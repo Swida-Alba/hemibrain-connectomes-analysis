@@ -23,6 +23,10 @@ from ..neuron_index import (
 # Keep the full membership maps for exact selection, but render a fixed page
 # of match details; the panel pager still exposes every matched name.
 MATCH_GROUP_PAGE_SIZE = 50
+# One gesture can produce a value-click, a QTable selection event, and a
+# delayed table update. Cover the maximum scroll-settle plus notification
+# lifetime so that these events can never start a second focus animation.
+FOCUS_DEDUP_SECONDS = 3.2
 
 
 def _normalized_focus_keys(keys) -> tuple[str, ...]:
@@ -136,15 +140,19 @@ def _render_index(
     content,
     dataset: str,
     *,
+    header_meta=None,
     query_values_getter: Callable[[], object] | None = None,
     query_selection: Callable[[List[str]], object] | None = None,
     query_resolution: Callable[[List[str]], object] | None = None,
     query_remove: Callable[[str], object] | None = None,
+    query_edit: Callable[[str], object] | None = None,
     add_to_query: Callable[[List[str]], object] | None = None,
     query_label: str = "Current query",
 ) -> None:
     """Render the current dataset's index or its cache-missing state."""
     content.clear()
+    if header_meta is not None:
+        header_meta.clear()
     path = neuron_index_path(dataset)
     try:
         index = load_cached_neuron_index(dataset)
@@ -169,66 +177,123 @@ def _render_index(
             ui.label("The cached neuron index is empty.").classes("text-body2 drocat-warn")
         return
 
-    with content:
-        with ui.row().classes("items-center gap-2 flex-wrap"):
-            ui.badge(f"{index.frame.height:,} indexed rows", color="primary").props("outline")
+    if header_meta is not None:
+        with header_meta:
+            ui.badge(
+                f"{index.frame.height:,} indexed rows", color="primary"
+            ).props("outline")
             ui.label(f"Source: {_relative_source(index.path)}").classes(
-                "text-caption drocat-muted"
+                "text-caption drocat-muted drocat-neuron-source"
             )
             if index.enriched:
                 ui.label(
-                    "Blank type/instance values are filled from local prepared metadata."
-                ).classes("text-caption drocat-muted")
+                    "metadata-enriched"
+                ).classes("text-caption drocat-muted drocat-neuron-enriched")
 
+    with content:
         if query_values_getter is not None:
-            with ui.element("section").classes("drocat-neuron-query-preview"):
-                with ui.row().classes("w-full items-center justify-between gap-2"):
-                    with ui.row().classes("items-center gap-2"):
-                        ui.icon("playlist_add_check", color="primary").classes("text-lg")
-                        ui.label(f"Current query · {query_label}").classes(
-                            "text-subtitle2 font-bold"
+            with ui.element("div").classes("w-full drocat-neuron-intro-row"):
+                with ui.element("section").classes("drocat-neuron-query-preview"):
+                    query_preview_state = {"expanded": False}
+
+                    def toggle_query_preview() -> None:
+                        query_preview_state["expanded"] = not query_preview_state[
+                            "expanded"
+                        ]
+                        if query_preview_state["expanded"]:
+                            query_preview_scroll.classes(
+                                add="drocat-neuron-query-preview-expanded",
+                                remove="drocat-neuron-query-preview-collapsed",
+                            )
+                            query_preview_toggle.text = "Collapse"
+                        else:
+                            query_preview_scroll.classes(
+                                add="drocat-neuron-query-preview-collapsed",
+                                remove="drocat-neuron-query-preview-expanded",
+                            )
+                            query_preview_toggle.text = "Expand"
+                        query_preview_toggle.update()
+
+                    with ui.row().classes("w-full items-center justify-between gap-2"):
+                        with ui.row().classes("items-center gap-2"):
+                            ui.icon("playlist_add_check", color="primary").classes("text-lg")
+                            ui.label(f"Current query · {query_label}").classes(
+                                "text-subtitle2 font-bold"
+                            )
+                        with ui.row().classes("items-center gap-1"):
+                            query_preview_toggle = ui.button(
+                                "Expand", on_click=toggle_query_preview
+                            ).props("flat dense").classes(
+                                "drocat-query-preview-expand-btn"
+                            )
+                            ui.badge("mirrors input", color="primary").props("outline")
+                    with ui.element("div").classes(
+                        "w-full drocat-neuron-query-preview-list "
+                        "drocat-neuron-query-preview-collapsed"
+                    ) as query_preview_scroll:
+                        query_preview = ui.row().classes(
+                            "w-full items-center gap-1 flex-wrap"
                         )
-                    ui.badge("mirrors input", color="primary").props("outline")
-                query_preview = ui.row().classes(
-                    "w-full items-center gap-1 flex-wrap mt-1"
-                )
-                query_preview_empty = ui.label(
-                    "No values in the query yet. Select a match or body row to add one."
-                ).classes("text-caption drocat-muted mt-1")
+                    query_preview_empty = ui.label(
+                        "No values in the query yet. Select a match or body row to add one."
+                    ).classes("text-caption drocat-muted mt-1")
 
-                def refresh_query_preview() -> None:
-                    values = _query_preview_values(query_values_getter)
-                    query_preview.clear()
-                    query_preview_empty.set_visibility(not values)
-                    with query_preview:
-                        for value in values:
-                            with ui.element("div").classes(
-                                "drocat-neuron-query-chip-wrap"
-                            ):
-                                # Keep the value label's historic class so
-                                # the preview remains easy to inspect and
-                                # compatible with existing UI tests.
-                                ui.label(value).classes("drocat-neuron-query-chip")
-                                if query_remove is not None:
-                                    ui.button(
-                                        icon="close",
-                                        on_click=lambda v=value: remove_query_value(v),
-                                    ).props("flat round dense").classes(
-                                        "drocat-neuron-query-chip-remove"
-                                    ).tooltip("Remove from this query")
+                    def refresh_query_preview() -> None:
+                        values = _query_preview_values(query_values_getter)
+                        query_preview.clear()
+                        query_preview_empty.set_visibility(not values)
+                        query_preview_toggle.set_visibility(bool(values))
+                        with query_preview:
+                            for value in values:
+                                with ui.element("div").classes(
+                                    "drocat-neuron-query-chip-wrap"
+                                ) as query_chip:
+                                    # Keep the value label's historic class so
+                                    # the preview remains easy to inspect and
+                                    # compatible with existing UI tests.
+                                    ui.label(value).classes(
+                                        "drocat-neuron-query-chip"
+                                    )
+                                    query_chip.on(
+                                        "dblclick",
+                                        lambda _event=None, v=value: edit_query_value(v),
+                                    ).tooltip("Double-click to edit this query value")
+                                    if query_remove is not None:
+                                        ui.button(
+                                            icon="close",
+                                            on_click=lambda v=value: remove_query_value(v),
+                                        ).props("flat round dense").classes(
+                                            "drocat-neuron-query-chip-remove"
+                                        ).tooltip("Remove from this query")
 
-                refresh_query_preview()
-        ui.label(
-            "Search returns all matches across bodyId, type, instance, and useful "
-            "type/taxonomy fields: strict case-sensitive prefixes come first, "
-            "followed by case-insensitive substring matches. Choose a target "
-            "column and match mode to apply that rule directly to this search "
-            "box; leave it unset for the global search. Numeric input is verified "
-            "against bodyId. Match details also keeps a secondary matched name "
-            "when the same row matches in another field. Select a matched name "
-            "to select every body sharing it, or select individual body rows to "
-            "add their body IDs."
-        ).classes("text-caption drocat-muted")
+                    refresh_query_preview()
+
+                    def edit_query_value(value: str) -> None:
+                        """Remove the value from viewer selection, then edit it."""
+                        remove_query_value(value)
+                        if query_edit is not None:
+                            query_edit(value)
+                        refresh_query_preview()
+                ui.label(
+                    "Search returns all matches across bodyId, type, instance, and useful "
+                    "type/taxonomy fields: strict case-sensitive prefixes come first, "
+                    "followed by case-insensitive substring matches. Choose a target "
+                    "column and match mode to apply that rule directly to this search "
+                    "box; leave it unset for the global search. Numeric input is verified "
+                    "against bodyId. Match details also keeps a secondary matched name "
+                    "when the same row matches in another field. Select a matched name "
+                    "to select every body sharing it, or select individual body rows to "
+                    "add their body IDs."
+                ).classes("text-caption drocat-muted drocat-neuron-search-help")
+        else:
+            ui.label(
+                "Search returns all matches across bodyId, type, instance, and useful "
+                "type/taxonomy fields: strict case-sensitive prefixes come first, "
+                "followed by case-insensitive substring matches. Choose a target "
+                "column and match mode to apply that rule directly to this search "
+                "box; leave it unset for the global search. Numeric input is verified "
+                "against bodyId."
+            ).classes("text-caption drocat-muted drocat-neuron-search-help")
 
         with ui.row().classes(
             "w-full items-end gap-2 flex-wrap drocat-neuron-search-toolbar"
@@ -397,6 +462,20 @@ def _render_index(
                 if str(linked or "").strip()
             ]
 
+        def match_member_keys(value: str) -> List[str]:
+            """Return the exact table rows belonging to one clicked match."""
+            keys: List[str] = []
+            for linked_value in related_match_values(value):
+                members = (
+                    selected_match_members.get(linked_value, set())
+                    or group_members.get(linked_value, ())
+                )
+                for member in members:
+                    member = str(member or "").strip()
+                    if member and member not in keys:
+                        keys.append(member)
+            return keys
+
         def remember_match(value: str, *, expand: bool = True) -> None:
             """Persist a selected name and its verified membership.
 
@@ -544,6 +623,7 @@ def _render_index(
             update_selection_status()
 
         def handle_match_selection(event) -> None:
+            previously_selected = set(selected_match_values)
             visible_rows = [
                 row for row in current_groups
                 if row.get("match_role") != "secondary"
@@ -576,18 +656,19 @@ def _render_index(
             # Selection and clicking a matched value use the same focus path:
             # resolve the first exact member, compute its sorted data page,
             # then scroll the actual metadata row into view.
-            focus_keys: List[str] = []
-            for value in selected_match_values:
-                members = tuple(
-                    selected_match_members.get(value, set())
-                    or group_members.get(value, ())
-                )
-                for member in members:
-                    member = str(member or "").strip()
-                    if member and member not in focus_keys:
-                        focus_keys.append(member)
+            # QTable reports the complete selected set, not the row that was
+            # just clicked. Focus the newly selected row's members so adding
+            # aMe26 after aMe1/aMe13 does not jump back to the first group.
+            new_values = [
+                value for value in raw_selected_values
+                if value not in previously_selected
+            ]
+            focus_value = new_values[-1] if new_values else (
+                next(iter(raw_selected_values), "")
+            )
+            focus_keys = match_member_keys(focus_value)
             if selected_rows and focus_keys:
-                request_focus(focus_keys)
+                request_focus(focus_keys, anchor_key=focus_keys[0])
             else:
                 refresh_table_selection()
 
@@ -618,18 +699,9 @@ def _render_index(
                 forget_match(value)
             sync_query_selection()
             if bool(args.get("selected")):
-                focus_keys: List[str] = []
-                for selected_value in selected_match_values:
-                    members = tuple(
-                        selected_match_members.get(selected_value, set())
-                        or group_members.get(selected_value, ())
-                    )
-                    for member in members:
-                        member = str(member or "").strip()
-                        if member and member not in focus_keys:
-                            focus_keys.append(member)
+                focus_keys = match_member_keys(value)
                 if focus_keys:
-                    request_focus(focus_keys)
+                    request_focus(focus_keys, anchor_key=focus_keys[0])
                     return
             refresh_table_selection()
 
@@ -843,11 +915,10 @@ def _render_index(
                     )
 
         state = {"page": initial.page, "page_size": 50}
-        # A QTable click may emit both a value-click and a selection event.
-        # Keep the server-side request boundary idempotent as well as the
-        # client-side JavaScript guard; otherwise two slightly different
-        # member bundles can schedule two animations for one user action.
-        focus_request = {"anchor": "", "requested_at": 0.0}
+        # A QTable gesture may emit both a value-click and a selection event.
+        # Coalesce those duplicate events by their exact anchor while still
+        # allowing a different matched entry to be selected immediately.
+        focus_request = {"requested_at": 0.0, "anchor": ""}
 
     def scroll_to_table_rows(focus_keys, anchor_key: str | None = None) -> None:
         """Focus every visible member row after the table finishes scrolling.
@@ -855,11 +926,11 @@ def _render_index(
         ``scrollIntoView({behavior: 'smooth'})`` is asynchronous. Starting the
         animation on the same tick makes the shade disappear while the row is
         still moving, and repeated NiceGUI/QTable events can queue a second
-        flash. A small client-side request token, duplicate cooldown, and
-        settle poll make one click produce one post-scroll flash. Rows outside
-        the current page are intentionally ignored by the DOM lookup; the
-        server first moves the page to the first member, so every member on
-        that focused page is shaded together.
+        flash. A client-side duplicate cooldown and settle poll make one click
+        produce one post-scroll flash. Rows outside the current page are
+        intentionally ignored by the DOM lookup; the server first moves the
+        page to the first member, so every member on that focused page is
+        shaded together.
         """
         keys = list(_normalized_focus_keys(focus_keys))
         if not keys:
@@ -867,6 +938,7 @@ def _render_index(
         encoded_keys = json.dumps(keys)
         anchor = str(anchor_key or keys[0]).strip() or keys[0]
         encoded_anchor = json.dumps(anchor)
+        focus_dedup_ms = int(FOCUS_DEDUP_SECONDS * 1000)
         ui.run_javascript(
             f"""
             setTimeout(() => {{
@@ -876,20 +948,18 @@ def _render_index(
                 const root = document.querySelector('.drocat-neuron-full-panel .drocat-data-viewer-scroll');
                 if (!root) return;
                 const state = window.__drocatNeuronFocusState || (window.__drocatNeuronFocusState = {{
-                    token: 0, signature: '', requestedAt: 0, timer: null
+                    token: 0, signature: '', requestedAt: 0, blockedUntil: 0, timer: null
                 }});
-                // The anchor, rather than the member-list order, identifies a
-                // focus action. Selection/click payloads can contain the same
-                // rows in different orders or with a newly expanded bundle.
                 const signature = anchor;
                 const now = performance.now();
-                // Selection and click events can arrive as two separate
-                // browser messages. Keep one focus action for the same
-                // matched bundle long enough to cover the full 1.35s breathe
-                // animation plus its cleanup timer.
-                if (state.signature === signature && now - state.requestedAt < 2600) return;
+                // Coalesce duplicate click/selection events for the same
+                // matched entry, but allow a deliberate selection of a
+                // different entry immediately. The anchor is the exact row
+                // the user selected, not the first previously selected row.
+                if (now < state.blockedUntil && state.signature === signature) return;
                 state.signature = signature;
                 state.requestedAt = now;
+                state.blockedUntil = now + {focus_dedup_ms};
                 state.token += 1;
                 const token = state.token;
                 if (state.timer) window.clearTimeout(state.timer);
@@ -907,7 +977,8 @@ def _render_index(
                         return;
                     }}
                     if (!rows.length) return;
-                    rows[0].scrollIntoView({{ behavior: 'smooth', block: 'center', inline: 'nearest' }});
+                    const anchorRow = rows.find(row => row.dataset.neuronKey === anchor) || rows[0];
+                    anchorRow.scrollIntoView({{ behavior: 'smooth', block: 'center', inline: 'nearest' }});
                     let lastRect = '';
                     let stableFrames = 0;
                     const started = performance.now();
@@ -928,7 +999,7 @@ def _render_index(
                     }};
                     const waitForSettle = () => {{
                         if (state.token !== token) return;
-                        const rect = rows[0].getBoundingClientRect();
+                        const rect = anchorRow.getBoundingClientRect();
                         const currentRect = `${{Math.round(rect.top)}}:${{Math.round(rect.left)}}`;
                         stableFrames = currentRect === lastRect ? stableFrames + 1 : 0;
                         lastRect = currentRect;
@@ -975,6 +1046,7 @@ def _render_index(
         reset_page: bool = False,
         focus_key: str | None = None,
         focus_keys=None,
+        focus_anchor_key: str | None = None,
     ):
         if reset_page:
             state["page"] = 1
@@ -1041,7 +1113,10 @@ def _render_index(
         # sets still retain entries selected on other pages.
         refresh_table_selection()
         if focus_keys:
-            scroll_to_table_rows(focus_keys)
+            scroll_to_table_rows(
+                focus_keys,
+                anchor_key=focus_anchor_key or focus_key,
+            )
         page_position.text = f"Page {result.page:,} of {result.pages:,}"
         page_position.update()
         previous_button.set_enabled(result.page > 1)
@@ -1058,30 +1133,35 @@ def _render_index(
     def reset_and_refresh(_event=None):
         refresh(reset_page=True)
 
-    def request_focus(focus_keys) -> None:
+    def request_focus(focus_keys, anchor_key: str | None = None) -> None:
         """Run one page-jump/focus request for one user action.
 
         NiceGUI can deliver a matched-value click and the QTable selection
-        update independently.  Suppress a repeated anchor during the entire
-        scroll/breathe interval so the second event cannot restart the visual
-        effect.  A later click on the same entry remains available after the
-        cooldown.
+        update independently. Suppress duplicate focus requests for the same
+        exact anchor during the current scroll/breathe interval, while a
+        different selected entry gets its own focus immediately.
         """
-        normalized = tuple(sorted(_normalized_focus_keys(focus_keys)))
+        normalized = tuple(_normalized_focus_keys(focus_keys))
         if not normalized:
             refresh_table_selection()
             return
-        anchor = normalized[0]
         now = time.monotonic()
+        anchor = str(anchor_key or normalized[0]).strip()
+        if anchor not in normalized:
+            anchor = normalized[0]
         if (
-            focus_request["anchor"] == anchor
-            and now - focus_request["requested_at"] < 2.6
+            now - focus_request["requested_at"] < FOCUS_DEDUP_SECONDS
+            and focus_request["anchor"] == anchor
         ):
             refresh_table_selection()
             return
-        focus_request["anchor"] = anchor
         focus_request["requested_at"] = now
-        refresh(focus_key=anchor, focus_keys=normalized)
+        focus_request["anchor"] = anchor
+        refresh(
+            focus_key=anchor,
+            focus_keys=normalized,
+            focus_anchor_key=anchor,
+        )
 
     def handle_match_value_click(event):
         row = getattr(event, "args", None)
@@ -1093,7 +1173,7 @@ def _render_index(
         # click chooses the same anchor every time.
         member_keys = tuple(sorted(group_members.get(value, ())))
         if member_keys:
-            request_focus(member_keys)
+            request_focus(member_keys, anchor_key=member_keys[0])
 
     search_input.on_value_change(reset_and_refresh)
     def handle_filter_column_change(event):
@@ -1133,6 +1213,7 @@ def create_neuron_index_viewer_link(
     query_selection: Callable[[List[str]], object] | None = None,
     query_resolution: Callable[[List[str]], object] | None = None,
     query_remove: Callable[[str], object] | None = None,
+    query_edit: Callable[[str], object] | None = None,
     add_to_query: Callable[[List[str]], object] | None = None,
     query_label: str = "Current query",
 ):
@@ -1144,15 +1225,24 @@ def create_neuron_index_viewer_link(
     When query callbacks are supplied, the match panel supports multi-select
     and synchronizes selected matched values with the owning query input.
     ``query_remove`` makes the mirrored query preview editable by removing
-    one value at a time.
+    one value at a time; ``query_edit`` lets a double-click return that value
+    to the owning chip editor.
     """
     dialog = ui.dialog()
     with dialog:
         with ui.card().classes(
             "w-[min(98vw,1800px)] max-w-none drocat-neuron-viewer-card"
         ):
-            with ui.row().classes("w-full items-center justify-between gap-3"):
-                title = ui.label("Available neurons").classes("text-h6")
+            with ui.row().classes(
+                "w-full items-center justify-between gap-2 drocat-neuron-dialog-header"
+            ):
+                with ui.row().classes("items-center gap-2 min-w-0 flex-grow"):
+                    title = ui.label("Available neurons").classes(
+                        "text-h6 drocat-neuron-dialog-title"
+                    )
+                    header_meta = ui.row().classes(
+                        "items-center gap-2 flex-wrap min-w-0 drocat-neuron-header-meta"
+                    )
                 ui.button(icon="close", on_click=dialog.close).props("flat round dense")
             dataset_picker_slot = ui.row().classes("w-full items-center")
             content = ui.column().classes(
@@ -1200,10 +1290,12 @@ def create_neuron_index_viewer_link(
         _render_index(
             content,
             dataset,
+            header_meta=header_meta,
             query_values_getter=query_values_getter,
             query_selection=query_selection,
             query_resolution=query_resolution,
             query_remove=query_remove,
+            query_edit=query_edit,
             add_to_query=add_to_query,
             query_label=query_label,
         )

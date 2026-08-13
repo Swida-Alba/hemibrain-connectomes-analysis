@@ -327,6 +327,36 @@ class TestPoolSources:
             ("aMe10_R", "instance"), ("aMe12_L", "instance"),
         ]
 
+    def test_newer_metadata_replaces_stale_rich_index(self, local_dirs):
+        """A refreshed source table must remove stale cached suggestions."""
+        import os
+
+        cache, datasets = local_dirs
+        folder = "test_v1"
+        cache_dir = cache / folder
+        cache_dir.mkdir()
+        index = cache_dir / "neuron_index.parquet"
+        pl.DataFrame({
+            "bodyId": ["1"],
+            "type": ["old-type"],
+            "instance": ["old-type_L"],
+            "flywireType": ["old-flywire"],
+        }).write_parquet(index)
+        source_dir = datasets / folder
+        source_dir.mkdir()
+        table = source_dir / "test_allneurons_neuron_df.csv"
+        table.write_text(
+            "bodyId,type,instance,flywireType\n"
+            "1,new-type,new-type_L,new-flywire\n",
+            encoding="utf-8",
+        )
+        os.utime(index, ns=(1_000, 1_000))
+        os.utime(table, ns=(2_000, 2_000))
+
+        pools = _folder_pools(folder)
+        assert pools["type"] == [("new-type", "type")]
+        assert pools["flywireType"] == [("new-flywire", "flywireType")]
+
     def test_partial_cache_index_is_augmented_for_aMe_prefix(self, local_dirs):
         """A cache with unrelated names still exposes table-only aMe types."""
         cache, datasets = local_dirs

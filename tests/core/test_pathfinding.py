@@ -653,9 +653,8 @@ def test_derive_type_paths_verbose_shows_single_line_progress(capsys):
 def test_relocate_viz_outputs_organizes_visualization_folder(tmp_path):
     """Phase-4 visualization artifacts are organized: the htmls move to
     visualization/ with Network_/Sankey_/Heatmap_ prefixes, and the
-    vispath-exported data plus the ORIGINAL input DataFrame move to
-    visualization/visualization_data/ — the duplicated data is kept, just
-    organized."""
+    vispath-exported data plus an explicitly named companion DataFrame move
+    to visualization/visualization_data/."""
     import sys
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
     import coana
@@ -673,7 +672,10 @@ def test_relocate_viz_outputs_organizes_visualization_folder(tmp_path):
     (run / (base + "_data.xlsx")).write_text("x")
 
     inp = pd.DataFrame({"path": ["A->B"], "length": [1]})
-    fc._relocate_viz_outputs(input_df=inp, input_name="type_paths")
+    fc._relocate_viz_outputs(
+        input_df=inp,
+        input_filename="type_paths_visualized.csv",
+    )
 
     viz = run / "visualization"
     # prefix + run name; the redundant type suffix is dropped
@@ -686,8 +688,9 @@ def test_relocate_viz_outputs_organizes_visualization_folder(tmp_path):
     d = viz / "visualization_data"
     assert (d / (base + "_data_connections.csv")).exists()
     assert (d / (base + "_data.xlsx")).exists()
-    assert (d / "type_paths_input.csv").exists()
-    saved = pd.read_csv(d / "type_paths_input.csv")
+    assert (d / "type_paths_visualized.csv").exists()
+    assert not (d / "type_paths_input.csv").exists()
+    saved = pd.read_csv(d / "type_paths_visualized.csv")
     assert list(saved.columns) == ["path", "length"]
 
 

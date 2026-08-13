@@ -16,7 +16,7 @@ import re
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .config import PROJECT_ROOT
-from .dataset_service import dataset_to_folder
+from .dataset_service import dataset_to_folder, folder_to_dataset
 from .search_logic import (
     filter_candidate_entries as _shared_filter_candidate_entries,
     match_search_pools,
@@ -24,13 +24,19 @@ from .search_logic import (
 
 try:
     from src.neuron_index_builder import (
+        metadata_candidates,
+        metadata_columns,
         priority_metadata_columns,
         read_metadata_projection,
+        viewer_search_columns,
     )
 except ImportError:
     from neuron_index_builder import (
+        metadata_candidates,
+        metadata_columns,
         priority_metadata_columns,
         read_metadata_projection,
+        viewer_search_columns,
     )
 
 # (value, hint) — the hint is the searched column name, except for bodyId
@@ -151,16 +157,35 @@ def _index_has_search_projection(folder: str) -> bool:
         import polars as pl
 
         columns = set(pl.scan_parquet(index).collect_schema().names())
-        # Legacy connection indexes contain only bodyId/type/instance/post and
-        # cache bookkeeping.  A generated projection has at least one extra
-        # metadata field and therefore does not need a second CSV scan.
-        legacy = {
-            "bodyId", "type", "instance", "post", "downstream_complete",
-            "last_fetched", "connection_count",
-        }
-        return bool(columns - legacy)
+        tables = _metadata_tables(folder)
+        if tables:
+            # The pulled metadata is authoritative.  If it is newer than the
+            # index, use it until the normal pull pipeline rebuilds the index;
+            # otherwise a newly pulled type could remain invisible to input
+            # suggestions.
+            if index.stat().st_mtime_ns < tables[0].stat().st_mtime_ns:
+                return False
+            expected = viewer_search_columns(metadata_columns(tables[0]))
+            # An identity-only index may still cover every column name while
+            # containing only a partial set of rows.  Keep the table fallback
+            # for that legacy shape; generated rich indexes have at least one
+            # promoted taxonomy field.
+            return (
+                len(expected) > 3
+                and set(expected).issubset(columns)
+            )
+
+        # With no local source table to compare, only a canonical search
+        # projection can be trusted.  Arbitrary operational columns do not
+        # make a legacy connection index rich.
+        return len(viewer_search_columns(columns)) > 3
     except Exception:
         return False
+
+
+def _metadata_tables(folder: str) -> List[Path]:
+    """Find pulled neuron metadata using the shared builder ordering."""
+    return metadata_candidates(folder_to_dataset(folder), _DATASETS_DIR)
 
 
 def _table_pools(folder: str) -> Optional[Dict[str, List[Entry]]]:
@@ -168,11 +193,7 @@ def _table_pools(folder: str) -> Optional[Dict[str, List[Entry]]]:
     ds_dir = _DATASETS_DIR / folder
     if not ds_dir.exists():
         return None
-    candidates = sorted(
-        p for pattern in ("*_neuron_df.csv", "*_neuron_df.parquet",
-                          "*_allneurons*.csv", "*_allneurons*.parquet")
-        for p in ds_dir.glob(pattern)
-    )
+    candidates = _metadata_tables(folder)
     if not candidates:
         return None
     for table in candidates:
@@ -251,12 +272,9 @@ def _folder_pools(folder: str) -> Dict[str, List[Entry]]:
     index = _CACHE_DIR / folder / "neuron_index.parquet"
     if index.exists():
         sources.append((str(index), index.stat().st_mtime_ns))
-    ds_dir = _DATASETS_DIR / folder
-    if ds_dir.exists():
-        for pattern in ("*_neuron_df.csv", "*_neuron_df.parquet",
-                        "*_allneurons*.csv", "*_allneurons*.parquet"):
-            for p in ds_dir.glob(pattern):
-                sources.append((str(p), p.stat().st_mtime_ns))
+    tables = _metadata_tables(folder)
+    for p in tables:
+        sources.append((str(p), p.stat().st_mtime_ns))
     key = ("pools", folder, tuple(sorted(sources)))
     if key in _POOL_CACHE:
         return _POOL_CACHE[key]
@@ -271,7 +289,18 @@ def _folder_pools(folder: str) -> Dict[str, List[Entry]]:
         # partial for names. Supplement it instead of letting it mask the
         # full local table; otherwise valid names such as ``aMe12`` disappear.
         if index_pools is not None and table_pools is not None:
-            pools = _merge_pools(index_pools, table_pools)
+            source_is_newer = bool(
+                index.exists()
+                and tables
+                and index.stat().st_mtime_ns < tables[0].stat().st_mtime_ns
+                and len(viewer_search_columns(metadata_columns(tables[0]))) > 3
+            )
+            # Once the pulled table changes, it is authoritative for both
+            # additions and removals.  Merging an old index would preserve
+            # deleted names and make suggestions disagree with the source.
+            pools = table_pools if source_is_newer else _merge_pools(
+                index_pools, table_pools
+            )
         elif index_pools is not None:
             pools = index_pools
         else:

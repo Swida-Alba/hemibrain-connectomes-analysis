@@ -154,3 +154,94 @@ def test_stale_sidecar_rebuilds_for_new_priority_fields(tmp_path):
     ids, info = resolve_neuron_query(cache, "new-location-type")
     assert ids == ["100"]
     assert info["matched_column"] == "locationType"
+
+
+def test_missing_cache_falls_back_to_authoritative_dataframe(tmp_path):
+    """A missing parquet cache must not change lookup semantics or write files."""
+    from src.neuron_search import (
+        get_cached_neuron_search,
+        resolve_cached_or_dataframe_query,
+        resolve_dataframe_query,
+    )
+
+    dataset = "metadata-only:v1.0"
+    frame = _write_search_cache(tmp_path)[1].to_pandas()
+    cache_root = tmp_path / "empty-cache"
+
+    assert get_cached_neuron_search(dataset, cache_root=cache_root) is None
+    ids, info = resolve_cached_or_dataframe_query(
+        None, frame, "MTe07"
+    )
+    expected, expected_info = resolve_dataframe_query(frame, "MTe07")
+
+    assert {str(value) for value in ids} == {
+        str(value) for value in expected
+    }
+    assert info["cache"] is False
+    assert info["matched_column"] == expected_info["matched_column"]
+    assert not cache_root.exists()
+
+
+def test_legacy_cache_missing_metadata_columns_falls_back(tmp_path):
+    """Same IDs do not make a legacy, narrow index safe for new fields."""
+    from src.neuron_index_builder import build_search_cache_frame
+    from src.neuron_search import (
+        get_cached_neuron_search,
+        resolve_cached_or_dataframe_query,
+    )
+
+    dataset = "legacy-schema:v1.0"
+    folder = dataset.replace(":", "_").replace(".", "_")
+    cache_dir = tmp_path / "cache" / folder
+    cache_dir.mkdir(parents=True)
+    index_path = cache_dir / "neuron_index.parquet"
+    legacy = pl.DataFrame({
+        "bodyId": ["100"],
+        "type": [""],
+        "instance": [""],
+    })
+    legacy.write_parquet(index_path)
+    build_search_cache_frame(legacy).write_parquet(
+        cache_dir / "neuron_index_search.parquet"
+    )
+
+    source = pd.DataFrame({
+        "bodyId": ["100"],
+        "type": [""],
+        "instance": [""],
+        "flywireType": ["MTe07"],
+    })
+    cache = get_cached_neuron_search(dataset, cache_root=tmp_path / "cache")
+    assert cache is not None
+
+    ids, info = resolve_cached_or_dataframe_query(cache, source, "MTe07")
+    assert ids == ["100"]
+    assert info["cache"] is False
+    assert info["matched_column"] == "flywireType"
+
+
+def test_fast_metadata_loader_does_not_use_stale_parquet(tmp_path):
+    """The CSV pulled by the dataset pipeline remains authoritative."""
+    import os
+
+    import src.statvis as statvis
+
+    csv = tmp_path / "sample_neuron_df.csv"
+    parquet = tmp_path / "sample_neuron_df.parquet"
+    pd.DataFrame({"bodyId": ["1"], "type": ["from-csv"]}).to_csv(
+        csv, index=False
+    )
+    pl.DataFrame({"bodyId": ["1"], "type": ["from-parquet"]}).write_parquet(
+        parquet
+    )
+
+    os.utime(parquet, ns=(1_000, 1_000))
+    os.utime(csv, ns=(2_000, 2_000))
+    assert statvis._load_dataframe_fast(str(csv))["type"].tolist() == [
+        "from-csv"
+    ]
+
+    os.utime(parquet, ns=(3_000, 3_000))
+    assert statvis._load_dataframe_fast(str(csv))["type"].tolist() == [
+        "from-parquet"
+    ]

@@ -6471,6 +6471,55 @@ class FindNeuronConnection:
             ),
         })
 
+    @staticmethod
+    def _is_sensitive_export_key(key) -> bool:
+        """Return whether a metadata key could contain an authentication secret."""
+        normalized = (
+            str(key or "")
+            .strip()
+            .lower()
+            .replace("-", "_")
+            .replace(" ", "_")
+        )
+        exact = {
+            "token",
+            "auth",
+            "authorization",
+            "password",
+            "secret",
+            "credential",
+            "credentials",
+            "api_key",
+            "apikey",
+        }
+        return (
+            normalized in exact
+            or normalized.startswith(("token_", "secret_", "password_"))
+            or normalized.endswith(
+                ("_token", "_password", "_secret", "_credential", "_credentials", "_api_key")
+            )
+        )
+
+    @classmethod
+    def _sanitize_export_value(cls, value):
+        """Remove secret-bearing keys recursively from run metadata.
+
+        Run exports are intended to be shareable audit records.  Do not rely
+        only on the top-level ``__dict__`` filter: nested configuration
+        dictionaries can also carry credentials from a client or API setup.
+        Values are copied into ordinary JSON-shaped containers so the caller's
+        live configuration is never mutated.
+        """
+        if isinstance(value, dict):
+            return {
+                key: cls._sanitize_export_value(item)
+                for key, item in value.items()
+                if not cls._is_sensitive_export_key(key)
+            }
+        if isinstance(value, (list, tuple)):
+            return [cls._sanitize_export_value(item) for item in value]
+        return value
+
     def _run_export_attributes(self, path_mode: str | None = None):
         """Build JSON-safe run metadata with custom groups made explicit."""
         public_attrs = {
@@ -6503,7 +6552,7 @@ class FindNeuronConnection:
             public_attrs["custom_grouping"] = grouping
         if path_mode is not None:
             public_attrs["path_mode"] = path_mode
-        return public_attrs
+        return self._sanitize_export_value(public_attrs)
 
     def InitializeNeuronInfo(self):
         # Ensure neuprint Client is set for the CORRECT dataset
@@ -8327,7 +8376,7 @@ class FindNeuronConnection:
         
         # Save as JSON
         with open(os.path.join(self.path_folder, 'all_attributes.json'), 'w') as f:
-            json.dump(all_attributes_dict, f, indent=4)
+            json.dump(self._sanitize_export_value(all_attributes_dict), f, indent=4)
         
         # Save as readable text
         with open(os.path.join(self.path_folder, 'parameters.txt'), 'w') as f:
@@ -8833,7 +8882,8 @@ class FindNeuronConnection:
             if self._run_early_visualization(body_df, body_folder):
                 self._vprint('  ✓ BodyId-level early network visualization created (network_early_bodyId)', level='always')
 
-    def _relocate_viz_outputs(self, input_df=None, input_name='type_paths'):
+    def _relocate_viz_outputs(self, input_df=None, input_name='type_paths',
+                              input_filename=None):
         """Organize the Phase-4 VisualizePath artifacts of the main
         type-level visualization into subfolders:
 
@@ -8842,9 +8892,9 @@ class FindNeuronConnection:
           ``Network_<base>.html``, ``Sankey_<base>.html``,
           ``Heatmap_<base>.html``.
         - ``visualization/visualization_data/`` holds the vispath-exported
-          data files (``<base>_data_*``) plus the ORIGINAL input DataFrame
-          that was passed to VisualizePath (``<input_name>_input.csv``), so
-          every visualization is reproducible from its inputs.
+          data files (``<base>_data_*``) plus an optional companion DataFrame.
+          The caller can name that file explicitly with ``input_filename``;
+          otherwise the historical ``<input_name>_input.csv`` name is used.
 
         The duplicated artifacts are kept, just organized (VisualizePath
         writes them into the run-folder root first).
@@ -8866,8 +8916,10 @@ class FindNeuronConnection:
                 shutil.move(os.path.join(self.allpath_folder, fname),
                             os.path.join(data_dir, fname))
         if input_df is not None and len(input_df) > 0:
+            if input_filename is None:
+                input_filename = f'{input_name}_input.csv'
             self._save_df_to_csv_polars(
-                input_df, os.path.join(data_dir, f'{input_name}_input.csv'))
+                input_df, os.path.join(data_dir, input_filename))
         self._vprint('  ✓ Visualization outputs organized under visualization/ '
                      '(visualization_data/ for the exported data and inputs)',
                      level='full')
@@ -11257,10 +11309,18 @@ class FindNeuronConnection:
                 )
                 vp.visualize()
                 self._record_viz_edge_trim(vp)
-                # Organize the visualization artifacts (htmls + exported
-                # data + the original input DataFrame) under visualization/
-                self._relocate_viz_outputs(input_df=paths_to_visualize,
-                                           input_name='type_paths')
+                # Keep the complete path result in Vispath's
+                # ``*_data_original_paths.csv``.  When the visualization edge
+                # limit actually trims the graph, export the exact complete
+                # path rows represented by that graph as a separate companion
+                # file.  This avoids writing a second copy of the untrimmed
+                # input under ``type_paths_input.csv``.
+                visualized_paths = None
+                if vp.edge_limit_trimmed:
+                    visualized_paths = vp.visualized_paths_for_export()
+                self._relocate_viz_outputs(
+                    input_df=visualized_paths,
+                    input_filename='type_paths_visualized.csv')
                 if self.verbose_mode == 'simple':
                     self._vprint('Done', level='simple')
                 else:

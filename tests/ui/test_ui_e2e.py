@@ -1149,9 +1149,45 @@ class TestRunner:
         assert calls and calls[0][0][0] == "/usr/bin/osascript"
         assert "choose folder" in calls[0][0][-1]
 
-    def test_dir_input_still_builds_with_browse_button(self):
-        """dir_input keeps its folder-open browse button (now opening the
-        optional system picker) plus an in-browser fallback."""
+    def test_windows_native_directory_picker_uses_folder_browser_dialog(
+        self, tmp_path, monkeypatch
+    ):
+        """Windows uses the STA PowerShell folder dialog adapter."""
+        import ui.components.common as common
+
+        calls = []
+
+        class Completed:
+            returncode = 0
+            stdout = str(tmp_path) + "\n"
+            stderr = ""
+
+        powershell = r"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+        monkeypatch.setattr(common.platform, "system", lambda: "Windows")
+        monkeypatch.setattr(
+            common.shutil,
+            "which",
+            lambda name: powershell if name == "powershell" else None,
+        )
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            return Completed()
+
+        monkeypatch.setattr(common.subprocess, "run", fake_run)
+        available, selected = common._native_directory_picker_sync(
+            "Choose output", str(tmp_path)
+        )
+
+        assert available is True
+        assert selected == str(tmp_path)
+        assert calls and calls[0][0][:3] == [powershell, "-NoProfile", "-STA"]
+        assert "FolderBrowserDialog" in calls[0][0][-1]
+        assert "SelectedPath" in calls[0][0][-1]
+
+    def test_dir_input_uses_one_direct_system_picker_button(self):
+        """The output field exposes one fixed folder action that opens the
+        desktop picker directly; no second in-app browse layer is rendered."""
         from nicegui import Client
         from nicegui.page import page
         from ui.tabs.find_path import create_find_path_tab
@@ -1160,12 +1196,22 @@ class TestRunner:
         with client:
             create_find_path_tab()
 
-        icons = [
-            getattr(el, "_props", {}).get("icon")
-            for el in client.elements.values()
+        elements = list(client.elements.values())
+        icons = [getattr(el, "_props", {}).get("icon") for el in elements]
+        folder_buttons = [
+            el for el in elements
+            if getattr(el, "_props", {}).get("icon") == "folder_open"
         ]
-        assert "folder_open" in icons  # the browse button is still there
-        assert "folder_tree" in icons
+        assert len(folder_buttons) == 1
+        assert "drocat-dir-icon-btn" in getattr(folder_buttons[0], "_classes", [])
+        assert getattr(folder_buttons[0], "_props", {}).get("round") is True
+        assert "folder_tree" not in icons
+
+        # The common neuron-input builder is used by every pathfinding input;
+        # all visible Clear actions must remain text-only.
+        clear_buttons = [el for el in elements if getattr(el, "text", "") == "Clear"]
+        assert clear_buttons
+        assert all("icon" not in getattr(el, "_props", {}) for el in clear_buttons)
 
     def test_pathfinding_tabs_wire_auto_suggest(self):
         """All four pathfinding tabs pass a suggestions provider to their
@@ -2420,6 +2466,58 @@ class TestComponents:
         })
         assert container.get_value() == ("exact", [3, 5, 10, "3, 7"])
         assert container.chip_input.options == [3, 5, 10, "3, 7"]
+
+    def test_neuron_list_input_collapses_and_double_click_reopens_a_chip(self):
+        """Long chip lists stay compact, while double-click restores one
+        existing value to the editor for typo correction."""
+        from nicegui import Client
+        from nicegui.page import page
+        from types import SimpleNamespace
+        from ui.components.common import neuron_list_input
+
+        client = Client(page("/neuron-input-expand-edit-test"))
+        with client:
+            container = neuron_list_input(
+                label="Source Neurons",
+                initial=["aMe1", "aMe2", "aMe3", "aMe4"],
+            )
+
+        assert "drocat-chip-list-collapsed" in container.chip_input_anchor._classes
+        assert "drocat-chip-list-expanded" not in container.chip_input_anchor._classes
+        assert container.expand_button.text == "Expand"
+        expand_listener = next(
+            listener
+            for listener in container.expand_button._event_listeners.values()
+            if listener.type == "click"
+        )
+        expand_listener.handler(SimpleNamespace())
+        assert "drocat-chip-list-expanded" in container.chip_input_anchor._classes
+        assert container.expand_button.text == "Collapse"
+        expand_listener.handler(SimpleNamespace())
+        assert "drocat-chip-list-collapsed" in container.chip_input_anchor._classes
+        assert container.expand_button.text == "Expand"
+
+        dblclick = next(
+            listener
+            for listener in container.chip_input._event_listeners.values()
+            if listener.type == "dblclick"
+        )
+        container.chip_input._handle_event({
+            "listener_id": dblclick.id,
+            "args": "aMe2",
+        })
+        assert container.chip_input.value == ["aMe1", "aMe3", "aMe4"]
+
+        blur = next(
+            listener
+            for listener in container.chip_input._event_listeners.values()
+            if listener.type == "blur"
+        )
+        blur.handler(SimpleNamespace(args=None))
+        assert container.get_value() == (
+            "exact",
+            ["aMe1", "aMe3", "aMe4", "aMe2"],
+        )
 
     def test_neuron_list_input_commas_and_spaces_are_not_separators(self):
         """Blur commits the WHOLE editor text as one chip (',' and ' ' preserved)."""

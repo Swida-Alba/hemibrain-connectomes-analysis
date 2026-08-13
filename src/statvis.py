@@ -59,9 +59,26 @@ def _load_dataframe_fast(file_path: str, dtype_overrides: dict = None) -> pd.Dat
     Returns:
         pandas DataFrame
     """
-    # Check for parquet version first
+    # A parquet sibling is a speed optimization, not a second source of
+    # truth.  Pulls write the ``*_neuron_df.csv`` metadata first; if that CSV
+    # is newer, reading the older parquet would let the dataframe resolver
+    # disagree with the freshly built neuron index.  Prefer parquet only when
+    # it is at least as new as the requested source file (or when the source
+    # path itself is absent).
     parquet_path = file_path.rsplit('.', 1)[0] + '.parquet'
+    parquet_is_current = False
     if os.path.exists(parquet_path):
+        if not os.path.exists(file_path):
+            parquet_is_current = True
+        else:
+            try:
+                parquet_is_current = (
+                    os.stat(parquet_path).st_mtime_ns
+                    >= os.stat(file_path).st_mtime_ns
+                )
+            except OSError:
+                parquet_is_current = False
+    if parquet_is_current:
         return pd.read_parquet(parquet_path)
     
     if not os.path.exists(file_path):

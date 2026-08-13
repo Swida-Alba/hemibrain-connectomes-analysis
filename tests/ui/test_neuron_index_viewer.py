@@ -714,7 +714,10 @@ class TestNeuronIndexViewer:
 
         client = Client(page("/neuron-index-viewer-cached"))
         with client:
-            link = create_neuron_index_viewer_link(lambda: dataset)
+            link = create_neuron_index_viewer_link(
+                lambda: dataset,
+                query_values_getter=lambda: [],
+            )
         self._click(link)
 
         texts = [el.text for el in client.elements.values() if getattr(el, "text", "")]
@@ -739,6 +742,28 @@ class TestNeuronIndexViewer:
             if "drocat-neuron-search-toolbar" in getattr(element, "_classes", set())
         )
         assert toolbar._classes
+        header_meta = next(
+            element for element in client.elements.values()
+            if "drocat-neuron-header-meta" in getattr(element, "_classes", set())
+        )
+        assert any(
+            "indexed rows" in getattr(element, "text", "")
+            for element in client.elements.values()
+        )
+        assert any(
+            "Source:" in getattr(element, "text", "")
+            for element in client.elements.values()
+        )
+        assert header_meta._classes
+        intro = next(
+            element for element in client.elements.values()
+            if "drocat-neuron-intro-row" in getattr(element, "_classes", set())
+        )
+        assert intro._classes
+        assert any(
+            "drocat-neuron-search-help" in getattr(element, "_classes", set())
+            for element in client.elements.values()
+        )
         tables = [el for el in client.elements.values() if type(el).__name__ == "Table"]
         assert len(tables) == 2
         match_table = next(
@@ -835,13 +860,25 @@ class TestNeuronIndexViewer:
         focus_scripts = [script for script in scripts if "scrollIntoView" in script]
         assert len(focus_scripts) == 1
         assert "const signature = anchor" in focus_scripts[0]
+        assert "blockedUntil" in focus_scripts[0]
         # A value click followed by the duplicate QTable event must not
         # restart the breathing row notification.
         match_table._handle_event({
             "listener_id": click_listener.id,
             "args": target,
         })
+        match_table._selection_handlers[0](SimpleNamespace(selection=[target]))
         assert len([script for script in scripts if "scrollIntoView" in script]) == 1
+        # A different matched entry selected immediately afterwards must get
+        # its own anchor instead of being swallowed by the duplicate guard.
+        another = next(
+            row for row in match_table._props["rows"]
+            if row["match_value"] == "aMe051"
+        )
+        match_table._selection_handlers[0](SimpleNamespace(selection=[another]))
+        focus_scripts = [script for script in scripts if "scrollIntoView" in script]
+        assert len(focus_scripts) == 2
+        assert "1051::51" in focus_scripts[-1]
         full_table = next(
             table for table in tables
             if table._props["columns"][0]["name"] == "bodyId"
@@ -913,6 +950,7 @@ class TestNeuronIndexViewer:
         current_query = ["existing"]
         selection_batches = []
         resolution_batches = []
+        edited_values = []
 
         def sync_query(values):
             selection_batches.append(list(values))
@@ -928,9 +966,38 @@ class TestNeuronIndexViewer:
                 query_values_getter=lambda: current_query,
                 query_selection=sync_query,
                 query_resolution=sync_resolution,
+                query_edit=edited_values.append,
                 query_label="Source Neurons",
             )
         self._click(link)
+
+        preview_list = next(
+            element for element in client.elements.values()
+            if "drocat-neuron-query-preview-list" in getattr(element, "_classes", set())
+        )
+        assert "drocat-neuron-query-preview-collapsed" in preview_list._classes
+        preview_expand = next(
+            element for element in client.elements.values()
+            if "drocat-query-preview-expand-btn" in getattr(element, "_classes", set())
+        )
+        preview_click = next(
+            listener for listener in preview_expand._event_listeners.values()
+            if listener.type == "click"
+        )
+        preview_click.handler(SimpleNamespace())
+        assert "drocat-neuron-query-preview-expanded" in preview_list._classes
+        preview_click.handler(SimpleNamespace())
+        assert "drocat-neuron-query-preview-collapsed" in preview_list._classes
+        preview_chip = next(
+            element for element in client.elements.values()
+            if "drocat-neuron-query-chip-wrap" in getattr(element, "_classes", set())
+        )
+        preview_dblclick = next(
+            listener for listener in preview_chip._event_listeners.values()
+            if listener.type == "dblclick"
+        )
+        preview_dblclick.handler(SimpleNamespace(args=None))
+        assert edited_values == ["existing"]
 
         search_input = next(
             element for element in client.elements.values()

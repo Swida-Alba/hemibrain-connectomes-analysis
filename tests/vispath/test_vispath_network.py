@@ -324,9 +324,7 @@ class TestHistoryLogicNode:
 # =============================================================================
 
 class TestNetworkTrimForPlot:
-    """_trim_network_for_plot keeps the edgeN_limit strongest edges but
-    ALWAYS reserves the source/target edges, and reports the applied
-    weight threshold in the trim warning."""
+    """Plot trimming keeps complete strong paths and avoids dangling edges."""
 
     def _make_vp(self, messages=None):
         vp = object.__new__(VisualizePath)
@@ -345,20 +343,20 @@ class TestNetworkTrimForPlot:
         assert vp._trim_network_for_plot() is G  # unchanged
         assert messages == []
 
-    def test_fallback_trim_reserves_source_target_edges_and_reports_threshold(self):
+    def test_fallback_trim_keeps_source_target_corridor_and_reports_threshold(self):
         messages = []
         vp = self._make_vp(messages)
         vp.edgeN_limit = 2
         G = FastGraph()
-        # source-outgoing / target-incoming edges (weak but reserved, and
-        # NOT counted toward the limit)
+        # Boundary edges are weak, but are part of a complete S -> T corridor.
         G.add_edge("S", "A", 1)
         G.add_edge("B", "T", 2)
         G.node_attrs["S"] = {"node_type": "source"}
         G.node_attrs["T"] = {"node_type": "target"}
         G.node_attrs["A"] = {"node_type": "intermediate"}
         G.node_attrs["B"] = {"node_type": "intermediate"}
-        # strong intermediate edges (may be cut)
+        # Strong intermediate edges complete the corridor.  X -> Y is a
+        # disconnected decoy and must not survive merely because it is strong.
         G.add_edge("A", "M", 100)
         G.add_edge("M", "B", 90)
         G.add_edge("X", "Y", 80)
@@ -366,14 +364,13 @@ class TestNetworkTrimForPlot:
 
         G_plot = vp._trim_network_for_plot()
         kept = set(G_plot.edges())
-        # reserved source/target edges always survive
+        # Endpoint edges survive only because the full corridor survives.
         assert {("S", "A"), ("B", "T")} <= kept
-        # the limit applies to NON-reserved edges only: 2 reserved + top-2
+        # The complete corridor is retained; the disconnected decoy is cut.
         assert len(kept) == 4
         assert ("X", "Y") not in kept  # weakest non-reserved cut
-        # the warning carries the explicit trim end (applied threshold) of
-        # the non-reserved portion
-        assert any("applied threshold: weight >= 90" in m for m in messages), messages
+        # The warning carries the weakest edge actually retained.
+        assert any("applied threshold: weight >= 1" in m for m in messages), messages
 
     def test_trim_reservation_capped_for_degenerate_source_target_classification(self):
         """Regression for the network_early preview: with an edge-list input
@@ -399,11 +396,12 @@ class TestNetworkTrimForPlot:
 
         vp.G_network = G
         G_plot = vp._trim_network_for_plot()
-        # bounded: at most 2 x edgeN_limit edges survive
-        assert G_plot.number_of_edges() <= 2 * vp.edgeN_limit
-        assert any("capped at 3 strongest edges" in m for m in messages), messages
+        # No source-to-target corridor can be inferred from this degenerate
+        # classification, so the ordinary edge-list limit applies.
+        assert G_plot.number_of_edges() <= vp.edgeN_limit
+        assert not any("source/target reservation" in m for m in messages), messages
 
-    def test_path_based_trim_reserves_source_target_edges_and_reports_threshold(self):
+    def test_path_based_trim_keeps_complete_paths_and_reports_threshold(self):
         messages = []
         vp = self._make_vp(messages)
         vp.edgeN_limit = 4
@@ -418,18 +416,53 @@ class TestNetworkTrimForPlot:
         G.add_edge("M", "B", 90)
         G.add_edge("X", "Y", 80)
         vp.G_network = G
-        # path_df: two paths — one weak (S>A>M>B>T) and one strong (S>A>X>Y>B>T)
+        # path_df: one complete path and one path whose edges are not all in
+        # the graph.  The valid path must be selected as a unit.
         vp.path_df = pd.DataFrame(
             {
-                "path_block": ["S>A>M>B>T", "S>A>X>Y>B>T"],
+                "path_block": ["S->A->M->B->T", "S->A->X->Y->B->T"],
                 "weights": [[1, 100, 90, 2], [1, 50, 60, 2]],
             }
         )
 
         G_plot = vp._trim_network_for_plot()
         kept = set(G_plot.edges())
-        assert {("S", "A"), ("B", "T")} <= kept  # reserved source/target edges
+        assert {("S", "A"), ("A", "M"), ("M", "B"), ("B", "T")} <= kept
+        assert ("X", "Y") not in kept
         assert any("applied threshold" in m for m in messages), messages
+
+    def test_path_trim_does_not_keep_a_target_tail_without_its_full_path(self):
+        messages = []
+        vp = self._make_vp(messages)
+        vp.edgeN_limit = 3
+        vp.path_df = pd.DataFrame(
+            {
+                "path_block": [
+                    "S->Mi1->T",          # weak, independent target tail
+                    "S->A->B->T",          # strong interior, weak endpoints
+                ],
+                "weights": [[100, 1], [1, 100, 2]],
+                "path_prob": [0.01, 0.9],
+            }
+        )
+        G = FastGraph()
+        for u, v, weight in [
+            ("S", "Mi1", 100), ("Mi1", "T", 1),
+            ("S", "A", 1), ("A", "B", 100), ("B", "T", 2),
+        ]:
+            G.add_edge(u, v, weight)
+        G.node_attrs["S"] = {"node_type": "source"}
+        G.node_attrs["T"] = {"node_type": "target"}
+        vp.G_network = G
+
+        selected = vp._select_edges_for_plot()
+        kept_edges, _boundary_capped, relaxed, selected_paths, _threshold = selected
+        assert relaxed is False
+        assert selected_paths == [1]
+        assert set(kept_edges) == {("S", "A"), ("A", "B"), ("B", "T")}
+        assert ("Mi1", "T") not in kept_edges
+        visualized = vp.visualized_paths_for_export()
+        assert list(visualized["path_block"]) == ["S->A->B->T"]
 
 
 # =============================================================================
@@ -476,14 +509,12 @@ class TestSaveDataMatrices:
 
 
 # =============================================================================
-# Visualization Edge Limit: the heatmap must consume the SAME edge set as the
-# network (reserved source/target edges survive in all three visualizations)
+# Visualization Edge Limit: the heatmap must consume the SAME complete-path /
+# corridor edge set as the network.
 # =============================================================================
 
 class TestVisualizationEdgeLimitConsistency:
-    """The shared _select_edges_for_plot / _filter_conn_df_for_plot give the
-    heatmap exactly the edge set the network draws — a weak source/target
-    edge survives everywhere, and a weak intermediate edge is cut everywhere."""
+    """The shared selector gives the heatmap exactly the network edge set."""
 
     def _make_vp(self, messages=None):
         vp = object.__new__(VisualizePath)
@@ -493,8 +524,8 @@ class TestVisualizationEdgeLimitConsistency:
 
     def _graph_and_conn(self):
         G = FastGraph()
-        G.add_edge("S", "A", 1)     # weak source-outgoing — reserved
-        G.add_edge("A", "T", 2)     # weak target-incoming — reserved
+        G.add_edge("S", "A", 1)     # weak source boundary
+        G.add_edge("A", "T", 2)     # weak target boundary
         G.add_edge("A", "M", 100)   # strong intermediate
         G.add_edge("M", "B", 90)    # strong intermediate
         G.add_edge("B", "C", 80)    # weakest intermediate — cut
@@ -515,7 +546,7 @@ class TestVisualizationEdgeLimitConsistency:
 
         filtered = vp._filter_conn_df_for_plot(conn_df)
         kept = set(zip(filtered["source"], filtered["target"]))
-        # the weak reserved source/target edges survive (reservation)
+        # the weak boundary edges survive as part of the inferred corridor
         assert {("S", "A"), ("A", "T")} <= kept, kept
         # the weakest intermediate edge is cut in the heatmap too
         assert ("B", "C") not in kept, kept
@@ -523,17 +554,17 @@ class TestVisualizationEdgeLimitConsistency:
         G_plot = vp._trim_network_for_plot()
         assert set(G_plot.edges()) == kept
 
-    def test_selector_reserves_weak_source_target_edges(self):
+    def test_selector_keeps_weak_source_target_edges_only_on_corridor(self):
         messages = []
         vp = self._make_vp(messages)
         vp.edgeN_limit = 2
         vp.G_network, _ = self._graph_and_conn()
         selected = vp._select_edges_for_plot()
         assert selected is not None
-        kept_edges, reserved_count, capped, selected_paths, threshold = selected
+        kept_edges, boundary_capped, relaxed, selected_paths, threshold = selected
         assert {("S", "A"), ("A", "T")} <= set(kept_edges)
         assert ("B", "C") not in set(kept_edges)
-        assert reserved_count == 2
-        assert capped is False
+        assert boundary_capped is False
+        assert relaxed is False
         assert selected_paths is None          # weight-based fallback branch
-        assert threshold == 90                 # min weight among kept non-reserved
+        assert threshold == 1                   # weakest edge in the corridor

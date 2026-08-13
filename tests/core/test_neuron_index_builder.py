@@ -182,3 +182,52 @@ def test_search_cache_compatibility_rejects_stale_priority_columns():
 
     assert is_search_cache_compatible(current, frame.columns)
     assert not is_search_cache_compatible(stale, frame.columns)
+
+
+def test_metadata_pull_materializes_index_and_search_cache(tmp_path):
+    """The first cache-enabled run builds both searchable parquet files."""
+    import pandas as pd
+
+    from src.coana import FindNeuronConnection
+    from src.neuron_index_builder import (
+        is_search_cache_compatible,
+        search_cache_path,
+    )
+
+    dataset = "fixture:v1.0"
+    folder = "fixture_v1_0"
+    metadata_dir = tmp_path / "datasets" / folder
+    metadata_dir.mkdir(parents=True)
+    metadata = metadata_dir / f"{folder}_allneurons_neuron_df.csv"
+    pl.DataFrame({
+        "bodyId": ["100", "200"],
+        "type": ["aMe12", ""],
+        "instance": ["aMe12_L", "Other_R"],
+        "flywireType": ["aMe12", "Other"],
+        "roiInfo": ["large", "large"],
+    }).write_csv(metadata)
+
+    index_path = tmp_path / "cache" / folder / "neuron_index.parquet"
+    search_path = search_cache_path(index_path)
+    finder = object.__new__(FindNeuronConnection)
+    finder.use_cache = True
+    finder.cache_folder = str(index_path.parent)
+    finder.script_path = str(tmp_path)
+    finder.dataset = dataset
+    finder._dataset_safe = folder
+    finder._neuron_index_cache = None
+    finder._neuron_index_dict = {}
+    finder._vprint = lambda *args, **kwargs: None
+    finder._get_neuron_index_path = lambda: str(index_path)
+    finder._get_neuron_search_cache_path = lambda: str(search_path)
+    finder._read_neuron_index_disk = lambda: pd.DataFrame()
+
+    assert FindNeuronConnection._ensure_neuron_index_from_metadata(finder) is True
+    assert index_path.is_file()
+    assert search_path.is_file()
+
+    index = pl.read_parquet(index_path)
+    search = pl.read_parquet(search_path)
+    assert index.columns[:4] == ["bodyId", "type", "instance", "flywireType"]
+    assert "roiInfo" not in index.columns
+    assert is_search_cache_compatible(search, index.columns)

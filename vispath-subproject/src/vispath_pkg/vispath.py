@@ -2302,27 +2302,22 @@ class VisualizePath:
         
         self._vprint("\nCreating layered Sankey diagram...")
         
-        # Determine how many edges we expect and check if simplification is needed
-        MAX_EDGES = self.edgeN_limit
-        
-        # First, compute min_weight for each path to enable path-based filtering
-        # This is more coherent than filtering top edges, as it preserves complete paths
+        # Use the same complete-path selection as the network and heatmap.
+        # This keeps all three visualizations consistent and prevents a
+        # weak target-incoming edge from appearing in Sankey without its
+        # selected upstream route.
+        if self.G_network is None:
+            self.build_network()
+
         path_df_with_score = self.path_df.copy()
-        
+
         def compute_path_min_weight(weights_value):
-            """Compute min weight for a path from its weights list."""
             weights_list = self._safe_eval_list(weights_value)
             if not weights_list:
                 return 0
             return min(weights_list)
-        
+
         path_df_with_score['_min_weight'] = path_df_with_score['weights'].apply(compute_path_min_weight)
-        
-        # Estimate edges per path (on average, each path has n-1 edges where n is path length)
-        # Some edges may be shared across paths, so we may need more paths than max_edges
-        estimated_paths_needed = MAX_EDGES * 2  # Start with 2x multiplier
-        
-        # Sort paths by min_weight descending and potentially limit
         path_df_sorted = path_df_with_score.sort_values('_min_weight', ascending=False)
         
         # Extract layer information from paths
@@ -2335,49 +2330,22 @@ class VisualizePath:
         has_probs = 'traversal_probabilities' in self.path_df.columns
         has_nt = 'nt_types' in self.path_df.columns
         
-        # First pass: check total unique edges to see if simplification is needed
-        total_paths = len(path_df_sorted)
-        needs_simplification = False
-        
-        # Quick edge count estimate by processing a sample of paths
-        if total_paths > estimated_paths_needed:
-            sample_edges = set()
-            for idx, row in path_df_sorted.head(estimated_paths_needed).iterrows():
-                path_block = row['path_block']
-                nodes = self._parse_path_block(path_block)
-                for i in range(len(nodes) - 1):
-                    sample_edges.add((i, nodes[i], nodes[i + 1]))
-            if len(sample_edges) > MAX_EDGES:
-                needs_simplification = True
-        
-        # If simplification is needed, limit to top paths that give us ~max_edges unique edges
-        if needs_simplification:
-            self.edge_limit_trimmed = True
-            self._vprint(f'\033[33m⚠️ Large dataset ({total_paths} paths) - selecting top paths for {MAX_EDGES} edges (source/target edges always reserved — every kept path keeps its first/last hop)\033[0m')
-            
-            # Iteratively add paths until we reach max_edges unique edges
-            paths_to_use = []
+        selected_for_plot = self._select_edges_for_plot()
+        if selected_for_plot is not None and selected_for_plot[3] is not None:
+            selected_path_indexes = selected_for_plot[3]
+            path_df_to_process = self.path_df.loc[selected_path_indexes]
+            needs_simplification = True
             unique_edges = set()
-            
-            for idx, row in path_df_sorted.iterrows():
-                path_block = row['path_block']
-                nodes = self._parse_path_block(path_block)
-                
-                # Count new edges this path would add
-                for i in range(len(nodes) - 1):
-                    unique_edges.add((i, nodes[i], nodes[i + 1]))
-                
-                paths_to_use.append(idx)
-                
-                # Stop when we have enough edges
-                if len(unique_edges) >= MAX_EDGES:
-                    break
-            
-            # Use only the selected paths
-            path_df_to_process = path_df_sorted.loc[paths_to_use]
-            threshold = path_df_sorted.loc[paths_to_use[-1], '_min_weight'] if paths_to_use else 0
-            self._vprint(f'  Selected top {len(paths_to_use)} paths → {len(unique_edges)} unique edges (applied threshold: path min-weight >= {threshold:g})')
+            for _idx, row in path_df_to_process.iterrows():
+                for edge_key, _data in self._path_edge_records(row):
+                    unique_edges.add(edge_key)
+            threshold = selected_for_plot[4]
+            self._vprint(
+                f'  Selected {len(selected_path_indexes)} complete paths → '
+                f'{len(unique_edges)} unique edges (applied threshold: '
+                f'edge weight >= {threshold:g})')
         else:
+            needs_simplification = False
             path_df_to_process = path_df_sorted
         
         # Process paths to extract edge data
@@ -2426,9 +2394,9 @@ class VisualizePath:
             # include orphan nodes) if no non-zero links are present.
             self._vprint('\033[33mWarning: No non-zero connections found for Sankey diagram. Building node-only Sankey (no links).\033[0m')
         
-        # Track if path-based simplification was already applied
-        # Note: We keep all edges from selected paths even if slightly over MAX_EDGES
-        # This preserves complete path connectivity
+        # Track whether the shared selector already simplified the path set.
+        # A single irreducibly long path may exceed the configured limit; in
+        # that case complete-path integrity is intentionally preferred.
         simplification_applied = needs_simplification
         original_edge_count = len(edge_data)
         
@@ -3560,7 +3528,7 @@ class VisualizePath:
             const simplificationApplied = {str(simplification_applied).lower()};
             const originalEdgeCount = {original_edge_count};
             if (simplificationApplied) {{
-                title += '<br><sub style="font-size: 0.8em; color: #e67e22;">⚠️ Simplified: Showing top ' + {len(weights)} + ' of ' + originalEdgeCount + ' edges by weight</sub>';
+                title += '<br><sub style="font-size: 0.8em; color: #e67e22;">⚠️ Simplified: showing complete strong paths within the visualization edge limit</sub>';
             }}
 
             Plotly.react(
@@ -3762,135 +3730,243 @@ class VisualizePath:
         
         return html
 
+    def _path_edge_records(self, row):
+        """Return the non-zero edges and per-edge metadata for one path row.
+
+        A path is only useful for visualization when every hop has a usable
+        weight.  In particular, this helper deliberately does not return a
+        source-outgoing or target-incoming edge by itself: callers select the
+        complete path row and then add all of its edges as one unit.
+        """
+        nodes = self._parse_path_block(row.get('path_block', ''))
+        weights = self._safe_eval_list(row.get('weights', []))
+        ratios = self._safe_eval_list(row.get('connection_ratios', []))
+        probs = self._safe_eval_list(row.get('traversal_probabilities', []))
+        if len(nodes) < 2 or len(weights) < len(nodes) - 1:
+            return []
+
+        records = []
+        for i in range(len(nodes) - 1):
+            weight = weights[i]
+            if weight == 0:
+                # A zero-weight hop is not present in G_network, so retaining
+                # the rest of this path would manufacture a broken path.
+                return []
+            records.append((
+                (nodes[i], nodes[i + 1]),
+                {
+                    'weight': weight,
+                    'ratio': ratios[i] if i < len(ratios) else 0,
+                    'probability': probs[i] if i < len(probs) else 0,
+                },
+            ))
+        return records
+
+    def _path_selection_score(self, row, records):
+        """Return a stable strength key for complete-path selection.
+
+        Endpoint hops are often the weakest hop solely because they are the
+        source/target boundary.  Ranking long paths by their interior weakest
+        hop keeps a strong route from being discarded just because its first
+        or last hop is weak.  Two-hop paths have no strict interior, so their
+        weakest hop remains the primary score.  Path probability and the
+        complete-path minimum weight are deterministic tie breakers.
+        """
+        weights = [data['weight'] for _, data in records]
+        if not weights:
+            return (0, 0, 0)
+        core_weights = weights[1:-1] if len(weights) > 2 else weights
+        core_strength = min(core_weights) if core_weights else min(weights)
+        path_probability = row.get('path_prob', row.get('path_probability', 0))
+        try:
+            path_probability = float(path_probability)
+        except (TypeError, ValueError):
+            path_probability = 0
+        return (core_strength, path_probability, min(weights))
+
+    @staticmethod
+    def _edges_on_source_target_corridor(edges, source_nodes, target_nodes):
+        """Keep only edges on a source-to-target corridor in ``edges``.
+
+        This is the safe fallback for edge-list input, where explicit path
+        rows are unavailable.  An edge survives only when its source is
+        reachable from a source node and its target can reach a target node.
+        Thus a target-incoming edge such as ``Mi1 -> target`` is removed when
+        the selected graph has no selected route into ``Mi1``.
+        """
+        edge_set = set(edges)
+        if not edge_set or not source_nodes or not target_nodes:
+            return set()
+
+        forward = set(source_nodes)
+        changed = True
+        while changed:
+            changed = False
+            for u, v in edge_set:
+                if u in forward and v not in forward:
+                    forward.add(v)
+                    changed = True
+
+        backward = set(target_nodes)
+        changed = True
+        while changed:
+            changed = False
+            for u, v in edge_set:
+                if v in backward and u not in backward:
+                    backward.add(u)
+                    changed = True
+
+        return {(u, v) for u, v in edge_set
+                if u in forward and v in backward}
+
     def _select_edges_for_plot(self):
         """Compute the edge set to draw under the Visualization Edge Limit.
 
-        Shared by the network and heatmap creators so both show the SAME
-        trimmed edge set: source-outgoing / target-incoming edges are reserved
-        first (capped at the limit, NOT counted toward it) and the remaining
-        capacity is filled with the strongest edges — path-based when path
-        data is available, weight-based otherwise.
+        The network and heatmap share this selector.  When path rows are
+        available, complete paths are the selection unit: a source-outgoing
+        or target-incoming edge is retained only as part of a selected path.
+        This prevents endpoint preservation from creating one-sided dead ends.
+        Paths are ranked by interior strength first, then path probability and
+        complete-path minimum weight, and are added without exceeding the
+        unique-edge limit whenever possible.
+
+        For edge-list input, the selector uses a bounded set of strong edges
+        and then removes edges that do not lie on a source-to-target corridor.
 
         Returns None when no trimming is needed, else
-        (kept_edges: {(u, v): data}, reserved_count, capped, selected_paths,
-        threshold) where selected_paths is None for the weight-based branch
-        and threshold is the applied cutoff (min weight among the kept
-        NON-reserved edges, 0 when none).
+        ``(kept_edges, boundary_capped, integrity_relaxed, selected_paths,
+        threshold)``.  ``selected_paths`` is a list of original path-row
+        indexes for path input and None for the edge-list fallback.
         """
         G = getattr(self, 'G_network', None)
         if self.edgeN_limit <= 0 or G is None \
                 or G.number_of_edges() <= self.edgeN_limit:
             return None
         self.edge_limit_trimmed = True
-        # Reserved edges: source nodes' OUTGOING + target nodes' INCOMING
-        # edges — kept first and NOT counted toward the edgeN_limit, so
-        # path integrity is preserved. The auto-reservation is BOUNDED to
-        # the limit itself: with edge-list inputs (e.g. the network_early
-        # preview) every node is classified as source/target and the raw
-        # reservation would swallow the whole graph, making the limit
-        # useless. Only the strongest source/target edges are then kept
-        # and the rest rejoin the ordinary trimming pool.
-        reserved_candidates = []
-        for node, attrs in G.node_attrs.items():
-            if attrs.get('node_type') == 'source':
-                for v in G.adj.get(node, ()):
-                    reserved_candidates.append((node, v))
-            elif attrs.get('node_type') == 'target':
-                for u in G.predecessors(node):
-                    reserved_candidates.append((u, node))
-        reserved_edges = set()
-        capped = False
-        if len(reserved_candidates) > self.edgeN_limit:
-            reserved_candidates.sort(
-                key=lambda uv: G.adj[uv[0]][uv[1]], reverse=True,
-            )
-            reserved_edges.update(reserved_candidates[:self.edgeN_limit])
-            capped = True
-        else:
-            reserved_edges.update(reserved_candidates)
 
         path_df = getattr(self, 'path_df', None)
         if path_df is not None and 'path_block' in path_df.columns \
                 and 'weights' in path_df.columns:
-            # Path-based filtering preserves complete paths; reserved edges
-            # do not count toward the capacity.
-            path_df_with_score = path_df.copy()
-
-            def compute_path_min_weight(weights_value):
-                weights_list = self._safe_eval_list(weights_value)
-                if not weights_list:
-                    return 0
-                return min(weights_list)
-
-            path_df_with_score['_min_weight'] = \
-                path_df_with_score['weights'].apply(compute_path_min_weight)
-            path_df_sorted = path_df_with_score.sort_values(
-                '_min_weight', ascending=False)
+            candidates = []
+            for order, (idx, row) in enumerate(path_df.iterrows()):
+                records = self._path_edge_records(row)
+                if not records:
+                    continue
+                candidates.append((
+                    self._path_selection_score(row, records),
+                    order,
+                    idx,
+                    records,
+                ))
+            candidates.sort(key=lambda item: item[0], reverse=True)
 
             edge_data_dict = {}
             selected_paths = []
-            has_ratios = 'connection_ratios' in path_df.columns
-            has_probs = 'traversal_probabilities' in path_df.columns
-            capacity = self.edgeN_limit  # reserved edges do not count
-            for idx, row in path_df_sorted.iterrows():
-                path_block = row['path_block']
-                nodes = self._parse_path_block(path_block)
-                weights = self._safe_eval_list(row['weights'])
-                ratios = self._safe_eval_list(
-                    row.get('connection_ratios', [])) if has_ratios else []
-                probs = self._safe_eval_list(
-                    row.get('traversal_probabilities', [])) if has_probs else []
-
-                for i in range(len(nodes) - 1):
-                    edge_key = (nodes[i], nodes[i + 1])
-                    weight = weights[i] if i < len(weights) else 0
-                    ratio = ratios[i] if i < len(ratios) else 0
-                    prob = probs[i] if i < len(probs) else 0
-                    if weight == 0:
-                        continue
+            integrity_relaxed = False
+            for _score, _order, idx, records in candidates:
+                candidate_edges = {edge for edge, _data in records}
+                new_edges = candidate_edges.difference(edge_data_dict)
+                if (len(edge_data_dict) + len(new_edges)
+                        > self.edgeN_limit):
+                    # Skip this path and continue looking for a complete path
+                    # that still fits.  This avoids the old behavior where
+                    # the first path crossing the limit overshot it.
+                    continue
+                for edge_key, data in records:
                     if edge_key not in edge_data_dict:
-                        edge_data_dict[edge_key] = {
-                            'weight': weight,
-                            'ratio': ratio,
-                            'probability': prob,
-                        }
+                        edge_data_dict[edge_key] = dict(data)
                     else:
                         edge_data_dict[edge_key]['weight'] = max(
-                            edge_data_dict[edge_key]['weight'], weight)
+                            edge_data_dict[edge_key]['weight'], data['weight'])
+                        edge_data_dict[edge_key]['ratio'] = max(
+                            edge_data_dict[edge_key]['ratio'], data['ratio'])
+                        edge_data_dict[edge_key]['probability'] = max(
+                            edge_data_dict[edge_key]['probability'],
+                            data['probability'])
                 selected_paths.append(idx)
-                if len(edge_data_dict) >= capacity:
-                    break
 
-            kept_edges = dict(edge_data_dict)
-            for (u, v) in reserved_edges:
-                kept_edges.setdefault((u, v), {
-                    'weight': G.adj[u][v], 'ratio': 0, 'probability': 0})
-            threshold = min(d['weight'] for d in edge_data_dict.values()) \
-                if edge_data_dict else 0
-            return kept_edges, len(reserved_edges), capped, \
-                len(selected_paths), threshold
+            # A single path longer than the configured limit is irreducible:
+            # show that complete path rather than an empty/broken graph.  This
+            # is recorded explicitly so callers can explain the soft limit.
+            if not selected_paths and candidates:
+                _score, _order, idx, records = candidates[0]
+                edge_data_dict = {edge: dict(data) for edge, data in records}
+                selected_paths = [idx]
+                integrity_relaxed = len(edge_data_dict) > self.edgeN_limit
 
-        # Fallback: weight-based filtering (edge-list input, no path data)
-        edges = sorted(
-            ((u, v, d) for u, v, d in G.edges(data=True)
-             if (u, v) not in reserved_edges),
-            key=lambda x: abs(x[2].get('weight', 0)), reverse=True,
+            kept_weights = [d['weight'] for d in edge_data_dict.values()]
+            threshold = min(kept_weights) if kept_weights else 0
+            return (edge_data_dict, False, integrity_relaxed,
+                    selected_paths, threshold)
+
+        # Edge-list fallback.  Endpoint edges are candidates, not guaranteed
+        # reservations.  Build a bounded candidate graph, then remove edges
+        # that cannot participate in a complete source-to-target corridor.
+        all_edges = list(G.edges(data=True))
+        source_nodes = {
+            node for node, attrs in G.node_attrs.items()
+            if attrs.get('node_type') == 'source'
+        }
+        target_nodes = {
+            node for node, attrs in G.node_attrs.items()
+            if attrs.get('node_type') == 'target'
+        }
+        boundary_candidates = []
+        for u, v, data in all_edges:
+            if u in source_nodes or v in target_nodes:
+                boundary_candidates.append((u, v, data))
+        boundary_candidates.sort(
+            key=lambda item: abs(item[2].get('weight', 0)), reverse=True)
+        selected_boundary = boundary_candidates[:self.edgeN_limit]
+        boundary_capped = len(boundary_candidates) > len(selected_boundary)
+        boundary_keys = {(u, v) for u, v, _data in selected_boundary}
+
+        ordinary = sorted(
+            ((u, v, data) for u, v, data in all_edges
+             if (u, v) not in boundary_keys),
+            key=lambda item: abs(item[2].get('weight', 0)), reverse=True,
         )
-        top_edges = edges[:self.edgeN_limit]
+        candidate_records = selected_boundary + ordinary[:self.edgeN_limit]
+        candidate_keys = {(u, v) for u, v, _data in candidate_records}
+        corridor_keys = self._edges_on_source_target_corridor(
+            candidate_keys, source_nodes, target_nodes)
+        if corridor_keys:
+            kept_keys = corridor_keys
+        else:
+            kept_keys = set(list(candidate_keys)[:self.edgeN_limit])
+
         kept_edges = {}
-        for (u, v) in reserved_edges:
-            kept_edges[(u, v)] = G.edge_attrs.get(
-                (u, v), {'weight': G.adj[u][v]})
-        for u, v, data in top_edges:
-            kept_edges[(u, v)] = data
-        kept_weights = [d.get('weight', 0) for _, _, d in top_edges]
+        for u, v, data in candidate_records:
+            if (u, v) in kept_keys:
+                kept_edges[(u, v)] = dict(data)
+        kept_weights = [d.get('weight', 0) for d in kept_edges.values()]
         threshold = min(kept_weights) if kept_weights else 0
-        return kept_edges, len(reserved_edges), capped, None, threshold
+        return (kept_edges, boundary_capped, False, None, threshold)
+
+    def visualized_paths_for_export(self):
+        """Return only path rows represented by the trimmed network.
+
+        The raw ``*_data_original_paths.csv`` remains the complete path
+        result.  This companion frame is the reproducible path input for the
+        rendered, edge-limited network and contains no independently-added
+        endpoint edges.
+        """
+        path_df = getattr(self, 'path_df', None)
+        if path_df is None or 'path_block' not in path_df.columns \
+                or 'weights' not in path_df.columns:
+            return pd.DataFrame()
+        selected = self._select_edges_for_plot()
+        if selected is None:
+            return path_df.copy()
+        selected_paths = selected[3]
+        if selected_paths is None:
+            return pd.DataFrame(columns=path_df.columns)
+        return path_df.loc[selected_paths].copy().reset_index(drop=True)
 
     def _filter_conn_df_for_plot(self, conn_df):
         """Filter a connection DataFrame to the SAME edge set the network
-        draws under the Visualization Edge Limit (reserved source/target
-        edges first, strongest fill). Returns the frame unchanged when no
+        draws under the Visualization Edge Limit (complete paths or a
+        source-to-target corridor). Returns the frame unchanged when no
         trimming applies."""
         selected = self._select_edges_for_plot()
         if selected is None:
@@ -3902,25 +3978,27 @@ class VisualizePath:
 
     def _trim_network_for_plot(self):
         """
-        Trim G_network to the edgeN_limit strongest edges for plotting.
+        Trim G_network to complete strong paths for plotting.
 
-        Path-based filtering preserves complete paths; edges of the
-        source/target nodes are ALWAYS reserved (they survive the trim
-        regardless of weight). Returns the graph to plot (the original
-        network when no trimming is needed); prints the trim warning with
-        the applied weight threshold when edges are dropped.
+        Endpoint edges are not independently reserved.  They survive only
+        when their complete source-to-target path is selected.  Returns the
+        graph to plot (the original network when no trimming is needed) and
+        prints the trim warning with the applied weight threshold.
         """
         G_to_plot = self.G_network
         selected = self._select_edges_for_plot()
         if selected is None:
             return G_to_plot
-        kept_edges, reserved_count, capped, selected_paths, threshold = selected
+        kept_edges, boundary_capped, integrity_relaxed, selected_paths, threshold = selected
 
-        if capped:
+        if boundary_capped:
             self._vprint(
-                f'  (source/target reservation capped at {self.edgeN_limit} strongest edges)')
+                f'  (edge-list endpoint candidates capped at {self.edgeN_limit} strongest edges)')
+        if integrity_relaxed:
+            self._vprint(
+                f'  (complete-path integrity relaxed the {self.edgeN_limit}-edge limit because the strongest path is longer)')
         self._vprint(
-            f'\033[33m⚠️ Too many edges ({self.G_network.number_of_edges()}) - simplifying to top {self.edgeN_limit} edges from top paths (source-outgoing/target-incoming edges reserved first, not counted toward the limit)\033[0m')
+            f'\033[33m⚠️ Too many edges ({self.G_network.number_of_edges()}) - simplifying to complete strong paths within the {self.edgeN_limit}-edge limit (endpoint edges are kept only with their paths)\033[0m')
 
         # Create subgraph with the kept edges
         G_sub = FastGraph()
@@ -3934,10 +4012,10 @@ class VisualizePath:
 
         if selected_paths is not None:
             self._vprint(
-                f'  Selected {selected_paths} paths + {reserved_count} reserved source/target edges → {G_to_plot.number_of_edges()} edges (applied threshold: weight >= {threshold:g})')
+                f'  Selected {len(selected_paths)} complete paths → {G_to_plot.number_of_edges()} edges (applied threshold: weight >= {threshold:g})')
         else:
             self._vprint(
-                f'  Kept top {self.edgeN_limit} + {reserved_count} reserved source/target edges → {G_to_plot.number_of_edges()} edges (applied threshold: weight >= {threshold:g})')
+                f'  Kept {G_to_plot.number_of_edges()} edge-list edges on a source-to-target corridor (applied threshold: weight >= {threshold:g})')
         return G_to_plot
 
     def create_network(self):
@@ -9362,18 +9440,16 @@ class VisualizePath:
             self._vprint("Warning: No connection data available for heatmap.")
             return None
         
-        # Filter edges if limit is set — the SAME edge set as the network
-        # (source-outgoing/target-incoming reserved first, strongest fill),
-        # so the heatmap never shows edges the network hides (or hides a
-        # reserved source/target edge the network keeps).
+        # Filter edges if limit is set — the SAME complete-path/corridor edge
+        # set as the network, so the heatmap never shows edges the network
+        # hides or endpoint edges that would be disconnected there.
         conn_df_to_use = self.conn_df
         selected = self._select_edges_for_plot()
         if selected is not None:
-            kept_edges, reserved_count, _capped, _paths, _thr = selected
+            kept_edges, _boundary_capped, _integrity_relaxed, _paths, _thr = selected
             conn_df_to_use = self._filter_conn_df_for_plot(self.conn_df)
             self._vprint(
-                f'  Filtering to the top {self.edgeN_limit} edges by weight '
-                f'plus {reserved_count} reserved source/target edges — same '
+                f'  Filtering to the complete-path/corridor edge set — same '
                 f'set as the network (out of {len(self.conn_df)})')
         elif getattr(self, 'G_network', None) is None and self.edgeN_limit \
                 and len(self.conn_df) > self.edgeN_limit:

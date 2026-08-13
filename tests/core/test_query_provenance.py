@@ -46,3 +46,23 @@ def test_run_exports_keep_queries_separate_from_resolved_body_ids():
     assert connection.parameter_dict["requested target neurons"] == "['PPL101']"
     assert connection.parameter_dict["resolved source bodyIds"] == "['100']"
     assert connection.parameter_dict["resolved target bodyIds"] == "['200']"
+
+
+def test_run_exports_drop_authentication_values_recursively():
+    connection = _connection_stub()
+    connection.token = "neuprint-secret"
+    connection.neuprint_token = "another-secret"
+    connection.runtime_options = {
+        "safe_option": "kept",
+        "cave_token": "cave-secret",
+        "nested": {"authorization": "Bearer secret", "safe": 1},
+    }
+
+    attributes = connection._run_export_attributes(path_mode="all")
+
+    assert "token" not in attributes
+    assert "neuprint_token" not in attributes
+    assert attributes["runtime_options"] == {
+        "safe_option": "kept",
+        "nested": {"safe": 1},
+    }

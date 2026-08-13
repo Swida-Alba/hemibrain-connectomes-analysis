@@ -211,6 +211,26 @@ html, body {
     border-radius: 10px;
     background: linear-gradient(135deg, rgba(232, 241, 255, .78), rgba(255, 255, 255, .92));
 }
+.drocat-neuron-query-preview-list {
+    max-height: 118px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 2px 2px 3px;
+    scrollbar-width: thin;
+}
+.drocat-neuron-query-preview-list.drocat-neuron-query-preview-expanded {
+    max-height: none;
+    overflow-y: visible;
+}
+.drocat-query-preview-expand-btn {
+    min-height: 24px;
+    padding: 0 6px;
+    color: var(--drocat-cobalt);
+    font-size: 11px;
+}
+.drocat-query-preview-expand-btn:hover {
+    background: rgba(69, 126, 191, .10);
+}
 .drocat-neuron-query-chip {
     display: inline-flex;
     align-items: center;
@@ -250,6 +270,31 @@ html, body {
     color: var(--drocat-navy);
     background: rgba(69, 126, 191, .10);
 }
+.drocat-chip-input-shell .drocat-chip-input .q-field__control {
+    align-content: flex-start;
+    scrollbar-width: thin;
+}
+.drocat-chip-input-shell.drocat-chip-list-collapsed
+    .drocat-chip-input .q-field__control {
+    max-height: 142px;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+.drocat-chip-input-shell.drocat-chip-list-expanded
+    .drocat-chip-input .q-field__control {
+    max-height: none;
+    overflow-y: visible;
+    overflow-x: hidden;
+}
+.drocat-chip-expand-btn {
+    min-height: 24px;
+    padding: 0 6px;
+    color: var(--drocat-cobalt);
+    font-size: 11px;
+}
+.drocat-chip-expand-btn:hover {
+    background: rgba(69, 126, 191, .10);
+}
 .drocat-neuron-match-jump {
     min-height: 26px;
     padding: 0 4px;
@@ -268,10 +313,56 @@ html, body {
     overflow: hidden;
     display: flex;
     flex-direction: column;
+    padding: 12px 16px 14px;
+}
+.drocat-neuron-dialog-header {
+    min-height: 30px;
+    margin-bottom: 2px;
+}
+.drocat-neuron-dialog-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.drocat-neuron-header-meta {
+    min-width: 0;
+    overflow: hidden;
+}
+.drocat-neuron-header-meta .q-badge {
+    min-height: 22px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 700;
+}
+.drocat-neuron-header-meta .drocat-neuron-source,
+.drocat-neuron-header-meta .drocat-neuron-enriched {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.drocat-neuron-intro-row {
+    display: grid;
+    grid-template-columns: minmax(320px, .9fr) minmax(0, 1.6fr);
+    align-items: stretch;
+    gap: 10px;
+    margin: 2px 0 4px;
+}
+.drocat-neuron-intro-row .drocat-neuron-query-preview {
+    min-width: 0;
+    margin: 0;
+    padding: 7px 10px;
+}
+.drocat-neuron-search-help {
+    align-self: center;
+    min-width: 0;
+    margin: 0;
+    line-height: 1.35;
 }
 .drocat-neuron-viewer-content {
     min-height: 0;
     overflow: auto;
+    padding-top: 0;
     padding-bottom: 4px;
 }
 .drocat-neuron-panel-toolbar {
@@ -526,7 +617,7 @@ html, body {
 }
 @keyframes drocat-neuron-focus-breathe {
     0%, 100% { opacity: 0; }
-    32%, 68% { opacity: 1; }
+    50% { opacity: 1; }
 }
 .drocat-data-viewer-table tr.drocat-neuron-focus-flash > td {
     position: relative;
@@ -538,18 +629,32 @@ html, body {
     z-index: 3;
     pointer-events: none;
     background: rgba(148, 163, 184, .20);
-    animation: drocat-neuron-focus-breathe 1.35s ease-in-out 1;
+    animation: drocat-neuron-focus-breathe 1.5s ease-in-out 1;
 }
 .drocat-data-viewer-table tr.drocat-neuron-focus-flash > td > * {
     position: relative;
     z-index: 4;
 }
 @media (max-width: 1100px) {
+    .drocat-neuron-intro-row {
+        grid-template-columns: 1fr;
+    }
     .drocat-neuron-results-layout {
         grid-template-columns: 1fr;
     }
     .drocat-neuron-match-panel {
         position: static;
+    }
+}
+@media (max-width: 760px) {
+    .drocat-neuron-viewer-card {
+        padding: 8px 10px 10px;
+    }
+    .drocat-neuron-header-meta {
+        flex-basis: 100%;
+    }
+    .drocat-neuron-dialog-header {
+        align-items: flex-start;
     }
 }
 
@@ -772,6 +877,28 @@ html, body {
 .q-menu .q-uploader { border: 1px solid var(--drocat-line) !important; border-radius: 12px !important; }
 .drocat-clear-btn { color: var(--drocat-faint); font-size: 12px; }
 .drocat-clear-btn:hover { color: var(--drocat-err); }
+
+/* Output-directory actions live inside the input append slot.  Give each
+   icon a fixed box so the path text never shifts or sits underneath a
+   button when the field is resized. */
+.drocat-output-dir .q-field__append {
+    flex-wrap: nowrap;
+    gap: 3px;
+    padding-left: 8px;
+}
+.drocat-output-dir .drocat-dir-icon-btn,
+.drocat-output-dir .drocat-dir-reset-btn {
+    flex: 0 0 32px;
+    width: 32px !important;
+    min-width: 32px !important;
+    height: 32px !important;
+    min-height: 32px !important;
+    padding: 0 !important;
+    margin: 0;
+    align-self: center;
+}
+.drocat-output-dir .drocat-dir-icon-btn .q-icon,
+.drocat-output-dir .drocat-dir-reset-btn .q-icon { font-size: 20px; }
 
 /* ---------- Palette picker (color previews) ---------- */
 .drocat-palette-grid {

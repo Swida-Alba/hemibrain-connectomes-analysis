@@ -351,7 +351,11 @@ def neuron_list_input(
       supplied, a ``See available neurons`` link opens the rendered,
       searchable cached neuron-index viewer for the current dataset.
       The viewer's mirrored query chips can remove values through the same
-      input when it supplies a ``query_remove`` callback.
+      input when it supplies a ``query_remove`` callback. Both the editor and
+      mirrored chips can be double-clicked to re-edit a value.
+
+    Long chip lists collapse to a scrollable three-row editor; the Expand
+    action opens the full list without changing the query.
 
     Returns container with .get_value() -> (filter_mode, neuron_list).
     """
@@ -360,6 +364,7 @@ def neuron_list_input(
         return f"{unit_label}{'s' if count != 1 else ''}"
 
     uploaded_neurons: List = []
+    chip_list_expanded = {"value": False}
 
     async def handle_upload(e):
         """Parse the first column of an uploaded CSV/TSV/Excel neuron list."""
@@ -394,7 +399,9 @@ def neuron_list_input(
             # input row; otherwise two neuron inputs on the same page would
             # anchor their menus to the same row and one popup could obscure
             # the other input during a focus change.
-            with ui.element("div").classes("relative flex-grow") as chip_input_anchor:
+            with ui.element("div").classes(
+                "relative flex-grow drocat-chip-input-shell drocat-chip-list-collapsed"
+            ) as chip_input_anchor:
                 chip_input = ui.select(
                     options=list(initial_values),
                     value=list(initial_values),
@@ -404,6 +411,15 @@ def neuron_list_input(
                     'use-chips use-input new-value-mode="add-unique" '
                     'input-debounce="0"'
                 ).classes("w-full drocat-select drocat-chip-input").tooltip(hint)
+
+            # Keep the layout control inside the field itself. A history or
+            # suggestion menu is anchored below the field and therefore cannot
+            # cover this button or turn an Expand click into a history pick.
+            with chip_input.add_slot("append"):
+                expand_button = ui.button(
+                    "Expand", on_click=lambda: toggle_chip_list()
+                ).props("flat dense no-focus").classes("drocat-chip-expand-btn")
+                expand_button.set_visibility(bool(initial_values))
 
             filter_mode = None
             if show_filter:
@@ -572,10 +588,12 @@ def neuron_list_input(
             count_badge = ui.badge(f"0 {_unit(0)}", color="grey-6").props("outline")
             upload_label = ui.label("").classes("text-caption drocat-muted")
             upload_label.set_visibility(False)
-            clear_button = ui.button(
-                "Clear",
-                icon="clear_all",
-            ).props("flat dense").classes("drocat-clear-btn")
+            # Keep this action text-only across every neuron input.  The
+            # label is already short and the icon made the status row look
+            # different from the other Clear actions in the UI.
+            clear_button = ui.button("Clear").props(
+                "flat dense"
+            ).classes("drocat-clear-btn")
             if available_neurons is not None:
                 # Import lazily to keep the common input component independent
                 # from the optional viewer's Polars-backed data layer.
@@ -590,6 +608,7 @@ def neuron_list_input(
                     query_selection=sync_viewer_selection,
                     query_resolution=sync_viewer_body_selection,
                     query_remove=remove_viewer_query_value,
+                    query_edit=lambda value: start_edit_value(value),
                     query_label=label,
                 )
 
@@ -621,6 +640,57 @@ def neuron_list_input(
         count = len(dict.fromkeys(combined))
         count_badge.text = f"{count} {_unit(count)}"
         count_badge.props(f"color={'primary' if count else 'grey-6'}")
+        expand_button.set_visibility(bool(chip_input.value))
+
+    def toggle_chip_list() -> None:
+        """Toggle the compact three-row view of the chip editor."""
+        # Expanding is a layout action, not a new query interaction. If the
+        # suggestion/history menu is open because the editor still owns focus,
+        # close it before the button takes focus so the Recent list cannot
+        # flash back over the expanded editor.
+        if suggestions is not None and suggest_menu is not None:
+            _suppress_history_popup["value"] = True
+            _close_suggest()
+        chip_list_expanded["value"] = not chip_list_expanded["value"]
+        if chip_list_expanded["value"]:
+            chip_input_anchor.classes(
+                add="drocat-chip-list-expanded",
+                remove="drocat-chip-list-collapsed",
+            )
+            expand_button.text = "Collapse"
+        else:
+            chip_input_anchor.classes(
+                add="drocat-chip-list-collapsed",
+                remove="drocat-chip-list-expanded",
+            )
+            expand_button.text = "Expand"
+        expand_button.update()
+
+    def start_edit_value(value) -> None:
+        """Remove one chip and put its exact text back into the editor."""
+        raw_value = getattr(value, "args", value)
+        target = str(raw_value or "").strip()
+        if not target:
+            return
+        current = list(chip_input.value or [])
+        remaining = [item for item in current if str(item).strip() != target]
+        if len(remaining) == len(current):
+            # The mirrored viewer can race a query refresh; still let the
+            # user recover the text they double-clicked.
+            remaining = current
+        viewer_owned_values.discard(target)
+        viewer_selected_values.discard(target)
+        viewer_owned_body_ids[:] = [
+            item for item in viewer_owned_body_ids
+            if str(item).strip() != target
+        ]
+        sync_options(remaining)
+        _suppress_history_popup["value"] = True
+        chip_input.set_value(remaining)
+        pending_input["value"] = target
+        chip_input.run_method("focus")
+        chip_input.run_method("updateInputValue", target)
+        update_status()
 
     def clear_all():
         uploaded_neurons.clear()
@@ -629,6 +699,14 @@ def neuron_list_input(
         viewer_owned_body_ids.clear()
         _suppress_history_popup["value"] = True
         chip_input.set_value([])
+        if chip_list_expanded["value"]:
+            chip_list_expanded["value"] = False
+            chip_input_anchor.classes(
+                add="drocat-chip-list-collapsed",
+                remove="drocat-chip-list-expanded",
+            )
+            expand_button.text = "Expand"
+            expand_button.update()
         upload_label.text = ""
         upload_label.set_visibility(False)
         update_status()
@@ -1160,6 +1238,19 @@ def neuron_list_input(
     # is added as a chip without requiring Enter. ``blur`` is a Quasar field
     # event and fires reliably when focus moves elsewhere.
     chip_input.on("blur", commit_pending_text)
+    chip_input.on(
+        "dblclick",
+        start_edit_value,
+        js_handler=(
+            "(event) => {"
+            "const chip = event.target.closest?.('.q-chip');"
+            "if (!chip || event.target.closest?.('.q-chip__remove')) return;"
+            "const content = chip.querySelector('.q-chip__content') || chip;"
+            "const value = (content.textContent || '').trim();"
+            "if (value) emit(value);"
+            "}"
+        ),
+    )
     clear_button.on_click(clear_all)
     update_status()
 
@@ -1182,6 +1273,8 @@ def neuron_list_input(
 
     container.get_value = get_value
     container.chip_input = chip_input
+    container.chip_input_anchor = chip_input_anchor
+    container.expand_button = expand_button
     container.filter_mode = filter_mode
     container.uploaded_neurons = uploaded_neurons
     container.suggest_menu = suggest_menu
@@ -1563,7 +1656,7 @@ async def dir_browser_dialog(title: str = "Select Directory",
 def dir_input(
     label: str = "Output Directory",
     default: Optional[str] = None,
-    hint: str = "Where results will be saved. Use the folder buttons to choose a directory.",
+    hint: str = "Where results will be saved. Use the folder button to choose a directory.",
     scope: Optional[str] = None,
     global_default: bool = False,
 ) -> ui.input:
@@ -1639,16 +1732,10 @@ def dir_input(
         if selected:
             _set_selected(selected)
         elif not available:
-            await browse_panel()
-
-    async def browse_panel():
-        selected = await dir_browser_dialog(
-            title=f"Select {label}",
-            initial=inp.value or str(PROJECT_ROOT),
-            default_output=inp.value or get_default_output_dir(),
-        )
-        if selected:
-            _set_selected(selected)
+            ui.notify(
+                "The system folder picker is unavailable in this environment.",
+                type="warning",
+            )
 
     def reset_tab_override():
         if not scope or global_default:
@@ -1663,17 +1750,22 @@ def dir_input(
             inp.update()
             ui.notify("This tab now uses the Settings default", type="positive")
 
+    # The output-directory control deliberately exposes one folder action.
+    # It always means "open the native desktop picker"; the in-app browser
+    # remains available as a standalone compatibility helper, but it must
+    # never appear as an unexpected second layer from this button.
     with inp.add_slot("append"):
         ui.button(icon="folder_open", on_click=browse_system).props(
-            "flat dense"
-        ).tooltip("Open the system folder picker")
-        ui.button(icon="folder_tree", on_click=browse_panel).props(
-            "flat dense"
-        ).tooltip("Browse folders inside DROCAT")
+            "flat dense round"
+        ).classes("drocat-dir-icon-btn").tooltip(
+            "Open the system folder picker"
+        )
         if scope and not global_default:
             ui.button(icon="restart_alt", on_click=reset_tab_override).props(
-                "flat dense"
-            ).tooltip("Use the Settings default for this tab")
+                "flat dense round"
+            ).classes("drocat-dir-reset-btn").tooltip(
+                "Use the Settings default for this tab"
+            )
 
     inp.on("blur", _persist_output_dir)
 

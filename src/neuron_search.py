@@ -694,6 +694,29 @@ def _scope_columns(search_frame, search_columns: str) -> List[str]:
     return [column for column in wanted if column in available]
 
 
+def _cache_covers_frame(cache: CachedNeuronSearch, frame: Any) -> bool:
+    """Return whether a cache can answer every canonical query for *frame*.
+
+    Body-ID equality alone is not enough to validate a cache.  Older cache
+    indexes can contain the same neurons while predating a newly pulled
+    ``*Type`` or taxonomy column.  In that situation using the cache would
+    return an incorrect empty result instead of consulting the authoritative
+    metadata table.  Compare the canonical searchable projection before
+    allowing the fast path; non-searchable metadata columns intentionally do
+    not affect this check.
+    """
+    try:
+        expected = [
+            canonical for canonical, _ in _dataframe_search_columns(frame)
+        ]
+        cached = ordered_search_columns(
+            cache.search_frame["search_column"].unique().to_list()
+        )
+    except Exception:
+        return False
+    return cached == expected
+
+
 def _load_signature(path: Path) -> Tuple[Any, ...]:
     try:
         stat = path.stat()
@@ -991,7 +1014,9 @@ def resolve_cached_or_dataframe_query(
             _body_id_key(value) for value in source_values
             if _body_id_key(value)
         }
-        if source_keys == set(cache.body_id_keys):
+        if source_keys == set(cache.body_id_keys) and _cache_covers_frame(
+            cache, frame
+        ):
             cached_result = resolve_neuron_query(
                 cache,
                 query,
