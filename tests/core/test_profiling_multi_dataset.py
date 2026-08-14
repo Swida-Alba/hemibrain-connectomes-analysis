@@ -170,6 +170,114 @@ def test_single_dataset_list_equivalent_to_dataset():
     comparer = _make_multi_comparer(datasets=[DS_A])
     assert comparer.is_multi_dataset is False
     assert comparer.dataset == DS_A
+    assert comparer.datasets == [DS_A]
+
+
+def test_single_dataset_report_indexes_all_metrics(tmp_path):
+    comparer = _make_multi_comparer(datasets=[DS_A])
+    output = tmp_path / "profiling"
+    output.mkdir()
+    matrix = pd.DataFrame([[1.0, 0.5], [0.5, 1.0]], index=["a", "b"], columns=["a", "b"])
+    metrics = {
+        name: matrix
+        for name in (
+            "jaccard", "weighted_jaccard", "cosine", "rank_corr",
+            "rank_corr_union", "combined",
+        )
+    }
+    report = comparer._generate_single_dataset_report(
+        output,
+        {"combined": metrics},
+        {},
+        {},
+    )
+    text = report.read_text(encoding="utf-8")
+    assert report.exists()
+    for metric in metrics:
+        assert metric in text
+    assert "type_level/results/type_similarity_jaccard_combined.csv" in text
+
+
+def test_report_redraws_plotly_and_links_vispath_editor(tmp_path):
+    pytest.importorskip("plotly")
+    comparer = _make_multi_comparer(datasets=[DS_A])
+    output = tmp_path / "profiling"
+    viz = output / "type_level" / "visualization"
+    viz.mkdir(parents=True)
+    (viz / "heatmap_type_combined_jaccard.html").write_text(
+        "<!doctype html><title>VisPath editor</title>", encoding="utf-8"
+    )
+    matrix = pd.DataFrame(
+        [[1.0, 0.5], [0.5, 1.0]],
+        index=["aMe12", "aMe10"],
+        columns=["aMe12", "aMe10"],
+    )
+
+    report = comparer._generate_single_dataset_report(
+        output,
+        {"combined": {"jaccard": matrix}},
+        {},
+        {},
+    )
+    text = report.read_text(encoding="utf-8")
+    assert "Plotly.newPlot" in text
+    assert "<iframe" not in text
+    assert "Open VisPath heatmap for editing" in text
+    assert "type_level/visualization/heatmap_type_combined_jaccard.html" in text
+
+
+def test_aggregate_inter_dataset_matrices_uses_neurons_by_dataset_pairs():
+    comparer = _make_multi_comparer(
+        datasets=[DS_A, DS_B, "flywire_FAFB_v783"],
+    )
+    labels = [DS_A, DS_B, "flywire_FAFB_v783"]
+    first = pd.DataFrame(
+        [[np.nan, 0.2, 0.3], [0.2, np.nan, 0.4], [0.3, 0.4, np.nan]],
+        index=labels,
+        columns=labels,
+    )
+    second = first + 0.1
+    second.iloc[0, 0] = np.nan
+    second.iloc[1, 1] = np.nan
+    second.iloc[2, 2] = np.nan
+    inter = {
+        "aMe12": {"combined": {"jaccard": first}},
+        "aMe10": {"combined": {"jaccard": second}},
+    }
+
+    aggregate = comparer._aggregate_inter_dataset_matrices(inter)
+    result = aggregate["combined"]["jaccard"]
+    assert result.index.tolist() == ["aMe12", "aMe10"]
+    assert result.columns.tolist() == [
+        f"{DS_A} vs {DS_B}",
+        f"{DS_A} vs flywire_FAFB_v783",
+        f"{DS_B} vs flywire_FAFB_v783",
+    ]
+    assert result.shape == (2, 3)
+    assert result.loc["aMe12", f"{DS_A} vs {DS_B}"] == pytest.approx(0.2)
+    assert result.loc["aMe10", f"{DS_B} vs flywire_FAFB_v783"] == pytest.approx(0.5)
+
+
+def test_heatmap_generation_handles_nonfinite_values_and_nested_output(tmp_path):
+    """Multi-dataset heatmaps must not fail on empty-profile NaNs."""
+    comparer = _make_multi_comparer(generate_heatmaps=True, show_figures=False)
+    matrix = pd.DataFrame(
+        [[1.0, np.nan], [np.inf, 0.5]],
+        index=["a", "b"],
+        columns=["a", "b"],
+    )
+    saved = {"heatmaps_generated": []}
+    viz_dir = tmp_path / "nested" / "visualization"
+
+    comparer._generate_heatmaps_vispath(
+        {"combined": {"jaccard": matrix}},
+        viz_dir,
+        saved,
+        prefix="inter",
+    )
+
+    assert saved["heatmaps_generated"]
+    assert (viz_dir / "heatmap_inter_combined_jaccard.html").exists()
 
 
 def test_mapped_query_uses_type_mapper():
@@ -427,16 +535,23 @@ def test_run_multi_dataset_output_structure(tmp_path, monkeypatch):
     safe_a = DS_A.replace(":", "_").replace(".", "_")
     safe_b = DS_B.replace(":", "_").replace(".", "_")
     assert (out / "intra_dataset" / safe_a).exists()
+    assert (out / "intra_dataset" / safe_a / "visualization").exists()
     assert (out / "cross_dataset" / "mapping_summary.csv").exists()
+    assert (out / "cross_dataset" / "all_types" / "results").exists()
+    assert (out / "cross_dataset" / "all_types" / "results" /
+            "similarity_combined_jaccard.csv").exists()
     assert (out / "cross_dataset" / "per_neuron" / "aMe12" / "results").exists()
+    assert (out / "cross_dataset" / "per_neuron" / "aMe12" / "visualization").exists()
     assert (out / "profiles" / safe_b / "aggregated").exists()
 
-    # the report embeds every heatmap and lists the anchors
+    # the report indexes every matrix (and embeds heatmaps when generated)
     report = (out / "report.html").read_text(encoding="utf-8")
     assert "Intra-dataset" in report
     assert "Inter-dataset" in report
-    assert "heatmap_intra_combined_jaccard.html" in report
-    assert "heatmap_inter_combined_jaccard.html" in report
+    assert "cross_dataset/all_types/results/similarity_combined_jaccard.csv" in report
+    assert "Dataset pair" in report
+    assert "<iframe" not in report
+    assert "similarity_combined_jaccard.csv" in report
     assert "mapping_summary" not in report  # summary is a CSV, not embedded
     params = json.loads((out / "parameters.json").read_text(encoding="utf-8"))
     assert params["datasets"] == [DS_A, DS_B]

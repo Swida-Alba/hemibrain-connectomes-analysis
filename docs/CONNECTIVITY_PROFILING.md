@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `ConnectivityProfiling.py` script compares connectivity profiles within a single dataset, enabling analysis of neural circuit similarity patterns. It supports comparison at multiple levels (bodyId, type) with interactive heatmap visualization.
+The `ConnectivityProfiling.py` script compares connectivity profiles within one dataset or across multiple selected datasets, enabling analysis of neural circuit similarity patterns. It supports comparison at multiple levels (bodyId, type) with interactive heatmap visualization.
 
 ## Key Features
 
@@ -13,6 +13,8 @@ The `ConnectivityProfiling.py` script compares connectivity profiles within a si
 - **ALL Metrics Output**: Automatically computes jaccard, cosine, rank_corr, rank_corr_union
 - **Separate Heatmaps**: One heatmap file per metric (not combined)
 - **Directional Analysis**: Separate upstream/downstream or combined profile comparison
+- **Multi-Dataset Overview**: Inter-dataset heatmaps use neuron/type rows and dataset-pair columns
+- **Report Rendering**: Reports redraw heatmaps with Plotly and link to the local VisPath HTML for editing
 - **Interactive Visualization**: Heatmaps via VisualizePath with native Ward clustering
 - **Profile Saving**: Saves individual and aggregated connectivity profiles
 - **Auto-Generated Output**: Folder named `connectivity_profiling_{query_name}_{timestamp}`
@@ -252,7 +254,7 @@ $$\text{RankCorr}_{union} = \rho_{spearman}(union)$$
 
 ## Visualization Features
 
-The heatmaps are generated using `VisualizePath.VisConnMatInteractive`, providing:
+The editable heatmap files are generated using `VisualizePath.VisConnMatInteractive`, providing:
 
 - **Clustering toggle**: Switch between Original and Clustered ordering (Ward by default)
 - **Clustering method selection**: Ward, Average, Complete, Single linkage
@@ -263,6 +265,8 @@ The heatmaps are generated using `VisualizePath.VisConnMatInteractive`, providin
 For connectivity profiling, heatmaps default to **clustered ordering** (`init_clustered=True`) to highlight similar profiles.
 
 **Note:** Each metric gets its own separate heatmap file, making it easy to compare different similarity measures side-by-side.
+
+The generated `report.html` redraws those matrices with Plotly instead of embedding the VisPath pages. Each report heatmap includes a local **Open VisPath heatmap for editing** link. For multi-dataset runs, the overview files under `cross_dataset/all_types/` have one row per queried neuron/type and one column per dataset pair; detailed datasets × datasets matrices remain under `cross_dataset/per_neuron/`.
 
 ## Intra-Type vs Inter-Type Analysis
 

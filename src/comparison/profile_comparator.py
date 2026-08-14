@@ -25,6 +25,7 @@ Example:
 """
 
 from dataclasses import dataclass
+from itertools import combinations
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union, Any, TYPE_CHECKING
 from datetime import datetime
@@ -8739,6 +8740,84 @@ class ConnectivityProfileComparer:
             out[anchor] = matrices
             
         return out
+
+    def _aggregate_inter_dataset_matrices(
+        self,
+        inter_matrices: Dict[str, Dict[str, Dict[str, pd.DataFrame]]],
+    ) -> Dict[str, Dict[str, pd.DataFrame]]:
+        """Combine per-anchor inter-dataset scores into comparison heatmaps.
+
+        The detailed inter-dataset calculation naturally produces one
+        datasets × datasets matrix for each queried neuron.  That layout is
+        useful for inspecting one anchor, but it does not scale when the
+        profiling query contains many neurons.  Reports and overview
+        visualizations use this companion layout instead:
+
+        * rows: queried neuron/type anchors
+        * columns: dataset pairs (for example ``dataset_a vs dataset_b``)
+        * values: the selected similarity metric for that anchor/pair
+
+        The original per-anchor matrices remain available to callers and are
+        still exported as CSVs.  Missing anchors/pairs are kept as NaN so the
+        CSV preserves the distinction between "not comparable" and a score
+        of zero; renderers can decide how to display those cells.
+        """
+        if not inter_matrices:
+            return {}
+
+        pair_specs = list(combinations(self.datasets, 2))
+        pair_labels = [f"{dataset_a} vs {dataset_b}" for dataset_a, dataset_b in pair_specs]
+        anchors = list(inter_matrices.keys())
+        directions = (
+            ['combined', 'upstream', 'downstream']
+            if self.direction == 'both'
+            else [self.direction]
+        )
+        metrics = [
+            'jaccard', 'weighted_jaccard', 'cosine',
+            'rank_corr', 'rank_corr_union', 'combined',
+        ]
+
+        aggregate: Dict[str, Dict[str, pd.DataFrame]] = {}
+        for direction in directions:
+            if not any(direction in inter_matrices.get(anchor, {}) for anchor in anchors):
+                continue
+            available_metrics = [
+                metric for metric in metrics
+                if any(
+                    metric in inter_matrices.get(anchor, {}).get(direction, {})
+                    for anchor in anchors
+                )
+            ]
+            metric_frames: Dict[str, pd.DataFrame] = {}
+            for metric in available_metrics:
+                rows = []
+                for anchor in anchors:
+                    anchor_matrix = (
+                        inter_matrices.get(anchor, {})
+                        .get(direction, {})
+                        .get(metric)
+                    )
+                    values = []
+                    for dataset_a, dataset_b in pair_specs:
+                        value = np.nan
+                        if anchor_matrix is not None:
+                            try:
+                                if dataset_a in anchor_matrix.index and dataset_b in anchor_matrix.columns:
+                                    value = anchor_matrix.loc[dataset_a, dataset_b]
+                                elif dataset_b in anchor_matrix.index and dataset_a in anchor_matrix.columns:
+                                    value = anchor_matrix.loc[dataset_b, dataset_a]
+                            except (KeyError, TypeError, ValueError):
+                                value = np.nan
+                        values.append(value)
+                    rows.append(values)
+
+                frame = pd.DataFrame(rows, index=anchors, columns=pair_labels, dtype=float)
+                frame.index.name = 'neuron_type'
+                metric_frames[metric] = frame
+            aggregate[direction] = metric_frames
+
+        return aggregate
     
     def _extract_cross_dataset_profiles(
         self
@@ -9535,6 +9614,7 @@ class ConnectivityProfileComparer:
             "- bodyid_level/bodyid_*: Direct bodyId-to-bodyId comparisons",
             "- bodyid_level/type_avg_*: Type similarities averaged from bodyId pairs",
             "  (diagonal = intra-type avg, off-diagonal = inter-type avg)",
+            "- report.html: Overall report linking every metric and heatmap",
             "",
             f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         ]
@@ -9626,8 +9706,269 @@ class ConnectivityProfileComparer:
             # Type-avg-bodyId heatmaps
             self._log("Generating type-avg-bodyId heatmaps...")
             self._generate_heatmaps_vispath(type_avg_matrices, bodyid_viz_dir, saved_files, prefix='type_avg')
+
+        # Keep one report entry point for the single-dataset workflow too.
+        # It is still useful when heatmaps are disabled because all exported
+        # metric matrices remain linked from the report.
+        report_path = self._generate_single_dataset_report(
+            output_path, type_matrices, bodyid_matrices, type_avg_matrices
+        )
+        saved_files['report_path'] = str(report_path)
         
         return saved_files
+
+    @staticmethod
+    def _metric_display_name(metric: str) -> str:
+        """Return the reader-facing label used by profiling reports."""
+        return {
+            'jaccard': 'Jaccard Similarity',
+            'weighted_jaccard': 'Weighted Jaccard Similarity',
+            'cosine': 'Cosine Similarity',
+            'rank_corr': 'Rank Correlation',
+            'rank_corr_union': 'Rank Correlation (Union)',
+            'combined': 'Combined Score',
+        }.get(metric, str(metric).replace('_', ' ').title())
+
+    @staticmethod
+    def _plotly_heatmap_fragment(
+        matrix: pd.DataFrame,
+        title: str,
+        metric: str,
+        x_title: str,
+        y_title: str,
+        include_plotlyjs: bool = False,
+    ) -> Optional[str]:
+        """Render a report heatmap as a Plotly fragment.
+
+        VisPath remains the editing surface, while the report owns its own
+        Plotly rendering.  This keeps the report layout independent from the
+        VisPath page and avoids nesting one exported HTML document inside
+        another HTML document.
+        """
+        if matrix is None or matrix.empty:
+            return None
+
+        try:
+            import plotly.graph_objects as go
+        except ImportError:
+            return None
+
+        numeric = matrix.apply(pd.to_numeric, errors='coerce')
+        numeric = numeric.replace([np.inf, -np.inf], np.nan)
+        z = [
+            [None if pd.isna(value) else float(value) for value in row]
+            for row in numeric.itertuples(index=False, name=None)
+        ]
+        x_labels = [str(value) for value in numeric.columns]
+        y_labels = [str(value) for value in numeric.index]
+
+        is_diverging = metric in {'rank_corr', 'rank_corr_union'}
+        colorscale = 'RdBu' if is_diverging else 'Blues'
+        zmin, zmax = (-1.0, 1.0) if is_diverging else (0.0, 1.0)
+        show_values = numeric.shape[0] <= 30 and numeric.shape[1] <= 30
+
+        heatmap_kwargs = {
+            'z': z,
+            'x': x_labels,
+            'y': y_labels,
+            'type': 'heatmap',
+            'colorscale': colorscale,
+            'zmin': zmin,
+            'zmax': zmax,
+            'xgap': 1,
+            'ygap': 1,
+            'hoverongaps': False,
+            'colorbar': {'title': {'text': ConnectivityProfileComparer._metric_display_name(metric)}},
+            'hovertemplate': (
+                '<b>%{y}</b><br>%{x}<br>'
+                f'{ConnectivityProfileComparer._metric_display_name(metric)}: %{{z:.3f}}'
+                '<extra></extra>'
+            ),
+        }
+        if show_values:
+            heatmap_kwargs['text'] = [
+                [
+                    '' if value is None else f'{value:.2f}'
+                    for value in row
+                ]
+                for row in z
+            ]
+            heatmap_kwargs['texttemplate'] = '%{text}'
+            heatmap_kwargs['textfont'] = {'size': 10, 'color': '#1f2937'}
+
+        fig = go.Figure(data=[go.Heatmap(**heatmap_kwargs)])
+        max_label_length = max((len(label) for label in y_labels), default=12)
+        left_margin = min(300, max(135, max_label_length * 6 + 24))
+        row_height = 24 if len(y_labels) <= 60 else 16
+        fig.update_layout(
+            template='plotly_white',
+            title={'text': title, 'x': 0.01, 'xanchor': 'left'},
+            height=max(460, min(2200, 300 + len(y_labels) * row_height)),
+            margin={
+                'l': left_margin,
+                'r': 32,
+                't': 72,
+                'b': 118 if len(x_labels) > 1 else 76,
+            },
+            font={'family': 'Arial, sans-serif', 'size': 11, 'color': '#1f2937'},
+            paper_bgcolor='white',
+            plot_bgcolor='white',
+            xaxis={
+                'title': {'text': x_title},
+                'tickangle': -45,
+                'automargin': True,
+            },
+            yaxis={
+                'title': {'text': y_title},
+                'autorange': 'reversed',
+                'automargin': True,
+            },
+        )
+
+        return fig.to_html(
+            full_html=False,
+            include_plotlyjs='inline' if include_plotlyjs else False,
+            config={
+                'responsive': True,
+                'displaylogo': False,
+                'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
+            },
+            default_width='100%',
+        )
+
+    def _append_report_heatmap(
+        self,
+        lines: List[str],
+        output_path: Path,
+        matrix: pd.DataFrame,
+        heading: str,
+        title: str,
+        metric: str,
+        x_title: str,
+        y_title: str,
+        csv_rel: str,
+        vispath_rel: str,
+        plotly_state: Dict[str, bool],
+    ) -> None:
+        """Append one Plotly heatmap and its CSV/VisPath links to a report."""
+        from html import escape
+
+        links = [f"<a href='{escape(csv_rel, quote=True)}'>CSV</a>"]
+        if (output_path / vispath_rel).exists():
+            links.append(
+                f"<a class='editor-link' href='{escape(vispath_rel, quote=True)}' "
+                "target='_blank' rel='noopener'>Open VisPath heatmap for editing</a>"
+            )
+        lines.append(
+            f"<h3>{escape(heading)} ({' · '.join(links)})</h3>"
+        )
+
+        fragment = self._plotly_heatmap_fragment(
+            matrix=matrix,
+            title=title,
+            metric=metric,
+            x_title=x_title,
+            y_title=y_title,
+            include_plotlyjs=plotly_state.get('include_plotlyjs', True),
+        )
+        if fragment:
+            plotly_state['include_plotlyjs'] = False
+            lines.append(f"<div class='heatmap-container'>{fragment}</div>")
+        else:
+            lines.append(
+                "<p class='muted'>Plotly is unavailable; use the CSV or VisPath "
+                "link above.</p>"
+            )
+
+    def _generate_single_dataset_report(
+        self,
+        output_path: Path,
+        type_matrices: Dict[str, Dict[str, pd.DataFrame]],
+        bodyid_matrices: Dict[str, Dict[str, pd.DataFrame]],
+        type_avg_matrices: Dict[str, Dict[str, pd.DataFrame]],
+    ) -> Path:
+        """Create a report linking every single-dataset metric output."""
+        from html import escape
+
+        metric_names = {
+            'jaccard': 'Jaccard Similarity',
+            'weighted_jaccard': 'Weighted Jaccard Similarity',
+            'cosine': 'Cosine Similarity',
+            'rank_corr': 'Rank Correlation',
+            'rank_corr_union': 'Rank Correlation (Union)',
+            'combined': 'Combined Score',
+        }
+        sections = [
+            ("Type-level", type_matrices, "type", "type_similarity"),
+            ("BodyId-level", bodyid_matrices, "bodyid", "bodyid_similarity"),
+            ("Type-average BodyId", type_avg_matrices, "type_avg", "type_avg_bodyid_similarity"),
+        ]
+        lines = [
+            "<!DOCTYPE html>",
+            "<html><head><meta charset='utf-8'>",
+            f"<title>Connectivity Profiling Report — {escape(str(self.query_name))}</title>",
+            "<style>body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;"
+            "margin:28px auto;max-width:1200px;color:#222;line-height:1.5}"
+            "h1{font-size:24px;margin-bottom:4px}h2{font-size:19px;margin-top:32px;"
+            "border-bottom:2px solid #4a7;padding-bottom:4px}"
+            "h3{font-size:14px;margin:18px 0 4px;color:#444}"
+            ".heatmap-container{width:100%;overflow-x:auto;border:1px solid #ddd;"
+            "border-radius:8px;margin:4px 0 12px;background:#fff;padding:8px}"
+            ".muted{color:#777;font-size:12px}.editor-link{margin-left:8px}"
+            "a{color:#1769aa}</style></head><body>",
+            "<h1>Connectivity Profiling Report</h1>",
+            f"<p class='muted'>Generated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>",
+            f"<p><b>Dataset:</b> {escape(str(self.dataset))}<br>"
+            f"<b>Query:</b> {escape(self._format_query_for_log(self.query))}<br>"
+            f"<b>Aggregation:</b> {escape(str(self.aggregation_level))}<br>"
+            "<b>Metrics:</b> jaccard · weighted_jaccard · cosine · rank_corr · "
+            "rank_corr_union · combined</p>",
+        ]
+        plotly_state = {'include_plotlyjs': True}
+
+        for title, matrices, prefix, csv_prefix in sections:
+            lines.append(f"<h2>{escape(title)}</h2>")
+            if not matrices:
+                lines.append("<p class='muted'>Not computed for this run.</p>")
+                continue
+            for direction, metric_matrices in matrices.items():
+                for metric in metric_matrices:
+                    csv_name = f"{csv_prefix}_{metric}_{direction}.csv"
+                    csv_rel = (
+                        f"{prefix}_level/results/{csv_name}"
+                        if prefix != "type_avg"
+                        else f"bodyid_level/results/{csv_name}"
+                    )
+                    if prefix == "type_avg":
+                        viz_rel = (
+                            f"bodyid_level/visualization/heatmap_type_avg_"
+                            f"{direction}_{metric}.html"
+                        )
+                    else:
+                        viz_rel = (
+                            f"{prefix}_level/visualization/heatmap_{prefix}_"
+                            f"{direction}_{metric}.html"
+                        )
+                    display = metric_names.get(metric, metric)
+                    self._append_report_heatmap(
+                        lines=lines,
+                        output_path=output_path,
+                        matrix=metric_matrices[metric],
+                        heading=f"{direction} · {display}",
+                        title=f"{title} similarity — {direction} · {display}",
+                        metric=metric,
+                        x_title="Neuron / type",
+                        y_title="Neuron / type",
+                        csv_rel=csv_rel,
+                        vispath_rel=viz_rel,
+                        plotly_state=plotly_state,
+                    )
+
+        lines.append("</body></html>")
+        report_path = output_path / "report.html"
+        report_path.write_text("\n".join(lines), encoding="utf-8")
+        self._log(f"Overall report (all metrics): {report_path}")
+        return report_path
     
     def _generate_heatmaps_vispath(
         self,
@@ -9651,6 +9992,32 @@ class ConnectivityProfileComparer:
             saved_files: Dict to append saved file paths to
             prefix: Prefix for filenames (e.g., 'type', 'bodyid', 'type_avg')
         """
+        # Cross-dataset similarities can legitimately contain NaN when a
+        # profile has no comparable partners.  Keep those values in the CSV
+        # analysis output, but pass finite copies to renderers that format
+        # every cell as an integer/float for hover text.
+        render_matrices: Dict[str, Dict[str, pd.DataFrame]] = {}
+        replaced_nonfinite = 0
+        for direction, metric_matrices in matrices.items():
+            render_matrices[direction] = {}
+            for metric, matrix in metric_matrices.items():
+                if matrix is None:
+                    render_matrices[direction][metric] = matrix
+                    continue
+                numeric = matrix.apply(pd.to_numeric, errors='coerce')
+                values = numeric.to_numpy(dtype=float, copy=False)
+                nonfinite = ~np.isfinite(values)
+                replaced_nonfinite += int(nonfinite.sum())
+                if nonfinite.any():
+                    numeric = numeric.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+                render_matrices[direction][metric] = numeric
+        if replaced_nonfinite:
+            self._log(
+                f"Heatmap visualization: replaced {replaced_nonfinite} non-finite "
+                "similarity values with 0; CSV matrices retain the original values."
+            )
+
+        viz_dir.mkdir(parents=True, exist_ok=True)
         try:
             # Import VisualizePath's heatmap function
             import sys
@@ -9916,8 +10283,15 @@ class ConnectivityProfileComparer:
         intra_base = output_path / 'intra_dataset'
         cross_base = output_path / 'cross_dataset'
         profiles_base = output_path / 'profiles'
+        cross_base.mkdir(parents=True, exist_ok=True)
         saved = {'matrices_saved': [], 'heatmaps_generated': [],
                  'profiles_saved': [], 'output_path': str(output_path)}
+
+        # The per-anchor matrices are retained for detailed inspection.  The
+        # report-facing visualization uses one aggregate matrix whose rows are
+        # anchors and whose columns are dataset pairs.
+        inter_type_matrices = self._aggregate_inter_dataset_matrices(inter_matrices)
+        saved['inter_type_matrices'] = inter_type_matrices
         
         # --- intra-dataset matrices + heatmaps per dataset ---
         for ds, matrices in matrices_by_dataset.items():
@@ -9925,6 +10299,7 @@ class ConnectivityProfileComparer:
             results_dir = intra_base / safe_ds / 'results'
             viz_dir = intra_base / safe_ds / 'visualization'
             results_dir.mkdir(parents=True, exist_ok=True)
+            viz_dir.mkdir(parents=True, exist_ok=True)
             for direction, metric_matrices in matrices.items():
                 for metric, mdf in metric_matrices.items():
                     csv_path = results_dir / f'similarity_{direction}_{metric}.csv'
@@ -9951,14 +10326,31 @@ class ConnectivityProfileComparer:
             results_dir = cross_base / 'per_neuron' / safe_anchor / 'results'
             viz_dir = cross_base / 'per_neuron' / safe_anchor / 'visualization'
             results_dir.mkdir(parents=True, exist_ok=True)
+            viz_dir.mkdir(parents=True, exist_ok=True)
             for direction, metric_matrices in matrices.items():
                 for metric, mdf in metric_matrices.items():
                     csv_path = results_dir / f'similarity_{direction}_{metric}.csv'
                     mdf.to_csv(csv_path)
                     saved['matrices_saved'].append(str(csv_path))
-            if self.generate_heatmaps:
-                self._log(f"Generating inter-dataset heatmaps for '{anchor}'...")
-                self._generate_heatmaps_vispath(matrices, viz_dir, saved, prefix='inter')
+
+        # --- aggregate inter-dataset matrices + heatmaps (all neurons) ---
+        all_types_results = cross_base / 'all_types' / 'results'
+        all_types_viz = cross_base / 'all_types' / 'visualization'
+        all_types_results.mkdir(parents=True, exist_ok=True)
+        all_types_viz.mkdir(parents=True, exist_ok=True)
+        for direction, metric_matrices in inter_type_matrices.items():
+            for metric, mdf in metric_matrices.items():
+                csv_path = all_types_results / f'similarity_{direction}_{metric}.csv'
+                mdf.to_csv(csv_path)
+                saved['matrices_saved'].append(str(csv_path))
+        if self.generate_heatmaps and inter_type_matrices:
+            self._log("Generating aggregate inter-dataset heatmaps (all neurons)...")
+            self._generate_heatmaps_vispath(
+                inter_type_matrices,
+                all_types_viz,
+                saved,
+                prefix='inter_all_types',
+            )
         
         # --- name-mapping summary (anchor -> resolved name per dataset) ---
         summary_rows = []
@@ -10005,22 +10397,30 @@ class ConnectivityProfileComparer:
             "",
             "intra_dataset/{dataset}/: N×N similarity of the queried neurons within",
             "  each dataset (rows/columns = types, bodyIds or custom groups).",
-            "cross_dataset/per_neuron/{anchor}/: datasets × datasets similarity of the",
+            "cross_dataset/all_types/: overview matrices with neurons as rows and",
+            "  dataset pairs as columns (one heatmap per direction/metric).",
+            "cross_dataset/per_neuron/{anchor}/: detailed datasets × datasets similarity of the",
             "  SAME queried neuron across datasets (homolog-finding backend algorithm,",
             "  partner types standardized to the male-cns v1.0 canonical names).",
             "cross_dataset/mapping_summary.csv: resolved name of each anchor per dataset.",
-            "report.html: overall summary embedding every heatmap.",
+            "report.html: Plotly heatmaps with local VisPath editor links.",
             "",
             f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         ]
         (output_path / 'README.txt').write_text('\n'.join(readme_lines), encoding='utf-8')
         
-        # --- overall report embedding all heatmaps ---
-        if self.generate_heatmaps:
-            report_path = self._generate_overall_report(
-                output_path, matrices_by_dataset, inter_matrices, anchor_profiles
-            )
-            saved['report_path'] = str(report_path)
+        # --- overall report with Plotly heatmaps and VisPath editor links ---
+        # Generate the index even when heatmaps are disabled: the CSV matrix
+        # links still make the run self-contained and explain which metrics
+        # were computed.
+        report_path = self._generate_overall_report(
+            output_path,
+            matrices_by_dataset,
+            inter_matrices,
+            anchor_profiles,
+            inter_type_matrices=inter_type_matrices,
+        )
+        saved['report_path'] = str(report_path)
         
         return saved
 
@@ -10030,23 +10430,21 @@ class ConnectivityProfileComparer:
         matrices_by_dataset: Dict[str, Dict[str, Dict[str, pd.DataFrame]]],
         inter_matrices: Dict[str, Dict[str, Dict[str, pd.DataFrame]]],
         anchor_profiles: Dict[str, Dict[str, Tuple[str, ConnectivityProfile]]],
+        inter_type_matrices: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None,
     ) -> Path:
-        """Build report.html embedding every intra- and inter-dataset heatmap.
+        """Build report.html with Plotly heatmaps and local editor links.
 
-        The interactive heatmaps are standalone HTML pages; the report embeds
-        them in iframes so one file summarizes the whole run.
+        The report redraws each matrix with Plotly.  The corresponding VisPath
+        HTML remains a sibling file and is linked as an editing surface rather
+        than embedded as a nested document.
         """
         from urllib.parse import quote
         
-        metrics_display = {'jaccard': 'Jaccard Similarity',
-                           'weighted_jaccard': 'Weighted Jaccard Similarity',
-                           'cosine': 'Cosine Similarity',
-                           'rank_corr': 'Rank Correlation',
-                           'rank_corr_union': 'Rank Correlation (Union)',
-                           'combined': 'Combined Score'}
         directions = (['combined', 'upstream', 'downstream']
                       if self.direction == 'both' else [self.direction])
         ds_list = self.datasets
+        if inter_type_matrices is None:
+            inter_type_matrices = self._aggregate_inter_dataset_matrices(inter_matrices)
         
         def esc(text: Any) -> str:
             return str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
@@ -10065,8 +10463,9 @@ class ConnectivityProfileComparer:
           'table{border-collapse:collapse;font-size:13px;margin:10px 0}'
           'td,th{border:1px solid #ccc;padding:4px 10px;text-align:left}'
           'th{background:#f2f7f4}'
-          'iframe{width:100%;height:520px;border:1px solid #ddd;border-radius:8px;'
-          'margin:4px 0 10px;background:#fff}'
+          '.heatmap-container{width:100%;overflow-x:auto;border:1px solid #ddd;'
+          'border-radius:8px;margin:4px 0 10px;background:#fff;padding:8px}'
+          '.editor-link{margin-left:8px}'
           '.muted{color:#777;font-size:12px}'
           '.toc{font-size:13px;columns:2;margin:10px 0}'
           '.toc li{margin:2px 0}'
@@ -10083,15 +10482,18 @@ class ConnectivityProfileComparer:
         a(f'<tr><th>Direction</th><td>{esc(self.direction)}</td></tr>')
         a(f'<tr><th>Auto type mapping</th><td>{"ON" if self._type_mapper is not None else "OFF"} '
           '(names standardized to male-cns v1.0 canonical types)</td></tr>')
-        a('<tr><th>Metrics</th><td>jaccard · cosine · rank_corr · rank_corr_union</td></tr>')
+        a('<tr><th>Metrics</th><td>jaccard · weighted_jaccard · cosine · rank_corr · '
+          'rank_corr_union · combined</td></tr>')
         a('</table>')
+
+        plotly_state = {'include_plotlyjs': True}
         
         # table of contents
         a('<h2>Contents</h2><div class="toc"><ul>')
         for ds in ds_list:
             a(f'<li><a href="#intra-{quote(esc(ds), safe="")}">Intra-dataset — {esc(ds)}</a></li>')
-        for anchor in inter_matrices:
-            a(f'<li><a href="#inter-{quote(esc(anchor), safe="")}">Inter-dataset — {esc(anchor)}</a></li>')
+        if inter_type_matrices:
+            a('<li><a href="#inter-all-types">Inter-dataset — all queried neurons</a></li>')
         a('</ul></div>')
         
         # intra-dataset sections (one per dataset)
@@ -10106,21 +10508,59 @@ class ConnectivityProfileComparer:
                 for metric in matrices.get(direction, {}):
                     rel = (f'intra_dataset/{quote(self._safe_folder_name(ds), safe="")}/'
                            f'visualization/heatmap_intra_{direction}_{metric}.html')
-                    a(f'<h3>{esc(direction)} · {esc(metrics_display.get(metric, metric))}</h3>')
-                    a(f'<iframe src="{rel}" loading="lazy"></iframe>')
+                    csv_rel = (f'intra_dataset/{quote(self._safe_folder_name(ds), safe="")}/'
+                               f'results/similarity_{direction}_{metric}.csv')
+                    self._append_report_heatmap(
+                        lines=lines,
+                        output_path=output_path,
+                        matrix=matrices[direction][metric],
+                        heading=f"{direction} · {self._metric_display_name(metric)}",
+                        title=f"Intra-dataset similarity — {ds} — {direction} · "
+                              f"{self._metric_display_name(metric)}",
+                        metric=metric,
+                        x_title="Neuron / type",
+                        y_title="Neuron / type",
+                        csv_rel=csv_rel,
+                        vispath_rel=rel,
+                        plotly_state=plotly_state,
+                    )
         
-        # inter-dataset sections (one per queried neuron/group)
-        for anchor, matrices in inter_matrices.items():
-            per_ds = anchor_profiles[anchor]
-            a(f'<h2 id="inter-{quote(esc(anchor), safe="")}">Inter-dataset — {esc(anchor)}</h2>')
-            resolved = ', '.join(f'{esc(d)}: {esc(per_ds[d][0])}' for d in ds_list if d in per_ds)
-            a(f'<p class="muted">Same queried neuron across datasets ({resolved}).</p>')
+        # One overview matrix per direction/metric: neuron/type rows ×
+        # dataset-pair columns. Detailed per-anchor matrices remain linked as
+        # CSVs, but are not repeated as separate report heatmaps.
+        if inter_type_matrices:
+            a('<h2 id="inter-all-types">Inter-dataset — all queried neurons</h2>')
+            a('<p class="muted">Rows are queried neurons/types; columns are dataset '
+              'pairs. Each cell is the similarity score for that neuron across the '
+              'corresponding pair.</p>')
             for direction in directions:
-                for metric in matrices.get(direction, {}):
-                    rel = (f'cross_dataset/per_neuron/{quote(self._safe_folder_name(anchor), safe="")}/'
-                           f'visualization/heatmap_inter_{direction}_{metric}.html')
-                    a(f'<h3>{esc(direction)} · {esc(metrics_display.get(metric, metric))}</h3>')
-                    a(f'<iframe src="{rel}" loading="lazy"></iframe>')
+                for metric, matrix in inter_type_matrices.get(direction, {}).items():
+                    rel = (f'cross_dataset/all_types/visualization/'
+                           f'heatmap_inter_all_types_{direction}_{metric}.html')
+                    csv_rel = (f'cross_dataset/all_types/results/'
+                               f'similarity_{direction}_{metric}.csv')
+                    self._append_report_heatmap(
+                        lines=lines,
+                        output_path=output_path,
+                        matrix=matrix,
+                        heading=f"{direction} · {self._metric_display_name(metric)}",
+                        title=f"Inter-dataset similarity — {direction} · "
+                              f"{self._metric_display_name(metric)}",
+                        metric=metric,
+                        x_title="Dataset pair",
+                        y_title="Neuron / type",
+                        csv_rel=csv_rel,
+                        vispath_rel=rel,
+                        plotly_state=plotly_state,
+                    )
+
+            if inter_matrices:
+                a('<p class="muted">Detailed per-neuron dataset × dataset CSVs:</p><ul>')
+                for anchor in inter_matrices:
+                    safe_anchor = quote(self._safe_folder_name(anchor), safe="")
+                    detail_rel = f'cross_dataset/per_neuron/{safe_anchor}/results/'
+                    a(f'<li><a href="{detail_rel}">{esc(anchor)}</a></li>')
+                a('</ul>')
         
         # name-mapping summary table
         a('<h2>Name mapping across datasets</h2>')
@@ -10145,7 +10585,7 @@ class ConnectivityProfileComparer:
         1. intra-dataset N×N similarity matrices per dataset
         2. inter-dataset comparisons of the SAME queried neuron across
            datasets (homolog-finding backend algorithm)
-        3. a reorganized output folder plus report.html embedding all heatmaps
+        3. a reorganized output folder plus a Plotly report with VisPath editor links
         """
         ds_list = self.datasets
         self._log("=" * 60)
@@ -10213,8 +10653,9 @@ class ConnectivityProfileComparer:
         self._log(f"Inter-dataset anchors (same neuron across datasets): "
                   f"{len(anchor_profiles)}")
         self._log("Output includes:")
-        self._log("  - report.html: overall summary with ALL heatmaps")
+        self._log("  - report.html: Plotly overview heatmaps with VisPath editor links")
         self._log("  - intra_dataset/{dataset}/: per-dataset N×N matrices & heatmaps")
+        self._log("  - cross_dataset/all_types/: neurons × dataset-pair overview heatmaps")
         self._log("  - cross_dataset/per_neuron/{anchor}/: same neuron across datasets")
         self._log("  - cross_dataset/mapping_summary.csv: resolved names per dataset")
         self._log("  - profiles/{dataset}/: aggregated connectivity profiles")
@@ -10233,6 +10674,7 @@ class ConnectivityProfileComparer:
             'is_cross_dataset': False,
             'use_auto_type_mapping': self._type_mapper is not None,
             'inter_anchors': list(anchor_profiles.keys()),
+            'inter_type_matrices': saved_files.get('inter_type_matrices', {}),
         }
 
     def _run_cross_dataset(self) -> Dict[str, Any]:

@@ -23,7 +23,7 @@ def create_connectivity_profiling_tab():
 
     form_col, results_col = tool_page(
         "Connectivity Profiling",
-        "Compare connectivity profiles within a single dataset.",
+        "Compare connectivity profiles within and across selected datasets.",
         icon="analytics",
         doc="connectivity_profiling.md",
     )
@@ -41,12 +41,14 @@ def create_connectivity_profiling_tab():
             )
             with param_grid(2):
                 datasets_select = dataset_multi_selector(
-                    label="Datasets to compare (select 1+)",
-                    default=["male-cns:v0.9", "hemibrain:v1.2.1"],
-                    hint="One dataset: intra-dataset profiling only. Two or more: the same "
-                         "query is profiled in every dataset (names mapped per dataset) and "
-                         "compared both within each dataset (intra) and across datasets "
-                         "(inter, same neuron).",
+                    label="Datasets to compare (select one or more)",
+                    default=[],
+                    hint="Select one or more datasets. One dataset with multiple thresholds "
+                         "is also supported. Two or more datasets profile the same query in "
+                         "each dataset (names mapped per dataset) and add within-dataset "
+                         "(intra) plus across-dataset (inter, same neuron) comparisons. "
+                         "The inter-dataset overview puts all queried neurons in rows and "
+                         "dataset pairs in columns.",
                 )
                 output_dir = dir_input(scope="connectivity_profiling")
 
@@ -76,7 +78,7 @@ def create_connectivity_profiling_tab():
                 ).classes("text-caption drocat-muted")
                 cluster_heatmap = checkbox_input(
                     "Generate Heatmaps", True,
-                    hint="Create the interactive Ward-clustered heatmap files.",
+                    hint="Create VisPath heatmaps for editing and Plotly heatmaps in the report.",
                 )
                 with param_grid(3):
                     min_synapse_threshold = number_input(
@@ -147,6 +149,11 @@ def create_connectivity_profiling_tab():
             ui.notify("Please enter at least one neuron", type="warning")
             return
 
+        selected_datasets = list(datasets_select.value or [])
+        if not selected_datasets:
+            ui.notify("Select one or more datasets", type="warning")
+            return
+
         skip_bodyid_param = {
             "auto": "auto",
             "skip": True,
@@ -166,9 +173,6 @@ def create_connectivity_profiling_tab():
                     "the custom groups", type="warning")
                 return
 
-        output_panel.clear()
-        output_panel.set_running(True)
-
         # Determine direction from checkboxes
         if analyze_upstream.value and analyze_downstream.value:
             direction = 'both'
@@ -180,9 +184,12 @@ def create_connectivity_profiling_tab():
             ui.notify("Select upstream, downstream, or both", type="warning")
             return
 
+        output_panel.clear()
+        output_panel.set_running(True)
+
         constructor_params = {
             "query": query,
-            "datasets": list(datasets_select.value),
+            "datasets": selected_datasets,
             "output_dir": output_dir.value,
             "top_k": int(top_k.value),
             "top_m": int(top_m.value),
