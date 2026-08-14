@@ -65,8 +65,11 @@ class ComparisonParameters:
         target_labels (str | List[str]): Custom label(s) for target neuron group(s)
             in output files and visualizations.
             
-        top_edges (int): Number of top edges to highlight in visualizations.
-            Default: -1 (no limit; the UI passes an explicit value).
+        top_edges (int): Number of top edges/paths retained in comparison
+            report tables (top-edge comparison, overlap, and presence matrices).
+            It does not trim the pathfinding graph or set the per-visualization
+            drawn-edge cap, though it can affect report-derived summary plots.
+            Default: -1 (include all report rows; the UI passes an explicit value).
             
         comparison_mode (str): Analysis mode - 'path' or 'edge'.
             - 'path': Discover edges through source-to-target paths (may filter
@@ -172,7 +175,10 @@ class ComparisonParameters:
     """Unified label(s) for intermediate group(s) - string or list matching group count"""
     
     top_edges: int = -1
-    """Number of top edges for visualization focus. -1 means include all edges."""
+    """Top-edge/report-row cap for cross-dataset analysis tables.
+    Positive values select the strongest rows; 0 or a negative value includes
+    all rows. This is independent of graph trimming and the per-visualization
+    drawing limit, though it can affect report-derived summary plots."""
 
     graph_edge_limit_bodyid: Optional[int] = None
     """Pan-graph edge limit for the bodyId-level graph in the path runs.
@@ -181,8 +187,9 @@ class ComparisonParameters:
     can inflate shortest distances). 0 = complete graph."""
 
     edgeN_limit: int = 500
-    """Visualization Edge Limit passed to the FindAllPath visualizations
-    (network / Sankey / heatmap — maximum edges drawn per visualization)."""
+    """Visualization Edge Limit passed to the FindAllPath visualizations.
+    It only caps edges drawn per network/Sankey/heatmap visualization; it does
+    not trim the analysis graph or alter path discovery."""
     
     overall_label_mapper: Optional[Any] = None
     """LabelMapper object or configuration for defining source, target, and intermediate neuron labels."""

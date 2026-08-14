@@ -34,7 +34,7 @@ def create_find_path_tab():
         return dataset_suggestions(text, ds, scope, limit=None)
 
     form_col, results_col = tool_page(
-        "Find All Paths",
+        "Complete Paths",
         "Discover multi-hop pathways between source and target neuron groups.",
         icon="route",
         doc="find_path.md",
@@ -96,10 +96,15 @@ def create_find_path_tab():
                 "tighten the Graph Edge Limit in Advanced Settings, or minimize/"
                 "batch the source and target sets."
             ).classes("text-caption text-amber-8").set_visibility(False)
+            edge_limit_bodyid_hint = None
+
             def _on_max_interlayer_change(e):
                 interlayer_warning.set_visibility((e.value or 0) >= 4)
                 # the bodyId edge limit only applies to deep searches
-                edge_limit_bodyid.set_enabled((e.value or 0) >= 3)
+                enabled = (e.value or 0) >= 3
+                edge_limit_bodyid.set_enabled(enabled)
+                if edge_limit_bodyid_hint is not None:
+                    edge_limit_bodyid_hint.set_visibility(not enabled)
 
             max_interlayer.on_value_change(_on_max_interlayer_change)
 
@@ -128,16 +133,23 @@ def create_find_path_tab():
                         help_doc="pathfinding_algorithms.html",
                     )
                 with ui.row().classes("gap-4"):
-                    edge_limit_bodyid = number_input(
-                        "Edge Limit – BodyIds", 1000000, 100, 1000000000,
-                        hint="Top-N strongest non-reserved edges kept in the bodyId-level "
-                             "graph (source/target edges are always kept in addition). "
-                             "Applied only when Layers ≥ 3 (deep searches, where the path "
-                             "count grows combinatorially); shallow runs keep the complete "
-                             "graph. Type-level and custom-group paths are derived from the "
-                             "discovered bodyId paths and need no edge limit. "
-                             "0 = unlimited (can be very slow for deep layers).",
-                    )
+                    with ui.column().classes("gap-0"):
+                        edge_limit_bodyid = number_input(
+                            "Edge Limit – BodyIds", 1000000, 0, 1000000000,
+                            hint="Top-N strongest non-reserved edges kept in the bodyId-level "
+                                 "graph (source/target edges are always kept in addition). "
+                                 "Applied only when Layers ≥ 3 (deep searches, where the path "
+                                 "count grows combinatorially); shallow runs keep the complete "
+                                 "graph. Type-level and custom-group paths are derived from the "
+                                 "discovered bodyId paths and need no edge limit. "
+                                 "0 = unlimited (can be very slow for deep layers).",
+                        )
+                        edge_limit_bodyid_hint = ui.label(
+                            "Unavailable for shallow searches (max intermediate layers 0–2); "
+                            "set Max Intermediate Layers to 3+ to enable BodyId edge trimming."
+                        ).classes("text-caption text-grey-7").set_visibility(
+                            (max_interlayer.value or 0) < 3
+                        )
                     # enabled only for deep searches (max_interlayer >= 3)
                     edge_limit_bodyid.set_enabled((max_interlayer.value or 0) >= 3)
                     visualize_early = checkbox_input(
@@ -252,7 +264,7 @@ def create_find_path_tab():
             _sync_hemisphere_options()
 
     with results_col:
-        output_panel.create(run_label="Find All Paths", run_icon="account_tree")
+        output_panel.create(run_label="Complete Paths", run_icon="account_tree")
 
     async def run_pathfinding():
         # Get values from neuron_list_input (returns (mode, list))

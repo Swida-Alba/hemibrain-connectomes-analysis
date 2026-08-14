@@ -52,10 +52,34 @@ class EdgeListEditorHandle:
     def _row_dicts(self) -> List[dict]:
         return [{**row, "id": i} for i, row in enumerate(self.rows)]
 
-    def refresh_table(self) -> None:
+    def refresh_table(self, *, preserve_selection: bool = False) -> None:
+        """Refresh the table while keeping Python and QTable selection in sync.
+
+        QTable clears its visual selection when ``rows`` is replaced.  The
+        editor used to leave ``_selected_ids`` untouched, so the edit panel
+        could appear deselected while ``Apply`` still edited a stale row (or
+        edited a different row after a delete).  Selection is now cleared on
+        data loads and explicitly restored only for edits that should keep the
+        active row selected.
+        """
+        row_dicts = self._row_dicts()
+        valid_ids = {
+            int(row["id"])
+            for row in row_dicts
+            if isinstance(row.get("id"), int)
+        }
+        if preserve_selection:
+            self._selected_ids = [
+                idx for idx in self._selected_ids if idx in valid_ids
+            ]
+        else:
+            self._selected_ids = []
+
         if self.table is not None:
-            self.table.rows = self._row_dicts()
-            self.table.selected = []
+            self.table.rows = row_dicts
+            self.table.selected = [
+                row for row in row_dicts if row["id"] in self._selected_ids
+            ]
             self.table.update()
 
     def set_rows(self, rows: List[dict], name: Optional[str] = None) -> None:
@@ -81,8 +105,8 @@ class EdgeListEditorHandle:
     # --------------------------------------------------------------- editing
     def add_edge(self) -> None:
         self.rows.append({"source": "", "target": "", "weight": "", "color": ""})
-        self.refresh_table()
         self._selected_ids = [len(self.rows) - 1]
+        self.refresh_table(preserve_selection=True)
         self._sync_edit_inputs()
         self.schedule_autosave()
 
@@ -94,7 +118,7 @@ class EdgeListEditorHandle:
         row = self.rows[self._selected_ids[0]]
         for key, element in self.edit_inputs.items():
             row[key] = str(element.value or "").strip()
-        self.refresh_table()
+        self.refresh_table(preserve_selection=True)
         self.schedule_autosave()
 
     def delete_selected(self) -> None:

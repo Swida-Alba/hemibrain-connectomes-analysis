@@ -2924,7 +2924,11 @@ class ComparisonAnalyzer:
             self._log("Saved: threshold_sensitivity.csv")
     
     def _export_top_edges_comparison(self, comparison_results_dir: str):
-        """Export top edges comparison to CSV."""
+        """Export report tables capped by the top_edges parameter.
+
+        This report-row cap is independent of graph discovery and the
+        per-visualization drawn-edge limit.
+        """
         dataset_names = self.parameters.get_dataset_names()
         top_n = self.parameters.top_edges
         
@@ -4236,10 +4240,13 @@ class ComparisonAnalyzer:
             ascending=[False, False]
         )
         
-        # Limit to top paths
-        max_paths = self.parameters.top_edges * 2
-        if len(path_presence_df) > max_paths:
-            path_presence_df = path_presence_df.head(max_paths)
+        # Limit to top paths only when a positive report-row cap is configured.
+        # Zero/negative values mean include all rows, matching the edge
+        # presence matrix and the top-edge metric helpers.
+        if self.parameters.top_edges > 0:
+            max_paths = self.parameters.top_edges * 2
+            if len(path_presence_df) > max_paths:
+                path_presence_df = path_presence_df.head(max_paths)
         
         # Save
         self._save_csv(path_presence_df, os.path.join(comparison_results_dir, f"path_presence_matrix_minsyn_{threshold}.csv"))

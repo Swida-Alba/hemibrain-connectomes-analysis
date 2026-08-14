@@ -235,7 +235,7 @@ def create_find_shortest_tab():
             _sync_hemisphere_options()
 
     with results_col:
-        output_panel.create(run_label="Find Shortest Paths", run_icon="alt_route")
+        output_panel.create(run_label="Shortest Paths", run_icon="alt_route")
 
     async def run_shortest():
         # Get values from neuron_list_input (returns (mode, list))

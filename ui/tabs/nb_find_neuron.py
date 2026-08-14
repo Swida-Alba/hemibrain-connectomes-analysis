@@ -7,6 +7,7 @@ from ..components.common import (
     dir_input, section_header, param_grid, tool_page,
 )
 from ..components.output_panel import OutputPanel
+from ..components.skeleton_visualization_settings import skeleton_visualization_settings
 from ..runner import ScriptRunner
 
 
@@ -39,15 +40,24 @@ def create_nb_find_neuron_tab():
                 match_algo = select_input("Algorithm", MATCH_ALGORITHMS, DEFAULTS["match_algorithm"])
                 top_n = number_input("Top N Results", 20, 5, 100)
 
-            # --- Advanced Settings (collapsed) ---
+            with ui.row().classes("w-full items-center gap-4"):
+                visualize = checkbox_input(
+                    "Visualize Top Neurons",
+                    True,
+                    hint="Generate optional 3D skeleton visualizations of matched neurons.",
+                )
+                visualization_settings = skeleton_visualization_settings(
+                    default_top_n=10,
+                    top_n_label="Visualize Top N",
+                    top_n_hint="Number of top types or bodyIds to render in 3D.",
+                    default_visualize_by="type",
+                    default_show_fig=False,
+                    default_export_views=True,
+                )
+
+            # --- Other Advanced Settings (collapsed) ---
             with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
                 with param_grid(2):
-                    visualize = checkbox_input("Visualize Top Neurons", True, hint="Generate 3D skeleton visualizations of matched neurons.")
-                    viz_top_n = number_input("Visualize Top N", 10, 1, 50, hint="Number of top types/bodyIds to render in 3D.")
-                    visualize_by = select_input(
-                        "Visualize By", ["type", "bodyId"], "type",
-                        hint="Group 3D visualizations by neuron type or individual bodyId.",
-                    )
                     sort_by = select_input(
                         "Sort By", ["max_score", "type_avg_score"], "max_score",
                         hint="Sorting key for matched neuron results.",
@@ -71,6 +81,7 @@ def create_nb_find_neuron_tab():
 
         output_panel.clear()
         output_panel.set_running(True)
+        visualization_values = visualization_settings.values()
 
         constructor_params = {"verbose": True}
 
@@ -79,9 +90,13 @@ def create_nb_find_neuron_tab():
             "output_dir": output_dir.value,
             "match_type": match_algo.value,
             "top_n": int(top_n.value),
-            "visualize_top_n": int(viz_top_n.value) if visualize.value else 0,
+            "visualize_top_n": (
+                visualization_values["visualize_top_n"]
+                if visualize.value else 0
+            ),
             "generate_individual_profiles": ['pdf'] if generate_pdf.value else None,
-            "visualize_by": visualize_by.value,
+            "visualize_by": visualization_values["visualize_by"],
+            "visualization_settings": visualization_values,
             "sort_by": sort_by.value,
             "pdf_images_per_page": (int(pdf_cols.value), int(pdf_rows.value)),
             "background_color": background_color.value,

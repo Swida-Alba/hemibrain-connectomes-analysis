@@ -49,6 +49,12 @@ Set it only to cap memory on extremely large graphs; the run then reports
 shortest paths **within the trimmed graph** (noted in
 `user_warning_notes.txt`).
 
+## Visualization Edge Limit
+
+Visualization Edge Limit only caps the number of edges drawn in each
+network, heatmap, or Sankey view. It does not trim the fetched graph and
+does not change shortest-path discovery.
+
 ## Everything else matches Find All Paths
 
 Graph cache (depth-aware; shallow caches are extended instead of rebuilt),

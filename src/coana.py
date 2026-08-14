@@ -1590,7 +1590,7 @@ class FindNeuronConnection:
     '''
     Internal: set True when the Visualization Edge Limit (edgeN_limit)
     actually trimmed edges in a visualization run (network/heatmap/Sankey).
-    Gates the '[edge limit per neuron]' note in user_warning_notes.txt: the
+    Gates the '[visualization edge limit]' note in user_warning_notes.txt: the
     limit is only worth warning about when it was hit. Reset per run.
     '''
 
@@ -1755,11 +1755,11 @@ class FindNeuronConnection:
     
     edgeN_limit: int = 500
     '''
-    number of strongest edges to show in network visualization\n
-    -1: show all edges\n
-    n > 0: show only the top n edges ranked by weight (default: 1000)\n
-    applies to VisualizePath visualizations\n
-    helps focus on most significant connections in large networks and prevents browser crashes\n
+    Visualization-only cap for VisualizePath network/heatmap/Sankey output.\n
+    -1 or 0: show all edges\n
+    n > 0: draw only the top n edges ranked by weight (default: 500)\n
+    This does not limit fetched connections, graph construction, or pathfinding.\n
+    It helps focus on significant connections in large networks and prevents browser crashes.\n
     '''
     
     pathN_to_show: int = -1
@@ -7882,9 +7882,10 @@ class FindNeuronConnection:
         # ratio and traversal-probability thresholds remain explicit below.
         if getattr(self, 'edgeN_limit', 0) and getattr(self, '_edgeN_limit_reached', False):
             notes.append(
-                f'- [edge limit per neuron] edgeN_limit={self.edgeN_limit}: at most '
-                f'the strongest {self.edgeN_limit} edges per neuron were considered '
-                f'when fetching connections.'
+                f'- [visualization edge limit] edgeN_limit={self.edgeN_limit}: '
+                f'visualizations drew at most the strongest {self.edgeN_limit} '
+                f'edges in each rendered network/heatmap/Sankey view; pathfinding '
+                f'and fetched analysis connections were not trimmed.'
             )
         if getattr(self, 'min_ratio', 0) > 0:
             notes.append(
@@ -7972,11 +7973,13 @@ class FindNeuronConnection:
 
     def _record_viz_edge_trim(self, vp):
         """Mirror the Visualization Edge Limit trim state to the per-run
-        flag that gates the '[edge limit per neuron]' warning note.
+        flag that gates the '[visualization edge limit]' warning note.
 
         The trim decision lives inside VisualizePath (the network/heatmap
         share one edge set, the Sankey has its own simplification); the flag
-        is set whenever any of them actually dropped edges.
+        is set whenever any of them actually dropped edges. The resulting
+        warning is visualization-only and must not imply that fetching or
+        pathfinding was trimmed.
         """
         if getattr(vp, 'edge_limit_trimmed', False):
             self._edgeN_limit_reached = True

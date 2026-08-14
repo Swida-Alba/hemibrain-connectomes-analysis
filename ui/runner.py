@@ -124,7 +124,7 @@ class _OutputSplitter:
 # =============================================================================
 TOOL_REGISTRY: Dict[str, dict] = {
     "find_path": {
-        "label": "Find All Paths",
+        "label": "Complete Paths",
         "import": "from coana import FindNeuronConnection",
         "class": "FindNeuronConnection",
         "var": "fc",
@@ -140,7 +140,7 @@ TOOL_REGISTRY: Dict[str, dict] = {
         },
     },
     "find_shortest": {
-        "label": "Find Shortest Paths",
+        "label": "Shortest Paths",
         "import": "from coana import FindNeuronConnection",
         "class": "FindNeuronConnection",
         "var": "fc",

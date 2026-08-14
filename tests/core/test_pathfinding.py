@@ -875,7 +875,7 @@ def test_write_user_warning_notes_lists_tilting_operations(tmp_path):
     assert "[depth] max_interlayer=4" in text
     assert "[symmetry] symmetry_analysis=True" in text
     assert "[visualization] pathN_to_show=200" in text
-    assert "[edge limit per neuron] edgeN_limit=500" in text
+    assert "[visualization edge limit] edgeN_limit=500" in text
     # inactive operations are NOT listed
     assert "hemisphere" not in text and "reciprocal" not in text
     assert "skip_bodyId" not in text and "cache_only" not in text
@@ -972,13 +972,13 @@ def test_write_user_warning_notes_omits_limits_not_reached(tmp_path):
     text = path.read_text(encoding="utf-8")
     assert "[graph edge limit]" in text
     # the three config-derived notes are gated on actual limit hits
-    assert "[edge limit per neuron]" not in text
+    assert "[visualization edge limit]" not in text
     assert "[threshold] min_synapse_num" not in text
     assert "[depth] max_interlayer" not in text
 
 
 def test_edgeN_limit_note_gated_on_actual_visualization_trim(tmp_path):
-    """The '[edge limit per neuron]' note appears only after a visualization
+    """The '[visualization edge limit]' note appears only after a visualization
     actually trimmed edges (vp.edge_limit_trimmed), never on config alone."""
     import sys
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
@@ -1012,7 +1012,7 @@ def test_edgeN_limit_note_gated_on_actual_visualization_trim(tmp_path):
     fc._record_viz_edge_trim(SimpleNamespace(edge_limit_trimmed=True))
     fc._write_user_warning_notes(str(tmp_path))
     text = (tmp_path / "user_warning_notes.txt").read_text(encoding="utf-8")
-    assert "[edge limit per neuron] edgeN_limit=500" in text
+    assert "[visualization edge limit] edgeN_limit=500" in text
 
     # A visualization that did NOT trim must not flip the flag.
     fc2 = object.__new__(coana.FindNeuronConnection)

@@ -1293,7 +1293,7 @@ def main_page():
         # a standalone slate card (no header), separated from the groups.
         NAV_GROUPS = [
             ("Connection", "connection", 4, [
-                ("Path", "route"), ("Shortest", "alt_route"),
+                ("Complete Paths", "route"), ("Shortest Paths", "alt_route"),
                 ("Network", "schema"), ("Cross-Dataset", "sync_alt"),
             ]),
             ("Visualization", "visualization", 2, [
@@ -1339,11 +1339,11 @@ def main_page():
                 with ui.element("div").classes("drocat-group-tabs"):
                     group_tab("Settings", "settings")
 
-        with ui.tab_panels(value="Path").classes("w-full bg-transparent") as nav_panels:
+        with ui.tab_panels(value="Complete Paths").classes("w-full bg-transparent") as nav_panels:
             # Connection
-            with ui.tab_panel("Path").classes("p-0"):
+            with ui.tab_panel("Complete Paths").classes("p-0"):
                 create_find_path_tab()
-            with ui.tab_panel("Shortest").classes("p-0"):
+            with ui.tab_panel("Shortest Paths").classes("p-0"):
                 create_find_shortest_tab()
             with ui.tab_panel("Network").classes("p-0"):
                 create_network_tab()

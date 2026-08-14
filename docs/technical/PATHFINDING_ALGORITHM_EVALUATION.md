@@ -326,7 +326,7 @@ new algorithms but engines:
 - **Parallel per-source enumeration** — the pipeline already chunks
   sources across processes; this is the cheapest real speedup for large
   queries.
-- **Tighter graph prefiltering** — raising Min Synapse Count / Edge Limit
+- **Tighter graph prefiltering** — raising Min Synapse Count / Edge Limit – BodyIds
   shrinks E, and every algorithm's work is O(E)-driven; this dwarfs any
   constant-factor algorithm change (the UI guide already recommends it).
 

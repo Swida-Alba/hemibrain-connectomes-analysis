@@ -131,7 +131,7 @@ def run_comprehensive_comparison():
         # Automatic type mapping across datasets (experimental)
         auto_type_mapping=False,
         
-        # Top edges to include in analysis
+        # Top edges/paths to retain in comparison report tables
         top_edges=500,
         
         # Comparison mode: 'path' (path-based filtering) or 'edge' (edge-based filtering)

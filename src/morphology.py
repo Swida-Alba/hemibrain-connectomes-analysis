@@ -34,6 +34,11 @@ import navis
 
 from statvis import getNeurons
 
+try:
+    from .visualization_options import default_analysis_skeleton_mesh_simplification
+except ImportError:
+    from visualization_options import default_analysis_skeleton_mesh_simplification
+
 # Feature columns (morphometrics part of the vector). The full per-neuron
 # vector is these 24 features + 100 persistence dimensions.
 MORPHOMETRIC_FEATURES: List[str] = [
@@ -1470,6 +1475,7 @@ class MorphologyComparer:
         max_pool_per_type: int = 100,
         visualize_top_n: int = 0,
         visualize_by: str = "type",
+        visualization_settings: Optional[Dict[str, object]] = None,
         output_dir: Optional[str] = None,
         saveas: Optional[str] = None,
         verbose: bool = True,
@@ -1496,6 +1502,7 @@ class MorphologyComparer:
         self.max_pool_per_type = int(max_pool_per_type)
         self.visualize_top_n = int(visualize_top_n)
         self.visualize_by = str(visualize_by).lower()
+        self.visualization_settings = dict(visualization_settings or {})
         self.verbose = verbose
         self.n_workers = max(1, int(n_workers))
         self.use_cache = use_cache
@@ -1692,7 +1699,7 @@ class MorphologyComparer:
             self._log("No similar neurons found.")
         else:
             self._save_results(results, bodyid_df, type_df, query_df)
-            self._visualize_top_results(results)
+            self._visualize_top_results(results, query_df=query_df)
         self._progress(total_steps, total_steps,
                        "Saving results & visualization" if not results.empty
                        else "Search finished (no similar neurons found)")
@@ -1830,7 +1837,8 @@ class MorphologyComparer:
         runs at ONE representation level (skeleton vs mesh — rows of any
         other representation are unscorable).
         """
-        self._log("Profile-first search: running connection-cache candidate discovery...")
+        self._log("Step 2/6 — Discovering candidates: running connection-cache "
+                  "candidate discovery...")
         self._progress(2, PROFILE_FIRST_TOTAL_STEPS,
                        "Discovering candidates (connection cache)")
         candidates = self._connection_cache_candidates(query_df)
@@ -1853,8 +1861,11 @@ class MorphologyComparer:
             self._log("Connection-cache candidates carry no types.")
             return pd.DataFrame(), pd.DataFrame()
 
-        self._progress(3, PROFILE_FIRST_TOTAL_STEPS,
-                       f"Expanding {len(keep_types)} candidate types to the scoring pool")
+        expansion_label = (
+            f"Expanding {len(keep_types)} candidate types to the scoring pool"
+        )
+        self._log(f"Step 3/6 — {expansion_label}")
+        self._progress(3, PROFILE_FIRST_TOTAL_STEPS, expansion_label)
 
         # Expand every kept type to ALL its member bodyIds (type map); the
         # union is the scoring pool. Per-type safety cap bounds huge types.
@@ -1899,8 +1910,15 @@ class MorphologyComparer:
                 if (_find_skeleton_file(self.dataset, bid, project_root=str(self.project_root)) is not None
                         and _skeleton_folder_level(self.dataset, str(self.project_root)) == cache_basis):
                     continue
+                load_label = f"Step 4/6 — Loading skeletons ({i}/{n_ids})"
                 self._progress(4, PROFILE_FIRST_TOTAL_STEPS,
-                               f"Loading skeletons ({i}/{n_ids})")
+                               load_label.replace("Step 4/6 — ", ""))
+                # Progress events drive the determinate UI bar and are not
+                # copied into the execution log.  Emit coarse-grained phase
+                # updates there as well so a long fetch is auditable.
+                checkpoint = max(1, n_ids // 10)
+                if i == 1 or i == n_ids or i % checkpoint == 0:
+                    self._log(load_label)
                 nrn = fetch_skeleton_on_demand(
                     self.dataset, bid, project_root=str(self.project_root),
                     persist=self.cache_fetched_skeletons,
@@ -1911,6 +1929,7 @@ class MorphologyComparer:
                     loaded[bid] = nrn
             return loaded
 
+        self._log("Step 4/6 — Loading & vectorizing skeletons")
         self._progress(4, PROFILE_FIRST_TOTAL_STEPS, "Loading & vectorizing skeletons")
         query_ids = [int(b) for b in query_df["bodyId"].tolist()]
 
@@ -2050,6 +2069,8 @@ class MorphologyComparer:
         keep = mask_c
         scores = np.full(len(pool_ids), np.nan)
         if keep.any():
+            self._log(f"Step 5/6 — Scoring similarity ({self.method}) for "
+                      f"{int(keep.sum())} usable candidates")
             self._progress(5, PROFILE_FIRST_TOTAL_STEPS,
                            f"Scoring similarity ({self.method})")
             scores[keep] = similarity_matrix(q_vec, X_c[keep], self.metric)
@@ -2230,6 +2251,207 @@ class MorphologyComparer:
             pair[i] = similarity_matrix(sub[i], sub, metric)
         total = float(pair.sum()) - n  # drop the diagonal (self = 1)
         return total / (n * (n - 1))
+
+    @staticmethod
+    def _type_member_count(type_name: str, id_to_type: Dict[int, str],
+                           query_df: Optional[pd.DataFrame] = None) -> int:
+        """Count the bodyIds belonging to a type without relying on a cache.
+
+        A profile-first run can load ``cache_data`` before it vectorizes the
+        query members.  Counting from that snapshot therefore undercounts a
+        queried type (and historically produced ``n_bodyids=0``).  The neuron
+        index is the authoritative population; ``query_df`` is a final
+        fallback for small/test datasets whose index is unavailable.
+        """
+        member_ids = set()
+        for bid, t in (id_to_type or {}).items():
+            if str(t or "").strip() == str(type_name or "").strip():
+                try:
+                    member_ids.add(int(bid))
+                except (TypeError, ValueError):
+                    continue
+        if query_df is not None and not query_df.empty:
+            for _, row in query_df.iterrows():
+                if str(row.get("type", "") or "").strip() != str(type_name or "").strip():
+                    continue
+                try:
+                    member_ids.add(int(row.get("bodyId")))
+                except (TypeError, ValueError):
+                    continue
+        return len(member_ids)
+
+    def _type_query_intra_rows(
+        self,
+        query_df: pd.DataFrame,
+        X: np.ndarray,
+        mask: np.ndarray,
+        intra: float,
+        candidate_source: Optional[str] = None,
+    ) -> List[Dict[str, object]]:
+        """Return ordered bodyId-level pairs within a type query.
+
+        Type searches resolve to every bodyId in the queried type.  Keep the
+        individual same-type comparisons in ``results.csv`` as well as the
+        type-level reference row.  Ordered pairs make every query bodyId
+        visible as a source and match the off-diagonal mean used by
+        ``_intra_type_similarity``.
+        """
+        if self.level != "type" or query_df is None or query_df.empty:
+            return []
+
+        records = []
+        for i, (_, row) in enumerate(query_df.iterrows()):
+            if i >= len(mask) or not bool(mask[i]):
+                continue
+            try:
+                bid = int(row["bodyId"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            raw_type = row.get("type", "")
+            q_type = "" if pd.isna(raw_type) else str(raw_type).strip()
+            records.append((i, bid, q_type, str(row.get("instance", "") or "")))
+
+        rows: List[Dict[str, object]] = []
+        for source_i, source_bid, source_type, _ in records:
+            for target_i, target_bid, target_type, target_instance in records:
+                if source_i == target_i:
+                    continue
+                score = float(similarity_matrix(
+                    X[source_i], X[target_i].reshape(1, -1), self.metric
+                )[0])
+                row: Dict[str, object] = {
+                    "source_bodyId": source_bid,
+                    "source_type": source_type,
+                    "target_bodyId": target_bid,
+                    "target_type": target_type,
+                    "target_instance": target_instance,
+                    "profile_similarity": np.nan,
+                    "similarity": score,
+                    "is_same_type": True,
+                    "intra_type_similarity": intra,
+                    "method": self.method,
+                    "metric": self.metric,
+                }
+                if candidate_source is not None:
+                    row["candidate_source"] = candidate_source
+                rows.append(row)
+        return rows
+
+    def _aggregate_type_rows(
+        self,
+        rows: List[Dict[str, object]],
+        query_type: str,
+        intra: float,
+        query_type_count: int = 0,
+        candidate_source: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """Aggregate bodyId rows while preserving the queried type count.
+
+        For inter-type rows, ``n_bodyids`` counts unique target bodyIds even
+        when a type query contributes one row per query source.  The queried
+        type is a reference row, so its count is the population member count,
+        not the number of pairwise rows.
+        """
+        import collections
+
+        grouped: Dict[str, List[Dict[str, object]]] = collections.defaultdict(list)
+        for row in rows:
+            target_type = str(row.get("target_type", "") or "").strip()
+            if target_type:
+                grouped[target_type].append(row)
+
+        agg_rows: List[Dict[str, object]] = []
+        for target_type, subrows in grouped.items():
+            values = [float(row["similarity"]) for row in subrows
+                      if pd.notna(row.get("similarity"))]
+            if not values:
+                continue
+            target_ids = {
+                int(row["target_bodyId"])
+                for row in subrows
+                if row.get("target_bodyId") is not None
+            }
+            profile_values = [float(row["profile_similarity"])
+                              for row in subrows
+                              if pd.notna(row.get("profile_similarity"))]
+            is_intra = target_type == str(query_type or "").strip()
+            row = {
+                "target_type": target_type,
+                "similarity": float(intra if is_intra and np.isfinite(intra)
+                                     else np.mean(values)),
+                "n_bodyids": int(query_type_count if is_intra and query_type_count
+                                  else len(target_ids)),
+                "profile_similarity": (
+                    float(np.mean(profile_values)) if profile_values else np.nan
+                ),
+                "is_intra_type": is_intra,
+                "intra_type_similarity": intra if is_intra else float("nan"),
+                "method": self.method,
+                "metric": self.metric,
+            }
+            if candidate_source is not None:
+                row["candidate_source"] = candidate_source
+            agg_rows.append(row)
+
+        if (query_type and query_type not in grouped and np.isfinite(intra)):
+            row = {
+                "target_type": str(query_type).strip(),
+                "similarity": intra,
+                "n_bodyids": int(query_type_count),
+                "profile_similarity": np.nan,
+                "is_intra_type": True,
+                "intra_type_similarity": intra,
+                "method": self.method,
+                "metric": self.metric,
+            }
+            if candidate_source is not None:
+                row["candidate_source"] = candidate_source
+            agg_rows.append(row)
+
+        agg_rows = sorted(
+            agg_rows,
+            key=lambda row: (
+                not bool(row["is_intra_type"]),
+                -float(row["similarity"]),
+                str(row["target_type"]),
+            ),
+        )
+        result = pd.DataFrame(agg_rows).head(self.top_n).reset_index(drop=True)
+        result.insert(0, "rank", np.arange(1, len(result) + 1))
+        return result
+
+    def _bodyid_dataframe(
+        self, rows: List[Dict[str, object]], query_type: str = ""
+    ) -> pd.DataFrame:
+        """Rank bodyId rows, retaining all intra-type pairs for type queries."""
+        if not rows:
+            return pd.DataFrame()
+        ordered = sorted(
+            rows,
+            key=lambda row: (-float(row["similarity"]), int(row["target_bodyId"])),
+        )
+        if self.level == "type" and query_type:
+            # Preserve every resolved same-type pair so a type query does not
+            # collapse to the first source bodyId. Inter-type rows retain the
+            # normal top-N limit.
+            intra_rows = [
+                row for row in ordered
+                if bool(row.get("is_same_type"))
+                and str(row.get("target_type", "") or "").strip() == query_type
+            ]
+            inter_rows = [row for row in ordered if row not in intra_rows]
+            ordered = intra_rows + inter_rows[: self.top_n]
+            ordered = sorted(
+                ordered,
+                key=lambda row: (-float(row["similarity"]),
+                                 int(row["source_bodyId"]),
+                                 int(row["target_bodyId"])),
+            )
+        else:
+            ordered = ordered[: self.top_n]
+        result = pd.DataFrame(ordered).reset_index(drop=True)
+        result.insert(0, "rank", np.arange(1, len(result) + 1))
+        return result
 
     def _vector_search(self, query_df: pd.DataFrame, data: dict
                        ) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -2554,10 +2776,16 @@ class MorphologyComparer:
         self.output_folder = str(run_dir)
 
     # ------------------------------------------------------------------ viz
-    def _visualize_top_results(self, results: pd.DataFrame):
-        """Render the 3D skeletons of the top-N found types/bodyIds (NB-style).
+    def _visualize_top_results(
+        self,
+        results: pd.DataFrame,
+        query_df: Optional[pd.DataFrame] = None,
+    ):
+        """Render queried neurons together with the top-N results (NB-style).
 
-        Enabled when ``visualize_top_n > 0``. With ``visualize_by='type'``
+        Enabled when ``visualize_top_n > 0``. The query is placed first in
+        the layer list so the resulting visualization makes the reference
+        neuron(s) visible alongside the matches. With ``visualize_by='type'``
         (default) each of the top-N distinct result types becomes one layer
         containing its member bodyIds (the result rows for bodyId-level
         searches, or the vector-cache members capped at ``n_per_type`` for
@@ -2582,6 +2810,49 @@ class MorphologyComparer:
 
         layers: List[List[int]] = []
         names: List[str] = []
+        query_layer_count = 0
+
+        def _body_ids(frame: pd.DataFrame) -> List[int]:
+            values = frame.get("bodyId", pd.Series(dtype=object)).tolist()
+            ids: List[int] = []
+            for value in values:
+                try:
+                    if pd.isna(value):
+                        continue
+                    ids.append(int(value))
+                except (TypeError, ValueError):
+                    continue
+            return list(dict.fromkeys(ids))
+
+        # Put the queried neuron(s) in their own layer(s).  This is kept out
+        # of ``visualize_top_n`` so that enabling query context never reduces
+        # the number of requested result layers.
+        if query_df is not None and not query_df.empty:
+            if self.visualize_by == "type" and "type" in query_df.columns:
+                grouped_query: Dict[str, List[int]] = {}
+                for _, row in query_df.iterrows():
+                    raw_type = row.get("type", "")
+                    query_type = "" if pd.isna(raw_type) else str(raw_type).strip()
+                    if not query_type:
+                        query_type = "query"
+                    grouped_query.setdefault(query_type, [])
+                    try:
+                        bid = row.get("bodyId")
+                        if not pd.isna(bid):
+                            grouped_query[query_type].append(int(bid))
+                    except (TypeError, ValueError):
+                        continue
+                for query_type, members in grouped_query.items():
+                    members = list(dict.fromkeys(members))
+                    if members:
+                        layers.append(members)
+                        names.append(f"query_{query_type}_x{len(members)}")
+                        query_layer_count += 1
+            else:
+                for bid in _body_ids(query_df):
+                    layers.append([bid])
+                    names.append(f"query_{bid}")
+                    query_layer_count += 1
         if self.visualize_by == "type":
             seen: set = set()
             rank = 0
@@ -2594,9 +2865,9 @@ class MorphologyComparer:
                     # members from the vector cache (bounded to n_per_type).
                     members = self._type_members_from_cache(t)
                 else:
-                    members = [int(b) for b in work.loc[
-                        work["target_type"] == t, "target_bodyId"
-                    ].tolist()]
+                    members = _body_ids(work.loc[
+                        work["target_type"] == t
+                    ].rename(columns={"target_bodyId": "bodyId"}))
                 if not members:
                     continue
                 seen.add(t)
@@ -2607,7 +2878,10 @@ class MorphologyComparer:
                     break
         else:
             for rank, (_, row) in enumerate(work.head(self.visualize_top_n).iterrows(), start=1):
-                bid = int(row.get("target_bodyId"))
+                try:
+                    bid = int(row.get("target_bodyId"))
+                except (TypeError, ValueError):
+                    continue
                 t = str(row.get("target_type", "") or "")
                 layers.append([bid])
                 names.append(f"r{rank}_{t or f'unknown_{bid}'}_{bid}")
@@ -2616,23 +2890,48 @@ class MorphologyComparer:
             self._log("Visualization skipped: no renderable layers.")
             return
 
+        self._log(
+            f"3D visualization: including {query_layer_count} query layer(s) "
+            f"and {len(layers) - query_layer_count} result layer(s)"
+        )
+
         run_dir = Path(getattr(self, "output_folder", "") or self.output_dir)
         try:
+            viz_kwargs = {
+                "dataset": self.dataset,
+                "output_dir": str(run_dir),
+                "neuron_layers": layers,
+                "custom_layer_names": names,
+                "saveas": _dataset_folder(self.dataset),
+                "include_timestamp": False,
+                "skip_synapse": True,
+                "skeleton_mode": "tube",
+                "legend_mode": "layer" if self.visualize_by == "type" else "single",
+                "brain_mesh": "template",
+                "export_views": False,
+                "show_fig": False,
+                "cache_neurons": True,
+                "verbose": "simple",
+            }
+            # The panel contains the same keyword names as VisualizeSkeleton.
+            # Ranking controls belong to MorphologyComparer, not the renderer.
+            for key, value in self.visualization_settings.items():
+                if key in {"visualize_top_n", "visualize_by", "use_default_simplification"}:
+                    continue
+                if key == "mesh_color" and value == "auto":
+                    continue
+                viz_kwargs[key] = value
+
+            # The shared panel returns None when its dataset-aware default is
+            # selected. Resolve that default at the analysis boundary so the
+            # dedicated Skeleton tab can retain its own historical defaults.
+            if viz_kwargs.get("skeleton_mesh_simplification") is None:
+                viz_kwargs["skeleton_mesh_simplification"] = (
+                    default_analysis_skeleton_mesh_simplification(self.dataset)
+                )
+
             vs = VisualizeSkeleton(
-                dataset=self.dataset,
-                output_dir=str(run_dir),
-                neuron_layers=layers,
-                custom_layer_names=names,
-                saveas=_dataset_folder(self.dataset),
-                include_timestamp=False,
-                skip_synapse=True,
-                skeleton_mode="tube",
-                legend_mode="layer" if self.visualize_by == "type" else "single",
-                brain_mesh="template",
-                export_views=False,
-                show_fig=False,
-                cache_neurons=True,
-                verbose="simple",
+                **viz_kwargs,
             )
             vs.plot_neurons()
             viz_dir = run_dir / f"plot3d_{_dataset_folder(self.dataset)}"

@@ -86,7 +86,7 @@ async def main() -> int:
 
     source = find_element("Source Neurons")
     target = find_element("Target Neurons")
-    run = find_element("Find All Paths")
+    run = find_element("Complete Paths")
     print(
         "source_id=", source[0] if source else None,
         "target_id=", target[0] if target else None,

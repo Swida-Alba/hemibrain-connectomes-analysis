@@ -499,7 +499,7 @@ class TestRunner:
         # morphological mode controls
         for label in ("Query Neuron(s)", "Level", "Method", "Metric",
                       "NBLAST Prefilter", "Candidate Source", "Candidate Expansion (×)",
-                      "ROI Filter", "Visualize Top-N Types", "Visualize By",
+                      "ROI Filter", "Visualize Top N Types / Neurons", "Visualize By",
                       "Download All Skeletons"):
             assert label in labels, f"missing morphological control: {label}"
         # connection-profile mode controls (relocated loose knobs)
@@ -522,25 +522,67 @@ class TestRunner:
         # connectivity-expanded candidates: top-N x 3 types by default
         assert by_label["Candidate Expansion (×)"].value == DEFAULTS["morph_candidate_expansion"] == 3
         # 3D visualization defaults: enabled with 6 top types, grouped by type
-        assert by_label["Visualize Top-N Types"].value == DEFAULTS["morph_visualize_top_n"]
+        assert by_label["Visualize Top N Types / Neurons"].value == DEFAULTS["morph_visualize_top_n"]
         assert by_label["Visualize By"].value == DEFAULTS["morph_visualize_by"]
+        assert by_label["Mesh Simplification"].value == 0.95
+        assert any(
+            getattr(el, "_props", {}).get("label") == "Advanced Visualization"
+            for el in client.elements.values()
+        )
 
-        # mode toggle exists and exposes both modes
-        toggles = [
-            el for el in client.elements.values()
-            if getattr(el, "tag", "") == "q-btn-toggle"
-        ]
-        assert len(toggles) == 1
-        toggle_options = [
-            o.get("label") for o in toggles[0]._props.get("options", [])
-        ]
-        assert "Morphological similarity" in toggle_options
-        assert "Connection profile similarity" in toggle_options
+        # The two similarity modes are independent, outlined buttons rather
+        # than one segmented toggle, so each remains easy to target and read.
+        mode_buttons = {
+            getattr(el, "text", ""): el
+            for el in client.elements.values()
+            if getattr(el, "text", "") in {
+                "Morphological similarity", "Connectivity similarity",
+            }
+        }
+        assert set(mode_buttons) == {
+            "Morphological similarity", "Connectivity similarity",
+        }
+        assert len(mode_buttons) == 2
         # vector-cache action row
         assert any(
             getattr(el, "text", "") == "Build Vector Cache"
             for el in client.elements.values()
         )
+
+    def test_analysis_visualization_simplification_follows_dataset(self):
+        """The advanced panel displays the same dataset-aware default that
+        the analysis backend will use, without overwriting custom values."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.find_similar import create_find_similar_tab
+
+        client = Client(page("/similar-visualization-simplification"))
+        with client:
+            create_find_similar_tab()
+
+        controls = {
+            getattr(el, "_props", {}).get("label"): el
+            for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label")
+        }
+        default_control = next(
+            el for el in client.elements.values()
+            if getattr(el, "text", "") == "Default Simplification"
+        )
+        dataset = controls["Dataset"]
+        mesh = controls["Mesh Simplification"]
+
+        assert mesh.value == 0.95
+        dataset.value = "flywire_FAFB_v783"
+        assert mesh.value == 0.98
+
+        default_control.value = False
+        mesh.value = 0.75
+        dataset.value = "male-cns:v1.0"
+        assert mesh.value == 0.75
+
+        default_control.value = True
+        assert mesh.value == 0.95
 
     def test_similar_tools_generate_runner_scripts(self):
         """The runner generates scripts for both Similar tools."""
@@ -1885,7 +1927,7 @@ class TestTabs:
 
         # Every tab button lives inside its group's tinted card.
         tint_by_label = {
-            "Path": "connection", "Shortest": "connection",
+            "Complete Paths": "connection", "Shortest Paths": "connection",
             "Network": "connection", "Cross-Dataset": "connection",
             "Skeleton": "visualization", "Net-Viz": "visualization",
             "Homologs": "similarity", "Similar": "similarity",
@@ -1913,8 +1955,8 @@ class TestTabs:
             el for el in client.elements.values()
             if type(el).__name__ == "TabPanels"
         )
-        assert panels.value == "Path"
-        assert "drocat-active" in buttons["Path"]._classes
+        assert panels.value == "Complete Paths"
+        assert "drocat-active" in buttons["Complete Paths"]._classes
         click = next(
             listener for listener in buttons["Net-Viz"]._event_listeners.values()
             if listener.type == "click"
@@ -1922,7 +1964,7 @@ class TestTabs:
         click.handler(SimpleNamespace())
         assert panels.value == "Net-Viz"
         assert "drocat-active" in buttons["Net-Viz"]._classes
-        assert "drocat-active" not in buttons["Path"]._classes
+        assert "drocat-active" not in buttons["Complete Paths"]._classes
 
     def test_flatten_neuron_layers(self):
         """The nested layer model flattens into one neuron per entry for
@@ -2089,6 +2131,18 @@ class TestTabs:
         # the bodyId edge limit only applies to deep searches: with the
         # default Layers = 2 the control starts DISABLED
         assert limits["Edge Limit – BodyIds"]._props.get("disable") is True
+        disabled_hint = next(
+            el for el in client.elements.values()
+            if "Unavailable for shallow searches" in getattr(el, "text", "")
+        )
+        assert disabled_hint.visible is True
+        max_layers = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Max Intermediate Layers"
+        )
+        max_layers.value = 3
+        assert limits["Edge Limit – BodyIds"]._props.get("disable") is not True
+        assert disabled_hint.visible is False
         # the type/group edge-limit controls are gone from the UI
         assert "Limit Graph Edges" not in all_text
         assert "Edge Limit – Groups" not in all_text
@@ -2277,11 +2331,30 @@ class TestTabs:
         by_label = {}
         for el in client.elements.values():
             label = getattr(el, "_props", {}).get("label")
-            if label in ("Edge Limit – BodyIds", "Visualization Edge Limit"):
+            if label in (
+                "Top Edges in Analysis Reports",
+                "Edge Limit – BodyIds",
+                "Visualization Edge Limit",
+            ):
                 by_label[label] = el
+        assert "Top Edges in Analysis Reports" in by_label, by_label
+        assert by_label["Top Edges in Analysis Reports"].value == 500
         assert "Edge Limit – BodyIds" in by_label, by_label
         # the pathfinding edge limit: 1M bodyId edges, deep searches only
         assert by_label["Edge Limit – BodyIds"].value == 1000000
+        assert by_label["Edge Limit – BodyIds"]._props.get("min") == 0
+        bodyid_hint = next(
+            el for el in client.elements.values()
+            if "Unavailable for shallow searches" in getattr(el, "text", "")
+        )
+        assert bodyid_hint.visible is True
+        max_layers = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Max Intermediate Layers"
+        )
+        max_layers.value = 3
+        assert by_label["Edge Limit – BodyIds"]._props.get("disable") is not True
+        assert bodyid_hint.visible is False
         # the visualization edge limit default follows the shared config
         assert by_label["Visualization Edge Limit"].value == DEFAULTS["edgeN_limit"]
         assert DEFAULTS["edgeN_limit"] == 500
@@ -2468,11 +2541,12 @@ class TestTabs:
         # the profiling tab supports multiple datasets (cross-dataset mode)
         multi_ds = [
             el for el in elements
-            if getattr(el, "_props", {}).get("label") == "Datasets to compare (select 1+)"
+            if getattr(el, "_props", {}).get("label") ==
+            "Datasets to compare (select one or more)"
         ]
         assert multi_ds, "multi-dataset selector missing"
         assert multi_ds[0]._props.get("multiple") is True
-        assert len(multi_ds[0].value) == 2, "defaults to two datasets"
+        assert multi_ds[0].value == [], "profiling starts without preset datasets"
 
         # the custom-group card is hidden until the level is chosen
         card = [

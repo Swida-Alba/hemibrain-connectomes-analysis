@@ -1,6 +1,6 @@
 """Multi-dataset profiling: per-dataset extraction with name mapping,
 inter-dataset comparisons of the same queried neuron (homolog backend),
-and the overall report.html that embeds all heatmaps.
+and the tabbed report.html with clustered Plotly heatmaps.
 
 Also covers the CrossDatasetTypeMapper switch to the male-cns v1.0 neuron
 info as the canonical name-mapping source (was v0.9).
@@ -224,6 +224,26 @@ def test_report_redraws_plotly_and_links_vispath_editor(tmp_path):
     assert "<iframe" not in text
     assert "Open VisPath heatmap for editing" in text
     assert "type_level/visualization/heatmap_type_combined_jaccard.html" in text
+    assert "data-tab-button" in text
+    assert "Overall" in text
+    plot_call = text.split("Plotly.newPlot(", 1)[1].split(");", 1)[0]
+    assert '"texttemplate":' not in plot_call
+
+
+def test_report_uses_vispath_ward_order_for_plotly_heatmaps():
+    pytest.importorskip("scipy")
+    comparer = _make_multi_comparer(datasets=[DS_A])
+    matrix = pd.DataFrame(
+        [[1.0, 1.0], [0.0, 0.0], [1.0, 1.0], [0.0, 0.0]],
+        index=["r0", "r1", "r2", "r3"],
+        columns=["c0", "c1"],
+    )
+
+    ordered, clustered = comparer._cluster_heatmap_matrix(matrix)
+
+    assert clustered is True
+    assert ordered.index.tolist() == ["r0", "r2", "r1", "r3"]
+    assert ordered.columns.tolist() == ["c0", "c1"]
 
 
 def test_aggregate_inter_dataset_matrices_uses_neurons_by_dataset_pairs():
@@ -544,10 +564,13 @@ def test_run_multi_dataset_output_structure(tmp_path, monkeypatch):
     assert (out / "cross_dataset" / "per_neuron" / "aMe12" / "visualization").exists()
     assert (out / "profiles" / safe_b / "aggregated").exists()
 
-    # the report indexes every matrix (and embeds heatmaps when generated)
+    # the report indexes every matrix in separate tabbed sections
     report = (out / "report.html").read_text(encoding="utf-8")
     assert "Intra-dataset" in report
     assert "Inter-dataset" in report
+    assert "data-tab-button" in report
+    assert "data-tab-group='report-sections'" in report
+    assert "Overall" in report
     assert "cross_dataset/all_types/results/similarity_combined_jaccard.csv" in report
     assert "Dataset pair" in report
     assert "<iframe" not in report

@@ -7,6 +7,7 @@ from ..components.common import (
     dir_input, section_header, param_grid, tool_page,
 )
 from ..components.output_panel import OutputPanel
+from ..components.skeleton_visualization_settings import skeleton_visualization_settings
 from ..runner import ScriptRunner
 
 
@@ -52,13 +53,28 @@ def create_nb_colabel_tab():
                 "Line-specificity and sparsity metrics are included automatically."
             ).classes("text-caption drocat-muted")
 
+            with ui.row().classes("w-full items-center gap-4"):
+                visualize_3d = checkbox_input(
+                    "3D Skeleton",
+                    False,
+                    hint="Render optional 3D skeletons of top co-labeled types.",
+                )
+                visualization_settings = skeleton_visualization_settings(
+                    default_top_n=5,
+                    top_n_label="Visualize Top N Types",
+                    top_n_hint="Number of top co-labeled types to visualize in 3D.",
+                    default_visualize_by="type",
+                    default_show_fig=False,
+                    default_export_views=True,
+                    dataset_provider=lambda: "" if dataset.value in (None, "(all)") else dataset.value,
+                    dataset_watchers=[dataset],
+                )
+
             # --- Advanced Settings (collapsed) ---
             with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
                 with ui.row().classes("gap-4"):
                     gen_heatmap = checkbox_input("Heatmaps", True, hint="Generate interactive heatmap visualizations.")
                     gen_report = checkbox_input("HTML Report", True, hint="Generate comprehensive HTML analysis report.")
-                    visualize_3d = checkbox_input("3D Skeleton", False, hint="Render 3D skeletons of top co-labeled types.")
-                viz_top_n = number_input("Visualize Top N Types", 5, 1, 20, hint="Number of top co-labeled types to visualize in 3D.")
                 with param_grid(3):
                     top_n_neurons = number_input(
                         "Top N Neurons Per Line", 200, 5, 2000,
@@ -106,6 +122,7 @@ def create_nb_colabel_tab():
             output_panel.set_running(False)
             return
 
+        visualization_values = visualization_settings.values()
         constructor_params = {"verbose": True}
 
         method_params = {
@@ -114,7 +131,10 @@ def create_nb_colabel_tab():
             "similarity_methods": methods,
             "generate_report": gen_report.value,
             "visualize": gen_heatmap.value,
-            "visualize_top_n": int(viz_top_n.value) if visualize_3d.value else 0,
+            "visualize_top_n": (
+                visualization_values["visualize_top_n"]
+                if visualize_3d.value else 0
+            ),
             "top_n_neurons": int(top_n_neurons.value),
             "min_score": float(min_score.value),
             "min_type_avg_score": float(min_type_avg_score.value),
@@ -122,6 +142,8 @@ def create_nb_colabel_tab():
             "background_color": background_color.value,
             "pdf_images_per_page": (int(pdf_cols.value), int(pdf_rows.value)),
             "datasets_to_visualize": ds,
+            "visualize_by": visualization_values["visualize_by"],
+            "visualization_settings": visualization_values,
         }
 
         result = await output_panel.run(runner, "nb_colabel", constructor_params, "colabel",

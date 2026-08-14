@@ -201,7 +201,7 @@ params = ComparisonParameters(
     
     # Analysis settings
     thresholds=[1, 3, 5, 10],
-    top_edges=50,
+    top_edges=50,  # Top-edge/path rows retained in comparison reports
     comparison_mode='path',
     
     # Output
@@ -818,7 +818,7 @@ If an edge appears at t=3 but disappears at t=5:
 1. Enable caching (automatic if cache exists)
 2. Use `skip_bodyId=True` to skip expensive bodyId-level processing if only type-level data is needed
 3. Reduce number of thresholds
-4. Reduce `top_edges` parameter
+4. Reduce `top_edges` to keep comparison report tables smaller (this does not trim pathfinding)
 5. Use smaller `max_interlayer`
 
 ### FlyWire Dataset Not Found
@@ -842,7 +842,7 @@ ComparisonParameters(
     target_neurons: Union[List, LabelMapper], # Target neuron patterns (list or mapper)
     max_interlayer: int,                      # Max intermediate layers
     thresholds: List[int],                    # Synapse count thresholds
-    top_edges: int = 50,                      # Max edges to analyze
+    top_edges: int = 50,                      # Report-table top-edge/path row cap
     comparison_mode: str = 'path',            # 'path' or 'edge'
     output_folder: str,                       # Base output directory
     saveas: str = None,                       # Custom folder name (auto if None)

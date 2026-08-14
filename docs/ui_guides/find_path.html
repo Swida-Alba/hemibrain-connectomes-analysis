@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Find All Paths - DROCAT Instructions</title>
+  <title>Complete Paths - DROCAT Instructions</title>
   <link rel="stylesheet" href="guide.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
     <a class="back" href="README.html">&larr; Back to guides</a>
     <span class="tag">Connectome</span>
   </header>
-  <h1>Find All Paths</h1>
+  <h1>Complete Paths</h1>
   <p class="lede">
     Discover multi-hop pathways between source and target neuron groups in a
     single dataset, e.g. <code>aMe12</code> → <code>aMe10</code>.
@@ -25,7 +25,7 @@
       as chips, paste, or upload a list.</li>
     <li>Pick the <b>Dataset</b> and an <b>Output Directory</b>.</li>
     <li>Keep <b>Max Intermediate Layers = 2</b> and click
-      <b>Find All Paths</b>; watch the live log.</li>
+      <b>Complete Paths</b>; watch the live log.</li>
   </ol>
 
   <h2>Inputs &amp; examples</h2>
@@ -45,7 +45,8 @@
     <tr><th>Parameter</th><th>Default</th><th>Meaning</th><th>Example</th></tr>
     <tr><td>Max Intermediate Layers</td><td>2</td><td>Path length: 0 = direct, 2 = two intermediates</td><td>3 finds longer circuits but is slower</td></tr>
     <tr><td>Min Synapse Count</td><td>3</td><td>Connections below this weight are removed</td><td>10 keeps only strong edges</td></tr>
-    <tr><td>Visualization Edge Limit</td><td>500</td><td>Maximum edges drawn per visualization (network / Sankey / heatmap, incl. the network_early preview)</td><td>50 for very dense regions</td></tr>
+    <tr><td>Visualization Edge Limit</td><td>500</td><td>Maximum edges drawn per visualization (network / Sankey / heatmap, incl. the network_early preview); does not alter pathfinding</td><td>50 for very dense regions</td></tr>
+    <tr><td>Edge Limit – BodyIds</td><td>1,000,000</td><td>Trims the bodyId discovery graph before deep pathfinding (Layers &ge; 3); 0 = complete graph</td><td>0 for no graph trimming</td></tr>
     <tr><td>Min Connection Ratio</td><td>0.0</td><td>Minimum weight/post ratio</td><td>0.1 keeps only dominant outputs</td></tr>
     <tr><td>Min Traversal Prob.</td><td>0.0</td><td>ratio/0.3, capped at 1.0</td><td>0.5 = confident paths only</td></tr>
     <tr><td>Algorithm</td><td>MemoizedDFS</td><td>MemoizedDFS (fastest measured at all depths, no graph copy; the default), DFS (backward memoized, few targets), MeetInMiddle (shallow queries), DP (robust), Bidirectional (shortest-first, high memory). See the <a href="pathfinding_algorithms.html">pathfinding algorithms guide</a>.</td><td>MemoizedDFS</td></tr>

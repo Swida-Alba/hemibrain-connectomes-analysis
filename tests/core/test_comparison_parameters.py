@@ -1,7 +1,6 @@
 """The cross-dataset comparison is backended by FindAllPath: ComparisonParameters
-must carry the same edge limits as the Find All Paths tab — the bodyId pan-graph
-edge limit (1M, applied only for deep searches) and the Visualization Edge Limit
-(2000) — and pass them through to every FindAllPath run."""
+must carry the bodyId pan-graph edge limit and the visualization-only edge
+limit, while keeping the separate report-row cap explicit."""
 
 import sys
 from pathlib import Path
@@ -43,12 +42,14 @@ def test_comparison_parameters_edge_limits_survive_dict_roundtrip():
     """Customized limits survive to_dict -> from_dict."""
     p = ComparisonParameters(
         datasets=['hemibrain:v1.2.1', 'male-cns:v1.0'],
-        graph_edge_limit_bodyid=500000, edgeN_limit=1500,
+        top_edges=250, graph_edge_limit_bodyid=500000, edgeN_limit=1500,
     )
     d = p.to_dict()
+    assert d["top_edges"] == 250
     assert d["graph_edge_limit_bodyid"] == 500000
     assert d["edgeN_limit"] == 1500
     p2 = ComparisonParameters.from_dict(d)
+    assert p2.top_edges == 250
     assert p2.graph_edge_limit_bodyid == 500000
     assert p2.edgeN_limit == 1500
 

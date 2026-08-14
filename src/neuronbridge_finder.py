@@ -84,6 +84,11 @@ except ImportError:
             letters = "".join(c for c in ds.split(":")[0] if c.isalpha())
             return (letters[:4] or "DS").upper()
 
+try:
+    from .visualization_options import default_analysis_skeleton_mesh_simplification
+except ImportError:
+    from visualization_options import default_analysis_skeleton_mesh_simplification
+
 # Try to import polars for faster DataFrame operations on large datasets
 try:
     import polars as pl
@@ -6692,6 +6697,7 @@ class NeuronBridgeFinder:
         type_filter: Optional[Dict[str, Union[str, List[str]]]] = None,
         datasets_to_visualize: Union[str, List[str]] = 'all',
         sort_by: str = 'max_score',
+        visualization_settings: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Visualize top N types/bodyIds per dataset using VisualizeSkeleton.
@@ -7001,29 +7007,30 @@ class NeuronBridgeFinder:
                 continue
             
             try:
-                # Determine brain_mesh based on dataset
-                brain_mesh = 'template'  # Use template for better performance
-                if 'vnc' in dataset.lower() or 'manc' in dataset.lower():
-                    brain_mesh = 'template'
-                elif 'cns' in dataset.lower():
-                    brain_mesh = 'template'
+                # The shared UI panel uses the dataset-aligned template brain
+                # by default.  Keep the same default for programmatic callers.
+                viz_settings = dict(visualization_settings or {})
+                brain_mesh = viz_settings.get('brain_mesh', 'template')
                 
-                # Set skeleton_mesh_simplification based on dataset
-                # FAFB/FlyWire needs more simplification (0.95) due to larger meshes
-                # Hemibrain and male-cns use 0.9
-                if 'fafb' in dataset.lower() or 'flywire' in dataset.lower():
-                    skeleton_simplification = 0.95
-                else:
-                    skeleton_simplification = 0.9
+                # Set skeleton_mesh_simplification based on dataset when the
+                # user leaves the shared control at its default. Analysis
+                # renders use more simplification than the dedicated Skeleton
+                # tab: 0.95 for NeuPrint and 0.98 for FlyWire/FAFB.
+                skeleton_simplification = (
+                    default_analysis_skeleton_mesh_simplification(dataset)
+                )
                 
-                # Set legend_mode based on visualize_by mode
-                legend_mode = 'layer' if visualize_by == 'type' else 'single'
+                legend_mode = viz_settings.get(
+                    'legend_mode', 'layer' if visualize_by == 'type' else 'single'
+                )
                 
                 # Determine whether to show VNC mesh based on region and dataset
                 # Show VNC when dataset is manc, male-cns, or region is VNC/All
                 is_vnc_dataset = ('manc' in dataset.lower() or 'cns' in dataset.lower() 
                                   or 'vnc' in dataset.lower())
-                show_vnc_mesh = is_vnc_dataset or self.region in ('VNC', 'All')
+                show_vnc_mesh = viz_settings.get(
+                    'vnc_mesh', is_vnc_dataset or self.region in ('VNC', 'All')
+                )
                 
                 # Determine export_views based on region setting
                 # - region='VNC': only bottom view (shows VNC from below)
@@ -7039,33 +7046,69 @@ class NeuronBridgeFinder:
                 # Custom folder name: plot3d_{dataset_folder} (VisualizeSkeleton prepends 'plot3d_')
                 custom_saveas = dataset_folder
                 
-                # Compute per-layer alpha based on relative scores
+                # Compute per-layer alpha based on relative scores.  An
+                # explicit palette/opacity in the advanced panel takes
+                # precedence over the historical score-based defaults.
                 # Alpha = 0.2 * (score_i / max_score) so higher-scoring types are more visible
                 layer_alphas = self._compute_layer_alphas(layer_scores, base_alpha=0.2)
                 neuron_colors = self._create_neuron_colors_with_alpha(len(neuron_layers), layer_alphas)
-                
+                if viz_settings.get('neuron_colors'):
+                    neuron_colors = viz_settings['neuron_colors']
+                if viz_settings.get('export_views', True):
+                    effective_export_views = export_views
+                else:
+                    effective_export_views = False
+                effective_simplification = viz_settings.get(
+                    'skeleton_mesh_simplification', skeleton_simplification
+                )
+                if effective_simplification is None:
+                    effective_simplification = skeleton_simplification
+                effective_background = viz_settings.get(
+                    'background_color', background_color
+                )
+                viz_kwargs = {
+                    'dataset': dataset,
+                    'output_dir': output_path,
+                    'neuron_layers': neuron_layers,
+                    'custom_layer_names': layer_names,
+                    'server': self.neuprint_server,
+                    'token': self.neuprint_token,
+                    'saveas': custom_saveas,
+                    'include_timestamp': False,
+                    'skip_synapse': viz_settings.get('skip_synapse', True),
+                    'neuron_colors': neuron_colors,
+                    'skeleton_mode': viz_settings.get('skeleton_mode', 'tube'),
+                    'legend_mode': legend_mode,
+                    'brain_mesh': brain_mesh,
+                    'vnc_mesh': show_vnc_mesh,
+                    'export_views': effective_export_views,
+                    'skeleton_mesh_simplification': effective_simplification,
+                    'roi_mesh_simplification': 0.95,
+                    'background_color': effective_background,
+                    'cache_neurons': viz_settings.get('cache_neurons', True),
+                    'cache_synapses': viz_settings.get('cache_synapses', True),
+                    'smooth_skeleton': viz_settings.get('smooth_skeleton', False),
+                    'show_soma': viz_settings.get('show_soma', True),
+                    'show_connectors': viz_settings.get('show_connectors', False),
+                    'show_fig': viz_settings.get('show_fig', False),
+                    'export_scale': viz_settings.get('export_scale', 3),
+                    'export_method': viz_settings.get('export_method', 'webdriver'),
+                    'verbose': 'full',
+                }
+                for key in (
+                    'min_synapse_num', 'synapse_size', 'synapse_mode',
+                    'synapse_alpha', 'synapse_colors', 'mesh_roi',
+                    'mesh_color', 'mesh_alpha', 'brain_mesh_color',
+                    'vnc_mesh_color',
+                ):
+                    if key in viz_settings:
+                        value = viz_settings[key]
+                        if key == 'mesh_color' and value == 'auto':
+                            continue
+                        viz_kwargs[key] = value
+
                 vs = VisualizeSkeleton(
-                    dataset=dataset,
-                    output_dir=output_path,
-                    neuron_layers=neuron_layers,
-                    custom_layer_names=layer_names,
-                    server=self.neuprint_server,
-                    token=self.neuprint_token,
-                    saveas=custom_saveas,
-                    include_timestamp=False,  # No timestamp for cleaner folder names
-                    skip_synapse=True,
-                    neuron_colors=neuron_colors,  # RGBA colors with per-layer alpha
-                    skeleton_mode='tube',
-                    legend_mode=legend_mode,  # 'layer' for type, 'single' for bodyId
-                    brain_mesh=brain_mesh,
-                    vnc_mesh=show_vnc_mesh,  # Show VNC for manc, male-cns, or VNC region
-                    export_views=export_views,  # Region-based view selection
-                    skeleton_mesh_simplification=skeleton_simplification,
-                    roi_mesh_simplification=0.95,
-                    background_color=background_color,
-                    cache_neurons=True,
-                    show_fig=False,
-                    verbose='full',  # Full verbose to see simplification logs
+                    **viz_kwargs,
                 )
                 vs.plot_neurons()
                 
@@ -7073,11 +7116,11 @@ class NeuronBridgeFinder:
                 # Use region-appropriate views for individual profile generation
                 if generate_individual_profiles:
                     # Use same views as export_views for consistency
-                    profile_views = export_views
+                    profile_views = effective_export_views or export_views
                     vs.plot_individuals(
                         output_format='png',
                         views=profile_views,
-                        scale=3,
+                        scale=viz_settings.get('export_scale', 3),
                         pdf_images_per_page=pdf_images_per_page,
                         pdf_title=f"{source_line} - {dataset}",
                         summary_format=generate_individual_profiles
@@ -7106,6 +7149,7 @@ class NeuronBridgeFinder:
         type_filter: Optional[Dict[str, Union[str, List[str]]]] = None,
         datasets_to_visualize: Union[str, List[str]] = 'all',
         sort_by: str = 'max_score',
+        visualization_settings: Optional[Dict[str, Any]] = None,
     ) -> pd.DataFrame:
         """
         Find EM neurons for multiple driver lines with automatic saving.
@@ -7534,6 +7578,7 @@ class NeuronBridgeFinder:
                             type_filter=type_filter,
                             datasets_to_visualize=datasets_to_visualize,
                             sort_by=sort_by,
+                            visualization_settings=visualization_settings,
                         )
                     
                     # Recommend colabeling analysis for multiple lines
@@ -7562,6 +7607,7 @@ class NeuronBridgeFinder:
                         type_filter=type_filter,
                         datasets_to_visualize=datasets_to_visualize,
                         sort_by=sort_by,
+                        visualization_settings=visualization_settings,
                     )
             
             return combined_df
@@ -7587,6 +7633,8 @@ class NeuronBridgeFinder:
         type_filter: Optional[Dict[str, Union[str, List[str]]]] = None,
         datasets_to_visualize: Union[str, List[str]] = 'all',
         sort_by: str = 'max_score',
+        visualize_by: str = 'type',
+        visualization_settings: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Analyze co-labeling patterns among given driver lines.
@@ -8054,7 +8102,7 @@ class NeuronBridgeFinder:
                 output_path=output_path,
                 per_dataset=True,
                 source_line=lines_label,
-                visualize_by='type',  # Default to type-based visualization
+                visualize_by=visualize_by,
                 generate_individual_profiles=generate_individual_profiles,
                 pdf_images_per_page=pdf_images_per_page,
                 background_color=background_color,
@@ -8062,6 +8110,7 @@ class NeuronBridgeFinder:
                 type_filter=type_filter,
                 datasets_to_visualize=datasets_to_visualize,
                 sort_by=sort_by,
+                visualization_settings=visualization_settings,
             )
         
         # Summary

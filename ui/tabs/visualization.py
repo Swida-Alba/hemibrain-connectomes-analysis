@@ -616,7 +616,7 @@ def create_net_viz_tab():
                 ["Path file", "Edge list editor", "Empty drawing canvas"],
                 "Path file",
                 hint=(
-                    "Path file: load Find All Paths output. Edge list editor: build "
+                    "Path file: load Complete Paths output. Edge list editor: build "
                     "or edit an edge list with auto-save. Empty drawing canvas: "
                     "add nodes and edges in the generated HTML."
                 ),
@@ -664,7 +664,7 @@ def create_net_viz_tab():
                         "drocat-upload-trigger"
                     ).tooltip("Upload a *_allpaths_info file (CSV/Excel)"):
                         with ui.menu() as path_upload_menu:
-                            ui.label("Load path data from Find All Paths").classes(
+                            ui.label("Load path data from Complete Paths").classes(
                                 "text-caption drocat-muted px-3 pt-2"
                             )
                             ui.label(
@@ -793,7 +793,7 @@ def create_net_viz_tab():
             path_file_path["path"] = csv_path
         elif not empty_canvas and not path_file_path["path"]:
             ui.notify(
-                "Please upload a path file first (Find All Paths output)",
+                "Please upload a path file first (Complete Paths output)",
                 type="warning",
             )
             return

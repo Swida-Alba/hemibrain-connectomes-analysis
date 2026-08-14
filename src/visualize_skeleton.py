@@ -4696,6 +4696,7 @@ class VisualizeSkeleton:
             # Visualization Settings
             f.write("[Visualization]\n")
             f.write(f"  Skeleton Mode:    {self.skeleton_mode}\n")
+            f.write(f"  Skeleton Mesh Simplification: {self.skeleton_mesh_simplification}\n")
             f.write(f"  Backend:          {self.backend}\n")
             f.write(f"  Brain Mesh:       {self.brain_mesh}\n")
             f.write(f"  VNC Mesh:         {self.vnc_mesh}\n")
@@ -4715,6 +4716,8 @@ class VisualizeSkeleton:
             f.write("\n")
             
             f.write("=" * 70 + "\n")
+
+        self._write_user_warning_notes()
         if self.backend == 'plotly':
             self.fig_3d = go.Figure()
         elif self.backend == 'k3d':
@@ -4737,7 +4740,44 @@ class VisualizeSkeleton:
             with pd.ExcelWriter(file_path,mode=mode,engine='openpyxl') as writer:
                 self.neuron_dfs[i].to_excel(writer, sheet_name=f'neuron_df{i}')
                 self.roi_dfs[i].to_excel(writer, sheet_name=f'roi_count_df{i}')
-    
+
+    def _write_user_warning_notes(self):
+        """Record the effective mesh simplification for this render.
+
+        Skeleton simplification changes the rendered tube mesh only; it does
+        not trim analysis graphs or alter the queried neuron set. Keep this
+        note beside every standalone and analysis-generated visualization so
+        the output remains self-describing.
+        """
+
+        value = self.skeleton_mesh_simplification
+        if value is None:
+            value_text = "not set"
+        else:
+            value_text = f"{float(value):.2f}"
+        if self.skeleton_mode == "tube":
+            scope = "applied to the rendered tube mesh"
+        else:
+            scope = "configured but not applied because skeleton_mode='line'"
+        note_path = os.path.join(self.save_folder, "user_warning_notes.txt")
+        text = (
+            "DROCAT user warning notes\n"
+            + "=" * 60
+            + "\n"
+            + "The following visualization settings affect rendering only; they "
+              "do not trim analysis graphs or change query results.\n\n"
+            + f"- [skeleton mesh simplification] dataset={self.dataset}; "
+              f"skeleton_mesh_simplification={value_text} ({scope}).\n"
+        )
+        try:
+            with open(note_path, "w", encoding="utf-8") as f:
+                f.write(text)
+        except OSError as exc:
+            self._vprint(
+                f"  Warning: could not write user_warning_notes.txt: {exc}",
+                level="full",
+            )
+
     def _get_cache_path(self, cache_type):
         """Get the cache directory for skeletons or synapses
         

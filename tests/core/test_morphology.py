@@ -651,13 +651,17 @@ class TestVisualizeTopResults:
         assert not res.empty
         assert len(self.FakeVisualizer.instances) == 1
         vs = self.FakeVisualizer.instances[0]
-        # top types by similarity: LINE (102) then Y (103), one layer each
-        assert vs.kwargs["neuron_layers"] == [[102], [103]]
-        assert vs.kwargs["custom_layer_names"] == ["r1_LINE_x1", "r2_Y_x1"]
+        # The queried LINE neuron is rendered first, followed by the top
+        # result types.
+        assert vs.kwargs["neuron_layers"] == [[101], [102], [103]]
+        assert vs.kwargs["custom_layer_names"] == [
+            "query_LINE_x1", "r1_LINE_x1", "r2_Y_x1"
+        ]
         assert vs.kwargs["legend_mode"] == "layer"
         assert vs.kwargs["skip_synapse"] is True
         assert vs.kwargs["show_fig"] is False
         assert vs.kwargs["saveas"] == morph._dataset_folder("test:v1")
+        assert vs.kwargs["skeleton_mesh_simplification"] == 0.95
 
     def test_type_level_excludes_intra_reference_row(self, tmp_path, monkeypatch):
         """The intra-type reference row (rank 1) must never be rendered."""
@@ -666,19 +670,41 @@ class TestVisualizeTopResults:
         assert not res.empty
         assert len(self.FakeVisualizer.instances) == 1
         vs = self.FakeVisualizer.instances[0]
-        # only the Y row remains after dropping the LINE intra reference;
-        # its members come from the vector cache
-        assert vs.kwargs["neuron_layers"] == [[103]]
-        assert vs.kwargs["custom_layer_names"] == ["r1_Y_x1"]
+        # The query remains visible; only the Y row remains after dropping the
+        # LINE intra reference, with its members from the vector cache.
+        assert vs.kwargs["neuron_layers"] == [[101], [103]]
+        assert vs.kwargs["custom_layer_names"] == ["query_LINE_x1", "r1_Y_x1"]
 
     def test_bodyid_mode_one_layer_per_row(self, tmp_path, monkeypatch):
         comparer = self._setup(tmp_path, monkeypatch, visualize_by="bodyId")
         comparer.find_similar()
         assert len(self.FakeVisualizer.instances) == 1
         vs = self.FakeVisualizer.instances[0]
-        assert vs.kwargs["neuron_layers"] == [[102], [103]]
-        assert vs.kwargs["custom_layer_names"] == ["r1_LINE_102", "r2_Y_103"]
+        assert vs.kwargs["neuron_layers"] == [[101], [102], [103]]
+        assert vs.kwargs["custom_layer_names"] == [
+            "query_101", "r1_LINE_102", "r2_Y_103"
+        ]
         assert vs.kwargs["legend_mode"] == "single"
+
+    def test_visualization_settings_are_forwarded(self, tmp_path, monkeypatch):
+        comparer = self._setup(
+            tmp_path,
+            monkeypatch,
+            visualization_settings={
+                "brain_mesh": "none",
+                "skeleton_mode": "line",
+                "background_color": "black",
+                "show_fig": True,
+                "export_views": True,
+            },
+        )
+        comparer.find_similar()
+        vs = self.FakeVisualizer.instances[0]
+        assert vs.kwargs["brain_mesh"] == "none"
+        assert vs.kwargs["skeleton_mode"] == "line"
+        assert vs.kwargs["background_color"] == "black"
+        assert vs.kwargs["show_fig"] is True
+        assert vs.kwargs["export_views"] is True
 
     def test_failure_never_breaks_search(self, tmp_path, monkeypatch):
         def boom(self):
@@ -1507,6 +1533,10 @@ class TestStepProgress:
         assert not res.empty
 
         out = capsys.readouterr().out
+        assert "Step 2/6 — Discovering candidates" in out
+        assert "Step 3/6 — Expanding 2 candidate types" in out
+        assert "Step 4/6 — Loading & vectorizing skeletons" in out
+        assert "Profile-first:" in out and "pool neurons" in out
         events = [ln.strip() for ln in out.splitlines()
                   if "[DROCAT][progress]" in ln]
         assert events == [

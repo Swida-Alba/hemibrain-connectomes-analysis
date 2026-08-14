@@ -11,6 +11,7 @@ from ..components.common import (
     apply_filter_mode,
 )
 from ..components.output_panel import OutputPanel
+from ..components.skeleton_visualization_settings import skeleton_visualization_settings
 from ..runner import ScriptRunner
 from ..skeleton_pull import SkeletonPuller
 from ..type_suggestions import dataset_suggestions
@@ -43,10 +44,21 @@ def create_find_similar_tab():
     )
 
     with form_col:
-        mode_toggle = ui.toggle(
-            ["Morphological similarity", "Connection profile similarity"],
-            value="Morphological similarity",
-        ).props("dense outlined").classes("w-full")
+        mode_value = {"value": "Morphological similarity"}
+        with ui.row().classes(
+            "w-full items-center justify-between gap-8 px-2"
+        ):
+            morph_mode_button = ui.button(
+                "Morphological similarity",
+            ).props("outline no-caps").classes("w-5/12")
+            connectivity_mode_button = ui.button(
+                "Connectivity similarity",
+            ).props("outline no-caps").classes("w-5/12")
+            for button in (morph_mode_button, connectivity_mode_button):
+                button.style(
+                    "min-height: 3.5rem; font-size: 1.1rem; "
+                    "font-weight: 700;"
+                )
 
         # ================= Morphological similarity panel =================
         with ui.column().classes("w-full gap-1") as morph_panel:
@@ -124,24 +136,29 @@ def create_find_similar_tab():
                              "(never written to the cache); cached skeletons "
                              "are reused.",
                     )
-                with param_grid(2):
-                    roi_filter = select_input(
-                        "ROI Filter", ["All ROIs"], "All ROIs",
-                        hint="Restrict candidate discovery to synapse rows in "
-                             "the selected ROIs (only shown when the dataset's "
-                             "connection cache carries ROI data). 'All ROIs' = "
-                             "no restriction.",
+                roi_filter = select_input(
+                    "ROI Filter", ["All ROIs"], "All ROIs",
+                    hint="Restrict candidate discovery to synapse rows in "
+                         "the selected ROIs (only shown when the dataset's "
+                         "connection cache carries ROI data). 'All ROIs' = "
+                         "no restriction.",
+                )
+                with ui.row().classes("w-full items-center gap-4"):
+                    visualize = checkbox_input(
+                        "Visualize Top Results",
+                        DEFAULTS["morph_visualize_top_n"] > 0,
+                        hint="Render optional 3D skeletons for the highest-ranked results.",
                     )
-                    visualize_top_n = number_input(
-                        "Visualize Top-N Types", DEFAULTS["morph_visualize_top_n"], 0, 50,
-                        hint="After the run, render the 3D skeletons of the top-N "
-                             "found types (0 = disabled). One layer per type with "
-                             "all its member skeletons, colored per type.",
-                    )
-                    visualize_by = select_input(
-                        "Visualize By", ["type", "bodyId"], DEFAULTS["morph_visualize_by"],
-                        hint="'type': one layer per top type (all its members). "
-                             "'bodyId': one layer per top result neuron.",
+                    visualization_settings = skeleton_visualization_settings(
+                        default_top_n=DEFAULTS["morph_visualize_top_n"],
+                        top_n_label="Visualize Top N Types / Neurons",
+                        top_n_hint=(
+                            "Number of top results to render. The grouping choice "
+                            "controls whether types or individual bodyIds are shown."
+                        ),
+                        default_visualize_by=DEFAULTS["morph_visualize_by"],
+                        dataset_provider=lambda: dataset.value,
+                        dataset_watchers=[dataset],
                     )
 
             with ui.card().classes("w-full drocat-card"):
@@ -312,7 +329,7 @@ def create_find_similar_tab():
                 finally:
                     build_button.enable()
 
-        # ============ Connection profile similarity panel ============
+        # ============ Connectivity similarity panel ============
         with ui.column().classes("w-full gap-1") as profile_panel:
             with ui.card().classes("w-full drocat-card"):
                 section_header("Query", "search")
@@ -397,15 +414,30 @@ def create_find_similar_tab():
                 )
 
         def sync_mode():
-            is_morph = mode_toggle.value == "Morphological similarity"
+            is_morph = mode_value["value"] == "Morphological similarity"
             morph_panel.set_visibility(is_morph)
             profile_panel.set_visibility(not is_morph)
+            morph_mode_button.props(
+                "color=primary" if is_morph else "color=grey-7"
+            )
+            connectivity_mode_button.props(
+                "color=grey-7" if is_morph else "color=primary"
+            )
+
+        def set_mode(value: str):
+            mode_value["value"] = value
+            sync_mode()
 
         def on_dataset_change(_e=None):
             refresh_coverage()
             refresh_roi_options()
 
-        mode_toggle.on_value_change(lambda _e: sync_mode())
+        morph_mode_button.on_click(
+            lambda _event: set_mode("Morphological similarity")
+        )
+        connectivity_mode_button.on_click(
+            lambda _event: set_mode("Connectivity similarity")
+        )
         dataset.on_value_change(on_dataset_change)
         sync_mode()
         on_dataset_change()
@@ -427,6 +459,7 @@ def create_find_similar_tab():
         output_panel.clear()
         output_panel.set_running(True)
 
+        visualization_values = visualization_settings.values()
         constructor_params = {
             "query": query[0] if len(query) == 1 else query,
             "dataset": dataset.value,
@@ -439,8 +472,11 @@ def create_find_similar_tab():
             "candidate_source": candidate_source.value,
             "candidate_expansion": int(candidate_expansion.value),
             "roi_filter": None if roi_filter.value == "All ROIs" else [roi_filter.value],
-            "visualize_top_n": int(visualize_top_n.value),
-            "visualize_by": visualize_by.value,
+            "visualize_top_n": (
+                visualization_values["visualize_top_n"] if visualize.value else 0
+            ),
+            "visualize_by": visualization_values["visualize_by"],
+            "visualization_settings": visualization_values,
             "output_dir": morph_output_dir.value,
             "saveas": "",
             "verbose": True,
@@ -505,7 +541,7 @@ def create_find_similar_tab():
         )
 
     async def run_similar():
-        if mode_toggle.value == "Morphological similarity":
+        if mode_value["value"] == "Morphological similarity":
             await run_morphological()
         else:
             await run_profile()

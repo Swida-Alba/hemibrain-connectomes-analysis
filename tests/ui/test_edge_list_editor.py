@@ -369,6 +369,21 @@ class TestEditorHandle:
         assert handle.edit_inputs["source"].value == "aMe10"
         assert handle.edit_inputs["weight"].value == "47"
 
+    def test_refresh_keeps_python_and_table_selection_aligned(self, store_patch_for_component):
+        client, handle = build_editor(store_patch_for_component)
+        handle.set_rows(ROWS)
+        handle.on_select(SimpleNamespace(selection=[{**ROWS[1], "id": 1}]))
+        handle.edit_inputs["weight"].value = "99"
+        handle.apply_edit()
+        assert handle._selected_ids == [1]
+        assert [row["id"] for row in handle.table.selected] == [1]
+        assert handle.rows[1]["weight"] == "99"
+
+        # Loading/replacing rows clears both representations of selection.
+        handle.set_rows(ROWS[:1])
+        assert handle._selected_ids == []
+        assert handle.table.selected == []
+
     def test_rename_deletes_previous_draft(self, store_patch_for_component):
         client, handle = build_editor(store_patch_for_component)
         handle.set_rows(ROWS, name="old name")

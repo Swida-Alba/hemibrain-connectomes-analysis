@@ -1,7 +1,7 @@
 """ConnectivityProfiling Tab - Intra-dataset connectivity profile comparison."""
 
 from nicegui import ui
-from ..config import DEFAULTS
+from ..config import DEFAULTS, get_tab_output_dir
 from ..components.common import (
     dataset_multi_selector, neuron_list_input, number_input, select_input, checkbox_input,
     dir_input, apply_filter_mode, section_header, param_grid, tool_page,
@@ -10,6 +10,12 @@ from ..components.mapping_editor import custom_grouping_block
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
 from ..type_suggestions import datasets_suggestions
+
+
+def _resolve_profiling_output_dir(value):
+    """Resolve the path selected in the profiling tab before a run starts."""
+    selected = str(value or "").strip()
+    return selected or str(get_tab_output_dir("connectivity_profiling")).strip()
 
 
 def create_connectivity_profiling_tab():
@@ -72,9 +78,10 @@ def create_connectivity_profiling_tab():
 
                 ui.separator()
                 ui.label(
-                    "All six similarity matrices are generated: combined, Jaccard, "
+                    "All six similarity matrices are generated: overall, Jaccard, "
                     "weighted Jaccard, cosine, rank correlation, and rank-correlation "
-                    "union (same metric set as the Find Homologs tab)."
+                    "union (same metric set as the Find Homologs tab). Overall combines "
+                    "upstream and downstream connectivity."
                 ).classes("text-caption drocat-muted")
                 cluster_heatmap = checkbox_input(
                     "Generate Heatmaps", True,
@@ -187,10 +194,17 @@ def create_connectivity_profiling_tab():
         output_panel.clear()
         output_panel.set_running(True)
 
+        # Keep the path selected in this tab as the single source of truth for
+        # both the backend constructor and the output-file scanner.  The
+        # fallback matters when the input has not emitted its first browser
+        # change event yet (for example, after opening the tab and clicking
+        # Run immediately).
+        profiling_output_dir = _resolve_profiling_output_dir(output_dir.value)
+
         constructor_params = {
             "query": query,
             "datasets": selected_datasets,
-            "output_dir": output_dir.value,
+            "output_dir": profiling_output_dir,
             "top_k": int(top_k.value),
             "top_m": int(top_m.value),
             "min_synapse_threshold": int(min_synapse_threshold.value),
@@ -211,13 +225,20 @@ def create_connectivity_profiling_tab():
         if aggregation_level.value == "custom group":
             constructor_params["custom_mapping_file"] = mapping_path
 
-        result = await output_panel.run(runner, "connectivity_profiling", constructor_params, "run",
-                                        output_dir=output_dir.value)
+        result = await output_panel.run(
+            runner,
+            "connectivity_profiling",
+            constructor_params,
+            "run",
+            output_dir=profiling_output_dir,
+        )
 
         output_panel.set_running(False)
         output_panel.set_status("Completed" if result["returncode"] == 0 else "Failed",
                                 "green" if result["returncode"] == 0 else "red")
-        output_panel.show_files(result["files"], result.get("output_folder") or output_dir.value)
+        output_panel.show_files(
+            result["files"], result.get("output_folder") or profiling_output_dir
+        )
 
     output_panel.run_button.on_click(run_profiling)
     output_panel.cancel_button.on_click(runner.cancel)

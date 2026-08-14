@@ -454,10 +454,10 @@ In the browser:
 ### For Large Networks (>500 edges)
 
 ```python
-# Limit edges for performance
+# Visualization-only edge cap for performance; pathfinding is unchanged
 vp = VisualizePath(
     'data.xlsx',
-    edgeN_limit=500,   # Keep top 500 edges by weight
+    edgeN_limit=500,   # Draw at most 500 strongest edges
     edge_width_scale='log'  # Better visual separation
 )
 ```
