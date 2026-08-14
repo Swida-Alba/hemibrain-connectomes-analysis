@@ -165,13 +165,8 @@ def save_draft(name: str, rows: List[dict], dirty: bool = True) -> Optional[str]
             "dirty": bool(dirty),
             "row_count": len(rows),
         }
-        has_color = any(row["color"] for row in rows)
-        columns = list(REQUIRED_COLUMNS) + (["color"] if has_color else [])
-        lines = [",".join(columns)]
-        for row in rows:
-            lines.append(",".join(_csv_quote(row[col]) for col in columns))
         try:
-            _atomic_write_text(_csv_path(slug), "\n".join(lines) + "\n")
+            _atomic_write_text(_csv_path(slug), rows_to_csv(rows))
             _write_meta(slug, meta)
         except OSError:
             return None
@@ -182,6 +177,17 @@ def _csv_quote(value: str) -> str:
     if any(ch in value for ch in ',"\n'):
         return '"' + value.replace('"', '""') + '"'
     return value
+
+
+def rows_to_csv(rows: List[dict]) -> str:
+    """Serialize rows in the PlotPath edge-list format."""
+    normalized = normalize_rows(rows)
+    has_color = any(row["color"] for row in normalized)
+    columns = list(REQUIRED_COLUMNS) + (["color"] if has_color else [])
+    lines = [",".join(columns)]
+    for row in normalized:
+        lines.append(",".join(_csv_quote(row[col]) for col in columns))
+    return "\n".join(lines) + "\n"
 
 
 def load_draft(name: str) -> Optional[List[dict]]:

@@ -86,6 +86,20 @@ class TestNeuPrintSimplifiedCache:
         # simplified: strictly fewer nodes than the raw 120-node neuron
         assert len(cached.nodes) < len(neuron.nodes)
 
+    def test_save_warms_simp90_cache_for_below90_render(self, tmp_path):
+        vs = build_vs(tmp_path)
+        vs.skeleton_mesh_simplification = 0.5
+        neuron = make_neuron(120)
+        neuron.id = 101
+
+        vs._save_cached_neurons(pd.DataFrame({"bodyId": [101]}), [neuron])
+
+        cache_dir = Path(tmp_path) / "cache" / "hemibrain_v1_2_1" / "skeletons"
+        with open(cache_dir / "101.pkl", "rb") as f:
+            cached = pickle.load(f)
+        assert len(cached.nodes) < len(neuron.nodes)
+        assert (cache_dir / ".level").read_text().strip() == "simp90"
+
     def test_load_reads_simplified_cache(self, tmp_path):
         vs = build_vs(tmp_path)
         neuron = make_neuron(120)
@@ -114,6 +128,24 @@ class TestNeuPrintSimplifiedCache:
         cache_dir.mkdir(parents=True, exist_ok=True)
         (cache_dir / ".level").write_text("simp90\n")
         assert vs._skeleton_cache_is_simplified() is True
+
+    def test_effective_render_level_uses_current_render_source(self, tmp_path):
+        vs = build_vs(tmp_path)
+        vs.skeleton_mesh_simplification = 0.95
+        neuron = make_neuron(120)
+        neuron.id = 101
+        vs._save_cached_neurons(pd.DataFrame({"bodyId": [101]}), [neuron])
+
+        # A raw first-run render must use the requested level directly even
+        # though the simp90 marker has already been written for future runs.
+        assert vs._effective_render_simplification(
+            is_fafb=False, using_simplified_cache=False
+        ) == pytest.approx(0.95)
+        # A cache-hit render uses the remaining relative reduction:
+        # (1 - .95) / (1 - .90) = 50% of cached faces kept.
+        assert vs._effective_render_simplification(
+            is_fafb=False, using_simplified_cache=True
+        ) == pytest.approx(0.5)
 
 
 class TestFlywireCacheUntouched:

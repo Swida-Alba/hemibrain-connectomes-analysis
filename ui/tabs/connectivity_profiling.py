@@ -48,7 +48,7 @@ def create_connectivity_profiling_tab():
             with param_grid(2):
                 datasets_select = dataset_multi_selector(
                     label="Datasets to compare (select one or more)",
-                    default=[],
+                    default=["male-cns:v1.0"],
                     hint="Select one or more datasets. One dataset with multiple thresholds "
                          "is also supported. Two or more datasets profile the same query in "
                          "each dataset (names mapped per dataset) and add within-dataset "
@@ -101,10 +101,10 @@ def create_connectivity_profiling_tab():
                     ).props('id=select-aggregation')
                     skip_bodyid_level = select_input(
                         "BodyId-Level Computation", ["auto", "skip", "compute"], "auto",
-                        hint="'auto': skip when >1000 bodyIds. 'skip': type-level only. "
-                             "'compute': always compute bodyId-level matrices. "
-                             "Ignored when Aggregation Level is 'bodyid' (the main matrices "
-                             "are already bodyId-level).",
+                        hint="'auto': skip bodyId matrices only when >1000 bodyIds. "
+                             "'skip': type-level only. 'compute': always include bodyId "
+                             "and type-average-bodyId matrices. Type and bodyId levels "
+                             "are both available in the profiling output.",
                     )
                 with ui.row().classes("gap-4"):
                     show_figures = checkbox_input(

@@ -830,6 +830,99 @@ html, body {
 .drocat-section-icon .q-icon { font-size: 17px; }
 .drocat-section-title { font-size: 14px; font-weight: 650; color: var(--drocat-navy); }
 
+/* ---------- Net-Viz edge-list editor ---------- */
+.drocat-edge-editor {
+    overflow: hidden;
+    border: 1px solid var(--drocat-line) !important;
+    border-radius: var(--drocat-radius-md) !important;
+    background: var(--drocat-surface) !important;
+    box-shadow: 0 2px 10px rgba(11, 31, 58, .05) !important;
+}
+.drocat-edge-editor .q-expansion-item__container,
+.drocat-edge-editor .q-expansion-item__content {
+    background: var(--drocat-surface) !important;
+}
+.drocat-edge-editor .q-item {
+    min-height: 52px;
+    padding: 8px 18px;
+    color: var(--drocat-navy);
+    font-weight: 650;
+}
+.drocat-edge-editor .q-expansion-item__content {
+    padding: 4px 18px 18px;
+}
+.drocat-edge-table {
+    overflow: hidden;
+    border-color: var(--drocat-line-strong) !important;
+    border-radius: 10px;
+}
+.drocat-edge-table .q-table__middle {
+    overflow-x: auto;
+}
+.drocat-edge-table .q-table thead tr {
+    background: var(--drocat-cobalt-soft);
+}
+.drocat-edge-table .q-table th {
+    height: 44px;
+    color: var(--drocat-navy);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .02em;
+    text-transform: none;
+}
+.drocat-edge-table .q-table td {
+    height: 48px;
+    color: var(--drocat-navy);
+    font-size: 13px;
+}
+.drocat-edge-header-cell,
+.drocat-edge-cell {
+    border-right: 1px solid var(--drocat-line) !important;
+}
+.drocat-edge-header-cell.drocat-edge-divider,
+.drocat-edge-cell.drocat-edge-divider {
+    border-right-color: var(--drocat-line-strong) !important;
+}
+.drocat-edge-select-cell {
+    width: 52px;
+    min-width: 52px;
+    border-right: 1px solid var(--drocat-line-strong) !important;
+    text-align: center;
+}
+.drocat-edge-cell {
+    min-width: 142px;
+    padding: 4px 10px !important;
+}
+.drocat-edge-cell:nth-child(4) {
+    min-width: 105px;
+}
+.drocat-edge-cell:nth-child(5) {
+    min-width: 180px;
+}
+.drocat-edge-table .q-field--borderless .q-field__control {
+    min-height: 34px;
+    padding: 0 4px;
+}
+.drocat-edge-table .q-field--borderless .q-field__native,
+.drocat-edge-table .q-field--borderless .q-field__input {
+    color: var(--drocat-navy) !important;
+    font-size: 13px;
+}
+.drocat-edge-row-even > td {
+    background: #f7fbff !important;
+}
+.drocat-edge-row-odd > td {
+    background: var(--drocat-surface) !important;
+}
+.drocat-edge-row-even:hover > td,
+.drocat-edge-row-odd:hover > td {
+    background: #eaf3ff !important;
+}
+.drocat-empty-canvas-btn {
+    min-height: 40px;
+    white-space: nowrap;
+}
+
 /* ---------- Form controls ---------- */
 .q-field--outlined .q-field__control {
     background: var(--drocat-surface) !important;

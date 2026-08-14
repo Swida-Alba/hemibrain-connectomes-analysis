@@ -1,0 +1,44 @@
+======================================================================
+VisualizeSkeleton Parameters - Complete Configuration
+======================================================================
+
+[Basic Info]
+  Dataset:          male-cns:v1.0
+  Timestamp:        20260815_001353
+  Client Type:      neuprint
+  Server:           https://neuprint.janelia.org
+  Output Directory: /Users/apple/Documents/GitHub/hemibrain-connectomes-analysis-v3.1/test_simp_sklt
+  Save Filename:    aMe12_no_simplification
+  Include Timestamp:False
+  Verbose:          simple
+
+[Layers]
+  Layer 0: aMe12 (6 neurons)
+           IDs: 12211, 12517, 12737, 12740, 13190, ... (+1 more)
+  Total Layers:     1
+
+[Color Settings]
+  Neuron Colors:    ('rgba(31, 119, 180, 0.2)',)
+  Neuron Alpha:     0.2
+  Synapse Alpha:    0.6
+  Brain Mesh Color: auto
+  VNC Mesh Color:   auto
+  Mesh ROI Color:   rgba(100, 100, 100, 0.1)
+
+[Visualization]
+  Skeleton Mode:    tube
+  Skeleton Mesh Simplification: 0.0
+  Backend:          plotly
+  Brain Mesh:       none
+  VNC Mesh:         False
+  Legend Mode:      layer
+  Expand Colors:    interpolation
+  Show Soma:        True
+
+[Synapse Settings]
+  Synapse Mode:     scatter
+  Synapse Size:     1
+  Min Synapse Num:  10
+  Synapse Alpha:    0.6
+
+======================================================================

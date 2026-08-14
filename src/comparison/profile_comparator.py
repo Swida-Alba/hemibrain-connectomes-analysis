@@ -7721,6 +7721,33 @@ class ConnectivityProfileComparer:
     )
     _REPORT_DIRECTIONS = ('combined', 'upstream', 'downstream')
 
+    # Use explicit report scales so zero is always white. Positive-only
+    # similarity metrics run from white to red; signed rank metrics run from
+    # blue through white to red.
+    _REPORT_POSITIVE_COLORSCALE = (
+        (0.0, '#ffffff'),
+        (0.1, '#fff5f0'),
+        (0.25, '#fee0d2'),
+        (0.4, '#fcbba1'),
+        (0.55, '#fc9272'),
+        (0.7, '#fb6a4a'),
+        (0.85, '#de2d26'),
+        (1.0, '#a50f15'),
+    )
+    _REPORT_DIVERGING_COLORSCALE = (
+        (0.0, '#053061'),
+        (0.1, '#2166ac'),
+        (0.2, '#4393c3'),
+        (0.3, '#92c5de'),
+        (0.4, '#d1e5f0'),
+        (0.5, '#ffffff'),
+        (0.6, '#fddbc7'),
+        (0.7, '#f4a582'),
+        (0.8, '#d6604d'),
+        (0.9, '#b2182b'),
+        (1.0, '#67001f'),
+    )
+
     def __init__(
         self,
         query: Union[str, int, List[Union[str, int, List]], Dict[str, List]],
@@ -7802,8 +7829,9 @@ class ConnectivityProfileComparer:
                 - False: Always compute bodyId-level matrices
                 - True: Always skip bodyId-level matrices  
                 - 'auto': Skip if n_bodyId_profiles > 1000 (default)
-                Note: For cross-dataset comparison, bodyId-level is always skipped
-                since profiles are from different datasets.
+            Note: Cross-dataset comparison always skips bodyId-level matrices;
+                multi-dataset profiling can compute bodyId-level intra-dataset
+                matrices for each dataset.
             use_auto_type_mapping: Enable automatic type name mapping for cross-dataset
                 comparison (default: True). When enabled, partner types are standardized
                 to their canonical (male-cns) names before comparison. This allows
@@ -7893,11 +7921,11 @@ class ConnectivityProfileComparer:
             else:
                 self.query, self._custom_group_names = self._normalize_query(query)
             
-            # Cross-dataset comparisons always skip the separate bodyId-level
-            # matrices (the intra matrices already cover each dataset).
-            if skip_bodyId_level != True:
-                self._log_pending = f"Multi-dataset comparison: separate bodyId-level matrices skipped"
-            self.skip_bodyId_level = True
+            # Multi-dataset runs can compute bodyId-level matrices for each
+            # dataset's intra-dataset comparison, using the same skip policy
+            # as single-dataset runs.  Inter-dataset matrices remain type-level
+            # because bodyIds are not comparable across datasets.
+            self.skip_bodyId_level = skip_bodyId_level
             
         else:
             # Intra-dataset comparison mode
@@ -8433,6 +8461,7 @@ class ConnectivityProfileComparer:
         dataset: Optional[str] = None,
         query: Optional[List] = None,
         custom_group_names: Optional[List[str]] = None,
+        aggregation_level: Optional[str] = None,
     ) -> Dict[str, List]:
         """
         Get the neurons/groups to compare based on query and aggregation level.
@@ -8463,6 +8492,7 @@ class ConnectivityProfileComparer:
             query = self.query
         if custom_group_names is None:
             custom_group_names = self._custom_group_names
+        effective_aggregation = aggregation_level or self.aggregation_level
         
         neurons = {}
         
@@ -8509,7 +8539,7 @@ class ConnectivityProfileComparer:
         # Process bodyIds
         for bid in bodyid_items:
             ntype = bodyid_to_type.get(bid)
-            if self.aggregation_level == 'bodyid':
+            if effective_aggregation == 'bodyid':
                 # rows are individual neurons
                 label = f"{bid}_{ntype}" if ntype else str(bid)
                 neurons[label] = [bid]
@@ -8526,7 +8556,7 @@ class ConnectivityProfileComparer:
             # It's a type name or pattern - get all bodyIds for this type
             body_ids = self.profiler.get_bodyids_for_type(item_str, dataset)
             if body_ids:
-                if self.aggregation_level == 'bodyid':
+                if effective_aggregation == 'bodyid':
                     # every bodyId of the type is its own row
                     for bid in body_ids:
                         neurons[f"{bid}_{item_str}"] = [bid]
@@ -8541,7 +8571,7 @@ class ConnectivityProfileComparer:
                         tids = self.profiler.get_bodyids_for_type(tname, dataset)
                         if not tids:
                             continue
-                        if self.aggregation_level == 'bodyid':
+                        if effective_aggregation == 'bodyid':
                             for bid in tids:
                                 neurons[f"{bid}_{tname}"] = [bid]
                         else:
@@ -8556,7 +8586,9 @@ class ConnectivityProfileComparer:
         return neurons
     
     def _extract_profiles_for_dataset(
-        self, dataset: str
+        self,
+        dataset: str,
+        aggregation_level: Optional[str] = None,
     ) -> Tuple[Dict[str, ConnectivityProfile], Dict[Tuple[str, int], ConnectivityProfile]]:
         """
         Extract both type-aggregated profiles and individual bodyId profiles
@@ -8571,10 +8603,12 @@ class ConnectivityProfileComparer:
             - type_profiles: Dictionary mapping type_label -> aggregated ConnectivityProfile
             - bodyid_profiles: Dictionary mapping (type_label, bodyId) -> individual ConnectivityProfile
         """
+        effective_aggregation = aggregation_level or self.aggregation_level
         query = self._mapped_query_for(dataset) if self.is_multi_dataset else self.query
         neurons = self._get_neurons_to_compare(
             dataset=dataset, query=query,
             custom_group_names=self._custom_group_names,
+            aggregation_level=effective_aggregation,
         )  # {type_label: [bodyIds]}
         
         type_profiles = {}
@@ -8626,7 +8660,7 @@ class ConnectivityProfileComparer:
                 bodyid_profiles[(label, bid)] = profile
         
         # Create aggregated type profiles
-        if self.aggregation_level == 'bodyid':
+        if effective_aggregation == 'bodyid':
             # 'bodyid' aggregation: rows are individual neurons — labels from
             # _get_neurons_to_compare already embed the bodyId
             # ({bodyId}_{type}), so no mean-pooling is needed.
@@ -8657,7 +8691,24 @@ class ConnectivityProfileComparer:
     def _extract_all_profiles(self) -> Tuple[Dict[str, ConnectivityProfile], Dict[Tuple[str, int], ConnectivityProfile]]:
         """Extract profiles for the primary dataset (single-dataset mode)."""
         return self._extract_profiles_for_dataset(self.dataset)
-    
+
+    @staticmethod
+    def _same_name_flag(
+        per_ds: Dict[str, Tuple[str, ConnectivityProfile]],
+        datasets: List[str],
+    ) -> int:
+        """Return 1 when every dataset has the same non-empty resolved name."""
+        resolved_names = [
+            '' if ds not in per_ds or per_ds[ds][0] is None
+            else str(per_ds[ds][0]).strip()
+            for ds in datasets
+        ]
+        return int(
+            bool(resolved_names)
+            and all(resolved_names)
+            and len(set(resolved_names)) == 1
+        )
+
     # ------------------------------------------------------------------
     # Inter-dataset comparisons (same queried neuron across datasets)
     # ------------------------------------------------------------------
@@ -8704,12 +8755,13 @@ class ConnectivityProfileComparer:
                     ntype = (self.profiler.get_types_for_bodyids([bid], ds) or {}).get(bid)
                     if not ntype:
                         continue
+                    candidate_labels = [self._map_query_item(ntype, ds)]
                     if self.aggregation_level == 'bodyid':
-                        label = f"{bid}_{ntype}"
-                    else:
-                        label = self._map_query_item(ntype, ds)
-                    if label in profiles:
-                        per_ds[ds] = (label, profiles[label])
+                        candidate_labels.insert(0, f"{bid}_{ntype}")
+                    for label in candidate_labels:
+                        if label in profiles:
+                            per_ds[ds] = (label, profiles[label])
+                            break
                 if len(per_ds) >= 2:
                     anchors[item_str] = per_ds
             elif self._looks_like_pattern(item_str):
@@ -9401,6 +9453,20 @@ class ConnectivityProfileComparer:
                             
                             metric_matrices['jaccard'][i, j] = scores['jaccard']
                             metric_matrices['jaccard'][j, i] = scores['jaccard']
+
+                            metric_matrices['weighted_jaccard'][i, j] = scores.get(
+                                'weighted_jaccard', 0.0
+                            )
+                            metric_matrices['weighted_jaccard'][j, i] = scores.get(
+                                'weighted_jaccard', 0.0
+                            )
+
+                            metric_matrices['combined'][i, j] = scores.get(
+                                'combined', 0.0
+                            )
+                            metric_matrices['combined'][j, i] = scores.get(
+                                'combined', 0.0
+                            )
                             
                             metric_matrices['cosine'][i, j] = scores['cosine']
                             metric_matrices['cosine'][j, i] = scores['cosine']
@@ -9409,9 +9475,13 @@ class ConnectivityProfileComparer:
                             metric_matrices['rank_corr'][i, j] = rank_val
                             metric_matrices['rank_corr'][j, i] = rank_val
                             
-                            rank_norm = scores['rank_norm'] if not np.isnan(scores.get('rank_norm', np.nan)) else 0.5
-                            metric_matrices['rank_corr_union'][i, j] = rank_norm
-                            metric_matrices['rank_corr_union'][j, i] = rank_norm
+                            rank_union_val = scores.get('rank_union', np.nan)
+                            rank_union_val = (
+                                rank_union_val
+                                if not np.isnan(rank_union_val) else 0.0
+                            )
+                            metric_matrices['rank_corr_union'][i, j] = rank_union_val
+                            metric_matrices['rank_corr_union'][j, i] = rank_union_val
                             
                             pbar.update(1)
             
@@ -9902,7 +9972,7 @@ a:hover { text-decoration: underline; }
 .level-heading h3 { margin: 0; font-size: 15px; }
 .level-heading span { color: var(--muted); font-size: 12px; }
 .metric-grid {
-  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 15px; align-items: stretch;
 }
 .heatmap-card {
@@ -9929,9 +9999,6 @@ a:hover { text-decoration: underline; }
 .mapping-table th, .mapping-table td { border: 1px solid var(--line); padding: 7px 9px; text-align: left; }
 .mapping-table th { background: var(--surface-soft); color: var(--muted); font-weight: 750; }
 .muted { color: var(--muted); font-size: 12px; }
-@media (max-width: 1120px) {
-  .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
 @media (max-width: 700px) {
   .report-shell { padding: 17px 12px 34px; }
   .report-hero, .section-card { padding: 17px; border-radius: 14px; }
@@ -10019,8 +10086,13 @@ a:hover { text-decoration: underline; }
         x_title: str,
         y_title: str,
         include_plotlyjs: bool = False,
+        square_cells: bool = False,
     ) -> Tuple[Optional[str], bool]:
-        """Render one clustered Plotly heatmap fragment without cell labels."""
+        """Render one clustered Plotly heatmap fragment without cell labels.
+
+        ``square_cells`` is used for intra-dataset similarity matrices, where
+        the row and column dimensions represent the same set of items.
+        """
         if matrix is None or matrix.empty:
             return None, False
 
@@ -10038,7 +10110,10 @@ a:hover { text-decoration: underline; }
         y_labels = [str(value) for value in ordered.index]
 
         is_diverging = metric in {'rank_corr', 'rank_corr_union'}
-        colorscale = 'RdBu' if is_diverging else 'Blues'
+        colorscale = (
+            cls._REPORT_DIVERGING_COLORSCALE
+            if is_diverging else cls._REPORT_POSITIVE_COLORSCALE
+        )
         zmin, zmax = (-1.0, 1.0) if is_diverging else (0.0, 1.0)
         heatmap_kwargs = {
             'z': z,
@@ -10048,8 +10123,6 @@ a:hover { text-decoration: underline; }
             'colorscale': colorscale,
             'zmin': zmin,
             'zmax': zmax,
-            'xgap': 1,
-            'ygap': 1,
             'hoverongaps': False,
             'connectgaps': False,
             'colorbar': {
@@ -10067,7 +10140,34 @@ a:hover { text-decoration: underline; }
         fig = go.Figure(data=[go.Heatmap(**heatmap_kwargs)])
         max_label_length = max((len(label) for label in y_labels), default=12)
         left_margin = min(235, max(90, max_label_length * 5 + 22))
+        matrix_dimension = max(len(y_labels), len(x_labels))
         row_height = 18 if len(y_labels) > 60 else 23
+        if square_cells:
+            # Two-column cards are wider than the previous three-column
+            # layout. Give square intra-dataset matrices enough vertical
+            # room before Plotly applies the equal-axis constraint.
+            row_height = 18 if matrix_dimension > 60 else 27
+        height = max(335, min(880, 185 + len(y_labels) * row_height))
+        if square_cells:
+            height = max(390, height)
+        xaxis = {
+            'title': {'text': x_title, 'font': {'size': 10}},
+            'tickangle': -42,
+            'automargin': True,
+        }
+        yaxis = {
+            'title': {'text': y_title, 'font': {'size': 10}},
+            'autorange': 'reversed',
+            'automargin': True,
+        }
+        if square_cells:
+            # Equal axis scaling makes each matrix cell a true square even
+            # when the responsive report card is resized.
+            yaxis.update({
+                'scaleanchor': 'x',
+                'scaleratio': 1,
+                'constrain': 'domain',
+            })
         fig.update_layout(
             template='plotly_white',
             title={
@@ -10076,7 +10176,7 @@ a:hover { text-decoration: underline; }
                 'xanchor': 'left',
                 'font': {'size': 13, 'color': '#152238'},
             },
-            height=max(335, min(880, 185 + len(y_labels) * row_height)),
+            height=height,
             margin={
                 'l': left_margin,
                 'r': 12,
@@ -10086,16 +10186,8 @@ a:hover { text-decoration: underline; }
             font={'family': 'Inter, Arial, sans-serif', 'size': 10, 'color': '#152238'},
             paper_bgcolor='white',
             plot_bgcolor='white',
-            xaxis={
-                'title': {'text': x_title, 'font': {'size': 10}},
-                'tickangle': -42,
-                'automargin': True,
-            },
-            yaxis={
-                'title': {'text': y_title, 'font': {'size': 10}},
-                'autorange': 'reversed',
-                'automargin': True,
-            },
+            xaxis=xaxis,
+            yaxis=yaxis,
         )
 
         return fig.to_html(
@@ -10159,6 +10251,7 @@ a:hover { text-decoration: underline; }
         csv_rel: Optional[str],
         vispath_rel: Optional[str],
         plotly_state: Dict[str, bool],
+        square_cells: bool = False,
     ) -> None:
         """Append one report card with a Plotly heatmap and source links."""
         from html import escape
@@ -10191,6 +10284,7 @@ a:hover { text-decoration: underline; }
             x_title=x_title,
             y_title=y_title,
             include_plotlyjs=plotly_state.get('include_plotlyjs', True),
+            square_cells=square_cells,
         )
         status_text = 'Ward clustered' if clustered else 'Original order'
         lines.append(
@@ -10224,8 +10318,9 @@ a:hover { text-decoration: underline; }
         x_title: str,
         y_title: str,
         plotly_state: Dict[str, bool],
+        square_cells: bool = False,
     ) -> None:
-        """Append six metric cards in a responsive three-column grid."""
+        """Append six metric cards in a responsive two-column grid."""
         metric_matrices = metric_matrices or {}
         lines.append("<div class='metric-grid'>")
         for metric in self._REPORT_METRICS:
@@ -10242,6 +10337,7 @@ a:hover { text-decoration: underline; }
                 csv_rel=csv_paths.get(metric),
                 vispath_rel=vispath_paths.get(metric),
                 plotly_state=plotly_state,
+                square_cells=square_cells,
             )
         lines.append('</div>')
 
@@ -10303,7 +10399,7 @@ a:hover { text-decoration: underline; }
                         lines.append(
                             f"<section class='level-block'><div class='level-heading'>"
                             f"<h3>{escape(level_title)}</h3>"
-                            "<span>3 cards per row · 6 metrics</span></div>"
+                            "<span>2 cards per row · 6 metrics</span></div>"
                         )
                         if not matrices:
                             lines.append(
@@ -10331,6 +10427,7 @@ a:hover { text-decoration: underline; }
                             f'{level_title} · {direction_label}',
                             csv_paths, vispath_paths,
                             'Neuron / type', 'Neuron / type', plotly_state,
+                            square_cells=True,
                         )
                         lines.append('</section>')
 
@@ -10669,7 +10766,12 @@ a:hover { text-decoration: underline; }
     def _save_multi_dataset_results(
         self,
         profiles_by_dataset: Dict[str, Dict[str, ConnectivityProfile]],
-        matrices_by_dataset: Dict[str, Dict[str, Dict[str, pd.DataFrame]]],
+        bodyid_profiles_by_dataset: Dict[
+            str, Dict[Tuple[str, int], ConnectivityProfile]
+        ],
+        matrices_by_dataset: Dict[
+            str, Dict[str, Dict[str, Dict[str, pd.DataFrame]]]
+        ],
         inter_matrices: Dict[str, Dict[str, Dict[str, pd.DataFrame]]],
         anchor_profiles: Dict[str, Dict[str, Tuple[str, ConnectivityProfile]]],
     ) -> Dict[str, Any]:
@@ -10682,15 +10784,17 @@ a:hover { text-decoration: underline; }
             ├── README.txt
             ├── intra_dataset/{dataset}/     # per-dataset N×N comparisons
             │   ├── results/similarity_{direction}_{metric}.csv
+            │   ├── results/bodyid_similarity_{metric}_{direction}.csv
+            │   ├── results/type_avg_bodyid_similarity_{metric}_{direction}.csv
             │   └── visualization/heatmap_{prefix}_{direction}_{metric}.html
             ├── cross_dataset/
-            │   ├── mapping_summary.csv      # anchor -> resolved name per dataset
+            │   ├── mapping_summary.csv      # resolved names + same-name flag
             │   ├── all_types/                # overview: neurons × dataset pairs
             │   │   ├── results/similarity_{direction}_{metric}.csv
             │   │   └── visualization/heatmap_*.html
-            │   └── per_neuron/{anchor}/     # detailed same-neuron matrices
-            │       └── results/similarity_{direction}_{metric}.csv
-            └── profiles/{dataset}/aggregated/*_profile.json
+            └── profiles/{dataset}/
+                ├── individual/*_profile.json
+                └── aggregated/*_profile.json
         """
         output_path = self._get_output_path()
         output_path.mkdir(parents=True, exist_ok=True)
@@ -10701,31 +10805,51 @@ a:hover { text-decoration: underline; }
         saved = {'matrices_saved': [], 'heatmaps_generated': [],
                  'profiles_saved': [], 'output_path': str(output_path)}
 
-        # The per-anchor matrices are retained for detailed inspection.  The
-        # report-facing visualization uses one aggregate matrix whose rows are
-        # anchors and whose columns are dataset pairs.
+        # The per-anchor matrices are aggregated into one report-facing matrix
+        # whose rows are anchors and whose columns are dataset pairs. Only the
+        # consolidated form is exported.
         inter_type_matrices = self._aggregate_inter_dataset_matrices(inter_matrices)
         saved['inter_type_matrices'] = inter_type_matrices
         
         # --- intra-dataset matrices + heatmaps per dataset ---
-        for ds, matrices in matrices_by_dataset.items():
+        matrix_level_specs = {
+            'type': ('similarity', 'intra'),
+            'bodyid': ('bodyid_similarity', 'intra_bodyid'),
+            'type_avg_bodyid': ('type_avg_bodyid_similarity', 'intra_type_avg'),
+        }
+        for ds, level_matrices in matrices_by_dataset.items():
             safe_ds = self._safe_folder_name(ds)
             results_dir = intra_base / safe_ds / 'results'
             viz_dir = intra_base / safe_ds / 'visualization'
             results_dir.mkdir(parents=True, exist_ok=True)
             viz_dir.mkdir(parents=True, exist_ok=True)
-            for direction, metric_matrices in matrices.items():
-                for metric, mdf in metric_matrices.items():
-                    csv_path = results_dir / f'similarity_{direction}_{metric}.csv'
-                    mdf.to_csv(csv_path)
-                    saved['matrices_saved'].append(str(csv_path))
-            if self.generate_heatmaps:
-                self._log(f"Generating intra-dataset heatmaps for {ds}...")
-                self._generate_heatmaps_vispath(matrices, viz_dir, saved, prefix='intra')
+            for level, matrices in level_matrices.items():
+                filename_prefix, heatmap_prefix = matrix_level_specs.get(
+                    level, (None, None)
+                )
+                if filename_prefix is None:
+                    continue
+                for direction, metric_matrices in matrices.items():
+                    for metric, mdf in metric_matrices.items():
+                        csv_path = results_dir / (
+                            f'{filename_prefix}_{direction}_{metric}.csv'
+                            if level == 'type'
+                            else f'{filename_prefix}_{metric}_{direction}.csv'
+                        )
+                        mdf.to_csv(csv_path)
+                        saved['matrices_saved'].append(str(csv_path))
+                if self.generate_heatmaps:
+                    self._log(
+                        f"Generating {level} intra-dataset heatmaps for {ds}..."
+                    )
+                    self._generate_heatmaps_vispath(
+                        matrices, viz_dir, saved, prefix=heatmap_prefix
+                    )
         
         # --- aggregated profiles per dataset ---
         for ds, profiles in profiles_by_dataset.items():
-            ds_dir = profiles_base / self._safe_folder_name(ds) / 'aggregated'
+            ds_root = profiles_base / self._safe_folder_name(ds)
+            ds_dir = ds_root / 'aggregated'
             ds_dir.mkdir(parents=True, exist_ok=True)
             for label, profile in profiles.items():
                 safe_label = self._safe_folder_name(label)
@@ -10733,19 +10857,15 @@ a:hover { text-decoration: underline; }
                 with open(profile_path, 'w') as f:
                     json.dump(profile.to_dict(), f, indent=2)
                 saved['profiles_saved'].append(str(profile_path))
-        
-        # --- inter-dataset matrices + heatmaps per anchor ---
-        for anchor, matrices in inter_matrices.items():
-            safe_anchor = self._safe_folder_name(anchor)
-            results_dir = cross_base / 'per_neuron' / safe_anchor / 'results'
-            viz_dir = cross_base / 'per_neuron' / safe_anchor / 'visualization'
-            results_dir.mkdir(parents=True, exist_ok=True)
-            viz_dir.mkdir(parents=True, exist_ok=True)
-            for direction, metric_matrices in matrices.items():
-                for metric, mdf in metric_matrices.items():
-                    csv_path = results_dir / f'similarity_{direction}_{metric}.csv'
-                    mdf.to_csv(csv_path)
-                    saved['matrices_saved'].append(str(csv_path))
+
+            bodyid_dir = ds_root / 'individual'
+            bodyid_dir.mkdir(parents=True, exist_ok=True)
+            for (type_label, bid), profile in bodyid_profiles_by_dataset.get(ds, {}).items():
+                safe_label = self._safe_folder_name(f'{bid}_{type_label}')
+                profile_path = bodyid_dir / f'{safe_label}_profile.json'
+                with open(profile_path, 'w') as f:
+                    json.dump(profile.to_dict(), f, indent=2)
+                saved['profiles_saved'].append(str(profile_path))
 
         # --- aggregate inter-dataset matrices + heatmaps (all neurons) ---
         all_types_results = cross_base / 'all_types' / 'results'
@@ -10771,7 +10891,10 @@ a:hover { text-decoration: underline; }
         for anchor, per_ds in anchor_profiles.items():
             row = {'anchor': anchor}
             for ds in self.datasets:
-                row[ds] = per_ds[ds][0] if ds in per_ds else ''
+                resolved_name = per_ds[ds][0] if ds in per_ds else ''
+                resolved_name = '' if resolved_name is None else str(resolved_name).strip()
+                row[ds] = resolved_name
+            row['same name'] = self._same_name_flag(per_ds, self.datasets)
             summary_rows.append(row)
         if summary_rows:
             summary_df = pd.DataFrame(summary_rows)
@@ -10809,14 +10932,15 @@ a:hover { text-decoration: underline; }
             f"Aggregation level: {self.aggregation_level}",
             f"Auto type mapping: {'ON' if self._type_mapper is not None else 'OFF'}",
             "",
-            "intra_dataset/{dataset}/: N×N similarity of the queried neurons within",
-            "  each dataset (rows/columns = types, bodyIds or custom groups).",
+            "intra_dataset/{dataset}/: per-dataset N×N similarity at three levels:",
+            "  results/similarity_* (type), bodyid_similarity_* (bodyId), and",
+            "  type_avg_bodyid_similarity_* (type similarity averaged from bodyIds).",
+            "profiles/{dataset}/individual/: individual bodyId connectivity profiles.",
+            "profiles/{dataset}/aggregated/: mean-pooled type/group profiles.",
             "cross_dataset/all_types/: overview matrices with neurons as rows and",
             "  dataset pairs as columns (one heatmap per direction/metric).",
-            "cross_dataset/per_neuron/{anchor}/: detailed datasets × datasets similarity of the",
-            "  SAME queried neuron across datasets (homolog-finding backend algorithm,",
-            "  partner types standardized to the male-cns v1.0 canonical names).",
-            "cross_dataset/mapping_summary.csv: resolved name of each anchor per dataset.",
+            "cross_dataset/mapping_summary.csv: resolved name of each anchor per dataset",
+            "  plus a numeric same-name flag (1 = same non-empty name everywhere).",
             "report.html: Plotly heatmaps with local VisPath editor links.",
             "",
             f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
@@ -10841,7 +10965,9 @@ a:hover { text-decoration: underline; }
     def _generate_overall_report(
         self,
         output_path: Path,
-        matrices_by_dataset: Dict[str, Dict[str, Dict[str, pd.DataFrame]]],
+        matrices_by_dataset: Dict[
+            str, Dict[str, Dict[str, Dict[str, pd.DataFrame]]]
+        ],
         inter_matrices: Dict[str, Dict[str, Dict[str, pd.DataFrame]]],
         anchor_profiles: Dict[str, Dict[str, Tuple[str, ConnectivityProfile]]],
         inter_type_matrices: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None,
@@ -10888,42 +11014,104 @@ a:hover { text-decoration: underline; }
 
             def render_dataset(ds: str, dataset_panel_id: str) -> None:
                 safe_ds = self._safe_folder_name(ds)
-                matrices = matrices_by_dataset.get(ds) or {}
+                raw_matrices = matrices_by_dataset.get(ds) or {}
+                if any(direction in raw_matrices for direction in directions):
+                    # Accept the old flat shape when rendering a report from
+                    # an in-memory caller created before the level split.
+                    level_matrices = {'type': raw_matrices}
+                else:
+                    level_matrices = raw_matrices
 
-                def render_direction(direction: str, _direction_panel_id: str) -> None:
-                    direction_label = self._direction_display_name(direction)
-                    metric_matrices = matrices.get(direction, {})
-                    csv_paths = {
-                        metric: (
-                            f'intra_dataset/{safe_ds}/results/'
-                            f'similarity_{direction}_{metric}.csv'
-                        )
-                        for metric in self._REPORT_METRICS
-                    }
-                    vispath_paths = {
-                        metric: (
-                            f'intra_dataset/{safe_ds}/visualization/'
-                            f'heatmap_intra_{direction}_{metric}.html'
-                        )
-                        for metric in self._REPORT_METRICS
-                    }
-                    lines.append(
-                        f"<div class='direction-intro'><h3 class='direction-title'>{escape(direction_label)}</h3>"
-                        f"<div class='direction-note'>{escape(self._direction_note(direction))}</div></div>"
+                level_specs = (
+                    ('type', 'Type level', 'similarity', 'intra'),
+                    ('bodyid', 'BodyId level', 'bodyid_similarity', 'intra_bodyid'),
+                    (
+                        'type_avg_bodyid',
+                        'Type average of bodyIds',
+                        'type_avg_bodyid_similarity',
+                        'intra_type_avg',
+                    ),
+                )
+
+                def render_level(level: str, level_panel_id: str) -> None:
+                    matrices = level_matrices.get(level) or {}
+                    level_label = next(
+                        spec[1] for spec in level_specs if spec[0] == level
                     )
-                    self._append_report_metric_grid(
-                        lines, output_path, metric_matrices,
-                        f'Intra-dataset · {ds} · {direction_label}',
-                        csv_paths, vispath_paths,
-                        'Neuron / type', 'Neuron / type', plotly_state,
+                    filename_prefix = next(
+                        spec[2] for spec in level_specs if spec[0] == level
+                    )
+                    heatmap_prefix = next(
+                        spec[3] for spec in level_specs if spec[0] == level
+                    )
+
+                    def render_direction(
+                        direction: str, _direction_panel_id: str
+                    ) -> None:
+                        direction_label = self._direction_display_name(direction)
+                        metric_matrices = matrices.get(direction, {})
+                        if not metric_matrices:
+                            lines.append(
+                                "<div class='heatmap-empty'>This profile level "
+                                "was not computed for this run.</div>"
+                            )
+                            return
+                        if level == 'type':
+                            csv_paths = {
+                                metric: (
+                                    f'intra_dataset/{safe_ds}/results/'
+                                    f'similarity_{direction}_{metric}.csv'
+                                )
+                                for metric in self._REPORT_METRICS
+                            }
+                        else:
+                            csv_paths = {
+                                metric: (
+                                    f'intra_dataset/{safe_ds}/results/'
+                                    f'{filename_prefix}_{metric}_{direction}.csv'
+                                )
+                                for metric in self._REPORT_METRICS
+                            }
+                        vispath_paths = {
+                            metric: (
+                                f'intra_dataset/{safe_ds}/visualization/'
+                                f'heatmap_{heatmap_prefix}_{direction}_{metric}.html'
+                            )
+                            for metric in self._REPORT_METRICS
+                        }
+                        lines.append(
+                            f"<div class='direction-intro'><h3 class='direction-title'>{escape(direction_label)}</h3>"
+                            f"<div class='direction-note'>{escape(self._direction_note(direction))}</div></div>"
+                        )
+                        self._append_report_metric_grid(
+                            lines,
+                            output_path,
+                            metric_matrices,
+                            f'Intra-dataset · {ds} · {level_label} · {direction_label}',
+                            csv_paths,
+                            vispath_paths,
+                            'Neuron / type',
+                            'Neuron / type',
+                            plotly_state,
+                            square_cells=True,
+                        )
+
+                    self._append_report_tab_group(
+                        lines,
+                        f'{level_panel_id}-directions',
+                        [
+                            (direction, self._direction_display_name(direction))
+                            for direction in directions
+                        ],
+                        render_direction,
+                        panel_class='tab-panel direction-panel',
                     )
 
                 self._append_report_tab_group(
                     lines,
-                    f'{dataset_panel_id}-directions',
-                    [(direction, self._direction_display_name(direction)) for direction in directions],
-                    render_direction,
-                    panel_class='tab-panel direction-panel',
+                    f'{dataset_panel_id}-levels',
+                    [(key, label) for key, label, _, _ in level_specs],
+                    render_level,
                 )
 
             self._append_report_tab_group(
@@ -10938,8 +11126,7 @@ a:hover { text-decoration: underline; }
             lines.append(
                 '<div class="section-card"><h2 class="section-heading">Inter-dataset</h2>'
                 '<p class="section-summary">Rows are queried neurons or types and '
-                'columns are dataset pairs. The detailed per-neuron matrices remain '
-                'available through the links below.</p>'
+                'columns are dataset pairs.</p>'
             )
 
             def render_direction(direction: str, _direction_panel_id: str) -> None:
@@ -10969,6 +11156,7 @@ a:hover { text-decoration: underline; }
                     f'Inter-dataset · {direction_label}',
                     csv_paths, vispath_paths,
                     'Dataset pair', 'Neuron / type', plotly_state,
+                    square_cells=False,
                 )
 
             self._append_report_tab_group(
@@ -10979,34 +11167,24 @@ a:hover { text-decoration: underline; }
                 panel_class='tab-panel direction-panel',
             )
 
-            if inter_matrices:
-                lines.append(
-                    '<details class="detail-block"><summary>Detailed per-neuron '
-                    'dataset × dataset CSVs</summary><ul class="detail-list">'
-                )
-                for anchor in inter_matrices:
-                    safe_anchor = self._safe_folder_name(anchor)
-                    lines.append(
-                        f"<li><a href='cross_dataset/per_neuron/{escape(safe_anchor, quote=True)}/results/'>"
-                        f"{escape(str(anchor))}</a></li>"
-                    )
-                lines.append('</ul></details>')
-
             if anchor_profiles:
                 lines.append(
                     '<details class="detail-block"><summary>Resolved names across datasets</summary>'
                     '<div style="overflow-x:auto"><table class="mapping-table"><thead><tr>'
                     '<th>Anchor</th>'
                     + ''.join(f'<th>{escape(str(ds))}</th>' for ds in ds_list)
+                    + '<th>same name</th>'
                     + '</tr></thead><tbody>'
                 )
                 for anchor, per_ds in anchor_profiles.items():
+                    same_name = self._same_name_flag(per_ds, ds_list)
                     lines.append(
                         f"<tr><td>{escape(str(anchor))}</td>"
                         + ''.join(
                             f"<td>{escape(str(per_ds[ds][0])) if ds in per_ds else '—'}</td>"
                             for ds in ds_list
                         )
+                        + f'<td>{same_name}</td>'
                         + '</tr>'
                     )
                 lines.append('</tbody></table></div></details>')
@@ -11066,22 +11244,57 @@ a:hover { text-decoration: underline; }
         else:
             self._log("Auto type mapping: DISABLED — names are used as-is per dataset")
         
-        # Step 1: per-dataset extraction + intra-dataset matrices
+        # Step 1: per-dataset extraction + intra-dataset matrices.  Always
+        # extract type-aggregated profiles and retain the individual bodyId
+        # profiles so each dataset can expose the same three levels as a
+        # single-dataset run.
         profiles_by_dataset: Dict[str, Dict[str, ConnectivityProfile]] = {}
-        matrices_by_dataset: Dict[str, Dict[str, Dict[str, pd.DataFrame]]] = {}
+        bodyid_profiles_by_dataset: Dict[str, Dict[Tuple[str, int], ConnectivityProfile]] = {}
+        matrices_by_dataset: Dict[str, Dict[str, Dict[str, Dict[str, pd.DataFrame]]]] = {}
         for ds in ds_list:
             self._log("")
             self._log(f"--- Dataset: {ds} ---")
             if self.use_cache and self.ensure_cache_complete:
                 self._ensure_connection_cache_complete_for_dataset(ds)
-            type_profiles, _ = self._extract_profiles_for_dataset(ds)
+            # A bodyId aggregation selection still gets a type-level view in
+            # the report; its bodyId view is provided by bodyid_matrices.
+            if self.aggregation_level == 'bodyid':
+                type_profiles, bodyid_profiles = self._extract_profiles_for_dataset(
+                    ds, aggregation_level='type'
+                )
+            else:
+                type_profiles, bodyid_profiles = self._extract_profiles_for_dataset(ds)
             profiles_by_dataset[ds] = type_profiles
+            bodyid_profiles_by_dataset[ds] = bodyid_profiles
+
+            level_matrices: Dict[str, Dict[str, Dict[str, pd.DataFrame]]] = {}
             if len(type_profiles) >= 2:
                 self._log(f"Computing intra-dataset similarity matrices for {ds}...")
-                matrices_by_dataset[ds] = self._compute_similarity_matrices(type_profiles)
+                level_matrices['type'] = self._compute_similarity_matrices(type_profiles)
             else:
                 self._log(f"Warning: fewer than 2 profiles in {ds} — "
-                          f"intra-dataset matrices skipped")
+                          f"type-level intra-dataset matrices skipped")
+
+            n_bodyid = len(bodyid_profiles)
+            if self.skip_bodyId_level == 'auto':
+                skip_bodyid = n_bodyid > 1000
+            else:
+                skip_bodyid = bool(self.skip_bodyId_level)
+            if skip_bodyid:
+                self._log(
+                    f"Skipping bodyId-level intra-dataset matrices for {ds} "
+                    f"(skip_bodyId_level={self.skip_bodyId_level}, n={n_bodyid})"
+                )
+            elif bodyid_profiles:
+                self._log(f"Computing bodyId-level intra-dataset matrices for {ds}...")
+                level_matrices['bodyid'] = self._compute_bodyid_similarity_matrices(
+                    bodyid_profiles
+                )
+                level_matrices['type_avg_bodyid'] = (
+                    self._compute_type_avg_bodyid_matrices(bodyid_profiles)
+                )
+
+            matrices_by_dataset[ds] = level_matrices
         
         # Step 2: inter-dataset comparisons (same queried neuron across datasets)
         self._log("")
@@ -11094,7 +11307,11 @@ a:hover { text-decoration: underline; }
         
         # Step 3: save everything + overall report
         saved_files = self._save_multi_dataset_results(
-            profiles_by_dataset, matrices_by_dataset, inter_matrices, anchor_profiles
+            profiles_by_dataset,
+            bodyid_profiles_by_dataset,
+            matrices_by_dataset,
+            inter_matrices,
+            anchor_profiles,
         )
         output_path = saved_files.get('output_path', '')
         
@@ -11109,27 +11326,40 @@ a:hover { text-decoration: underline; }
                   f"{len(anchor_profiles)}")
         self._log("Output includes:")
         self._log("  - report.html: Plotly overview heatmaps with VisPath editor links")
-        self._log("  - intra_dataset/{dataset}/: per-dataset N×N matrices & heatmaps")
-        self._log("  - cross_dataset/all_types/: neurons × dataset-pair overview heatmaps")
-        self._log("  - cross_dataset/per_neuron/{anchor}/: same neuron across datasets")
-        self._log("  - cross_dataset/mapping_summary.csv: resolved names per dataset")
-        self._log("  - profiles/{dataset}/: aggregated connectivity profiles")
+        self._log("  - intra_dataset/{dataset}/: type, bodyId, and type-average-bodyId matrices & heatmaps")
+        self._log("  - cross_dataset/all_types/: consolidated neurons × dataset-pair matrices and heatmaps")
+        self._log("  - cross_dataset/mapping_summary.csv: resolved names + same-name flag")
+        self._log("  - profiles/{dataset}/: individual and aggregated connectivity profiles")
         
         return {
             'is_multi_dataset': True,
             'n_type_profiles': sum(len(p) for p in profiles_by_dataset.values()),
-            'n_bodyid_profiles': 0,
+            'n_bodyid_profiles': sum(len(p) for p in bodyid_profiles_by_dataset.values()),
             'output_path': output_path,
             'datasets': ds_list,
             'type_labels': sorted({lbl for pro in profiles_by_dataset.values() for lbl in pro}),
             'matrices_saved': saved_files.get('matrices_saved', []),
             'heatmaps_generated': saved_files.get('heatmaps_generated', []),
             'report_path': saved_files.get('report_path', ''),
-            'bodyid_level_skipped': True,
+            'bodyid_level_skipped': not any('bodyid' in levels for levels in matrices_by_dataset.values()),
             'is_cross_dataset': False,
             'use_auto_type_mapping': self._type_mapper is not None,
             'inter_anchors': list(anchor_profiles.keys()),
             'inter_type_matrices': saved_files.get('inter_type_matrices', {}),
+            'intra_matrices_by_dataset': matrices_by_dataset,
+            'type_matrices_by_dataset': {
+                ds: levels.get('type', {})
+                for ds, levels in matrices_by_dataset.items()
+            },
+            'bodyid_matrices_by_dataset': {
+                ds: levels.get('bodyid', {})
+                for ds, levels in matrices_by_dataset.items()
+            },
+            'type_avg_matrices_by_dataset': {
+                ds: levels.get('type_avg_bodyid', {})
+                for ds, levels in matrices_by_dataset.items()
+            },
+            'bodyid_profiles_by_dataset': bodyid_profiles_by_dataset,
         }
 
     def _run_cross_dataset(self) -> Dict[str, Any]:

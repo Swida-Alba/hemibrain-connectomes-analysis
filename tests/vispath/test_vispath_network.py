@@ -26,6 +26,7 @@ that trusted, locally-produced file.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -506,6 +507,55 @@ class TestSaveDataMatrices:
         assert "run_data_connMatrix_weight.csv" in names
         assert "run_data_connMatrix_ratio.csv" in names
         assert "run_data_connMatrix_prob.csv" in names
+
+
+def test_empty_network_does_not_repeat_timestamp_in_folder_name(tmp_path):
+    """A timestamped Net-Viz run folder contributes only one file timestamp."""
+    run_folder = tmp_path / "plotpath_empty_network_20260814_170906"
+    visualizer = VisualizePath(
+        path_file=None,
+        output_folder=str(run_folder),
+        generate_empty_network=True,
+        showfig=False,
+        verbose=False,
+    )
+
+    output_path = Path(visualizer.generate_empty_network_html())
+
+    assert output_path.name == "plotpath_empty_network_20260814_170906_network.html"
+    assert re.findall(r"\d{8}_\d{6}", output_path.stem) == ["20260814_170906"]
+
+
+def test_visualize_network_opens_generated_html_once(tmp_path, monkeypatch):
+    """The network convenience method must not open the same HTML twice."""
+    import webbrowser
+
+    opened = []
+    monkeypatch.setattr(webbrowser, "open", opened.append)
+
+    visualizer = VisualizePath(
+        path_file=pd.DataFrame({
+            "path_block": ["S>T"],
+            "weights": [[3]],
+        }),
+        output_folder=str(tmp_path),
+        showfig=True,
+        verbose=False,
+    )
+    graph = FastGraph()
+    graph.add_edge("S", "T", 3)
+    graph.node_attrs["S"]["node_type"] = "source"
+    graph.node_attrs["T"]["node_type"] = "target"
+    visualizer.conn_df = pd.DataFrame({
+        "source": ["S"],
+        "target": ["T"],
+        "weight": [3],
+    })
+    visualizer.G_network = graph
+
+    output_path = Path(visualizer.visualize_network())
+
+    assert opened == [f"file://{output_path.resolve()}"]
 
 
 # =============================================================================

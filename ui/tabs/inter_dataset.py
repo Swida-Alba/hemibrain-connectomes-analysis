@@ -41,7 +41,7 @@ def create_inter_dataset_tab():
             section_header("Datasets", "storage")
             datasets_select = dataset_multi_selector(
                 label="Datasets to compare (one dataset with multiple thresholds is also supported)",
-                default=[],
+                default=["male-cns:v1.0"],
             )
 
         with ui.card().classes("w-full drocat-card"):

@@ -172,8 +172,8 @@ profile:       {output_dir}/findhomologs_{SRC}_to_{TGT}_{query}_{timestamp}/</co
   <ul>
     <li><b>results.csv</b> always holds <b>bodyId-level</b> similarities
       (ranked <code>target_bodyId</code> rows), whatever the query kind.
-      A type query ranks the individual neurons of the found types; the
-      query type's own members are excluded.</li>
+      A type query includes unique intra-type bodyId pairs for every
+      resolved query member, followed by the top inter-type bodyId rows.</li>
     <li><b>type_summary.csv</b> always holds <b>type-level</b> similarities
       (one row per target type, the query type first as the intra-type
       reference with <code>is_intra_type=True</code>), whatever the query

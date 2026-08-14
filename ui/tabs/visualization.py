@@ -33,7 +33,7 @@ from ..components.palette_picker import (
     color_swatch_picker,
     assign_palette_colors,
 )
-from ..components.edge_list_editor import edge_list_editor, draft_recovery_banner
+from ..components.edge_list_editor import edge_list_editor
 from ..dataset_service import is_banc_dataset
 
 
@@ -615,31 +615,23 @@ def create_net_viz_tab():
             "HTML canvas for direct interactive drawing."
         ).classes("text-caption drocat-muted")
 
-        # Recovery reminder: auto-saved edge-list drafts that were never
-        # exported before the previous session ended (UI/port shutdown).
-        editor_ref = {"handle": None}
-
-        def recover_draft(name):
-            handle = editor_ref.get("handle")
-            if handle is None:
-                return
-            if handle.load_draft(name):
-                net_viz_source.set_value("Edge list editor")
-
-        draft_recovery_banner(recover_draft)
-
         with ui.card().classes("w-full drocat-card").props('id="card-net-viz-source"'):
             section_header("Net-Viz Source", "source")
-            net_viz_source = select_input(
-                "Canvas Source",
-                ["Path file", "Edge list editor", "Empty drawing canvas"],
-                "Path file",
-                hint=(
-                    "Path file: load Complete Paths output. Edge list editor: build "
-                    "or edit an edge list with auto-save. Empty drawing canvas: "
-                    "add nodes and edges in the generated HTML."
-                ),
-            )
+            with ui.row().classes("w-full items-end gap-3 flex-wrap"):
+                with ui.element("div").classes("grow min-w-[240px]"):
+                    net_viz_source = select_input(
+                        "Canvas Source",
+                        ["Path file", "Edge list editor"],
+                        "Path file",
+                        hint=(
+                            "Path file: load Complete Paths output. Edge list editor: "
+                            "build or edit an edge list with auto-save."
+                        ),
+                    )
+                empty_canvas_button = ui.button(
+                    "Create Empty Canvas",
+                    icon="open_in_new",
+                ).props("color=secondary outline").classes("drocat-empty-canvas-btn")
             ui.label(
                 "Path file mode accepts CSV or Excel with path_type / path_bodyId sheets."
             ).classes("text-caption drocat-muted")
@@ -702,25 +694,43 @@ def create_net_viz_tab():
                         "text-caption drocat-muted drocat-truncate"
                     )
 
-            empty_canvas_hint = ui.label(
-                "Empty canvas mode creates an editable Cytoscape HTML. Open it, enable "
-                "Edit Mode, then add nodes and connect them interactively."
-            ).classes("text-caption drocat-muted")
-
             def update_net_viz_source():
                 source = net_viz_source.value
                 path_input_panel.set_visibility(source == "Path file")
-                empty_canvas_hint.set_visibility(source == "Empty drawing canvas")
                 if source != "Path file":
                     path_upload_menu.close()
 
-            net_viz_source.on_value_change(lambda _event: update_net_viz_source())
+        editor_panel_ref = {"panel": None}
 
-        # Edge-list editor card (auto-saved drafts; see ui.edge_list_store).
-        # Always visible so a custom edge list can be built at any time;
-        # Canvas Source selects which input a run consumes.
-        editor = edge_list_editor(export_dir_provider=lambda: path_output_dir.value)
-        editor_ref["handle"] = editor
+        def expand_editor_for_source():
+            panel = editor_panel_ref.get("panel")
+            if panel is not None and not panel.value:
+                panel.set_value(True)
+
+        def collapse_editor_for_source():
+            panel = editor_panel_ref.get("panel")
+            if panel is not None and panel.value:
+                panel.set_value(False)
+
+        def update_net_viz_source_with_editor():
+            update_net_viz_source()
+            if net_viz_source.value == "Edge list editor":
+                expand_editor_for_source()
+            else:
+                collapse_editor_for_source()
+
+        # Keep the source selector and the editor expansion synchronized. The
+        # expansion callback handles the important reverse direction: opening
+        # the editor immediately selects it as the run source.
+        net_viz_source.on_value_change(
+            lambda _event: update_net_viz_source_with_editor()
+        )
+
+        editor = edge_list_editor(
+            export_dir_provider=lambda: path_output_dir.value,
+            on_expand=lambda: net_viz_source.set_value("Edge list editor"),
+        )
+        editor_panel_ref["panel"] = editor.expansion
         update_net_viz_source()
 
         with ui.card().classes("w-full drocat-card").props('id="card-net-viz-rendering"'):
@@ -750,11 +760,6 @@ def create_net_viz_tab():
             ui.label(
                 "Path mode exports HTML and connection tables; empty mode exports an HTML canvas."
             ).classes("text-caption drocat-muted")
-
-            empty_canvas_button = ui.button(
-                "Create Empty Canvas",
-                icon="open_in_new",
-            ).props("color=secondary outline").classes("w-full")
 
     with results_col:
         net_viz_output.create(run_label="Generate Network", run_icon="account_tree")
@@ -800,8 +805,10 @@ def create_net_viz_tab():
 
     async def execute_net_viz(empty_canvas=False):
         editor_mode = (not empty_canvas) and net_viz_source.value == "Edge list editor"
+        transient_editor_path = None
         if editor_mode:
-            # Flush the auto-save first so the run uses the latest edits.
+            # Flush the auto-save when named; otherwise use a temporary CSV.
+            # A draft name is optional for running the edited edge list.
             csv_path = editor.runnable_path_file()
             if not csv_path:
                 ui.notify(
@@ -810,6 +817,7 @@ def create_net_viz_tab():
                 )
                 return
             path_file_path["path"] = csv_path
+            transient_editor_path = csv_path if editor.transient_csv_path == csv_path else None
         elif not empty_canvas and not path_file_path["path"]:
             ui.notify(
                 "Please upload a path file first (Complete Paths output)",
@@ -817,22 +825,28 @@ def create_net_viz_tab():
             )
             return
 
-        colors = COLOR_PRESETS.get(color_preset.get_value(), COLOR_PRESETS["Cool"])
-        constructor_params = {
-            "path_file": None if empty_canvas else path_file_path["path"],
-            "output_folder": make_plotpath_folder(empty_canvas),
-            "source_color": colors["source"],
-            "intermediate_color": colors["intermediate"],
-            "target_color": colors["target"],
-            "link_color": colors["link"],
-            "network_layout": path_layout.value,
-            "showfig": True if empty_canvas else show_path_fig.value,
-            "generate_empty_network": empty_canvas,
-        }
-        await run_panel(constructor_params)
+        try:
+            colors = COLOR_PRESETS.get(color_preset.get_value(), COLOR_PRESETS["Cool"])
+            constructor_params = {
+                "path_file": None if empty_canvas else path_file_path["path"],
+                "output_folder": make_plotpath_folder(empty_canvas),
+                "source_color": colors["source"],
+                "intermediate_color": colors["intermediate"],
+                "target_color": colors["target"],
+                "link_color": colors["link"],
+                "network_layout": path_layout.value,
+                "showfig": True if empty_canvas else show_path_fig.value,
+                "generate_empty_network": empty_canvas,
+            }
+            await run_panel(constructor_params)
+        finally:
+            if transient_editor_path:
+                editor.cleanup_transient_csv()
+                if path_file_path.get("path") == transient_editor_path:
+                    path_file_path["path"] = None
 
     async def run_net_viz():
-        await execute_net_viz(net_viz_source.value == "Empty drawing canvas")
+        await execute_net_viz(empty_canvas=False)
 
 
     async def create_empty_canvas():

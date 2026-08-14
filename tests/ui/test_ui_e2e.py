@@ -278,8 +278,8 @@ class TestRunner:
         assert "datasets=['male-cns:v1.0']" in script
         assert "thresholds=[3, 7]" in script
 
-    def test_inter_dataset_tab_hides_nickname_editor_and_starts_unselected(self):
-        """Cross-dataset nicknames stay script-only and dataset selection is opt-in."""
+    def test_inter_dataset_tab_hides_nickname_editor_and_defaults_to_male_cns(self):
+        """Cross-dataset nicknames stay script-only and male-cns is preselected."""
         from nicegui import Client
         from nicegui.page import page
         from ui.tabs.inter_dataset import create_inter_dataset_tab
@@ -296,7 +296,7 @@ class TestRunner:
         dataset_control = controls[
             "Datasets to compare (one dataset with multiple thresholds is also supported)"
         ]
-        assert dataset_control.value == []
+        assert dataset_control.value == ["male-cns:v1.0"]
         assert not any("Nickname" in label for label in controls)
         assert any(
             getattr(el, "text", "") == "Custom Mapping · none"
@@ -2546,7 +2546,7 @@ class TestTabs:
         ]
         assert multi_ds, "multi-dataset selector missing"
         assert multi_ds[0]._props.get("multiple") is True
-        assert multi_ds[0].value == [], "profiling starts without preset datasets"
+        assert multi_ds[0].value == ["male-cns:v1.0"]
 
         # the custom-group card is hidden until the level is chosen
         card = [

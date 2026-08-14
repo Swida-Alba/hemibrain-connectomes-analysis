@@ -1,14 +1,15 @@
 """Tests for the edge-list editor backend (auto-save draft store) and its
-UI integration in the Network tab.
+UI integration in the Net-Viz tab.
 
 Covers:
 - ui/edge_list_store.py: draft CRUD, atomic auto-save, dirty tracking,
   crash recovery, validation, and PlotPath-ready CSV layout.
-- ui/components/edge_list_editor.py: editor state, edit operations,
-  debounced auto-save flush, export, and the recovery reminder banner.
-- ui/tabs/visualization.py: Canvas Source wiring and reminder rendering (Net-Viz tab).
+- ui/components/edge_list_editor.py: editor state, add/delete/inline edit
+  operations, debounced auto-save flush, and export.
+- ui/tabs/visualization.py: Canvas Source and editor expansion wiring (Net-Viz tab).
 """
 import json
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -329,29 +330,39 @@ class TestEditorHandle:
         assert handle.table is not None and handle.status_label is not None
         assert set(handle.edit_inputs) == {"source", "target", "weight", "color"}
 
-    def test_add_edge_and_autosave_flush(self, store_patch_for_component):
+    def test_add_edge_uses_current_editor_values_and_autosaves(self, store_patch_for_component):
         client, handle = build_editor(store_patch_for_component)
         handle.name_input.value = "my draft"
+        for key, value in {
+            "source": "A",
+            "target": "B",
+            "weight": "12",
+            "color": "#123456",
+        }.items():
+            handle.edit_inputs[key].value = value
         handle.add_edge()
-        handle.edit_inputs["source"].value = "A"
-        handle.edit_inputs["target"].value = "B"
-        handle.edit_inputs["weight"].value = "12"
-        handle.apply_edit()
         # Debounced timer does not run in unit tests; flush explicitly.
         csv_path = handle.flush_autosave()
         assert csv_path and Path(csv_path).exists()
         rows = store.load_draft("my draft")
-        assert rows[0]["source"] == "A" and rows[0]["weight"] == "12"
+        assert rows[0] == {
+            "source": "A",
+            "target": "B",
+            "weight": "12",
+            "color": "#123456",
+        }
         assert meta("my draft")["dirty"] is True
         assert "Auto-saved" in handle.status_label.text
 
-    def test_apply_edit_requires_selection(self, store_patch_for_component):
+    def test_inline_edit_updates_row_and_editor_inputs(self, store_patch_for_component):
         client, handle = build_editor(store_patch_for_component)
-        handle.name_input.value = "nosel"
-        handle.rows = [{"source": "A", "target": "B", "weight": "1", "color": ""}]
-        handle._selected_ids = []
-        handle.apply_edit()  # warns, does not crash, does not mutate
-        assert handle.rows[0]["source"] == "A"
+        handle.set_rows(ROWS)
+        handle.on_select(SimpleNamespace(selection=[{**ROWS[1], "id": 1}]))
+        handle.on_inline_edit(
+            SimpleNamespace(args={"id": 1, "field": "target", "value": " MBON02 "})
+        )
+        assert handle.rows[1]["target"] == "MBON02"
+        assert handle.edit_inputs["target"].value == "MBON02"
 
     def test_delete_selected_rows(self, store_patch_for_component):
         client, handle = build_editor(store_patch_for_component)
@@ -373,8 +384,9 @@ class TestEditorHandle:
         client, handle = build_editor(store_patch_for_component)
         handle.set_rows(ROWS)
         handle.on_select(SimpleNamespace(selection=[{**ROWS[1], "id": 1}]))
-        handle.edit_inputs["weight"].value = "99"
-        handle.apply_edit()
+        handle.on_inline_edit(
+            SimpleNamespace(args={"id": 1, "field": "weight", "value": "99"})
+        )
         assert handle._selected_ids == [1]
         assert [row["id"] for row in handle.table.selected] == [1]
         assert handle.rows[1]["weight"] == "99"
@@ -408,93 +420,60 @@ class TestEditorHandle:
         handle.set_rows(ROWS, name="complete")
         assert handle.runnable_path_file() is not None
 
+    def test_runnable_path_file_without_draft_name_uses_transient_csv(self, store_patch_for_component):
+        client, handle = build_editor(store_patch_for_component)
+        handle.set_rows(ROWS, name="")
+        path = handle.runnable_path_file()
+        try:
+            assert path == handle.transient_csv_path
+            assert path and Path(path).exists()
+            assert "aMe12,aMe10,128" in Path(path).read_text(encoding="utf-8")
+            assert "draft name is optional" in handle.status_label.text
+            assert store.list_drafts() == []
+        finally:
+            handle.cleanup_transient_csv()
+        assert not Path(path).exists()
+
+    def test_export_downloads_without_draft_name(self, store_patch_for_component):
+        client, handle = build_editor(store_patch_for_component)
+        handle.set_rows(ROWS, name="")
+        downloads = []
+        handle.table.client.download = lambda src, filename, media_type: downloads.append(
+            (src, filename, media_type)
+        )
+
+        exported = handle.export_csv()
+
+        assert re.fullmatch(r"edge_list_\d{8}_\d{6}\.csv", exported)
+        assert len(downloads) == 1
+        content, filename, media_type = downloads[0]
+        assert content.decode("utf-8").startswith("source,target,weight\n")
+        assert re.fullmatch(r"edge_list_\d{8}_\d{6}\.csv", filename)
+        assert media_type == "text/csv"
+        assert store.list_drafts() == []
+
     def test_export_marks_clean_and_copies(self, store_patch_for_component, tmp_path):
         export_dir = tmp_path / "run_output"
         client, handle = build_editor(store_patch_for_component, export_dir=export_dir)
         handle.set_rows(ROWS, name="exp")
         handle.flush_autosave()
         exported = handle.export_csv()
-        assert exported == str(export_dir / "exp_edge_list.csv")
+        assert exported and Path(exported).parent == export_dir
+        assert re.fullmatch(r"exp_edge_list_\d{8}_\d{6}\.csv", Path(exported).name)
         assert Path(exported).exists()
         assert meta("exp")["dirty"] is False
         assert "no unsaved changes" in handle.status_label.text
 
-    def test_load_draft_into_editor(self, store_patch_for_component):
-        store.save_draft("saved net", ROWS)
+    def test_editor_has_no_draft_load_or_delete_controls(self, store_patch_for_component):
         client, handle = build_editor(store_patch_for_component)
-        assert handle.load_draft("saved net") is True
-        assert handle.rows == store.normalize_rows(ROWS)
-        assert handle.name_input.value == "saved net"
-        assert handle.current_name == "saved net"
-
-    def test_load_missing_draft_fails(self, store_patch_for_component):
-        client, handle = build_editor(store_patch_for_component)
-        assert handle.load_draft("ghost") is False
-
-    def test_delete_current_draft(self, store_patch_for_component):
-        store.save_draft("gone", ROWS)
-        client, handle = build_editor(store_patch_for_component)
-        handle.load_draft("gone")
-        assert handle.delete_current_draft() is True
-        assert store.get_meta("gone") is None
-        assert handle.rows == []
-
-    def test_draft_select_lists_existing_drafts(self, store_patch_for_component):
-        store.save_draft("one", ROWS)
-        store.save_draft("two", ROWS)
-        client, handle = build_editor(store_patch_for_component)
-        assert set(handle.draft_select.options) == {"one", "two"}
-
-
-class TestRecoveryBanner:
-    def test_banner_hidden_when_clean(self, store_patch_for_component):
-        from ui.components.edge_list_editor import draft_recovery_banner
-        store.save_draft("clean", ROWS, dirty=False)
-        client = Client(page(f"/banner-clean-{uuid.uuid4().hex}"))
-        with client:
-            rendered = draft_recovery_banner(lambda name: None)
-        assert rendered is False
-        ids = [(getattr(el, "_props", None) or {}).get("id") for el in client.elements.values()]
-        assert "card-edge-draft-recovery" not in ids
-
-    def test_banner_shown_for_dirty_drafts(self, store_patch_for_component):
-        from ui.components.edge_list_editor import draft_recovery_banner
-        store.save_draft("wip net", ROWS)
-        client = Client(page(f"/banner-dirty-{uuid.uuid4().hex}"))
-        with client:
-            rendered = draft_recovery_banner(lambda name: None)
-        assert rendered is True
-        ids = [(getattr(el, "_props", None) or {}).get("id") for el in client.elements.values()]
-        assert "card-edge-draft-recovery" in ids
-        texts = " ".join(
-            str(getattr(el, "text", ""))
+        labels = [
+            (getattr(el, "_props", None) or {}).get("label")
             for el in client.elements.values()
-            if type(el).__name__ == "Label"
-        )
-        assert "wip net" in texts
-        assert "recoverable" in texts.lower()
-
-    def test_banner_recover_callback_receives_name(self, store_patch_for_component):
-        from ui.components.edge_list_editor import draft_recovery_banner
-        store.save_draft("wip", ROWS)
-        received = []
-        client = Client(page(f"/banner-cb-{uuid.uuid4().hex}"))
-        with client:
-            draft_recovery_banner(lambda name: received.append(name))
-            buttons = [
-                el for el in client.elements.values()
-                if type(el).__name__ == "Button"
-                and "wip" in str((getattr(el, "_props", None) or {}).get("label", ""))
-            ]
-            assert len(buttons) == 1
-            # Invoke the registered click handler directly.
-            listeners = [
-                listener for listener in buttons[0]._event_listeners.values()
-                if listener.type == "click"
-            ]
-            assert len(listeners) == 1
-            listeners[0].handler(SimpleNamespace())
-        assert received == ["wip"]
+        ]
+        assert "Load Draft" not in labels
+        assert "Load" not in labels
+        assert "Delete Draft" not in labels
+        assert "Apply to Selected" not in labels
 
 
 # =============================================================================
@@ -519,7 +498,7 @@ class TestNetworkTabIntegration:
             if (getattr(el, "_props", None) or {}).get("label")
         ]
 
-    def test_canvas_source_includes_editor_option(self, monkeypatch, tmp_path):
+    def test_canvas_source_excludes_empty_canvas_and_includes_editor(self, monkeypatch, tmp_path):
         self._patch_store(monkeypatch, tmp_path)
         client = self._build_tab(monkeypatch, tmp_path)
         selects = [
@@ -527,7 +506,7 @@ class TestNetworkTabIntegration:
             if (getattr(el, "_props", None) or {}).get("label") == "Canvas Source"
         ]
         assert len(selects) == 1
-        assert selects[0].options == ["Path file", "Edge list editor", "Empty drawing canvas"]
+        assert selects[0].options == ["Path file", "Edge list editor"]
 
     def test_editor_card_present(self, monkeypatch, tmp_path):
         self._patch_store(monkeypatch, tmp_path)
@@ -542,16 +521,15 @@ class TestNetworkTabIntegration:
         ids = [(getattr(el, "_props", None) or {}).get("id") for el in client.elements.values()]
         assert "card-edge-draft-recovery" not in ids
 
-    def test_reminder_shown_for_dirty_drafts(self, monkeypatch, tmp_path):
+    def test_dirty_drafts_do_not_render_a_recovery_card(self, monkeypatch, tmp_path):
         self._patch_store(monkeypatch, tmp_path)
         store.save_draft("unfinished", ROWS)
         client = self._build_tab(monkeypatch, tmp_path)
         ids = [(getattr(el, "_props", None) or {}).get("id") for el in client.elements.values()]
-        assert "card-edge-draft-recovery" in ids
+        assert "card-edge-draft-recovery" not in ids
 
     def test_source_switch_toggles_path_input(self, monkeypatch, tmp_path):
-        """The edge-list editor card is always visible in the Net-Viz tab;
-        only the path-file upload panel follows the Canvas Source select."""
+        """The source selector and editor expansion stay synchronized."""
         self._patch_store(monkeypatch, tmp_path)
         client = self._build_tab(monkeypatch, tmp_path)
         source = next(
@@ -566,13 +544,15 @@ class TestNetworkTabIntegration:
             el for el in client.elements.values()
             if (getattr(el, "_props", None) or {}).get("id") == "card-net-viz-edge-editor"
         )
-        # Path file (default): upload panel shown, editor always visible.
+        # Path file (default): upload panel shown, editor collapsed.
         assert source.value == "Path file"
         assert path_panel.visible is True
-        assert editor_card.visible is True
+        assert editor_card.value is False
         source.set_value("Edge list editor")
         assert path_panel.visible is False
-        assert editor_card.visible is True
-        source.set_value("Empty drawing canvas")
-        assert path_panel.visible is False
-        assert editor_card.visible is True
+        assert editor_card.value is True
+        source.set_value("Path file")
+        assert path_panel.visible is True
+        assert editor_card.value is False
+        editor_card.set_value(True)
+        assert source.value == "Edge list editor"

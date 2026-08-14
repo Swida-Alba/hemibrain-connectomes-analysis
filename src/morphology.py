@@ -2095,22 +2095,42 @@ class MorphologyComparer:
                            f"Scoring similarity ({self.method})")
             scores[keep] = similarity_matrix(q_vec, X_c[keep], self.metric)
 
-        query_type = query_df["type"].iloc[0] if len(query_df) else ""
+        query_type = ""
+        if len(query_df):
+            raw_query_type = query_df["type"].iloc[0]
+            query_type = "" if pd.isna(raw_query_type) else str(raw_query_type).strip()
+        query_ids_set = set(query_ids)
         # Type lookup: the full neuron table / index map, with the vector
         # cache's labels overriding for the neurons it covers (the cache is
         # freshest there). The old replace-all behaviour silently dropped
         # every pool neuron outside the cache from the type-level results.
-        id_to_type, _ = _load_neuron_type_map(self.dataset, str(self.project_root))
+        id_to_type, id_to_instance = _load_neuron_type_map(
+            self.dataset, str(self.project_root)
+        )
         if cache_data is not None:
             id_to_type.update(
                 {int(b): t for b, t in zip(cache_data["bodyIds"], cache_data["types"])}
             )
+            id_to_instance.update(
+                {int(b): i for b, i in zip(cache_data["bodyIds"], cache_data["instances"])}
+            )
         intra = float("nan")
-        # Intra-type reference, consistent with the standardization above:
-        # with the cache's own stats the cache population supplies it (it
-        # holds every member of the query type); otherwise it comes from
-        # the unified-standardized query vectors.
-        if using_cache_stats and cache_data is not None and len(cache_data["bodyIds"]):
+        # Type queries are resolved to all members of the queried type. Use
+        # those unified-standardized query vectors directly, rather than a
+        # possibly stale cache snapshot loaded before fetched query vectors
+        # were appended.
+        if self.level == "type" and query_type and mask_q.any():
+            query_ok = np.where(mask_q)[0]
+            intra = self._intra_type_similarity(
+                query_type,
+                np.asarray([query_ids[i] for i in query_ok], dtype=np.int64),
+                [query_type for _ in query_ok],
+                X_q[query_ok],
+                self.metric,
+            )
+        elif using_cache_stats and cache_data is not None and len(cache_data["bodyIds"]):
+            # BodyId queries still use the complete cached type population so
+            # their same-type rows retain the established reference value.
             intra = self._intra_type_similarity(
                 query_type, cache_data["bodyIds"], cache_data["types"],
                 cache_data["X"], self.metric,
@@ -2120,86 +2140,85 @@ class MorphologyComparer:
             intra = self._intra_type_similarity(
                 query_type,
                 np.array([query_ids[i] for i in ok], dtype=np.int64),
-                [str(query_df["type"].iloc[i]) if i < len(query_df) else ""
+                [str(query_df["type"].iloc[i]).strip() if i < len(query_df) else ""
                  for i in ok],
                 X_q[ok], self.metric,
             )
 
-        rows = []
-        for i, bid in enumerate(pool_ids):
-            if not keep[i]:
-                continue
-            t = id_to_type.get(bid, "")
-            # The query neurons (and, for type searches, every neuron of the
-            # query type) are the query itself and stay out of the rows; the
-            # intra reference row is injected in the type summary instead.
-            if bid in set(query_ids) or (self.level == "type" and t == query_type):
-                continue
-            rows.append({
-                "source_bodyId": query_ids[0],
-                "source_type": query_type,
-                "target_bodyId": bid,
-                "target_type": t,
-                "target_instance": "",
-                "profile_similarity": prof_by_id.get(bid, np.nan),
-                "similarity": float(scores[i]),
-                "is_same_type": t == query_type if t else False,
-                "intra_type_similarity": intra,
-                "method": self.method,
-                "metric": self.metric,
-                "candidate_source": "profile",
-            })
+        rows: List[Dict[str, object]] = []
+        if self.level == "type":
+            # Compare every resolved query member to every usable candidate.
+            # The old centroid row carried query_ids[0] as its source and
+            # therefore made a multi-bodyId type query look like one neuron.
+            candidate_indices = [i for i, ok in enumerate(keep) if ok]
+            query_indices = [i for i, ok in enumerate(mask_q) if ok]
+            for query_i in query_indices:
+                q_bid = int(query_ids[query_i])
+                raw_q_type = query_df["type"].iloc[query_i]
+                q_type = "" if pd.isna(raw_q_type) else str(raw_q_type).strip()
+                q_scores = (similarity_matrix(
+                    X_q[query_i], X_c[candidate_indices], self.metric
+                ) if candidate_indices else np.asarray([]))
+                for score_i, candidate_i in enumerate(candidate_indices):
+                    bid = int(pool_ids[candidate_i])
+                    if bid in query_ids_set:
+                        continue
+                    target_type = str(id_to_type.get(bid, "") or "").strip()
+                    rows.append({
+                        "source_bodyId": q_bid,
+                        "source_type": q_type,
+                        "target_bodyId": bid,
+                        "target_type": target_type,
+                        "target_instance": id_to_instance.get(bid, ""),
+                        "profile_similarity": prof_by_id.get(bid, np.nan),
+                        "similarity": float(q_scores[score_i]),
+                        "is_same_type": target_type == q_type if target_type else False,
+                        "intra_type_similarity": intra,
+                        "method": self.method,
+                        "metric": self.metric,
+                        "candidate_source": "profile",
+                    })
+            rows.extend(self._type_query_intra_rows(
+                query_df, X_q, mask_q, intra, candidate_source="profile"
+            ))
+        else:
+            for i, bid in enumerate(pool_ids):
+                if not keep[i]:
+                    continue
+                bid = int(bid)
+                target_type = str(id_to_type.get(bid, "") or "").strip()
+                if bid in query_ids_set:
+                    continue
+                rows.append({
+                    "source_bodyId": query_ids[0],
+                    "source_type": query_type,
+                    "target_bodyId": bid,
+                    "target_type": target_type,
+                    "target_instance": id_to_instance.get(bid, ""),
+                    "profile_similarity": prof_by_id.get(bid, np.nan),
+                    "similarity": float(scores[i]),
+                    "is_same_type": target_type == query_type if target_type else False,
+                    "intra_type_similarity": intra,
+                    "method": self.method,
+                    "metric": self.metric,
+                    "candidate_source": "profile",
+                })
         if not rows and not (self.level == "type" and np.isfinite(intra)):
             return pd.DataFrame(), pd.DataFrame()
 
-        # Type-level aggregation over ALL scored rows (the query type itself
-        # is included as the intra-type reference row; injected from the
-        # type map when no query-type neuron reached the pool).
-        import collections
-        agg: Dict[str, List[float]] = collections.defaultdict(list)
-        prof: Dict[str, List[float]] = collections.defaultdict(list)
-        for r in rows:
-            if r["target_type"]:
-                agg[r["target_type"]].append(r["similarity"])
-                if np.isfinite(r["profile_similarity"]):
-                    prof[r["target_type"]].append(r["profile_similarity"])
-        agg_rows = []
-        for t, vals in agg.items():
-            agg_rows.append({
-                "target_type": t,
-                "similarity": float(np.mean(vals)),
-                "n_bodyids": len(vals),
-                "profile_similarity": float(np.mean(prof[t])) if prof[t] else np.nan,
-                "is_intra_type": t == query_type,
-                "intra_type_similarity": intra if t == query_type else float("nan"),
-                "method": self.method,
-                "metric": self.metric,
-                "candidate_source": "profile",
-            })
-        if query_type and query_type not in agg and np.isfinite(intra):
-            if cache_data is not None:
-                n_members = int(sum(1 for t in cache_data["types"] if t == query_type))
-            else:
-                n_members = int(sum(1 for t in id_to_type.values() if t == query_type))
-            agg_rows.append({
-                "target_type": query_type,
-                "similarity": intra,
-                "n_bodyids": n_members,
-                "profile_similarity": np.nan,
-                "is_intra_type": True,
-                "intra_type_similarity": intra,
-                "method": self.method,
-                "metric": self.metric,
-                "candidate_source": "profile",
-            })
-        agg_rows = sorted(agg_rows, key=lambda r: (not r["is_intra_type"], -r["similarity"], r["target_type"]))
-        type_df = pd.DataFrame(agg_rows).head(self.top_n).reset_index(drop=True)
-        type_df.insert(0, "rank", np.arange(1, len(type_df) + 1))
+        query_type_count = self._type_member_count(
+            query_type, id_to_type, query_df=query_df
+        )
+        type_df = self._aggregate_type_rows(
+            rows,
+            query_type=query_type,
+            intra=intra,
+            query_type_count=query_type_count,
+            candidate_source="profile",
+        )
 
         # bodyId-level rows: top-N scored neurons.
-        rows = sorted(rows, key=lambda r: (-r["similarity"], r["target_bodyId"]))
-        bodyid_df = pd.DataFrame(rows).head(self.top_n).reset_index(drop=True)
-        bodyid_df.insert(0, "rank", np.arange(1, len(bodyid_df) + 1))
+        bodyid_df = self._bodyid_dataframe(rows, query_type=query_type)
 
         # NBLAST refinement over the fetched pool skeletons (transient).
         if self.method == "nblast":
@@ -2213,7 +2232,14 @@ class MorphologyComparer:
                        neurons: Optional[Dict[int, "navis.TreeNeuron"]] = None) -> pd.DataFrame:
         """Replace vector scores with NBLAST scores for the fetched candidates."""
         self._progress(5, PROFILE_FIRST_TOTAL_STEPS, "Refining scores with NBLAST")
-        cand_ids = [int(b) for b in results["target_bodyId"].tolist()]
+        query_ids = {int(b) for b in query_df["bodyId"].tolist()}
+        # Type-level results also contain intra-type rows whose target
+        # is another query member.  They are reference pairs, not candidates
+        # for refinement; keep their vector similarity below.
+        cand_ids = [
+            int(b) for b in results["target_bodyId"].tolist()
+            if int(b) not in query_ids
+        ]
         query_dp = self._dotprops_for_ids(
             [int(b) for b in query_df["bodyId"].tolist()], neurons=neurons
         )
@@ -2238,8 +2264,17 @@ class MorphologyComparer:
                 val = float(row.iloc[j])
                 nblast_scores[t] = max(nblast_scores.get(t, -np.inf), val)
         results = results.copy()
-        results["similarity"] = results["target_bodyId"].map(
-            lambda b: nblast_scores.get(int(b), np.nan)
+        # In type mode, ``results`` also contains the vector-based ordered
+        # intra-type pairs.  They are not in the candidate NBLAST map because
+        # query members are deliberately excluded from that candidate set;
+        # preserve their already-computed intra similarity instead of turning
+        # those rows into NaN during refinement.
+        results["similarity"] = results.apply(
+            lambda row: nblast_scores.get(
+                int(row["target_bodyId"]), row["similarity"]
+            ) if bool(row.get("is_same_type", False))
+            else nblast_scores.get(int(row["target_bodyId"]), np.nan),
+            axis=1,
         )
         results = results.sort_values(
             ["similarity", "target_bodyId"], ascending=[False, True]
@@ -2308,13 +2343,15 @@ class MorphologyComparer:
         intra: float,
         candidate_source: Optional[str] = None,
     ) -> List[Dict[str, object]]:
-        """Return ordered bodyId-level pairs within a type query.
+        """Return unique bodyId-level pairs within a type query.
 
         Type searches resolve to every bodyId in the queried type.  Keep the
         individual same-type comparisons in ``results.csv`` as well as the
-        type-level reference row.  Ordered pairs make every query bodyId
-        visible as a source and match the off-diagonal mean used by
-        ``_intra_type_similarity``.
+        type-level reference row.  Emit one row per unordered pair, while
+        orienting the rows so every member is represented as a source when
+        there are at least three members.  The mean of these unique pairs
+        matches the off-diagonal mean used by ``_intra_type_similarity``
+        because the supported similarity metrics are symmetric.
         """
         if self.level != "type" or query_df is None or query_df.empty:
             return []
@@ -2332,29 +2369,42 @@ class MorphologyComparer:
             records.append((i, bid, q_type, str(row.get("instance", "") or "")))
 
         rows: List[Dict[str, object]] = []
-        for source_i, source_bid, source_type, _ in records:
-            for target_i, target_bid, target_type, target_instance in records:
-                if source_i == target_i:
-                    continue
-                score = float(similarity_matrix(
-                    X[source_i], X[target_i].reshape(1, -1), self.metric
-                )[0])
-                row: Dict[str, object] = {
-                    "source_bodyId": source_bid,
-                    "source_type": source_type,
-                    "target_bodyId": target_bid,
-                    "target_type": target_type,
-                    "target_instance": target_instance,
-                    "profile_similarity": np.nan,
-                    "similarity": score,
-                    "is_same_type": True,
-                    "intra_type_similarity": intra,
-                    "method": self.method,
-                    "metric": self.metric,
-                }
-                if candidate_source is not None:
-                    row["candidate_source"] = candidate_source
-                rows.append(row)
+        pair_directions = {}
+        n_records = len(records)
+        # A cyclic orientation gives every member an outgoing row without
+        # duplicating an unordered pair.  For two members there is only one
+        # possible row, so both members are still represented across its
+        # endpoints.
+        if n_records >= 3:
+            for i in range(n_records):
+                j = (i + 1) % n_records
+                pair_directions[tuple(sorted((i, j)))] = (i, j)
+        for i in range(n_records):
+            for j in range(i + 1, n_records):
+                pair_directions.setdefault((i, j), (i, j))
+
+        for source_i, target_i in pair_directions.values():
+            _, source_bid, source_type, _ = records[source_i]
+            _, target_bid, target_type, target_instance = records[target_i]
+            score = float(similarity_matrix(
+                X[source_i], X[target_i].reshape(1, -1), self.metric
+            )[0])
+            row: Dict[str, object] = {
+                "source_bodyId": source_bid,
+                "source_type": source_type,
+                "target_bodyId": target_bid,
+                "target_type": target_type,
+                "target_instance": target_instance,
+                "profile_similarity": np.nan,
+                "similarity": score,
+                "is_same_type": True,
+                "intra_type_similarity": intra,
+                "method": self.method,
+                "metric": self.metric,
+            }
+            if candidate_source is not None:
+                row["candidate_source"] = candidate_source
+            rows.append(row)
         return rows
 
     def _aggregate_type_rows(
@@ -2402,7 +2452,8 @@ class MorphologyComparer:
                 "n_bodyids": int(query_type_count if is_intra and query_type_count
                                   else len(target_ids)),
                 "profile_similarity": (
-                    float(np.mean(profile_values)) if profile_values else np.nan
+                    np.nan if is_intra else
+                    (float(np.mean(profile_values)) if profile_values else np.nan)
                 ),
                 "is_intra_type": is_intra,
                 "intra_type_similarity": intra if is_intra else float("nan"),
@@ -2459,7 +2510,13 @@ class MorphologyComparer:
                 if bool(row.get("is_same_type"))
                 and str(row.get("target_type", "") or "").strip() == query_type
             ]
-            inter_rows = [row for row in ordered if row not in intra_rows]
+            inter_rows = [
+                row for row in ordered
+                if not (
+                    bool(row.get("is_same_type"))
+                    and str(row.get("target_type", "") or "").strip() == query_type
+                )
+            ]
             ordered = intra_rows + inter_rows[: self.top_n]
             ordered = sorted(
                 ordered,
@@ -2479,42 +2536,73 @@ class MorphologyComparer:
 
         Returns (bodyId-level df, type-level df): results.csv always holds
         the bodyId rows and type_summary.csv the type rows, whatever the
-        query kind. Type queries score from the type centroid and exclude
-        the query type's members from the bodyId rows; the type rows carry
-        the intra-type reference row."""
+        query kind. Type queries score every resolved query member against
+        every candidate member in the bodyId export; results.csv keeps
+        ordered intra-type pairs. Inter-type summary rows average those
+        pairs; the cache-direct query-type reference retains its centroid
+        score contract."""
         body_ids = data["bodyIds"]
         types = data["types"]
         X = data["X"]
         query_ids = [int(b) for b in query_df["bodyId"].tolist()]
         query_ids_set = set(query_ids)
-        q_type = query_df["type"].iloc[0] if len(query_df) else ""
+        q_type = ""
+        if len(query_df):
+            raw_q_type = query_df["type"].iloc[0]
+            q_type = "" if pd.isna(raw_q_type) else str(raw_q_type).strip()
+
+        q_mask = np.isin(body_ids, query_ids)
+        # Cache-direct type searches use every cached member of the queried
+        # type; the type index below supplies the authoritative member count
+        # even if a legacy query resolver returned only one member.
         intra = self._intra_type_similarity(q_type, body_ids, types, X, self.metric)
+        type_map, _ = _load_neuron_type_map(
+            self.dataset, str(self.project_root)
+        )
+        query_type_count = self._type_member_count(
+            q_type, type_map, query_df=query_df
+        )
 
         # --- bodyId rows ---
         rows = []
         if self.level == "type":
-            # Query type vector = mean of the query's member vectors; every
-            # query member is the query itself and is excluded.
-            q_mask = np.isin(body_ids, query_ids)
-            q_vec = X[q_mask].mean(axis=0) if q_mask.any() else None
-            if q_vec is None:
+            if not q_mask.any():
                 return pd.DataFrame(), pd.DataFrame()
-            scores = similarity_matrix(q_vec, X, self.metric)
-            for i, bid in enumerate(body_ids):
-                if int(bid) in query_ids_set:
+            query_pair_X = np.full(
+                (len(query_df), X.shape[1]), np.nan, dtype=float
+            )
+            query_pair_mask = np.zeros(len(query_df), dtype=bool)
+            for query_i, qrow in enumerate(query_df.itertuples(index=False)):
+                q_bid = int(qrow.bodyId)
+                q_idx = np.where(body_ids == q_bid)[0]
+                if not len(q_idx):
                     continue
-                rows.append({
-                    "source_bodyId": query_ids[0],
-                    "source_type": q_type,
-                    "target_bodyId": int(bid),
-                    "target_type": types[i],
-                    "target_instance": data["instances"][i],
-                    "similarity": float(scores[i]),
-                    "is_same_type": types[i] == q_type,
-                    "intra_type_similarity": intra,
-                    "method": self.method,
-                    "metric": self.metric,
-                })
+                q_vec = X[q_idx[0]]
+                query_pair_X[query_i] = q_vec
+                query_pair_mask[query_i] = True
+                scores = similarity_matrix(q_vec, X, self.metric)
+                source_type = str(getattr(qrow, "type", q_type) or "").strip()
+                for i, bid in enumerate(body_ids):
+                    bid = int(bid)
+                    if bid in query_ids_set:
+                        continue
+                    target_type = str(types[i] or "").strip()
+                    rows.append({
+                        "source_bodyId": q_bid,
+                        "source_type": source_type,
+                        "target_bodyId": bid,
+                        "target_type": target_type,
+                        "target_instance": data["instances"][i],
+                        "similarity": float(scores[i]),
+                        "is_same_type": target_type == source_type,
+                        "intra_type_similarity": intra,
+                        "method": self.method,
+                        "metric": self.metric,
+                    })
+            rows.extend(self._type_query_intra_rows(
+                query_df, query_pair_X, query_pair_mask, intra,
+                candidate_source=None
+            ))
         else:
             # Multi-query support: each query row is ranked independently
             # (self and any co-query neurons excluded from its rows).
@@ -2531,9 +2619,9 @@ class MorphologyComparer:
                         continue
                     rows.append({
                         "source_bodyId": int(qrow["bodyId"]),
-                        "source_type": qrow["type"],
+                        "source_type": str(qrow["type"] or "").strip(),
                         "target_bodyId": int(bid),
-                        "target_type": types[i],
+                        "target_type": str(types[i] or "").strip(),
                         "target_instance": data["instances"][i],
                         "similarity": float(scores[i]),
                         "is_same_type": types[i] == qrow["type"],
@@ -2541,20 +2629,49 @@ class MorphologyComparer:
                         "method": self.method,
                         "metric": self.metric,
                     })
-        rows = sorted(rows, key=lambda r: (-r["similarity"], r["target_bodyId"]))
-        bodyid_df = pd.DataFrame(rows).head(self.top_n).reset_index(drop=True)
-        bodyid_df.insert(0, "rank", np.arange(1, len(bodyid_df) + 1))
+        bodyid_df = self._bodyid_dataframe(rows, query_type=q_type)
 
-        # --- type rows (from the query centroid, incl. intra reference) ---
-        q_mask = np.isin(body_ids, query_ids)
-        q_vec = X[q_mask].mean(axis=0) if q_mask.any() else None
-        type_df = pd.DataFrame()
-        if q_vec is not None:
-            scores = similarity_matrix(q_vec, X, self.metric)
-            type_df = self._aggregate_by_type(
-                body_ids, types, scores, query_type=q_type,
-                metric=self.metric, X=X,
+        # --- type rows ---
+        if self.level == "type":
+            # Aggregate inter-type scores over every query-member/candidate
+            # pair.  Keep the established centroid score for the query-type
+            # reference itself; ``intra_type_similarity`` remains the
+            # off-diagonal member-pair reference.
+            q_vec = X[q_mask].mean(axis=0) if q_mask.any() else None
+            type_df = self._aggregate_type_rows(
+                rows,
+                query_type=q_type,
+                intra=intra,
+                query_type_count=(query_type_count or int(q_mask.sum())),
             )
+            if q_vec is not None and q_type and not type_df.empty:
+                centroid_scores = similarity_matrix(q_vec, X, self.metric)
+                query_type_mask = np.asarray(
+                    [str(t or "").strip() == q_type for t in types],
+                    dtype=bool,
+                )
+                if query_type_mask.any():
+                    centroid_similarity = float(
+                        np.mean(centroid_scores[query_type_mask])
+                    )
+                    type_df.loc[
+                        type_df["target_type"] == q_type, "similarity"
+                    ] = centroid_similarity
+                    if query_type_count:
+                        type_df.loc[
+                            type_df["target_type"] == q_type, "n_bodyids"
+                        ] = query_type_count
+        else:
+            # Keep the established centroid aggregation for bodyId queries'
+            # per-type summary.
+            q_vec = X[q_mask].mean(axis=0) if q_mask.any() else None
+            type_df = pd.DataFrame()
+            if q_vec is not None:
+                scores = similarity_matrix(q_vec, X, self.metric)
+                type_df = self._aggregate_by_type(
+                    body_ids, types, scores, query_type=q_type,
+                    metric=self.metric, X=X,
+                )
         return bodyid_df, type_df
 
     def _vector_for_body_id(self, bid: int, body_ids: np.ndarray, X: np.ndarray) -> Optional[np.ndarray]:
@@ -2652,15 +2769,35 @@ class MorphologyComparer:
         id_to_type = {int(b): t for b, t in zip(body_ids, types)}
         id_to_inst = {int(b): i for b, i in zip(body_ids, data["instances"])}
 
-        query_type = query_df["type"].iloc[0] if len(query_df) else ""
-        intra = self._intra_type_similarity(query_type, body_ids, types, X, "cosine")
+        query_type = ""
+        if len(query_df):
+            raw_query_type = query_df["type"].iloc[0]
+            query_type = "" if pd.isna(raw_query_type) else str(raw_query_type).strip()
+        query_mask = np.isin(body_ids, list(query_ids))
+        if self.level == "type" and query_mask.any():
+            intra = self._intra_type_similarity(
+                query_type,
+                body_ids[query_mask],
+                [query_type for _ in range(int(query_mask.sum()))],
+                X[query_mask],
+                "cosine",
+            )
+        else:
+            intra = self._intra_type_similarity(query_type, body_ids, types, X, "cosine")
+
+        type_map, _ = _load_neuron_type_map(
+            self.dataset, str(self.project_root)
+        )
+        query_type_count = self._type_member_count(
+            query_type, type_map, query_df=query_df
+        )
 
         # --- bodyId rows (query members excluded) ---
-        rows = []
+        rows: List[Dict[str, object]] = []
         for bid, score in ranked:
             if bid in query_ids:
                 continue
-            t = id_to_type.get(bid, "")
+            t = str(id_to_type.get(bid, "") or "").strip()
             rows.append({
                 "source_bodyId": int(query_df["bodyId"].iloc[0]),
                 "source_type": query_type,
@@ -2673,10 +2810,32 @@ class MorphologyComparer:
                 "method": self.method,
                 "metric": "nblast",
             })
-        bodyid_df = pd.DataFrame(rows).head(self.top_n).reset_index(drop=True)
-        bodyid_df.insert(0, "rank", np.arange(1, len(bodyid_df) + 1))
+        if self.level == "type" and query_mask.any():
+            query_pair_X = np.full(
+                (len(query_df), X.shape[1]), np.nan, dtype=float
+            )
+            query_pair_mask = np.zeros(len(query_df), dtype=bool)
+            for query_i, qrow in enumerate(query_df.itertuples(index=False)):
+                q_idx = np.where(body_ids == int(qrow.bodyId))[0]
+                if len(q_idx):
+                    query_pair_X[query_i] = X[q_idx[0]]
+                    query_pair_mask[query_i] = True
+            rows.extend(self._type_query_intra_rows(
+                query_df, query_pair_X, query_pair_mask, intra,
+                candidate_source=None,
+            ))
+        bodyid_df = self._bodyid_dataframe(rows, query_type=query_type)
 
         # --- type rows (per-type NBLAST means + intra reference) ---
+        if self.level == "type":
+            type_df = self._aggregate_type_rows(
+                rows,
+                query_type=query_type,
+                intra=intra,
+                query_type_count=(query_type_count or int(query_mask.sum())),
+            )
+            return bodyid_df, type_df
+
         import collections
         agg: Dict[str, List[float]] = collections.defaultdict(list)
         for bid, score in ranked:
@@ -2801,18 +2960,22 @@ class MorphologyComparer:
         results: pd.DataFrame,
         query_df: Optional[pd.DataFrame] = None,
     ):
-        """Render queried neurons together with the top-N results (NB-style).
+        """Render the top-N result neurons/types (NB-style).
 
-        Enabled when ``visualize_top_n > 0``. The query is placed first in
-        the layer list so the resulting visualization makes the reference
-        neuron(s) visible alongside the matches. With ``visualize_by='type'``
-        (default) each of the top-N distinct result types becomes one layer
-        containing its member bodyIds (the result rows for bodyId-level
-        searches, or the vector-cache members capped at ``n_per_type`` for
-        type-level searches); with ``'bodyId'`` each top result row is one
-        layer. The intra-type reference row is never rendered. Output goes to
-        the same run folder (plot3d_{dataset}/ subfolder); a visualization
-        failure is logged but never fails the similarity search.
+        Enabled when ``visualize_top_n > 0``. Query neurons are deliberately
+        excluded from the layer list and from the top-N count. With
+        ``visualize_by='type'`` (default) each of the top-N distinct result
+        types becomes one layer containing its member bodyIds (the result rows
+        for bodyId-level searches, or the vector-cache members capped at
+        ``n_per_type`` for type-level searches); with ``'bodyId'`` each top
+        result row is one layer. The intra-type reference row is never
+        rendered. Output goes to the same run folder (plot3d_{dataset}/
+        subfolder); a visualization failure is logged but never fails the
+        similarity search.
+
+        ``query_df`` is retained for compatibility with callers from older
+        releases; it is used only to remove query bodyIds if they are present
+        in a supplied result frame.
         """
         if self.visualize_top_n <= 0 or results is None or results.empty:
             return
@@ -2830,7 +2993,6 @@ class MorphologyComparer:
 
         layers: List[List[int]] = []
         names: List[str] = []
-        query_layer_count = 0
 
         def _body_ids(frame: pd.DataFrame) -> List[int]:
             values = frame.get("bodyId", pd.Series(dtype=object)).tolist()
@@ -2844,35 +3006,30 @@ class MorphologyComparer:
                     continue
             return list(dict.fromkeys(ids))
 
-        # Put the queried neuron(s) in their own layer(s).  This is kept out
-        # of ``visualize_top_n`` so that enabling query context never reduces
-        # the number of requested result layers.
+        def _body_id_in(value, ids: set) -> bool:
+            try:
+                return not pd.isna(value) and int(value) in ids
+            except (TypeError, ValueError):
+                return False
+
+        query_body_ids = set()
         if query_df is not None and not query_df.empty:
-            if self.visualize_by == "type" and "type" in query_df.columns:
-                grouped_query: Dict[str, List[int]] = {}
-                for _, row in query_df.iterrows():
-                    raw_type = row.get("type", "")
-                    query_type = "" if pd.isna(raw_type) else str(raw_type).strip()
-                    if not query_type:
-                        query_type = "query"
-                    grouped_query.setdefault(query_type, [])
-                    try:
-                        bid = row.get("bodyId")
-                        if not pd.isna(bid):
-                            grouped_query[query_type].append(int(bid))
-                    except (TypeError, ValueError):
-                        continue
-                for query_type, members in grouped_query.items():
-                    members = list(dict.fromkeys(members))
-                    if members:
-                        layers.append(members)
-                        names.append(f"query_{query_type}_x{len(members)}")
-                        query_layer_count += 1
-            else:
-                for bid in _body_ids(query_df):
-                    layers.append([bid])
-                    names.append(f"query_{bid}")
-                    query_layer_count += 1
+            query_body_ids = set(_body_ids(query_df))
+
+        # Be defensive if a caller supplies a frame that still contains the
+        # query rows. Filtering before the top-N selection is what makes the
+        # requested count mean "top N results", not "top N rows including the
+        # query".
+        if query_body_ids and "target_bodyId" in work.columns:
+            work = work.loc[
+                ~work["target_bodyId"].map(
+                    lambda value: _body_id_in(value, query_body_ids)
+                )
+            ]
+        if work.empty:
+            self._log("Visualization skipped: no non-query results to show.")
+            return
+
         if self.visualize_by == "type":
             seen: set = set()
             rank = 0
@@ -2888,6 +3045,7 @@ class MorphologyComparer:
                     members = _body_ids(work.loc[
                         work["target_type"] == t
                     ].rename(columns={"target_bodyId": "bodyId"}))
+                members = [bid for bid in members if bid not in query_body_ids]
                 if not members:
                     continue
                 seen.add(t)
@@ -2897,12 +3055,18 @@ class MorphologyComparer:
                 if rank >= self.visualize_top_n:
                     break
         else:
-            for rank, (_, row) in enumerate(work.head(self.visualize_top_n).iterrows(), start=1):
+            rank = 0
+            for _, row in work.iterrows():
+                if rank >= self.visualize_top_n:
+                    break
                 try:
                     bid = int(row.get("target_bodyId"))
                 except (TypeError, ValueError):
                     continue
+                if bid in query_body_ids:
+                    continue
                 t = str(row.get("target_type", "") or "")
+                rank += 1
                 layers.append([bid])
                 names.append(f"r{rank}_{t or f'unknown_{bid}'}_{bid}")
 
@@ -2910,10 +3074,7 @@ class MorphologyComparer:
             self._log("Visualization skipped: no renderable layers.")
             return
 
-        self._log(
-            f"3D visualization: including {query_layer_count} query layer(s) "
-            f"and {len(layers) - query_layer_count} result layer(s)"
-        )
+        self._log(f"3D visualization: including {len(layers)} result layer(s)")
 
         run_dir = Path(getattr(self, "output_folder", "") or self.output_dir)
         try:

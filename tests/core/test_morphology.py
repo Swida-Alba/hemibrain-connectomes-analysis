@@ -597,15 +597,17 @@ class TestMorphologyComparer:
 
     def test_type_search_writes_bodyid_results_csv(self, tmp_path, monkeypatch):
         """results.csv is ALWAYS bodyId-level: a type query's results.csv
-        holds the ranked bodyIds (query members excluded) while
-        type_summary.csv holds the type rows."""
+        holds ranked bodyId rows, including ordered intra-type pairs when
+        multiple query members are resolved, while type_summary.csv holds
+        the type rows."""
         root = self._setup(tmp_path, monkeypatch)
         comparer = self._make_comparer(root, query=101, level="type")
         comparer.find_similar()
         run_dir = Path(comparer.output_folder)
         res = pd.read_csv(run_dir / "results.csv")
         assert "target_bodyId" in res.columns
-        assert 101 not in res["target_bodyId"].tolist()  # query member excluded
+        # This scalar fixture resolves one member, so there is no intra pair.
+        assert 101 not in res["target_bodyId"].tolist()
         assert res["target_type"].tolist() == ["LINE", "Y"]
         summary = pd.read_csv(run_dir / "type_summary.csv")
         assert "target_type" in summary.columns
@@ -651,11 +653,11 @@ class TestVisualizeTopResults:
         assert not res.empty
         assert len(self.FakeVisualizer.instances) == 1
         vs = self.FakeVisualizer.instances[0]
-        # The queried LINE neuron is rendered first, followed by the top
-        # result types.
-        assert vs.kwargs["neuron_layers"] == [[101], [102], [103]]
+        # The query is excluded; the requested count applies only to result
+        # types.
+        assert vs.kwargs["neuron_layers"] == [[102], [103]]
         assert vs.kwargs["custom_layer_names"] == [
-            "query_LINE_x1", "r1_LINE_x1", "r2_Y_x1"
+            "r1_LINE_x1", "r2_Y_x1"
         ]
         assert vs.kwargs["legend_mode"] == "layer"
         assert vs.kwargs["skip_synapse"] is True
@@ -670,21 +672,38 @@ class TestVisualizeTopResults:
         assert not res.empty
         assert len(self.FakeVisualizer.instances) == 1
         vs = self.FakeVisualizer.instances[0]
-        # The query remains visible; only the Y row remains after dropping the
-        # LINE intra reference, with its members from the vector cache.
-        assert vs.kwargs["neuron_layers"] == [[101], [103]]
-        assert vs.kwargs["custom_layer_names"] == ["query_LINE_x1", "r1_Y_x1"]
+        # The query and the LINE intra reference are excluded; only the Y row
+        # remains, with its members from the vector cache.
+        assert vs.kwargs["neuron_layers"] == [[103]]
+        assert vs.kwargs["custom_layer_names"] == ["r1_Y_x1"]
 
     def test_bodyid_mode_one_layer_per_row(self, tmp_path, monkeypatch):
         comparer = self._setup(tmp_path, monkeypatch, visualize_by="bodyId")
         comparer.find_similar()
         assert len(self.FakeVisualizer.instances) == 1
         vs = self.FakeVisualizer.instances[0]
-        assert vs.kwargs["neuron_layers"] == [[101], [102], [103]]
+        assert vs.kwargs["neuron_layers"] == [[102], [103]]
         assert vs.kwargs["custom_layer_names"] == [
-            "query_101", "r1_LINE_102", "r2_Y_103"
+            "r1_LINE_102", "r2_Y_103"
         ]
         assert vs.kwargs["legend_mode"] == "single"
+
+    def test_query_rows_do_not_consume_bodyid_top_n(self, tmp_path, monkeypatch):
+        comparer = self._setup(
+            tmp_path, monkeypatch, visualize_by="bodyId", visualize_top_n=1
+        )
+        results = pd.DataFrame({
+            "target_bodyId": [101, 102, 103],
+            "target_type": ["LINE", "LINE", "Y"],
+            "similarity": [1.0, 0.9, 0.8],
+        })
+        query_df = pd.DataFrame({"bodyId": [101], "type": ["LINE"]})
+
+        comparer._visualize_top_results(results, query_df=query_df)
+
+        vs = self.FakeVisualizer.instances[0]
+        assert vs.kwargs["neuron_layers"] == [[102]]
+        assert vs.kwargs["custom_layer_names"] == ["r1_LINE_102"]
 
     def test_visualization_settings_are_forwarded(self, tmp_path, monkeypatch):
         comparer = self._setup(
@@ -1172,6 +1191,64 @@ class TestProfileFirst:
         assert intra.iloc[0]["target_type"] == "T"
         assert intra.iloc[0]["intra_type_similarity"] == pytest.approx(1.0, abs=1e-6)
         assert (res["target_type"] == "Y").any()
+
+    def test_type_query_exports_all_members_and_intra_pairs(
+        self, tmp_path, monkeypatch
+    ):
+        """A type query must not collapse to query_ids[0] in results.csv.
+
+        The body-level export contains unique intra-type pairs for every
+        resolved query member, while the type summary counts the type
+        population rather than the pre-fetch cache snapshot.
+        """
+        comparer = self._setup(tmp_path, monkeypatch)
+        # Make the two query members morphologically distinct so a
+        # first-bodyId-only implementation cannot pass the type-mean check.
+        write_skeleton(tmp_path, "np:v1", 102, bushy_y_neuron())
+        self._index(tmp_path, [
+            (101, "Q", "Q_1"), (102, "Q", "Q_2"),
+            (201, "T", "T_1"), (202, "Y", "Y_1"),
+        ])
+        comparer.level = "type"
+        monkeypatch.setattr(comparer, "_resolve_query", lambda: pd.DataFrame({
+            "bodyId": [101, 102], "type": ["Q", "Q"],
+            "instance": ["Q_1", "Q_2"],
+        }))
+        monkeypatch.setattr(comparer, "_connection_cache_candidates",
+                            lambda q: self._candidates([
+                                (201, 9, 1.0, "T"), (202, 5, 0.6, "Y"),
+                            ]))
+        monkeypatch.setattr(morph, "fetch_skeleton_on_demand",
+                            lambda d, b, project_root=None, persist=True:
+                            line_neuron(length=25))
+
+        res = comparer.find_similar()
+        assert not res.empty
+        body = pd.read_csv(Path(comparer.output_folder) / "results.csv")
+        endpoints = set(body["source_bodyId"]) | set(body["target_bodyId"])
+        assert {101, 102}.issubset(endpoints)
+        intra = body[
+            (body["target_type"] == "Q")
+            & (body["is_same_type"] == True)  # noqa: E712
+        ]
+        assert set(zip(intra["source_bodyId"], intra["target_bodyId"])) == {
+            (101, 102)
+        }
+        assert intra["intra_type_similarity"].iloc[0] == pytest.approx(
+            intra["similarity"].mean(),
+            abs=1e-6,
+        )
+
+        summary = pd.read_csv(Path(comparer.output_folder) / "type_summary.csv")
+        row = summary[summary["target_type"] == "Q"].iloc[0]
+        assert row["n_bodyids"] == 2
+        assert row["is_intra_type"] == True  # noqa: E712
+        target_rows = body[body["target_type"] == "T"]
+        assert set(target_rows["source_bodyId"]) == {101, 102}
+        target_row = summary[summary["target_type"] == "T"].iloc[0]
+        assert target_row["similarity"] == pytest.approx(
+            target_rows["similarity"].mean(), abs=1e-6
+        )
 
     def test_type_search_uses_only_connectivity_candidates(self, tmp_path, monkeypatch):
         """Regression: a cached-only type must NOT rank; a member of an

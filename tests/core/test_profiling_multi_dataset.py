@@ -162,7 +162,20 @@ def test_multi_dataset_init():
     assert comparer.is_multi_dataset is True
     assert comparer.datasets == [DS_A, DS_B]
     assert comparer.dataset == DS_A
-    assert comparer.skip_bodyId_level is True
+    assert comparer.skip_bodyId_level == "auto"
+
+
+def test_mapping_same_name_flag_is_numeric_and_requires_complete_match():
+    comparer = _make_multi_comparer()
+    profile = _profile("p", DS_A)
+
+    same = {DS_A: ("aMe12", profile), DS_B: ("aMe12", profile)}
+    different = {DS_A: ("aMe12", profile), DS_B: ("MTe07", profile)}
+    missing = {DS_A: ("aMe12", profile)}
+
+    assert comparer._same_name_flag(same, [DS_A, DS_B]) == 1
+    assert comparer._same_name_flag(different, [DS_A, DS_B]) == 0
+    assert comparer._same_name_flag(missing, [DS_A, DS_B]) == 0
 
 
 def test_single_dataset_list_equivalent_to_dataset():
@@ -226,8 +239,14 @@ def test_report_redraws_plotly_and_links_vispath_editor(tmp_path):
     assert "type_level/visualization/heatmap_type_combined_jaccard.html" in text
     assert "data-tab-button" in text
     assert "Overall" in text
-    plot_call = text.split("Plotly.newPlot(", 1)[1].split(");", 1)[0]
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr))" in text
+    assert "2 cards per row · 6 metrics" in text
+    # The inline Plotly bundle contains its own example call; inspect the
+    # actual generated chart invocation at the end of the report instead.
+    plot_call = text.rsplit("Plotly.newPlot(", 1)[1].split(");", 1)[0]
     assert '"texttemplate":' not in plot_call
+    assert '"scaleanchor":"x"' in plot_call
+    assert '"scaleratio":1' in plot_call
 
 
 def test_report_uses_vispath_ward_order_for_plotly_heatmaps():
@@ -244,6 +263,68 @@ def test_report_uses_vispath_ward_order_for_plotly_heatmaps():
     assert clustered is True
     assert ordered.index.tolist() == ["r0", "r2", "r1", "r3"]
     assert ordered.columns.tolist() == ["c0", "c1"]
+
+
+def test_report_heatmaps_use_red_positive_blue_negative_white_zero():
+    comparer = _make_multi_comparer(datasets=[DS_A])
+
+    positive_fragment, _ = comparer._plotly_heatmap_fragment(
+        pd.DataFrame(
+            [[0.0, 1.0]],
+            index=["row"],
+            columns=["zero", "positive"],
+        ),
+        "Jaccard",
+        "jaccard",
+        "x",
+        "y",
+    )
+    signed_fragment, _ = comparer._plotly_heatmap_fragment(
+        pd.DataFrame(
+            [[-1.0, 0.0, 1.0]],
+            index=["row"],
+            columns=["negative", "zero", "positive"],
+        ),
+        "Rank",
+        "rank_corr_union",
+        "x",
+        "y",
+    )
+
+    assert positive_fragment is not None
+    assert signed_fragment is not None
+    assert '"colorscale":[[0.0,"#ffffff"]' in positive_fragment
+    assert '"#a50f15"' in positive_fragment
+    assert '"colorscale":[[0.0,"#053061"]' in signed_fragment
+    assert '"#ffffff"' in signed_fragment
+    assert '"#67001f"' in signed_fragment
+    assert '"xgap"' not in positive_fragment
+    assert '"ygap"' not in positive_fragment
+
+
+def test_bodyid_matrices_populate_weighted_jaccard_symmetrically():
+    comparer = _make_multi_comparer(datasets=[DS_A])
+    profile_a = _profile(1, DS_A, upstream={"X": 4.0, "Y": 2.0, "Z": 1.0})
+    profile_b = _profile(2, DS_A, upstream={"X": 2.0, "Y": 1.0, "Z": 0.5})
+    bodyid_profiles = {
+        ("TypeA", 1): profile_a,
+        ("TypeB", 2): profile_b,
+    }
+
+    matrices = comparer._compute_bodyid_similarity_matrices(bodyid_profiles)
+    weighted = matrices["combined"]["weighted_jaccard"]
+    scores = ProfileComparator.combined_score(profile_a, profile_b, direction="both")
+    expected = scores["weighted_jaccard"]
+
+    assert expected > 0.0
+    assert weighted.loc["1_TypeA", "2_TypeB"] == pytest.approx(expected)
+    assert weighted.loc["2_TypeB", "1_TypeA"] == pytest.approx(expected)
+    assert matrices["combined"]["combined"].loc["1_TypeA", "2_TypeB"] == pytest.approx(
+        scores["combined"]
+    )
+    assert matrices["combined"]["rank_corr_union"].loc["1_TypeA", "2_TypeB"] == pytest.approx(
+        scores["rank_union"]
+    )
 
 
 def test_aggregate_inter_dataset_matrices_uses_neurons_by_dataset_pairs():
@@ -546,6 +627,7 @@ def test_run_multi_dataset_output_structure(tmp_path, monkeypatch):
     result = comparer.run()
     assert result["is_multi_dataset"] is True
     assert result["report_path"]
+    assert not any("/per_neuron/" in path for path in result["matrices_saved"])
 
     out = Path(result["output_path"])
     assert (out / "report.html").exists()
@@ -560,9 +642,12 @@ def test_run_multi_dataset_output_structure(tmp_path, monkeypatch):
     assert (out / "cross_dataset" / "all_types" / "results").exists()
     assert (out / "cross_dataset" / "all_types" / "results" /
             "similarity_combined_jaccard.csv").exists()
-    assert (out / "cross_dataset" / "per_neuron" / "aMe12" / "results").exists()
-    assert (out / "cross_dataset" / "per_neuron" / "aMe12" / "visualization").exists()
+    assert not (out / "cross_dataset" / "per_neuron").exists()
     assert (out / "profiles" / safe_b / "aggregated").exists()
+
+    mapping = pd.read_csv(out / "cross_dataset" / "mapping_summary.csv")
+    assert "same name" in mapping.columns
+    assert mapping.loc[mapping["anchor"] == "aMe12", "same name"].iloc[0] == 1
 
     # the report indexes every matrix in separate tabbed sections
     report = (out / "report.html").read_text(encoding="utf-8")
@@ -576,6 +661,84 @@ def test_run_multi_dataset_output_structure(tmp_path, monkeypatch):
     assert "<iframe" not in report
     assert "similarity_combined_jaccard.csv" in report
     assert "mapping_summary" not in report  # summary is a CSV, not embedded
+    assert "Detailed per-neuron" not in report
     params = json.loads((out / "parameters.json").read_text(encoding="utf-8"))
     assert params["datasets"] == [DS_A, DS_B]
     assert params["aggregation_level"] == "type"
+
+
+def test_multi_dataset_saves_bodyid_and_type_average_intra_levels(tmp_path, monkeypatch):
+    comparer = _make_multi_comparer(skip_bodyId_level=False)
+    comparer.output_dir = str(tmp_path)
+
+    import comparison.profile_comparator as pc_mod
+    monkeypatch.setattr(pc_mod, "get_type_mapper", lambda *a, **k: None)
+    monkeypatch.setattr(comparer, "_compute_inter_dataset_matrices", lambda anchors: {})
+    monkeypatch.setattr(
+        comparer,
+        "_generate_heatmaps_vispath",
+        lambda matrices, viz_dir, saved, prefix: None,
+    )
+
+    matrix = pd.DataFrame(
+        [[1.0, 0.5], [0.5, 1.0]],
+        index=["aMe12", "x"],
+        columns=["aMe12", "x"],
+    )
+    metrics = {
+        metric: matrix
+        for metric in (
+            "jaccard",
+            "weighted_jaccard",
+            "cosine",
+            "rank_corr",
+            "rank_corr_union",
+            "combined",
+        )
+    }
+    pa = _profile("a", DS_A, upstream={"X": 4.0})
+    pb = _profile("b", DS_B, upstream={"X": 3.0})
+
+    def fake_extract(ds):
+        profile = pa if ds == DS_A else pb
+        return (
+            {"aMe12": profile, "x": profile},
+            {("aMe12", 1): profile, ("x", 2): profile},
+        )
+
+    monkeypatch.setattr(comparer, "_extract_profiles_for_dataset", fake_extract)
+    monkeypatch.setattr(
+        comparer,
+        "_compute_similarity_matrices",
+        lambda profiles: {"combined": metrics},
+    )
+    monkeypatch.setattr(
+        comparer,
+        "_compute_bodyid_similarity_matrices",
+        lambda profiles: {"combined": metrics},
+    )
+    monkeypatch.setattr(
+        comparer,
+        "_compute_type_avg_bodyid_matrices",
+        lambda profiles: {"combined": metrics},
+    )
+
+    result = comparer.run()
+    out = Path(result["output_path"])
+    safe_a = DS_A.replace(":", "_").replace(".", "_")
+    intra_results = out / "intra_dataset" / safe_a / "results"
+
+    assert result["bodyid_level_skipped"] is False
+    assert result["n_bodyid_profiles"] == 4
+    assert (
+        intra_results / "bodyid_similarity_weighted_jaccard_combined.csv"
+    ).exists()
+    assert (
+        intra_results / "type_avg_bodyid_similarity_weighted_jaccard_combined.csv"
+    ).exists()
+
+    report = (out / "report.html").read_text(encoding="utf-8")
+    assert "BodyId level" in report
+    assert "Type average of bodyIds" in report
+    assert "bodyid_similarity_weighted_jaccard_combined.csv" in report
+    assert "type_avg_bodyid_similarity_weighted_jaccard_combined.csv" in report

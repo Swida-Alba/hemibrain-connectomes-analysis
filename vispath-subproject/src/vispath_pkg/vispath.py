@@ -629,9 +629,16 @@ class VisualizePath:
                 self.output_folder = './empty_network'
                 self.base_filename = f'empty_network_{timestamp}'
             else:
-                # Use folder name + timestamp for uniqueness
+                # The UI passes a per-run folder that already ends in a
+                # timestamp (for example, ``plotpath_empty_network_...``).
+                # Reuse that name so the generated file does not repeat the
+                # same timestamp. Standalone callers with an ordinary folder
+                # still receive the timestamped filename used historically.
                 folder_name = os.path.basename(self.output_folder.rstrip(os.sep))
-                self.base_filename = f'{folder_name}_{timestamp}'
+                if re.search(r'_\d{8}_\d{6}$', folder_name):
+                    self.base_filename = folder_name
+                else:
+                    self.base_filename = f'{folder_name}_{timestamp}'
             os.makedirs(self.output_folder, exist_ok=True)
             return
         
@@ -9701,9 +9708,8 @@ class VisualizePath:
         # 3. Create network and show immediately
         if plot_network:
             network_path = self.create_network()
-            if self.showfig:
-                import webbrowser
-                webbrowser.open('file://' + os.path.abspath(network_path))
+            # ``create_network`` already opens the generated file when
+            # ``showfig`` is enabled. Do not open it again here.
         
         # Save data
         self.save_data()
@@ -9842,11 +9848,7 @@ class VisualizePath:
         
         # Create network
         network_path = self.create_network()
-        
-        # Show if requested
-        if self.showfig:
-            import webbrowser
-            webbrowser.open('file://' + os.path.abspath(network_path))
+        # ``create_network`` already handles the optional browser open.
         
         self._vprint("\n" + "=" * 80)
         self._vprint("✓ Network visualization complete!")

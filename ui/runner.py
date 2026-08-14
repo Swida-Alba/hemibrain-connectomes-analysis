@@ -766,6 +766,10 @@ print("[DROCAT] Done.")
         "Output folder: ",
         "📁 Output folder: ",
         "📁 Output: ",
+        # ConnectivityProfileComparer prefixes its final run path with the
+        # plain ``Output:`` label.  Keep this marker path-only so the output
+        # panel can resolve the current profiling folder from the log.
+        "Output: ",
         "Saving results to: ",
         "Results saved to: ",
         "Output will be saved to: ",

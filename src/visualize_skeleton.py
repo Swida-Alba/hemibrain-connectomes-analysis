@@ -2669,6 +2669,147 @@ class VisualizeSkeleton:
         else:  # kaleido
             return 100
 
+    @staticmethod
+    def _skeleton_simplification_warning(dataset, client_type,
+                                         skeleton_mode, simplification):
+        """Return warning metadata for an aggressively simplified tube render.
+
+        The simplification value is a rendering setting, not an analysis
+        setting.  The thresholds are deliberately strict: the default
+        analysis settings (NeuPrint 0.95 and FAFB 0.98) should make the user
+        aware that fine branches can be lost in the rendered surface.
+
+        Returns
+        -------
+        dict or None
+            Dataset family, value, and threshold for the warning, or ``None``
+            when the warning does not apply.
+        """
+        if str(skeleton_mode or '').lower() != 'tube':
+            return None
+
+        try:
+            value = float(simplification)
+        except (TypeError, ValueError):
+            return None
+
+        dataset_name = str(dataset or '')
+        normalized_dataset = dataset_name.lower()
+        is_fafb = 'fafb' in normalized_dataset
+        is_flywire = 'flywire' in normalized_dataset
+
+        if is_fafb:
+            family = 'FlyWire FAFB'
+            threshold = 0.95
+        elif not is_flywire:
+            family = 'NeuPrint'
+            threshold = 0.90
+        else:
+            # BANC and other FlyWire datasets do not share the FAFB mesh
+            # pipeline, so do not apply the FAFB warning to them.
+            return None
+
+        if value <= threshold:
+            return None
+
+        return {
+            'dataset': dataset_name,
+            'family': family,
+            'value': value,
+            'threshold': threshold,
+        }
+
+    def _skeleton_simplification_warning_html(self):
+        """Build the in-page warning for the current visualization settings."""
+        warning = self._skeleton_simplification_warning(
+            getattr(self, 'dataset', ''),
+            getattr(self, 'client_type', ''),
+            getattr(self, 'skeleton_mode', ''),
+            getattr(self, 'skeleton_mesh_simplification', None),
+        )
+        if warning is None:
+            return ''
+
+        # Escape dataset text before inserting it into generated HTML.  The
+        # warning is generated from user-provided dataset/configuration input.
+        from html import escape
+
+        family = escape(warning['family'])
+        dataset = escape(warning['dataset'])
+        value = warning['value']
+        threshold = warning['threshold']
+        if warning['family'] == 'NeuPrint':
+            pipeline_note = (
+                ' NeuPrint renders may start from the fixed simp90 skeleton '
+                'cache; values above 0.90 then decimate that cached surface '
+                'again.'
+            )
+        else:
+            pipeline_note = (
+                ' FAFB renders start from a soma-aware mesh cache, so the '
+                'same percentage is not directly comparable with NeuPrint '
+                'skeleton-node reduction.'
+            )
+        return (
+            '<div id="drocat-skeleton-simplification-warning" role="alert" '
+            'style="box-sizing:border-box;width:100%;padding:10px 14px;'
+            'margin:0 0 8px 0;border:1px solid #d99a2b;border-left:5px solid '
+            '#d97706;border-radius:6px;background:#fff8e6;color:#5b4300;'
+            'font:14px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">'
+            '<strong>Skeleton simplification warning.</strong> '
+            f'{family} dataset <code>{dataset}</code> is rendered with '
+            f'<code>skeleton_mesh_simplification={value:.3f}</code>, above '
+            f'the {threshold:.2f} detail-warning threshold. Higher values '
+            'remove more mesh faces and can hide fine branches. Lower the '
+            'simplification value in the visualization settings for more '
+            f'detail.{pipeline_note} This affects visualization only; analysis graphs and '
+            'query results are unchanged.'
+            '</div>'
+        )
+
+    def _inject_skeleton_simplification_warning(self, html_path):
+        """Insert the simplification warning at the top of a full HTML page."""
+        warning_html = self._skeleton_simplification_warning_html()
+        if not warning_html or not os.path.exists(html_path):
+            return
+
+        try:
+            with open(html_path, 'r', encoding='utf-8') as handle:
+                html = handle.read()
+
+            # Avoid duplicate banners when an existing file is decorated by a
+            # retry/export path more than once.
+            if 'drocat-skeleton-simplification-warning' in html:
+                return
+
+            import re
+            match = re.search(r'<body\b[^>]*>', html, flags=re.IGNORECASE)
+            if match is None:
+                return
+
+            html = html[:match.end()] + '\n' + warning_html + html[match.end():]
+            with open(html_path, 'w', encoding='utf-8') as handle:
+                handle.write(html)
+        except Exception as exc:
+            self._vprint(
+                f'  Warning: could not add HTML simplification warning: {exc}',
+                level='full',
+            )
+
+    def _write_plotly_html(self, figure, html_path, **kwargs):
+        """Write a self-contained visualization HTML.
+
+        Plotly's JavaScript runtime is embedded in every page so an HTML file
+        remains portable when copied without its output directory.  A warning
+        banner is added after Plotly has generated the document so it remains
+        visible in both the main and per-neuron pages.
+        """
+        kwargs.setdefault('auto_open', False)
+        kwargs.setdefault('full_html', True)
+        kwargs.setdefault('include_plotlyjs', True)
+        figure.write_html(html_path, **kwargs)
+        self._inject_skeleton_simplification_warning(html_path)
+
     def _simplify_mesh_open3d(self, trimesh_obj, target_faces):
         """
         Simplify a trimesh mesh using open3d's quadric decimation.
@@ -2935,10 +3076,11 @@ class VisualizeSkeleton:
         
         # Save figure to temporary HTML
         temp_html = os.path.join(output_folder, "_temp_export.html")
-        export_fig.write_html(
+        self._write_plotly_html(
+            export_fig,
             temp_html, 
             auto_open=False, 
-            include_plotlyjs='cdn',
+            include_plotlyjs=True,
             config={'displayModeBar': False}
         )
         
@@ -3092,9 +3234,13 @@ class VisualizeSkeleton:
                             
                             # Save simplified HTML to permanent file for reuse
                             simplified_html_path = os.path.join(output_folder, f"{self.saveas}_simplified.html")
-                            simplified_fig.write_html(simplified_html_path, auto_open=False, 
-                                                     include_plotlyjs='cdn',
-                                                     config={'displayModeBar': False})
+                            self._write_plotly_html(
+                                simplified_fig,
+                                simplified_html_path,
+                                auto_open=False,
+                                include_plotlyjs=True,
+                                config={'displayModeBar': False},
+                            )
                             
                             new_size_mb = os.path.getsize(simplified_html_path) / 1024 / 1024
                             self._vprint(f'      ✓ Simplified HTML saved: {os.path.basename(simplified_html_path)} ({new_size_mb:.0f}MB)')
@@ -5146,7 +5292,7 @@ class VisualizeSkeleton:
                 
                 mesh_neuron = navis.conversion.tree2meshneuron(
                     skeleton,
-                    tube_points=8,
+                    tube_points=VisualizeSkeleton.SKELETON_TUBE_POINTS,
                     use_normals=True
                 )
                 
@@ -5227,7 +5373,9 @@ class VisualizeSkeleton:
         except Exception:
             return False
 
-    def _effective_render_simplification(self, is_fafb: bool) -> float:
+    def _effective_render_simplification(
+            self, is_fafb: bool, using_simplified_cache: bool | None = None
+    ) -> float:
         """Effective render-time mesh decimation fraction for tube mode.
 
         For NeuPrint datasets whose skeleton cache already holds the fixed
@@ -5239,9 +5387,18 @@ class VisualizeSkeleton:
         count instead of silently doing nothing.
 
         Returns the fraction of faces to remove (0.0 = keep all).
+
+        ``using_simplified_cache`` describes the source of the neurons being
+        rendered in the current run.  The default ``None`` keeps the marker-
+        based behavior for existing callers, while the main render pipeline
+        passes the per-run source explicitly.  This matters on the first
+        fetch: saving a simp90 cache must not make a still-raw in-memory
+        render use the cache-relative decimation formula.
         """
         target = self.skeleton_mesh_simplification
-        if (not is_fafb and self._skeleton_cache_is_simplified()
+        if using_simplified_cache is None:
+            using_simplified_cache = self._skeleton_cache_is_simplified()
+        if (not is_fafb and using_simplified_cache
                 and target >= self.NEUPRINT_SKELETON_CACHE_LEVEL):
             remaining_after_cache = 1 - self.NEUPRINT_SKELETON_CACHE_LEVEL
             remaining_target = 1 - target
@@ -5389,6 +5546,11 @@ class VisualizeSkeleton:
     NEUPRINT_SKELETON_DOWNSAMPLE = 10
     FAFB_MESH_CACHE_SOMA_RADIUS = 20000  # 20µm radius around soma for gentler simplification
     
+    # Number of radial segments used when converting TreeNeurons to tube
+    # meshes. This controls the tube cross-section only; it is deliberately
+    # independent of skeleton_mesh_simplification.
+    SKELETON_TUBE_POINTS = 6
+
     def _get_fafb_mesh_cache_key(self):
         """Generate a cache key based on coordinate space and simplification settings.
         
@@ -6059,7 +6221,7 @@ class VisualizeSkeleton:
         try:
             mesh_neuron = navis.conversion.tree2meshneuron(
                 skeleton,
-                tube_points=8,
+                tube_points=VisualizeSkeleton.SKELETON_TUBE_POINTS,
                 use_normals=True
             )
             
@@ -6158,15 +6320,16 @@ class VisualizeSkeleton:
         self._vprint(f'\n🔬 Fetching skeletons for {n_layers} layers ({total_skeletons:,} neurons total)...')
         
         # For FAFB: Check mesh cache first (transformed + meshed neurons)
-        # Cache stores pre-simplified meshes at FAFB_MESH_CACHE_SIMPLIFICATION (0.9 = keep 10% faces)
+        # Cache stores pre-simplified meshes at FAFB_MESH_CACHE_SIMPLIFICATION
+        # (0.95 = keep 5% of faces).
         # 
         # Cache usage decision:
-        # - If user wants simplification >= 0.9 (keep ≤10% faces): use cache, apply additional simplification if needed
-        # - If user wants simplification < 0.9 (keep >10% faces): bypass cache, load from ZIP and apply user's simplification
+        # - If user wants simplification >= 0.95 (keep ≤5% faces): use cache, apply additional simplification if needed
+        # - If user wants simplification < 0.95 (keep >5% faces): bypass cache, load from ZIP and apply user's simplification
         #
         # Example scenarios:
-        # - simplification=0.95 (keep 5%): load from cache (10%), simplify to 5% → additional_keep = 0.05/0.1 = 50%
-        # - simplification=0.9 (keep 10%): load from cache (10%), no additional simplification needed
+        # - simplification=0.98 (keep 2%): load from cache (5%), simplify to 2% → additional_keep = 0.02/0.05 = 40%
+        # - simplification=0.95 (keep 5%): load from cache (5%), no additional simplification needed
         # - simplification=0.5 (keep 50%): cannot use cache (only has 10%), load from ZIP and apply 0.5 simplification
         is_fafb = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
         fafb_mesh_cache = {}  # bodyId -> MeshNeuron (from cache)
@@ -6337,6 +6500,21 @@ class VisualizeSkeleton:
             cache_result = self._load_cached_neurons(self.neuron_dfs[i],
                                                      ignore_cache=ignore_skeleton_cache)
             cached_neurons, missing_ids = cache_result
+
+            # Track the source used by THIS render, rather than inferring it
+            # later from the folder marker.  A cache marker can be written
+            # while this run is still holding the freshly fetched raw
+            # skeletons in memory.
+            using_simplified_skeleton_cache = (
+                not is_fafb
+                and self.skeleton_mode == 'tube'
+                and self.cache_neurons
+                and self.skeleton_mesh_simplification
+                    >= self.NEUPRINT_SKELETON_CACHE_LEVEL
+                and cached_neurons is not None
+                and not missing_ids
+                and self._skeleton_cache_is_simplified()
+            )
             
             # Check and fix MANC scaling for cached neurons (handling legacy cache)
             if cached_neurons is not None and 'manc' in self.dataset.lower():
@@ -6449,6 +6627,36 @@ class VisualizeSkeleton:
                 # Save to raw cache (for non-FAFB datasets)
                 if raw_neuron_vols is not None and not is_fafb:
                     self._save_cached_neurons(self.neuron_dfs[i], raw_neuron_vols)
+
+                    # For cache-eligible renders, reload the newly written
+                    # simp90 files before rendering.  This makes the first
+                    # run use the same source as later cache-hit runs.  For
+                    # targets below 0.90 we intentionally keep the raw
+                    # in-memory neurons for the current render; the cache is
+                    # only being warmed for a future >=0.90 request.
+                    if (
+                        self.skeleton_mode == 'tube'
+                        and self.cache_neurons
+                        and self.skeleton_mesh_simplification
+                            >= self.NEUPRINT_SKELETON_CACHE_LEVEL
+                    ):
+                        refreshed_cached, refreshed_missing = (
+                            self._load_cached_neurons(self.neuron_dfs[i])
+                        )
+                        if (
+                            refreshed_cached is not None
+                            and not refreshed_missing
+                            and self._skeleton_cache_is_simplified()
+                        ):
+                            cached_neurons = refreshed_cached
+                            raw_neuron_vols = None
+                            missing_ids = []
+                            using_simplified_skeleton_cache = True
+                            self._vprint(
+                                '  ✓ Using newly written simp90 cache for '
+                                'this render',
+                                level='full',
+                            )
             
             # Combine cached and newly fetched neurons
             if cached_neurons is not None and raw_neuron_vols is not None:
@@ -6529,7 +6737,10 @@ class VisualizeSkeleton:
                                     n.nodes['radius'] = 1
                                 # Convert
                                 if hasattr(navis, 'conversion') and hasattr(navis.conversion, 'tree2meshneuron'):
-                                    mesh_n = navis.conversion.tree2meshneuron(n)
+                                    mesh_n = navis.conversion.tree2meshneuron(
+                                        n,
+                                        tube_points=self.SKELETON_TUBE_POINTS,
+                                    )
                                 else:
                                     mesh_neurons_list.append(n)
                                     continue
@@ -6603,8 +6814,8 @@ class VisualizeSkeleton:
             
             # For FAFB: combine cached + newly processed neurons, then merge by layer if needed
             # This block handles:
-            # 1. When cache is used (simplification >= 0.9): combine cached + new, apply additional simp if > 0.9
-            # 2. When cache is not used (simplification < 0.9): just process neuron_vols for merging
+            # 1. When cache is used (simplification >= 0.95): combine cached + new, apply additional simp if > 0.95
+            # 2. When cache is not used (simplification < 0.95): just process neuron_vols for merging
             # Set flag to skip generic simplification block below (FAFB is already simplified here)
             fafb_already_simplified = False
             if is_fafb and self.skeleton_mode == 'tube':
@@ -6651,7 +6862,7 @@ class VisualizeSkeleton:
                 if neuron_vols is not None and len(neuron_vols) > 0:
                     neurons_list = list(neuron_vols) if isinstance(neuron_vols, navis.NeuronList) else [neuron_vols]
                     
-                    # When cache not used (simplification < 0.9), need to convert and simplify here
+                    # When cache not used (simplification < 0.95), need to convert and simplify here
                     # This path processes neurons loaded directly from ZIP with user's actual simplification setting
                     if not use_fafb_cache:
                         processed_neurons = []
@@ -6679,7 +6890,10 @@ class VisualizeSkeleton:
                                 elif hasattr(n, 'nodes'):
                                     n.nodes['radius'] = 1
                                 if hasattr(navis, 'conversion') and hasattr(navis.conversion, 'tree2meshneuron'):
-                                    mesh_n = navis.conversion.tree2meshneuron(n)
+                                    mesh_n = navis.conversion.tree2meshneuron(
+                                        n,
+                                        tube_points=self.SKELETON_TUBE_POINTS,
+                                    )
                                 else:
                                     processed_neurons.append(n)
                                     continue
@@ -6733,7 +6947,10 @@ class VisualizeSkeleton:
                                     elif hasattr(n, 'nodes'):
                                         n.nodes['radius'] = 1
                                     if hasattr(navis, 'conversion') and hasattr(navis.conversion, 'tree2meshneuron'):
-                                        mesh_n = navis.conversion.tree2meshneuron(n)
+                                        mesh_n = navis.conversion.tree2meshneuron(
+                                            n,
+                                            tube_points=self.SKELETON_TUBE_POINTS,
+                                        )
                                         mesh_n.id = n.id if hasattr(n, 'id') else None
                                         if hasattr(n, 'name'):
                                             mesh_n.name = n.name
@@ -6839,7 +7056,10 @@ class VisualizeSkeleton:
             # 10% nodes -> ~1% faces). Levels above the cache level apply
             # the remaining relative reduction; below it the render ran on
             # transient RAW fetches and decimates at the user's level.
-            render_simplification = self._effective_render_simplification(is_fafb)
+            render_simplification = self._effective_render_simplification(
+                is_fafb,
+                using_simplified_cache=using_simplified_skeleton_cache,
+            )
             if render_simplification > 0 and self.skeleton_mode == 'tube' and not fafb_already_simplified:
                 try:
                     import trimesh
@@ -6864,7 +7084,10 @@ class VisualizeSkeleton:
                                 
                                 # Convert
                                 if hasattr(navis, 'conversion') and hasattr(navis.conversion, 'tree2meshneuron'):
-                                    mesh_n = navis.conversion.tree2meshneuron(n)
+                                    mesh_n = navis.conversion.tree2meshneuron(
+                                        n,
+                                        tube_points=self.SKELETON_TUBE_POINTS,
+                                    )
                             elif isinstance(n, navis.MeshNeuron):
                                 mesh_n = n
                                 
@@ -10357,15 +10580,14 @@ class VisualizeSkeleton:
                 # Minimal config: hide toolbar for cleaner appearance
                 html_config = {'displayModeBar': False}
             
-            # Optimization: use 'cdn' for smaller file size (loads plotly.js from CDN)
-            # This reduces HTML file size significantly compared to 'directory' or including full plotly.js
-            # Fix: Set auto_open=False to prevent hanging, handle opening manually
-            # Reverted 'cdn' to default (embed) as user reported issues with subsequent PNG export
-            self.fig_3d.write_html(
-                self.fig_path+'.html',
-                auto_open=False, 
-                # include_plotlyjs='cdn',  # Reverted to default to avoid potential issues
-                config=html_config
+            # Keep each HTML self-contained so it remains portable when copied
+            # without the surrounding output directory.
+            self._write_plotly_html(
+                self.fig_3d,
+                self.fig_path + '.html',
+                auto_open=False,
+                include_plotlyjs=True,
+                config=html_config,
             )
             
             if self.show_fig:
@@ -10501,9 +10723,13 @@ class VisualizeSkeleton:
                             
                             # Save simplified HTML for reuse by export_video, plot_individuals, etc.
                             simplified_html_path = os.path.join(self.save_folder, f"{self.saveas}_simplified.html")
-                            export_fig.write_html(simplified_html_path, auto_open=False,
-                                                 include_plotlyjs='cdn',
-                                                 config={'displayModeBar': False})
+                            self._write_plotly_html(
+                                export_fig,
+                                simplified_html_path,
+                                auto_open=False,
+                                include_plotlyjs=True,
+                                config={'displayModeBar': False},
+                            )
                             simplified_size_mb = os.path.getsize(simplified_html_path) / 1024 / 1024
                             self._vprint(f'      ✓ Saved simplified HTML: {os.path.basename(simplified_html_path)} ({simplified_size_mb:.0f}MB)')
                             
@@ -10937,9 +11163,13 @@ class VisualizeSkeleton:
                 
                 # Save main HTML with all traces visible for WebDriver
                 temp_html = os.path.join(output_dir, '_temp_main_figure.html')
-                export_fig.write_html(temp_html, auto_open=False, 
-                                       include_plotlyjs='cdn',
-                                       config={'displayModeBar': False})
+                self._write_plotly_html(
+                    export_fig,
+                    temp_html,
+                    auto_open=False,
+                    include_plotlyjs=True,
+                    config={'displayModeBar': False},
+                )
             
             # Use the optimized helper function
             result = export_individuals_webdriver(
@@ -11005,7 +11235,12 @@ class VisualizeSkeleton:
                     
                     html_filename = f'{safe_name}.html'
                     html_path = os.path.join(output_dir, html_filename)
-                    self.fig_3d.write_html(html_path, include_plotlyjs='cdn', full_html=True)
+                    self._write_plotly_html(
+                        self.fig_3d,
+                        html_path,
+                        include_plotlyjs=True,
+                        full_html=True,
+                    )
                     generated_files['html'].append(html_path)
         
         # ==============================================================================
@@ -11052,7 +11287,12 @@ class VisualizeSkeleton:
                 if 'html' in output_format:
                     html_filename = f'{safe_name}.html'
                     html_path = os.path.join(output_dir, html_filename)
-                    self.fig_3d.write_html(html_path, include_plotlyjs='cdn', full_html=True)
+                    self._write_plotly_html(
+                        self.fig_3d,
+                        html_path,
+                        include_plotlyjs=True,
+                        full_html=True,
+                    )
                     generated_files['html'].append(html_path)
                 
                 # Export PNG(s) if requested (kaleido path)
@@ -12231,9 +12471,13 @@ class VisualizeSkeleton:
                 
                 # Save figure to temp HTML
                 temp_html = os.path.join(pic_folder, '_temp_video.html')
-                fig_new.write_html(temp_html, auto_open=False, 
-                                   include_plotlyjs='cdn',
-                                   config={'displayModeBar': False})
+                self._write_plotly_html(
+                    fig_new,
+                    temp_html,
+                    auto_open=False,
+                    include_plotlyjs=True,
+                    config={'displayModeBar': False},
+                )
                 
                 # Only save simplified HTML copy if we actually used a simplified figure
                 # Check if _simplified_export_fig exists AND was used for this export
@@ -12498,9 +12742,13 @@ class VisualizeSkeleton:
                         
                         # Save simplified HTML for future reuse
                         simplified_html_path = os.path.join(save_folder, f"{saveas}_simplified.html")
-                        fig_new.write_html(simplified_html_path, auto_open=False,
-                                          include_plotlyjs='cdn',
-                                          config={'displayModeBar': False})
+                        self._write_plotly_html(
+                            fig_new,
+                            simplified_html_path,
+                            auto_open=False,
+                            include_plotlyjs=True,
+                            config={'displayModeBar': False},
+                        )
                         simplified_size_mb = os.path.getsize(simplified_html_path) / 1024 / 1024
                         self._vprint(f'   ✓ Saved simplified HTML: {os.path.basename(simplified_html_path)} ({simplified_size_mb:.0f}MB)')
                         

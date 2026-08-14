@@ -63,6 +63,83 @@ def test_visualization_warning_notes_record_effective_simplification(tmp_path):
     assert "rendering only" in notes
 
 
+def test_html_simplification_warning_uses_dataset_specific_thresholds():
+    assert VisualizeSkeleton._skeleton_simplification_warning(
+        "male-cns:v1.0", "neuprint", "tube", 0.90
+    ) is None
+    assert VisualizeSkeleton._skeleton_simplification_warning(
+        "male-cns:v1.0", "neuprint", "tube", 0.901
+    )["threshold"] == 0.90
+
+    assert VisualizeSkeleton._skeleton_simplification_warning(
+        "flywire_FAFB_v783", "flywire", "tube", 0.95
+    ) is None
+    assert VisualizeSkeleton._skeleton_simplification_warning(
+        "flywire_FAFB_v783", "flywire", "tube", 0.951
+    )["threshold"] == 0.95
+
+    # The warning is for the tube-surface pipeline, not line rendering or the
+    # separate BANC mesh pipeline.
+    assert VisualizeSkeleton._skeleton_simplification_warning(
+        "male-cns:v1.0", "neuprint", "line", 0.99
+    ) is None
+    assert VisualizeSkeleton._skeleton_simplification_warning(
+        "flywire_BANC_v888", "flywire", "tube", 0.99
+    ) is None
+
+
+def test_html_writer_embeds_plotly_runtime_and_injects_warning(tmp_path):
+    class FakeFigure:
+        def __init__(self):
+            self.kwargs = None
+
+        def write_html(self, path, **kwargs):
+            self.kwargs = kwargs
+            Path(path).write_text(
+                "<html><head></head><body><div id='figure'></div></body></html>",
+                encoding="utf-8",
+            )
+
+    visualizer = object.__new__(VisualizeSkeleton)
+    visualizer.dataset = "male-cns:v1.0"
+    visualizer.client_type = "neuprint"
+    visualizer.skeleton_mode = "tube"
+    visualizer.skeleton_mesh_simplification = 0.95
+    visualizer._vprint = lambda *args, **kwargs: None
+
+    figure = FakeFigure()
+    path = tmp_path / "skeleton.html"
+    visualizer._write_plotly_html(figure, str(path))
+
+    assert figure.kwargs["include_plotlyjs"] is True
+    html = path.read_text(encoding="utf-8")
+    assert "drocat-skeleton-simplification-warning" in html
+    assert "skeleton_mesh_simplification=0.950" in html
+    assert "fixed simp90 skeleton cache" in html
+    assert html.index("drocat-skeleton-simplification-warning") > html.index("<body>")
+
+
+def test_real_skeleton_html_is_portable_without_plotly_sidecar(tmp_path):
+    import plotly.graph_objects as go
+
+    visualizer = object.__new__(VisualizeSkeleton)
+    visualizer.dataset = "flywire_FAFB_v783"
+    visualizer.client_type = "flywire"
+    visualizer.skeleton_mode = "tube"
+    visualizer.skeleton_mesh_simplification = 0.98
+    visualizer._vprint = lambda *args, **kwargs: None
+
+    path = tmp_path / "portable.html"
+    visualizer._write_plotly_html(
+        go.Figure(go.Scatter3d(x=[0], y=[0], z=[0])), str(path)
+    )
+
+    html = path.read_text(encoding="utf-8")
+    assert 'src="plotly.min.js"' not in html
+    assert "Plotly.newPlot" in html
+    assert "drocat-skeleton-simplification-warning" in html
+
+
 def test_all_skeleton_result_paths_accept_visualization_settings():
     assert "visualization_settings" in inspect.signature(
         NeuronBridgeFinder.find_neurons_batch
