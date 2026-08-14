@@ -122,6 +122,10 @@ from utils.color_utils import (
     color_to_hex,
     extract_rgba_tuple,
 )
+from utils.flywire_readiness import (
+    flywire_skeleton_readiness,
+    require_flywire_skeleton_access,
+)
 
 
 def _configure_roi_mesh_traces(mesh_traces, roi_name):
@@ -4154,6 +4158,22 @@ class VisualizeSkeleton:
             self.verbose = 'full'
         elif self.verbose is False:
             self.verbose = False
+
+        # Record FlyWire readiness without rejecting cache-only/configuration
+        # callers.  The actual FAFB readiness check runs at plot_skeleton(),
+        # immediately before any skeleton query.  BANC is rejected here so
+        # its converter cannot be mistaken for skeleton support.
+        flywire_access = flywire_skeleton_readiness(
+            self.dataset,
+            project_root=self.script_path,
+        )
+        self._flywire_skeleton_access = flywire_access
+        if flywire_access.get('is_banc'):
+            require_flywire_skeleton_access(
+                self.dataset,
+                project_root=self.script_path,
+                log=self._vprint,
+            )
         
         # Silence navis INFO messages (like "Use the `.show()` method to plot the figure.")
         # These are not useful for automated visualization and clutter output
@@ -4287,24 +4307,6 @@ class VisualizeSkeleton:
                 print("Please follow the instructions above to download the required files.")
                 sys.exit(1)
             
-            try:
-                import fafb_utils
-                # Check for skeleton zip
-                if not os.path.exists(dataset_dir):
-                    dataset_dir = os.path.join(self.script_path, 'datasets', 'flywire_FAFB_v783')
-                
-                if os.path.exists(dataset_dir):
-                    sk_zip = fafb_utils.get_fafb_skeleton_zip(dataset_dir)
-                    if not sk_zip:
-                        print(f'\033[31mWarning: FlyWire skeleton zip not found in {dataset_dir}\033[0m')
-                        if 'BANC' in self.dataset:
-                            print('Skeleton visualization not available for BANC, because the skeleton data not available in flywire codex')
-                        else:
-                            print(f'Please download sk_lod1_783_healed.zip from https://codex.flywire.ai/api/download?dataset=fafb')
-                        print(f'Visualization might fail or be incomplete.')
-                        sys.exit(0)
-            except ImportError:
-                pass
 
         if self.synapse_mode not in ['scatter', 'sphere', 'cone', 'tetrahedron']:
             raise ValueError('synapse_mode can only be "scatter", "sphere", "cone", or "tetrahedron"')
@@ -5560,6 +5562,15 @@ class VisualizeSkeleton:
         dict
             Dictionary of bodyId -> TreeNeuron (keys are both int and str for compatibility)
         """
+        access = getattr(self, '_flywire_skeleton_access', None)
+        if access is not None and not access.get('cave_token'):
+            self._vprint(
+                '  ⚠️  CAVE_TOKEN is not configured; skipping FAFB API fallback '
+                'and using local skeleton data only.',
+                level='simple',
+            )
+            return {}
+
         try:
             from cave_data_fetcher import CAVEDataFetcher
         except ImportError:
@@ -5576,6 +5587,7 @@ class VisualizeSkeleton:
         
         fetcher = CAVEDataFetcher(
             dataset=self.dataset,
+            project_root=self.script_path,
             verbose=self.verbose == 'full'
         )
         
@@ -5836,6 +5848,12 @@ class VisualizeSkeleton:
         ... )
         >>> vs.plot_neurons()
         """
+        require_flywire_skeleton_access(
+            dataset,
+            project_root=os.path.dirname(os.path.dirname(__file__)),
+            log=print if verbose else (lambda _message: None),
+        )
+
         try:
             from cave_data_fetcher import CAVEDataFetcher
         except ImportError:
@@ -6117,6 +6135,16 @@ class VisualizeSkeleton:
     def plot_skeleton(self):
         from tqdm import tqdm
         import sys
+
+        # Validate access at the script's skeleton-query boundary.  This
+        # blocks BANC and gives FAFB users the local-preparation/token
+        # instructions before any CAVE or ZIP fetch is attempted.
+        flywire_access = require_flywire_skeleton_access(
+            self.dataset,
+            project_root=self.script_path,
+            log=self._vprint,
+        )
+        self._flywire_skeleton_access = flywire_access
         
         n_layers = len(self.neuron_layers)
         total_skeletons = sum(len(df) if df is not None else 0 for df in self.neuron_dfs)

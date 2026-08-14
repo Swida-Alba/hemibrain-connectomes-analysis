@@ -15,6 +15,7 @@ from ..components.skeleton_visualization_settings import skeleton_visualization_
 from ..runner import ScriptRunner
 from ..skeleton_pull import SkeletonPuller
 from ..type_suggestions import dataset_suggestions
+from ..dataset_service import is_banc_dataset
 
 MORPH_METHODS = ["vector", "nblast"]
 MORPH_METRICS = ["cosine", "pearson"]
@@ -75,9 +76,14 @@ def create_find_similar_tab():
                 )
                 with param_grid(2):
                     dataset = dataset_selector(
+                        disable_banc=True,
                         hint="Dataset to search for similar neurons in.",
                     )
                     morph_output_dir = dir_input(scope="find_similar_morphology")
+                morph_dataset_warning = ui.label(
+                    "⚠️ BANC morphological similarity is unavailable because "
+                    "FlyWire does not provide BANC skeletons. Select a non-BANC dataset."
+                ).classes("text-caption text-amber-8").set_visibility(False)
 
             with ui.card().classes("w-full drocat-card"):
                 section_header("Similarity Parameters", "tune")
@@ -267,6 +273,13 @@ def create_find_similar_tab():
                     download_label.text = ""
 
             def start_download():
+                if is_banc_dataset(dataset.value):
+                    morph_dataset_warning.set_visibility(True)
+                    ui.notify(
+                        "BANC skeleton downloads are unavailable; select a non-BANC dataset.",
+                        type="warning",
+                    )
+                    return
                 ok = skeleton_puller.start(dataset.value)
                 if not ok:
                     ui.notify("A skeleton download is already running", type="warning")
@@ -301,6 +314,13 @@ def create_find_similar_tab():
                     coverage_label.text = "Coverage unavailable."
 
             async def build_cache():
+                if is_banc_dataset(dataset.value):
+                    morph_dataset_warning.set_visibility(True)
+                    ui.notify(
+                        "BANC morphological similarity is unavailable; select a non-BANC dataset.",
+                        type="warning",
+                    )
+                    return
                 build_button.disable()
                 ui.notify(
                     "Building skeleton vector cache (this can take a few minutes)...",
@@ -429,6 +449,7 @@ def create_find_similar_tab():
             sync_mode()
 
         def on_dataset_change(_e=None):
+            morph_dataset_warning.set_visibility(is_banc_dataset(dataset.value))
             refresh_coverage()
             refresh_roi_options()
 
@@ -447,6 +468,13 @@ def create_find_similar_tab():
         output_panel.create(run_label="Run Similarity Search", run_icon="play_arrow")
 
     async def run_morphological():
+        if is_banc_dataset(dataset.value):
+            morph_dataset_warning.set_visibility(True)
+            ui.notify(
+                "BANC morphological similarity is unavailable; select a non-BANC dataset.",
+                type="warning",
+            )
+            return
         mode, neurons = query_input.get_value()
         query = apply_filter_mode(neurons, mode)
         if not query:

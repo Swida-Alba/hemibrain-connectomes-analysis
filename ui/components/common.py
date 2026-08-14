@@ -125,8 +125,15 @@ def dataset_selector(
     hint: str = "NeuPrint: fetched from server with token. FlyWire: uses converted local files; CAVE token is only needed for CAVE API features.",
     allow_custom: bool = False,
     show_local_status: bool = True,
+    disable_banc: bool = False,
 ) -> ui.select:
-    """Create a dataset dropdown selector with local status labels."""
+    """Create a dataset dropdown selector with local status labels.
+
+    ``disable_banc`` keeps BANC visible for discoverability but marks every
+    BANC option as disabled in the Quasar popup.  The backend still validates
+    the dataset because a value can be supplied programmatically or by a
+    previously saved UI state.
+    """
     from ..dataset_service import get_dataset_service
 
     service = get_dataset_service()
@@ -146,6 +153,25 @@ def dataset_selector(
         value=default_val,
         label=label,
     ).props("outlined").classes("w-full drocat-select").tooltip(hint)
+    if disable_banc:
+        # NiceGUI converts its Python option mapping to QSelect options with
+        # ``label`` and an internal index.  Use the rendered label as the
+        # stable predicate so the BANC rows are disabled whether local-status
+        # suffixes are shown or not.  Quasar renders disabled options grey and
+        # prevents selecting them from the popup.
+        disabled_labels = [
+            str(dataset_name)
+            for dataset_name in options
+            if "banc" in str(dataset_name).strip().lower()
+        ]
+        if disabled_labels:
+            sel.props(
+                ":option-disable=\"option => "
+                "String(option.value || option.label).toLowerCase().includes('banc')\""
+            )
+        # Keep a small Python-side marker for tests and server-side callers;
+        # it does not replace the backend guard.
+        sel._drocat_disabled_datasets = disabled_labels
     if allow_custom:
         sel.props('use-input new-value-mode="add-unique"')
     if on_change:

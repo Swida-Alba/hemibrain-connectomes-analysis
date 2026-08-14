@@ -34,6 +34,7 @@ from ..components.palette_picker import (
     assign_palette_colors,
 )
 from ..components.edge_list_editor import edge_list_editor, draft_recovery_banner
+from ..dataset_service import is_banc_dataset
 
 
 def _flatten_neuron_layers(neuron_layers) -> list:
@@ -99,8 +100,12 @@ def create_skeleton_tab():
                 dataset_provider=lambda: dataset.value if dataset is not None else ""
             )
             with param_grid(2):
-                dataset = dataset_selector()
+                dataset = dataset_selector(disable_banc=True)
                 output_dir = dir_input(scope="visualization_skeleton")
+            skeleton_dataset_warning = ui.label(
+                "⚠️ BANC skeleton visualization is unavailable because FlyWire "
+                "does not provide BANC skeletons. Select a non-BANC dataset."
+            ).classes("text-caption text-amber-8").set_visibility(False)
             with param_grid(3):
                 filter_mode = select_input(
                     "Match by",
@@ -433,8 +438,15 @@ def create_skeleton_tab():
                     options.append(value)
             roi_select.set_options(options)
 
+        def _sync_skeleton_dataset_warning():
+            skeleton_dataset_warning.set_visibility(
+                is_banc_dataset(dataset.value)
+            )
+
         roi_mode.on_value_change(lambda _e: _sync_roi_options())
         dataset.on_value_change(lambda _e: _sync_roi_options())
+        dataset.on_value_change(lambda _e: _sync_skeleton_dataset_warning())
+        _sync_skeleton_dataset_warning()
 
     with results_col:
         skeleton_output.create(run_label="Generate 3D Skeleton", run_icon="view_in_ar")
@@ -468,6 +480,13 @@ def create_skeleton_tab():
         )
 
     async def run_skeleton():
+        if is_banc_dataset(dataset.value):
+            _sync_skeleton_dataset_warning()
+            ui.notify(
+                "BANC skeleton visualization is unavailable; select a non-BANC dataset.",
+                type="warning",
+            )
+            return
         # The layer tree maps 1:1 to the backend's nested-list model:
         # neuron_layers[i] = layer i's neurons, custom_layer_names partial.
         neuron_layers = layer_tree.get_neuron_layers()

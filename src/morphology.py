@@ -39,6 +39,11 @@ try:
 except ImportError:
     from visualization_options import default_analysis_skeleton_mesh_simplification
 
+try:
+    from .utils.flywire_readiness import require_flywire_skeleton_access
+except ImportError:
+    from utils.flywire_readiness import require_flywire_skeleton_access
+
 # Feature columns (morphometrics part of the vector). The full per-neuron
 # vector is these 24 features + 100 persistence dimensions.
 MORPHOMETRIC_FEATURES: List[str] = [
@@ -1346,6 +1351,12 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    require_flywire_skeleton_access(
+        dataset,
+        project_root=project_root,
+        log=print if verbose else (lambda _message: None),
+    )
+
     root = Path(project_root) if project_root else Path(__file__).parent.parent
     folder = _dataset_folder(dataset)
     skeleton_dir = root / "cache" / folder / "skeletons"
@@ -1626,6 +1637,15 @@ class MorphologyComparer:
         self._log(f"Morphological similarity: query={self.query} dataset={self.dataset} "
                   f"method={self.method} level={self.level} metric={self.metric} "
                   f"candidate_source={source}")
+
+        # BANC has connectivity tables but no skeleton release.  FAFB may use
+        # its local skeleton bundle or CAVE, but must not silently fall into a
+        # failed remote fetch when neither source is configured.
+        require_flywire_skeleton_access(
+            self.dataset,
+            project_root=self.project_root,
+            log=self._log,
+        )
 
         # NBLAST needs skeletons; FlyWire bulk caches hold meshes only.
         if self.method == "nblast" and self._is_flywire():

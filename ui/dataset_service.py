@@ -68,6 +68,17 @@ def is_flywire_dataset(dataset: str) -> bool:
     return normalized.startswith("flywire_") or "fafb" in normalized
 
 
+def is_banc_dataset(dataset: str) -> bool:
+    """Return whether *dataset* identifies a BANC release.
+
+    BANC remains listed in the general dataset catalog for supported
+    connectivity tools, but morphology/skeleton tabs use this predicate to
+    show the option as unavailable.
+    """
+
+    return "banc" in str(dataset or "").strip().lower()
+
+
 class DatasetService:
     """Service for fetching and managing dataset availability."""
 

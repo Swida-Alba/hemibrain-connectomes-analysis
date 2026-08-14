@@ -96,10 +96,20 @@ class CAVEDataFetcher:
             if os.path.exists(token_path):
                 with open(token_path, 'r') as f:
                     for line in f:
-                        if line.startswith(f'{token_name}='):
-                            token = line.split('=', 1)[1].strip().strip("'\"")
-                            if token and not token.startswith('YOUR_'):
-                                return token
+                        line = line.strip()
+                        if not line or line.startswith('#') or '=' not in line:
+                            continue
+                        key, value = line.split('=', 1)
+                        if key.strip() != token_name:
+                            continue
+                        token = value.strip().strip("'\"")
+                        if token and not token.startswith('YOUR_'):
+                            return token
+        # Direct environment configuration is supported by the shared token
+        # manager as well; keep CAVE fetches consistent with that behavior.
+        token = os.environ.get(token_name, '').strip()
+        if token and not token.startswith('YOUR_'):
+            return token
         return None
     
     def _get_config(self) -> dict:
