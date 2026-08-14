@@ -209,6 +209,51 @@ def _nearest_roi_assignments(
     })
 
 
+def _validate_snap_options(snap_outside: bool, max_snap_distance: float | None):
+    if max_snap_distance is not None:
+        if not np.isfinite(max_snap_distance) or max_snap_distance < 0:
+            raise ValueError("max_snap_distance must be a finite non-negative number")
+        if not snap_outside:
+            raise ValueError("max_snap_distance requires snap_outside=True")
+
+
+def _apply_snap_columns(
+    frame: pd.DataFrame,
+    items: Sequence[tuple[str, Any]],
+    *,
+    coordinate_columns: Sequence[str] = DEFAULT_COORDINATE_COLUMNS,
+    snap_outside: bool = False,
+    max_snap_distance: float | None = None,
+) -> pd.DataFrame:
+    """Annotate direct assignments with optional nearest-ROI fallback columns."""
+    _validate_snap_options(snap_outside, max_snap_distance)
+    result = frame.copy()
+    result["nearest_roi"] = pd.Series(
+        [None] * len(result), index=result.index, dtype="object"
+    )
+    result["nearest_roi_distance"] = np.nan
+    result["snapped_roi"] = result["derived_roi"].astype(object)
+    result["was_snapped"] = False
+
+    if not snap_outside or result.empty:
+        return result
+
+    outside_rows = result.index[~result["inside"].astype(bool)]
+    if not len(outside_rows):
+        return result
+    point_values = result.loc[outside_rows, list(coordinate_columns)].to_numpy(dtype=float)
+    nearest = _nearest_roi_assignments(point_values, items)
+    result.loc[outside_rows, "nearest_roi"] = nearest["roi"].to_numpy()
+    result.loc[outside_rows, "nearest_roi_distance"] = nearest["distance"].to_numpy()
+    eligible = np.ones(len(outside_rows), dtype=bool)
+    if max_snap_distance is not None:
+        eligible = nearest["distance"].to_numpy(dtype=float) <= max_snap_distance
+    eligible_rows = outside_rows.to_numpy()[eligible]
+    result.loc[eligible_rows, "snapped_roi"] = nearest.loc[eligible, "roi"].to_numpy()
+    result.loc[eligible_rows, "was_snapped"] = True
+    return result
+
+
 def containment_backend() -> str:
     """Return the point-in-mesh backend available to the current process."""
     try:
@@ -305,11 +350,7 @@ def segment_synapses(
     """
     if not isinstance(synapses, pd.DataFrame):
         raise TypeError("synapses must be a pandas DataFrame")
-    if max_snap_distance is not None:
-        if not np.isfinite(max_snap_distance) or max_snap_distance < 0:
-            raise ValueError("max_snap_distance must be a finite non-negative number")
-        if not snap_outside:
-            raise ValueError("max_snap_distance requires snap_outside=True")
+    _validate_snap_options(snap_outside, max_snap_distance)
 
     assignments = classify_points_by_rois(
         synapses,
@@ -323,35 +364,25 @@ def segment_synapses(
         result["point_index"] = pd.Series(dtype="int64")
         result["derived_roi"] = pd.Series(dtype="object")
         result["inside"] = pd.Series(dtype="bool")
-        result["nearest_roi"] = pd.Series(dtype="object")
-        result["nearest_roi_distance"] = pd.Series(dtype="float64")
-        result["snapped_roi"] = pd.Series(dtype="object")
-        result["was_snapped"] = pd.Series(dtype="bool")
-        return result
+        return _apply_snap_columns(
+            result,
+            _mesh_items(roi_meshes) if snap_outside else [],
+            coordinate_columns=coordinate_columns,
+            snap_outside=snap_outside,
+            max_snap_distance=max_snap_distance,
+        )
 
     result = synapses.iloc[assignments["point_index"].to_numpy()].copy()
     result.insert(0, "point_index", assignments["point_index"].to_numpy())
     result["derived_roi"] = assignments["roi"].to_numpy()
     result["inside"] = assignments["inside"].to_numpy(dtype=bool)
-    result["nearest_roi"] = pd.Series([None] * len(result), dtype="object")
-    result["nearest_roi_distance"] = np.nan
-    result["snapped_roi"] = result["derived_roi"].astype(object)
-    result["was_snapped"] = False
-
-    if snap_outside:
-        items = _mesh_items(roi_meshes)
-        outside_rows = result.index[~result["inside"].astype(bool)]
-        if len(outside_rows):
-            point_values = result.loc[outside_rows, list(coordinate_columns)].to_numpy(dtype=float)
-            nearest = _nearest_roi_assignments(point_values, items)
-            result.loc[outside_rows, "nearest_roi"] = nearest["roi"].to_numpy()
-            result.loc[outside_rows, "nearest_roi_distance"] = nearest["distance"].to_numpy()
-            eligible = np.ones(len(outside_rows), dtype=bool)
-            if max_snap_distance is not None:
-                eligible = nearest["distance"].to_numpy(dtype=float) <= max_snap_distance
-            eligible_rows = outside_rows.to_numpy()[eligible]
-            result.loc[eligible_rows, "snapped_roi"] = nearest.loc[eligible, "roi"].to_numpy()
-            result.loc[eligible_rows, "was_snapped"] = True
+    result = _apply_snap_columns(
+        result,
+        _mesh_items(roi_meshes) if snap_outside else [],
+        coordinate_columns=coordinate_columns,
+        snap_outside=snap_outside,
+        max_snap_distance=max_snap_distance,
+    )
     result.reset_index(drop=True, inplace=True)
     return result
 
@@ -427,17 +458,23 @@ def segment_skeleton(
     segment_samples: int = 11,
     overlap: str = "all",
     outside_label: str | None = OUTSIDE_ROI,
+    snap_outside: bool = False,
+    max_snap_distance: float | None = None,
 ) -> SkeletonSegmentation:
     """Segment skeleton nodes and estimate parent-child edge occupancy.
 
     ``segment_samples`` is the number of equal-length midpoint samples per
     edge.  A value of 11 is appropriate for preliminary inspection; exact
     boundary clipping should replace this approximation for production use.
+    When ``snap_outside`` is enabled, direct outside node/sample assignments
+    also receive nearest-surface labels in ``snapped_roi``.  Direct geometry
+    remains in ``derived_roi`` and ``was_snapped`` marks the fallback.
     """
     if segment_samples < 1:
         raise ValueError("segment_samples must be at least 1")
     if overlap not in {"all", "first", "error"}:
         raise ValueError("overlap must be 'all', 'first', or 'error'")
+    _validate_snap_options(snap_outside, max_snap_distance)
 
     nodes = _skeleton_nodes(skeleton)
     items = _mesh_items(roi_meshes)
@@ -452,6 +489,12 @@ def segment_skeleton(
     node_result.insert(0, "point_index", node_assignments["point_index"].to_numpy())
     node_result["derived_roi"] = node_assignments["roi"].to_numpy()
     node_result["inside"] = node_assignments["inside"].to_numpy(dtype=bool)
+    node_result = _apply_snap_columns(
+        node_result,
+        items,
+        snap_outside=snap_outside,
+        max_snap_distance=max_snap_distance,
+    )
     node_result.reset_index(drop=True, inplace=True)
 
     edges = _edge_table(nodes)
@@ -463,13 +506,21 @@ def segment_skeleton(
     sample_columns = [
         "segment_index", "parent_id", "node_id", "sample_index",
         "derived_roi", "inside", "length", "length_inside",
+        "x", "y", "z",
         "start_x", "start_y", "start_z", "end_x", "end_y", "end_z",
     ]
     if edges.empty:
+        empty_samples = pd.DataFrame(columns=sample_columns)
+        empty_samples = _apply_snap_columns(
+            empty_samples,
+            items,
+            snap_outside=snap_outside,
+            max_snap_distance=max_snap_distance,
+        )
         return SkeletonSegmentation(
             node_result,
             pd.DataFrame(columns=segment_columns),
-            pd.DataFrame(columns=sample_columns),
+            empty_samples,
         )
 
     midpoint_t = (np.arange(segment_samples, dtype=float) + 0.5) / segment_samples
@@ -566,6 +617,7 @@ def segment_skeleton(
                 dtype=float,
             )
             for roi, inside in sample_rois:
+                midpoint_xyz = (start_xyz + end_xyz) / 2.0
                 sample_rows.append({
                     "segment_index": int(edge_index),
                     "parent_id": int(edge["parent_id"]),
@@ -575,6 +627,9 @@ def segment_skeleton(
                     "inside": bool(inside),
                     "length": edge_length / segment_samples,
                     "length_inside": edge_length / segment_samples if inside else 0.0,
+                    "x": midpoint_xyz[0],
+                    "y": midpoint_xyz[1],
+                    "z": midpoint_xyz[2],
                     "start_x": start_xyz[0],
                     "start_y": start_xyz[1],
                     "start_z": start_xyz[2],
@@ -585,6 +640,12 @@ def segment_skeleton(
 
     segment_result = pd.DataFrame(rows, columns=segment_columns)
     sample_result = pd.DataFrame(sample_rows, columns=sample_columns)
+    sample_result = _apply_snap_columns(
+        sample_result,
+        items,
+        snap_outside=snap_outside,
+        max_snap_distance=max_snap_distance,
+    )
     return SkeletonSegmentation(node_result, segment_result, sample_result)
 
 

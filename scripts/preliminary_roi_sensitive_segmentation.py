@@ -317,10 +317,19 @@ def _segment_saved_inputs(
     skeleton_records = []
     skeleton_results = {}
     skeleton_passed_rois = set()
+    skeleton_snapped_rois = set()
+    skeleton_snapped_counts = {}
     for body_id in metadata["bodyId"].astype("int64"):
         skeleton_path = SKELETON_ROOT / f"{body_id}.parquet"
         nodes = pd.read_parquet(skeleton_path)
-        result = segment_skeleton(nodes, meshes, segment_samples=segment_samples, overlap="first")
+        result = segment_skeleton(
+            nodes,
+            meshes,
+            segment_samples=segment_samples,
+            overlap="first",
+            snap_outside=snap_outside,
+            max_snap_distance=max_snap_distance,
+        )
         skeleton_results[int(body_id)] = result
         node_path = SEGMENTED_ROOT / f"{body_id}_skeleton_nodes_by_geometry.parquet"
         segment_path = SEGMENTED_ROOT / f"{body_id}_skeleton_segments_by_geometry.parquet"
@@ -333,6 +342,20 @@ def _segment_saved_inputs(
             for roi in result.nodes.loc[result.nodes["inside"], "derived_roi"].unique()
             if str(roi) != OUTSIDE_ROI
         )
+        for frame in (result.nodes, result.samples):
+            if "was_snapped" not in frame.columns:
+                continue
+            skeleton_snapped_rois.update(
+                str(roi)
+                for roi in frame.loc[frame["was_snapped"], "snapped_roi"].unique()
+                if str(roi) != OUTSIDE_ROI
+            )
+            for roi, count in frame.loc[
+                frame["was_snapped"], "snapped_roi"
+            ].value_counts().items():
+                skeleton_snapped_counts[str(roi)] = (
+                    skeleton_snapped_counts.get(str(roi), 0) + int(count)
+                )
         skeleton_passed_rois.update(
             str(roi)
             for roi in result.segments.loc[result.segments["inside"], "derived_roi"].unique()
@@ -360,6 +383,7 @@ def _segment_saved_inputs(
         "containment_backend": containment_backend(),
         "mesh_names": sorted(meshes),
         "skeleton_passed_rois": sorted(skeleton_passed_rois),
+        "skeleton_snapped_rois": sorted(skeleton_snapped_rois),
         "synapse_passed_rois": sorted(
             str(roi)
             for roi in segmented_synapses.loc[
@@ -382,6 +406,22 @@ def _segment_saved_inputs(
                 segmented_synapses["was_snapped"], "snapped_roi"
             ].value_counts().to_dict(),
         },
+        "skeleton_snap": {
+            "enabled": snap_outside,
+            "source_label": OUTSIDE_ROI,
+            "max_distance": max_snap_distance,
+            "node_snapped_rows": int(sum(
+                frame["was_snapped"].sum()
+                for result in skeleton_results.values()
+                for frame in (result.nodes,)
+            )),
+            "sample_snapped_rows": int(sum(
+                frame["was_snapped"].sum()
+                for result in skeleton_results.values()
+                for frame in (result.samples,)
+            )),
+            "snapped_roi_counts": dict(sorted(skeleton_snapped_counts.items())),
+        },
         "skeletons": skeleton_records,
         "api_vs_geometry_table": str(
             (SEGMENTED_ROOT / "synapse_api_vs_geometry_roi_counts.csv").relative_to(OUTPUT_ROOT)
@@ -394,7 +434,13 @@ def _segment_saved_inputs(
     passed_meshes = {
         roi: mesh for roi, mesh in meshes.items() if roi in skeleton_passed_rois
     }
-    return segmented_synapses, meshes, passed_meshes, skeleton_results
+    return (
+        segmented_synapses,
+        meshes,
+        passed_meshes,
+        skeleton_results,
+        skeleton_snapped_rois,
+    )
 
 
 ROI_PALETTE = [
@@ -439,59 +485,73 @@ def _add_raw_roi_traces(vs, meshes, *, source_space: str, target_space: str, roi
         )
 
 
-def _add_segmented_skeleton_traces(
+def _add_segmented_skeleton_dot_traces(
     vs,
     skeleton_results,
     *,
     source_space: str,
     target_space: str,
     roi_colors,
+    roi_column: str,
+    highlight_snapped: bool = False,
 ):
-    """Overlay raw skeleton edges colored by their geometry-derived ROI."""
+    """Overlay raw skeleton nodes as ROI-colored dots, never connected lines."""
     import plotly.graph_objects as go
     import navis
 
     shown_rois = set()
     for body_id, result in sorted(skeleton_results.items()):
-        segments = result.samples
-        if segments.empty:
+        points = result.nodes
+        if points.empty:
             continue
-        for roi, group in segments.groupby("derived_roi", sort=True):
+        if roi_column not in points.columns:
+            raise ValueError(f"Skeleton table does not contain ROI column {roi_column!r}")
+        group_columns = [roi_column]
+        if highlight_snapped and "was_snapped" in points.columns:
+            group_columns.append("was_snapped")
+        grouped_points = points.groupby(
+            group_columns[0] if len(group_columns) == 1 else group_columns,
+            sort=True,
+        )
+        for group_key, group in grouped_points:
+            if len(group_columns) == 1:
+                roi = group_key
+                was_snapped = False
+            else:
+                roi, was_snapped = group_key
             roi = str(roi)
-            parent = group[["start_x", "start_y", "start_z"]].rename(
-                columns={"start_x": "x", "start_y": "y", "start_z": "z"}
-            )
-            child = group[["end_x", "end_y", "end_z"]].rename(
-                columns={"end_x": "x", "end_y": "y", "end_z": "z"}
-            )
-            endpoints = pd.concat([parent, child], ignore_index=True)
+            coords = group[["x", "y", "z"]].copy()
             if source_space != target_space:
-                endpoints = navis.xform_brain(
-                    endpoints,
+                coords = navis.xform_brain(
+                    coords,
                     source=source_space,
                     target=target_space,
                 )
-
-            x_values = []
-            y_values = []
-            z_values = []
-            for index in range(0, len(endpoints), 2):
-                x_values.extend([endpoints.iloc[index]["x"], endpoints.iloc[index + 1]["x"], None])
-                y_values.extend([endpoints.iloc[index]["y"], endpoints.iloc[index + 1]["y"], None])
-                z_values.extend([endpoints.iloc[index]["z"], endpoints.iloc[index + 1]["z"], None])
-
+            customdata = group[["node_id"]].to_numpy()
+            label = "snapped skeleton dots" if bool(was_snapped) else "skeleton dots"
             vs.fig_3d.add_trace(
                 go.Scatter3d(
-                    x=x_values,
-                    y=y_values,
-                    z=z_values,
-                    mode="lines",
-                    name=f"skeleton ROI [{roi}]",
+                    x=coords["x"],
+                    y=coords["y"],
+                    z=coords["z"],
+                    mode="markers",
+                    name=f"{label} [{roi}]",
                     legendgroup=f"skeleton-roi:{roi}",
                     showlegend=roi not in shown_rois,
-                    line=dict(color=roi_colors.get(roi, "#777777"), width=4.5),
+                    marker=dict(
+                        size=3.0 if bool(was_snapped) else 2.2,
+                        color=roi_colors.get(roi, "#777777"),
+                        symbol="circle-open" if bool(was_snapped) else "circle",
+                        opacity=0.90,
+                        line=(
+                            dict(color=roi_colors.get(roi, "#777777"), width=1.0)
+                            if bool(was_snapped) else None
+                        ),
+                    ),
+                    customdata=customdata,
                     hovertemplate=(
-                        f"<b>skeleton ROI [{roi}]</b><br>bodyId={body_id}"
+                        f"<b>{label} [{roi}]</b><br>bodyId={body_id}"
+                        "<br>nodeId=%{customdata[0]}"
                         "<extra></extra>"
                     ),
                 )
@@ -597,15 +657,16 @@ def _visualize(
         verbose="simple",
     )
 
-    # This invokes the production visualizer for raw skeletons and its native
-    # male-CNS template mesh.  ROI traces below are added from the serialized
-    # API meshes so local/simplified ROI caches cannot be selected accidentally.
-    vs.plot_skeleton()
+    # Use the production visualizer for its native male-CNS template mesh, but
+    # do not call plot_skeleton(): it emits connected line traces.  Raw
+    # skeleton nodes are added below as independent dots so disconnected
+    # branches cannot be joined accidentally.
     vs.plot_mesh()
+    skeleton_roi_column = "snapped_roi" if highlight_snapped else "derived_roi"
     skeleton_rois = {
         str(roi)
         for result in skeleton_results.values()
-        for roi in result.segments["derived_roi"].unique()
+        for roi in result.nodes[skeleton_roi_column].unique()
     }
     roi_colors = _roi_color_map(
         set(meshes) | set(segmented_synapses[synapse_roi_column].unique()) | skeleton_rois
@@ -617,12 +678,14 @@ def _visualize(
         target_space="JRCFIB2022M",
         roi_colors=roi_colors,
     )
-    _add_segmented_skeleton_traces(
+    _add_segmented_skeleton_dot_traces(
         vs,
         skeleton_results,
         source_space="JRCFIB2022Mraw",
         target_space="JRCFIB2022M",
         roi_colors=roi_colors,
+        roi_column=skeleton_roi_column,
+        highlight_snapped=highlight_snapped,
     )
     _add_segmented_synapse_traces(
         vs,
@@ -657,7 +720,7 @@ def main(argv=None):
     parser.add_argument(
         "--snap-outside",
         action="store_true",
-        help="Assign outside synapses to their nearest ROI surface and create a snapped figure",
+        help="Assign outside synapses and skeleton nodes to nearest ROI surfaces and create a snapped figure",
     )
     parser.add_argument(
         "--max-snap-distance",
@@ -669,7 +732,13 @@ def main(argv=None):
     _ensure_dirs()
     client = _load_client()
     metadata, synapses, manifest = _fetch_raw(client, reuse=args.reuse)
-    segmented_synapses, meshes, passed_meshes, skeleton_results = _segment_saved_inputs(
+    (
+        segmented_synapses,
+        meshes,
+        passed_meshes,
+        skeleton_results,
+        skeleton_snapped_rois,
+    ) = _segment_saved_inputs(
         metadata,
         synapses,
         manifest,
@@ -690,7 +759,7 @@ def main(argv=None):
         saveas="aMe12_ROI_sensitive_geometry",
         synapse_roi_column="derived_roi",
         title=(
-            "male-cns:v1.0 aMe12: raw skeletons colored by geometry-derived ROI, "
+            "male-cns:v1.0 aMe12: raw skeleton dots colored by geometry-derived ROI, "
             "directly segmented synapses, API ROI meshes"
         ),
     )
@@ -703,7 +772,7 @@ def main(argv=None):
         snapped_meshes = dict(meshes_to_plot)
         snapped_meshes.update({
             roi: meshes[roi]
-            for roi in snapped_roi_names
+            for roi in snapped_roi_names | set(skeleton_snapped_rois)
             if roi in meshes
         })
         snapped_figure_folder = _visualize(
@@ -715,7 +784,7 @@ def main(argv=None):
             saveas="aMe12_ROI_sensitive_geometry_snapped",
             synapse_roi_column="snapped_roi",
             title=(
-                "male-cns:v1.0 aMe12: skeleton ROI colors, nearest-ROI-snapped synapses, "
+                "male-cns:v1.0 aMe12: skeleton dots with snapped ROIs, nearest-ROI-snapped synapses, "
                 "API ROI meshes"
             ),
             highlight_snapped=True,
@@ -726,6 +795,7 @@ def main(argv=None):
         "synapses": int(len(synapses)),
         "successful_roi_meshes": sorted(meshes),
         "skeleton_passed_rois": sorted(passed_meshes),
+        "skeleton_snapped_rois": sorted(skeleton_snapped_rois),
         "visualized_roi_meshes": sorted(meshes_to_plot),
         "snap_outside": args.snap_outside,
         "snapped_synapses": int(segmented_synapses["was_snapped"].sum()),

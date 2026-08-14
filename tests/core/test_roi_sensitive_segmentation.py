@@ -114,6 +114,32 @@ def test_skeleton_nodes_and_crossing_segments_are_segmented():
     assert (center_samples["end_x"] <= 1.0).all()
 
 
+def test_outside_skeleton_nodes_and_samples_can_be_snapped():
+    skeleton = pd.DataFrame(
+        {
+            "node_id": [0, 1, 2],
+            "parent_id": [-1, 0, 1],
+            "x": [-3.0, 0.0, 3.0],
+            "y": [0.0, 0.0, 0.0],
+            "z": [0.0, 0.0, 0.0],
+        }
+    )
+    result = segment_skeleton(
+        skeleton,
+        {"center": cube()},
+        segment_samples=3,
+        overlap="first",
+        snap_outside=True,
+        max_snap_distance=3.0,
+    )
+
+    assert result.nodes["derived_roi"].tolist() == [OUTSIDE_ROI, "center", OUTSIDE_ROI]
+    assert result.nodes["snapped_roi"].tolist() == ["center", "center", "center"]
+    assert result.nodes["was_snapped"].tolist() == [True, False, True]
+    assert result.samples["was_snapped"].any()
+    assert set(result.samples.loc[result.samples["was_snapped"], "snapped_roi"]) == {"center"}
+
+
 def test_segment_samples_must_be_positive():
     skeleton = pd.DataFrame(
         {"node_id": [0], "parent_id": [-1], "x": [0.0], "y": [0.0], "z": [0.0]}

@@ -77,7 +77,7 @@ def create_find_shortest_tab():
             section_header("Core Parameters", "tune")
             with param_grid(3):
                 max_interlayer = number_input(
-                    "Max Intermediate Layers", DEFAULTS["max_interlayer"], 0, None,
+                    "Max Intermediate Layers", 5, 0, None,
                     hint="Maximum number of intermediate neuron layers between source "
                          "and target. Higher = more paths but slower.",
                 )
@@ -123,16 +123,6 @@ def create_find_shortest_tab():
                              "memory on extremely large graphs (distances then become "
                              "shortest-within-trimmed-graph).",
                     )
-                with ui.row().classes("gap-4"):
-                    visualize_early = checkbox_input(
-                        "Visualize Network Before Reconstruction", False,
-                        hint="Draw the discovered network graph (all weighted edges) into "
-                             "network_early/ right after the layers are fetched — before the "
-                             "path enumeration — so you see the explored topology immediately "
-                             "while reconstruction is still running. Off by default: the "
-                             "early preview duplicates the final path-based visualizations "
-                             "with a plain edge list.",
-                    ).props('id=checkbox-early-viz')
                 search_columns = select_input(
                     "Search Columns", SEARCH_COLUMNS, "auto",
                     hint="Which columns to search when resolving neuron names. "
@@ -275,7 +265,9 @@ def create_find_shortest_tab():
             "max_interlayer": int(max_interlayer.value),
             "filter_by": filter_by.value,
             "graph_edge_limit_bodyid": int(edge_limit_bodyid.value),
-            "visualize_before_reconstruct": visualize_early.value,
+            # Shortest Paths no longer exposes the early network preview in
+            # the UI; keep the backend behavior explicitly disabled.
+            "visualize_before_reconstruct": False,
             "search_columns": search_columns.value,
             "network_layout": network_layout.value,
             "use_cache": use_cache.value,

@@ -152,15 +152,6 @@ def create_find_path_tab():
                         )
                     # enabled only for deep searches (max_interlayer >= 3)
                     edge_limit_bodyid.set_enabled((max_interlayer.value or 0) >= 3)
-                    visualize_early = checkbox_input(
-                        "Visualize Network Before Reconstruction", False,
-                        hint="Draw the discovered network graph (all weighted edges) into "
-                             "network_early/ right after the layers are fetched — before the "
-                             "path enumeration — so you see the explored topology immediately "
-                             "while deep reconstruction is still running. Off by default: the "
-                             "early preview duplicates the final path-based visualizations "
-                             "with a plain edge list.",
-                    ).props('id=checkbox-early-viz')
                 search_columns = select_input(
                     "Search Columns", SEARCH_COLUMNS, "auto",
                     hint="Which columns to search when resolving neuron names. "
@@ -305,7 +296,9 @@ def create_find_path_tab():
             "filter_by": filter_by.value,
             "pathfinding": pathfinding_algo.value,
             "graph_edge_limit_bodyid": int(edge_limit_bodyid.value),
-            "visualize_before_reconstruct": visualize_early.value,
+            # Complete Paths no longer exposes the early network preview in
+            # the UI; keep the backend behavior explicitly disabled.
+            "visualize_before_reconstruct": False,
             "search_columns": search_columns.value,
             "network_layout": network_layout.value,
             "use_cache": use_cache.value,

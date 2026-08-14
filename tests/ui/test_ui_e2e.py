@@ -2147,14 +2147,13 @@ class TestTabs:
         assert "Limit Graph Edges" not in all_text
         assert "Edge Limit – Groups" not in all_text
         assert "Edge Limit – Types/Groups" not in all_text
-        assert "Visualize Network Before Reconstruction" in all_text
-        # the early-visualization checkbox is OFF by default (matched via its
-        # stable id; the checkbox label itself is client-side slot text)
+        assert "Visualize Network Before Reconstruction" not in all_text
+        # Complete Paths does not expose the early-visualization checkbox.
         early_viz = [
             el for el in client.elements.values()
             if getattr(el, "_props", {}).get("id") == "checkbox-early-viz"
         ]
-        assert early_viz and early_viz[0].value is False
+        assert not early_viz
         # the deep-layer warning label exists (hidden until layers >= 4)
         assert any("Layers ≥ 4" in t for t in texts), "deep-layer warning missing"
 
@@ -2384,10 +2383,24 @@ class TestTabs:
         ]
 
         assert shortest_layers and path_layers, "Max Intermediate Layers input missing"
+        assert shortest_layers[0].value == 5, shortest_layers[0].value
+        assert path_layers[0].value == DEFAULTS["max_interlayer"], path_layers[0].value
         for layers in (shortest_layers, path_layers):
-            assert layers[0].value == DEFAULTS["max_interlayer"], layers[0].value
             props = layers[0]._props
             assert props.get("min") == 0 and props.get("max") is None, props
+
+        for client in (shortest_client, path_client):
+            labels = [
+                getattr(el, "_props", {}).get("label")
+                for el in client.elements.values()
+                if getattr(el, "_props", {}).get("label")
+            ]
+            ids = [
+                getattr(el, "_props", {}).get("id")
+                for el in client.elements.values()
+            ]
+            assert "Visualize Network Before Reconstruction" not in labels
+            assert "checkbox-early-viz" not in ids
 
     def test_interdataset_mode_switch_resets_mode_defaults(self):
         """Switching Path Enumeration resets the mode-specific defaults
