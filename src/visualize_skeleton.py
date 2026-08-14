@@ -6145,6 +6145,13 @@ class VisualizeSkeleton:
             log=self._vprint,
         )
         self._flywire_skeleton_access = flywire_access
+        if flywire_access.get('is_fafb') and flywire_access.get('cave_token'):
+            self._vprint(
+                '  🌐 FAFB CAVE fallback is enabled; local cache/ZIP data is '
+                'preferred, and missing or extrusion-affected skeletons will '
+                'be requested from CAVE.',
+                level='simple',
+            )
         
         n_layers = len(self.neuron_layers)
         total_skeletons = sum(len(df) if df is not None else 0 for df in self.neuron_dfs)

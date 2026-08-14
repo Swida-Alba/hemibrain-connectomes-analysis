@@ -192,7 +192,9 @@ def require_flywire_skeleton_access(
         if status["cave_token"]:
             log(
                 f"[DROCAT][dataset-guard] FAFB skeleton access ready: local "
-                f"source found ({source}); CAVE API fallback is configured."
+                f"source found ({source}); CAVE API fallback is configured "
+                "and will be attempted for missing or extrusion-affected "
+                "skeletons."
             )
         else:
             log(

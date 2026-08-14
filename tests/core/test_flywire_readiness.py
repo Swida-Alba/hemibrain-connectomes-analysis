@@ -71,6 +71,23 @@ def test_fafb_local_source_is_ready_without_cave_token(tmp_path, monkeypatch):
     assert "CAVE fallback is disabled" in "\n".join(log)
 
 
+def test_fafb_local_source_keeps_cave_fallback_enabled_with_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAVE_TOKEN", "configured-token")
+    skeleton_zip = (
+        tmp_path / "datasets" / "flywire_FAFB_v783" / "sk_lod1_783_healed.zip"
+    )
+    skeleton_zip.parent.mkdir(parents=True)
+    skeleton_zip.write_bytes(b"placeholder")
+
+    log = []
+    require_flywire_skeleton_access(
+        "flywire_FAFB_v783", project_root=tmp_path, log=log.append
+    )
+    text = "\n".join(log)
+    assert "CAVE API fallback is configured" in text
+    assert "will be attempted" in text
+
+
 def test_fafb_cave_token_is_an_online_fallback(tmp_path, monkeypatch):
     monkeypatch.setenv("CAVE_TOKEN", "secret-token-value")
     status = flywire_skeleton_readiness(
