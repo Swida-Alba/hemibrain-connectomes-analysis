@@ -413,6 +413,7 @@ def _render_index(
         match_groups_all = list(initial.match_groups)
         current_groups = match_groups_all[:MATCH_GROUP_PAGE_SIZE]
         match_state = {"page": 1}
+        match_header_selection = {"all_visible": False}
         current_group_body_ids = {
             str(key): tuple(values)
             for key, values in initial.match_group_body_ids.items()
@@ -607,11 +608,30 @@ def _render_index(
 
         def refresh_table_selection() -> None:
             if match_table is not None:
-                match_table.selected = [
+                visible_match_rows = [
                     row for row in current_groups
                     if row.get("match_role") != "secondary"
                     and str(row.get("match_value", "") or "") in selected_match_values
                 ]
+                if match_header_selection["all_visible"]:
+                    selectable_match_values = {
+                        str(row.get("match_value", "") or "").strip()
+                        for row in current_groups
+                        if row.get("match_role") != "secondary"
+                    }
+                    if (
+                        selectable_match_values
+                        and selectable_match_values.issubset(selected_match_values)
+                    ):
+                        # Secondary rows are display-only and have no row
+                        # checkbox. Keep them in QTable's internal selection
+                        # only after a header select-all so Quasar can show
+                        # the header as fully checked.
+                        visible_match_rows.extend(
+                            row for row in current_groups
+                            if row.get("match_role") == "secondary"
+                        )
+                match_table.selected = visible_match_rows
                 match_table.update()
             if table is not None:
                 active = effective_body_keys()
@@ -623,6 +643,17 @@ def _render_index(
             update_selection_status()
 
         def handle_match_selection(event) -> None:
+            visible_row_keys = {
+                str(row.get("__match_group_key", "") or "")
+                for row in current_groups
+            }
+            selected_row_keys = {
+                str(row.get("__match_group_key", "") or "")
+                for row in list(getattr(event, "selection", []) or [])
+            }
+            match_header_selection["all_visible"] = bool(
+                visible_row_keys and visible_row_keys.issubset(selected_row_keys)
+            )
             previously_selected = set(selected_match_values)
             visible_rows = [
                 row for row in current_groups
@@ -690,6 +721,7 @@ def _render_index(
                 return
             if row.get("match_role") == "secondary":
                 return
+            match_header_selection["all_visible"] = False
             value = str(row.get("match_value", "") or "").strip()
             if not value:
                 return
@@ -788,6 +820,32 @@ def _render_index(
                     on_select=handle_match_selection,
                     pagination=None,
                 ).classes("w-full drocat-neuron-match-table")
+                # The custom body slot adds the selection cell explicitly.
+                # Render the matching header cell explicitly as well so it
+                # uses the same width and alignment as the row checkboxes.
+                match_table.add_slot(
+                    "header",
+                    r"""
+                    <q-tr :props="props">
+                      <q-th auto-width class="drocat-neuron-match-select-cell">
+                        <q-checkbox
+                          v-model="props.selected"
+                          :indeterminate="props.selected === null"
+                          dense
+                        />
+                      </q-th>
+                      <q-th
+                        v-for="col in props.cols"
+                        :key="col.name"
+                        :props="props"
+                        :class="col.headerClasses"
+                        :style="col.headerStyle"
+                      >
+                        {{ col.label }}
+                      </q-th>
+                    </q-tr>
+                    """,
+                )
                 match_table.add_slot(
                     "body",
                     r"""

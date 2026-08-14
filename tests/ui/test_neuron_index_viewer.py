@@ -778,6 +778,13 @@ class TestNeuronIndexViewer:
         assert match_table._props["columns"][1]["name"] == "match_value"
         assert match_table._props["columns"][1]["label"] == "Matched value"
         assert match_table._props["columns"][2]["name"] == "body_count"
+        assert "header" in match_table.slots
+        header_template = match_table.slots["header"].template
+        assert "drocat-neuron-match-select-cell" in header_template
+        assert "v-model=\"props.selected\"" in header_template
+        assert ':indeterminate="props.selected === null"' in header_template
+        assert "props.multipleSelect" not in header_template
+        assert "v-for=\"col in props.cols\"" in header_template
         assert "body" in match_table.slots
         assert "match-value-click" in match_table.slots["body"].template
         assert "secondary" in match_table.slots["body"].template
@@ -1166,6 +1173,18 @@ class TestNeuronIndexViewer:
         assert {
             row["match_value"] for row in match_table.selected
         } == {"MeVPaMe2"}
+        match_table._selection_handlers[0](SimpleNamespace(selection=[]))
+
+        # A header select-all includes the display-only secondary row in
+        # QTable's internal selection so the header remains fully checked,
+        # while the owning query still receives only the primary name.
+        match_table._selection_handlers[0](SimpleNamespace(
+            selection=list(match_table._props["rows"])
+        ))
+        assert {
+            row["match_value"] for row in match_table.selected
+        } == {"MeVPaMe2", "aMe19a"}
+        assert current_query == ["MeVPaMe2"]
         match_table._selection_handlers[0](SimpleNamespace(selection=[]))
         match_table._selection_handlers[0](SimpleNamespace(selection=[
             groups["aMe19a"],
