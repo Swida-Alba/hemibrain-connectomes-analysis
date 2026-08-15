@@ -296,6 +296,20 @@ class TestGeneratedHtmlStructure:
         # the geometry editor refreshes edge styles after resizing
         assert "refreshEdgeStyles(false);  // keep endpoints/offsets attached to resized nodes" in js
 
+    def test_reciprocal_detection_excludes_edge_itself(self, network_html):
+        """A one-way edge must never be treated as its own parallel: the
+        reciprocal check counts edges per direction, so only a DIFFERENT
+        edge in the reverse direction triggers the offset branch. Otherwise
+        every edge takes the reciprocal-offset branch and its arrows miss
+        the node centers."""
+        js = _script_text(network_html)
+        # per-direction counts, not a set of all edges
+        assert "const visibleEdgeCounts = new Map();" in js
+        assert "const key = e.source().id() + '→' + e.target().id();" in js
+        assert "visibleEdgeCounts.set(key, (visibleEdgeCounts.get(key) || 0) + 1);" in js
+        # parallel check looks up the REVERSE direction only
+        assert "const hasVisibleParallel = (visibleEdgeCounts.get(target + '→' + source) || 0) > 0;" in js
+
     def test_deadend_hidden_classes_have_display_none_style(self, network_html):
         """Regression: dead-end classes were assigned and counted, but no
         stylesheet rule hid them, so Hide Dead Ends reported counts without

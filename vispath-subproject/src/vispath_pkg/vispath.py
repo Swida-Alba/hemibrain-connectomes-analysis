@@ -6473,13 +6473,18 @@ class VisualizePath:
             const shouldShowStatus = (showStatus === undefined) ? true : showStatus;
             const offsetMagnitude = Math.max(0, parseFloat(reciprocalOffset) || 0);  // Keep reciprocal edges parallel but separated
 
-            // Cache which (target -> source) pairs have a visible edge so the
+            // Count visible edges per (source -> target) direction so the
             // reciprocal check is O(1) per edge instead of a full selector
-            // scan per edge (O(E²) on large graphs).
-            const visibleReverseKeys = new Set();
+            // scan per edge (O(E²) on large graphs). Using a per-direction
+            // COUNT (not a set of all edges) is essential: an edge's own
+            // direction key must not count as a parallel, or every edge
+            // would wrongly take the reciprocal-offset branch and its
+            // arrows would miss the node centers.
+            const visibleEdgeCounts = new Map();
             cy.edges().forEach(e => {{
                 if (!e.hasClass('hidden') && !e.hasClass('filtered')) {{
-                    visibleReverseKeys.add(e.target().id() + '→' + e.source().id());
+                    const key = e.source().id() + '→' + e.target().id();
+                    visibleEdgeCounts.set(key, (visibleEdgeCounts.get(key) || 0) + 1);
                 }}
             }});
 
@@ -6490,8 +6495,11 @@ class VisualizePath:
                 const target = edge.target().id();
                 const canonicalSign = source.localeCompare(target) < 0 ? 1 : -1;
                 
-                // Check if there's a visible parallel edge (both directions)
-                const hasVisibleParallel = visibleReverseKeys.has(target + '→' + source);
+                // Check if there's a visible parallel edge (both directions);
+                // a count > 0 for the REVERSE direction means a DIFFERENT
+                // edge goes the other way (the edge itself contributes to
+                // its own direction key, not the reverse one)
+                const hasVisibleParallel = (visibleEdgeCounts.get(target + '→' + source) || 0) > 0;
 
                 if (source === target) {{
                     // Keep loops curved for readability
