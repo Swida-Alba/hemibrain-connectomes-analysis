@@ -226,7 +226,7 @@ def create_skeleton_tab():
                 ui.label("Synapse options").classes("drocat-mini-label")
                 with param_grid(3):
                     skip_synapse = checkbox_input(
-                        "Skip Synapses", True,
+                        "Skip Synapses", False,
                         hint="Hide synapse markers for a cleaner view.",
                     )
                     min_synapse_num = number_input(
