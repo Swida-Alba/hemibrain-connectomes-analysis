@@ -653,11 +653,11 @@ class TestVisualizeTopResults:
         assert not res.empty
         assert len(self.FakeVisualizer.instances) == 1
         vs = self.FakeVisualizer.instances[0]
-        # The query is excluded; the requested count applies only to result
-        # types.
-        assert vs.kwargs["neuron_layers"] == [[102], [103]]
+        # The query is rendered as the first (reference) layer; the requested
+        # top-N count applies only to result types.
+        assert vs.kwargs["neuron_layers"] == [[101], [102], [103]]
         assert vs.kwargs["custom_layer_names"] == [
-            "r1_LINE_x1", "r2_Y_x1"
+            "query_101_x1", "r1_LINE_x1", "r2_Y_x1"
         ]
         assert vs.kwargs["legend_mode"] == "layer"
         assert vs.kwargs["skip_synapse"] is True
@@ -672,19 +672,19 @@ class TestVisualizeTopResults:
         assert not res.empty
         assert len(self.FakeVisualizer.instances) == 1
         vs = self.FakeVisualizer.instances[0]
-        # The query and the LINE intra reference are excluded; only the Y row
-        # remains, with its members from the vector cache.
-        assert vs.kwargs["neuron_layers"] == [[103]]
-        assert vs.kwargs["custom_layer_names"] == ["r1_Y_x1"]
+        # The query is the first layer; the LINE intra reference is excluded,
+        # so only the Y row remains, with its members from the vector cache.
+        assert vs.kwargs["neuron_layers"] == [[101], [103]]
+        assert vs.kwargs["custom_layer_names"] == ["query_101_x1", "r1_Y_x1"]
 
     def test_bodyid_mode_one_layer_per_row(self, tmp_path, monkeypatch):
         comparer = self._setup(tmp_path, monkeypatch, visualize_by="bodyId")
         comparer.find_similar()
         assert len(self.FakeVisualizer.instances) == 1
         vs = self.FakeVisualizer.instances[0]
-        assert vs.kwargs["neuron_layers"] == [[102], [103]]
+        assert vs.kwargs["neuron_layers"] == [[101], [102], [103]]
         assert vs.kwargs["custom_layer_names"] == [
-            "r1_LINE_102", "r2_Y_103"
+            "query_101_x1", "r1_LINE_102", "r2_Y_103"
         ]
         assert vs.kwargs["legend_mode"] == "single"
 
@@ -702,8 +702,10 @@ class TestVisualizeTopResults:
         comparer._visualize_top_results(results, query_df=query_df)
 
         vs = self.FakeVisualizer.instances[0]
-        assert vs.kwargs["neuron_layers"] == [[102]]
-        assert vs.kwargs["custom_layer_names"] == ["r1_LINE_102"]
+        # The query reference layer never consumes the top-N budget: the
+        # query row (101) is excluded from the results, leaving one layer.
+        assert vs.kwargs["neuron_layers"] == [[101], [102]]
+        assert vs.kwargs["custom_layer_names"] == ["query_101_x1", "r1_LINE_102"]
 
     def test_visualization_settings_are_forwarded(self, tmp_path, monkeypatch):
         comparer = self._setup(

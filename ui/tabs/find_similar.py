@@ -1,5 +1,6 @@
 """FindSimilar Tab - Morphological and connection-profile similarity search."""
 
+import re
 import time
 
 from nicegui import ui
@@ -81,7 +82,7 @@ def create_find_similar_tab():
                     label="Query Neuron(s)",
                     placeholder="Type or upload CSV/TSV/Excel (e.g., aMe12, 1005174948)",
                     hint="Neuron types, bodyIds, or patterns. Multiple queries "
-                         "are ranked independently (same search backend as pathfinding).",
+                         "are searched independently and saved as separate runs.",
                     suggestions=_morph_suggest,
                     available_neurons=lambda: dataset.value
                     if dataset is not None else "",
@@ -367,9 +368,8 @@ def create_find_similar_tab():
                 source_input = neuron_list_input(
                     label="Query Neuron (type or bodyId)",
                     show_filter=False,
-                    show_upload=False,
-                    max_items=1,
-                    hint="Single neuron type or bodyId to find similar neurons for.",
+                    show_upload=True,
+                    hint="Enter one or more neuron types or bodyIds. Each input is searched independently.",
                     suggestions=_profile_suggest,
                     available_neurons=lambda: source_dataset.value
                     if source_dataset is not None else "",
@@ -485,6 +485,37 @@ def create_find_similar_tab():
     with results_col:
         output_panel.create(run_label="Run Similarity Search", run_icon="play_arrow")
 
+    def _unique_queries(values):
+        """Return the entered queries in order, without duplicate chips."""
+        queries = []
+        seen = set()
+        for value in values or []:
+            text = str(value).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            queries.append(value)
+        return queries
+
+    def _saveas_for_query(base_value, index, query, total):
+        """Keep custom-named multi-query runs separate on disk."""
+        base = str(base_value or "").strip()
+        if not base or total == 1:
+            return base
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(query)).strip("_")
+        safe = safe[:60] or f"query_{index + 1}"
+        return f"{base}_{index + 1}_{safe}"
+
+    def _collect_files(results):
+        """Merge per-query output files while preserving their paths."""
+        files = {}
+        for result in results:
+            for file_info in result.get("files", []):
+                path = file_info.get("path")
+                if path:
+                    files[path] = file_info
+        return list(files.values())
+
     async def run_morphological():
         if is_banc_dataset(dataset.value):
             morph_dataset_warning.set_visibility(True)
@@ -494,11 +525,11 @@ def create_find_similar_tab():
             )
             return
         mode, neurons = query_input.get_value()
-        query = apply_filter_mode(neurons, mode)
-        if not query:
+        queries = _unique_queries(apply_filter_mode(neurons, mode))
+        if not queries:
             ui.notify("Please enter at least one query neuron", type="warning")
             return
-        if len(query) > 50:
+        if len(queries) > 50:
             ui.notify("Please limit the query to 50 neurons", type="warning")
             return
 
@@ -506,8 +537,7 @@ def create_find_similar_tab():
         output_panel.set_running(True)
 
         visualization_values = visualization_settings.values()
-        constructor_params = {
-            "query": query[0] if len(query) == 1 else query,
+        base_params = {
             "dataset": dataset.value,
             "level": level.value,
             "method": method.value,
@@ -530,32 +560,59 @@ def create_find_similar_tab():
             "use_cache": True,
             "cache_fetched_skeletons": cache_fetched.value,
         }
-        result = await output_panel.run(
-            runner, "find_similar_morphology", constructor_params,
-            "find_similar", output_dir=morph_output_dir.value,
-        )
-        output_panel.set_running(False)
-        output_panel.set_status(
-            "Completed" if result["returncode"] == 0 else "Failed",
-            "green" if result["returncode"] == 0 else "red",
-        )
-        output_panel.show_files(
-            result["files"], result.get("output_folder") or morph_output_dir.value
-        )
+        results = []
+        last_output_folder = None
+        try:
+            for index, query in enumerate(queries):
+                if len(queries) > 1:
+                    output_panel.log(
+                        f"--- Morphology query {index + 1}/{len(queries)}: {query} ---",
+                        "system",
+                    )
+                constructor_params = dict(base_params)
+                constructor_params["query"] = query
+                result = await output_panel.run(
+                    runner, "find_similar_morphology", constructor_params,
+                    "find_similar", output_dir=morph_output_dir.value,
+                )
+                results.append(result)
+                last_output_folder = result.get("output_folder") or last_output_folder
+                if result.get("cancelled"):
+                    break
+
+            cancelled = any(result.get("cancelled") for result in results)
+            succeeded = bool(results) and all(
+                result.get("returncode") == 0 for result in results
+            )
+            if cancelled:
+                output_panel.set_status("Cancelled", "red")
+            else:
+                output_panel.set_status(
+                    "Completed" if succeeded else "Failed",
+                    "green" if succeeded else "red",
+                )
+            files = _collect_files(results)
+            if files:
+                output_panel.show_files(
+                    files,
+                    morph_output_dir.value if len(queries) > 1
+                    else last_output_folder or morph_output_dir.value,
+                )
+        finally:
+            output_panel.set_running(False)
 
     async def run_profile():
         source_vals = source_input.get_value()[1]
-        source = str(source_vals[0]).strip() if source_vals else ""
-        if not source:
-            ui.notify("Please enter a query neuron", type="warning")
+        sources = _unique_queries(source_vals)
+        if not sources:
+            ui.notify("Please enter at least one query neuron", type="warning")
             return
 
         output_panel.clear()
         output_panel.set_running(True)
 
         visualization_values = profile_visualization_settings.values()
-        constructor_params = {
-            "source": source,
+        base_params = {
             "source_dataset": source_dataset.value,
             "target_dataset": source_dataset.value,
             "output_dir": profile_output_dir.value,
@@ -581,18 +638,49 @@ def create_find_similar_tab():
             "verbose": True,
         }
         method_name = "find_homologs_fast" if use_fast.value else "find_novel_homologs"
-        result = await output_panel.run(
-            runner, "find_similar_profile", constructor_params,
-            method_name, output_dir=profile_output_dir.value,
-        )
-        output_panel.set_running(False)
-        output_panel.set_status(
-            "Completed" if result["returncode"] == 0 else "Failed",
-            "green" if result["returncode"] == 0 else "red",
-        )
-        output_panel.show_files(
-            result["files"], result.get("output_folder") or profile_output_dir.value
-        )
+        results = []
+        last_output_folder = None
+        try:
+            for index, source in enumerate(sources):
+                if len(sources) > 1:
+                    output_panel.log(
+                        f"--- Connectivity query {index + 1}/{len(sources)}: {source} ---",
+                        "system",
+                    )
+                constructor_params = dict(base_params)
+                constructor_params.update({
+                    "source": source,
+                    "saveas": _saveas_for_query(saveas.value, index, source, len(sources)),
+                })
+                result = await output_panel.run(
+                    runner, "find_similar_profile", constructor_params,
+                    method_name, output_dir=profile_output_dir.value,
+                )
+                results.append(result)
+                last_output_folder = result.get("output_folder") or last_output_folder
+                if result.get("cancelled"):
+                    break
+
+            cancelled = any(result.get("cancelled") for result in results)
+            succeeded = bool(results) and all(
+                result.get("returncode") == 0 for result in results
+            )
+            if cancelled:
+                output_panel.set_status("Cancelled", "red")
+            else:
+                output_panel.set_status(
+                    "Completed" if succeeded else "Failed",
+                    "green" if succeeded else "red",
+                )
+            files = _collect_files(results)
+            if files:
+                output_panel.show_files(
+                    files,
+                    profile_output_dir.value if len(sources) > 1
+                    else last_output_folder or profile_output_dir.value,
+                )
+        finally:
+            output_panel.set_running(False)
 
     async def run_similar():
         if mode_value["value"] == "Morphological similarity":

@@ -2960,36 +2960,38 @@ class MorphologyComparer:
         results: pd.DataFrame,
         query_df: Optional[pd.DataFrame] = None,
     ):
-        """Render the top-N result neurons/types (NB-style).
+        """Render the query plus the top-N result neurons/types.
 
-        Enabled when ``visualize_top_n > 0``. Query neurons are deliberately
-        excluded from the layer list and from the top-N count. With
-        ``visualize_by='type'`` (default) each of the top-N distinct result
-        types becomes one layer containing its member bodyIds (the result rows
-        for bodyId-level searches, or the vector-cache members capped at
-        ``n_per_type`` for type-level searches); with ``'bodyId'`` each top
-        result row is one layer. The intra-type reference row is never
-        rendered. Output goes to the same run folder (plot-3d_{dataset}/
-        subfolder); a visualization failure is logged but never fails the
-        similarity search.
+        The query is always the first visualization layer and does not consume
+        the requested top-N result count. With ``visualize_by='type'``
+        (default) each of the top-N distinct result types becomes one layer
+        containing its member bodyIds (the result rows for bodyId-level
+        searches, or the vector-cache members capped at ``n_per_type`` for
+        type-level searches); with ``'bodyId'`` each top result row is one
+        layer. The intra-type reference row is never rendered. Output goes to
+        the same run folder (plot-3d_{dataset}/subfolder); a visualization
+        failure is logged but never fails the similarity search.
 
         ``query_df`` is retained for compatibility with callers from older
-        releases; it is used only to remove query bodyIds if they are present
-        in a supplied result frame.
+        releases. It supplies the query bodyIds for the reference layer and is
+        also used to remove query bodyIds if they are present in a supplied
+        result frame.
         """
-        if self.visualize_top_n <= 0 or results is None or results.empty:
+        if self.visualize_top_n <= 0:
+            return
+        if results is None:
+            work = pd.DataFrame()
+        else:
+            work = results.copy()
+        if work.empty and (query_df is None or query_df.empty):
             return
         VisualizeSkeleton = _import_visualizer()
         if VisualizeSkeleton is None:
             self._log("Visualization skipped: visualize_skeleton not available.")
             return
 
-        work = results
         if "is_intra_type" in work.columns:
             work = work[work["is_intra_type"] != True]  # noqa: E712
-        if work.empty:
-            self._log("Visualization skipped: no inter-type results to show.")
-            return
 
         layers: List[List[int]] = []
         names: List[str] = []
@@ -3016,6 +3018,19 @@ class MorphologyComparer:
         if query_df is not None and not query_df.empty:
             query_body_ids = set(_body_ids(query_df))
 
+        # Keep the query visible as a reference layer. It is intentionally
+        # added before selecting result layers so the first color and legend
+        # entry identify the neuron that was searched.
+        if query_body_ids:
+            query_label = str(self.query)
+            safe_query = "".join(
+                char if char.isalnum() or char in "._-" else "_"
+                for char in query_label
+            ).strip("_") or "neuron"
+            query_members = list(dict.fromkeys(_body_ids(query_df)))
+            layers.append(query_members)
+            names.append(f"query_{safe_query}_x{len(query_members)}")
+
         # Be defensive if a caller supplies a frame that still contains the
         # query rows. Filtering before the top-N selection is what makes the
         # requested count mean "top N results", not "top N rows including the
@@ -3026,8 +3041,8 @@ class MorphologyComparer:
                     lambda value: _body_id_in(value, query_body_ids)
                 )
             ]
-        if work.empty:
-            self._log("Visualization skipped: no non-query results to show.")
+        if work.empty and not layers:
+            self._log("Visualization skipped: no renderable query or results.")
             return
 
         if self.visualize_by == "type":
@@ -3074,7 +3089,10 @@ class MorphologyComparer:
             self._log("Visualization skipped: no renderable layers.")
             return
 
-        self._log(f"3D visualization: including {len(layers)} result layer(s)")
+        self._log(
+            f"3D visualization: including query + {max(0, len(layers) - 1)} "
+            "result layer(s)"
+        )
 
         run_dir = Path(getattr(self, "output_folder", "") or self.output_dir)
         try:

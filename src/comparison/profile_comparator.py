@@ -6601,13 +6601,67 @@ class HomologFinder:
             # Determine target column names
             target_col = 'target_type' if 'target_type' in results_df.columns else 'target'
             target_bodyid_col = 'target_bodyId' if 'target_bodyId' in results_df.columns else None
-            
+
+            def _body_ids(values):
+                """Normalize a sequence of bodyId-like values for rendering."""
+                ids = []
+                for value in values or []:
+                    try:
+                        if pd.isna(value):
+                            continue
+                        ids.append(int(value))
+                    except (TypeError, ValueError):
+                        continue
+                return list(dict.fromkeys(ids))
+
+            # The source/query is rendered as a reference layer.  For a type
+            # query, result rows normally carry every source bodyId; when a
+            # caller supplies a type-only result frame, resolve the members
+            # from the same source lookup used by the search.
+            query_bodyids = []
+            if 'source_bodyId' in results_df.columns:
+                query_bodyids = _body_ids(results_df['source_bodyId'].dropna().unique().tolist())
+            if not query_bodyids and str(query).strip().isdigit():
+                query_bodyids = [int(str(query).strip())]
+            if not query_bodyids:
+                try:
+                    query_bodyids = _body_ids(
+                        self.get_bodyids_for_type(str(query), vis_source_dataset)
+                    )
+                except Exception:
+                    query_bodyids = []
+            query_bodyid_set = set(query_bodyids)
+            same_dataset = source_dataset == target_dataset
+            safe_query = ''.join(
+                char if char.isalnum() or char in '._-' else '_'
+                for char in str(query)
+            ).strip('_') or 'neuron'
+            query_layer_name = f'query_{safe_query}_x{len(query_bodyids)}'
+
+            def _is_query_bodyid(value):
+                try:
+                    return not pd.isna(value) and int(value) in query_bodyid_set
+                except (TypeError, ValueError):
+                    return False
+
+            # A same-dataset search can render the query and its matches in a
+            # single scene. Cross-dataset searches keep separate scenes because
+            # VisualizeSkeleton accepts one dataset per instance; the source
+            # reference is still rendered below under source_neurons/.
+            candidate_results = results_df
+            if same_dataset and target_bodyid_col and query_bodyid_set:
+                candidate_results = results_df.loc[
+                    ~results_df[target_bodyid_col].map(
+                        _is_query_bodyid
+                    )
+                ]
+
             # Get matches to visualize; for bodyId-level use union of per-source top-N targets
             if top_n and top_n > 0:
                 if target_bodyid_col:
-                    if 'source_bodyId' in results_df.columns:
+                    if 'source_bodyId' in candidate_results.columns:
                         per_source_matches = []
-                        for _, group in results_df.groupby('source_bodyId'):
+                        for _, group in candidate_results.groupby('source_bodyId'):
                             if 'rank_corr' in group.columns:
                                 sorted_group = group.sort_values('rank_corr', ascending=False, na_position='last')
                             else:
@@ -6620,26 +6674,32 @@ class HomologFinder:
                             top_matches = results_df.iloc[0:0]
                     else:
                         if 'rank_corr' in results_df.columns:
-                            top_matches = results_df.nlargest(top_n, 'rank_corr')
+                            top_matches = candidate_results.nlargest(top_n, 'rank_corr')
                         else:
-                            top_matches = results_df.head(top_n)
+                            top_matches = candidate_results.head(top_n)
 
                     top_matches = top_matches.drop_duplicates(subset=[target_bodyid_col], keep='first')
                 else:
-                    top_matches = results_df.head(top_n)
+                    top_matches = candidate_results.head(top_n)
             else:
-                top_matches = results_df
+                top_matches = candidate_results
             
             # =====================================================================
             # 1. BodyId-level visualizations: Batch all bodyIds as separate layers
             #    Using plot_individuals() for efficient per-neuron exports
             # =====================================================================
-            if target_bodyid_col and not top_matches.empty:
+            if target_bodyid_col and (
+                not top_matches.empty or (same_dataset and bool(query_bodyids))
+            ):
                 self._log(f"  Creating bodyId-level visualizations (batch mode with plot_individuals)...")
                 
                 # Collect all bodyIds as separate layers (one bodyId per layer)
                 bodyid_layers = []
                 bodyid_layer_names = []
+
+                if same_dataset and query_bodyids:
+                    bodyid_layers.append(query_bodyids)
+                    bodyid_layer_names.append(query_layer_name)
                 
                 for idx, row in top_matches.iterrows():
                     target_type = row.get(target_col, '')
@@ -6701,7 +6761,10 @@ class HomologFinder:
                                 files_saved.append(f'visualization/bodyId_level/individual_profiles/{name}.html')
                             files_saved.append('visualization/bodyId_level/individual_profiles.pdf')
                         
-                        self._log(f"    Saved: bodyId_level/ ({len(bodyid_layers)} neurons, batch mode with plot_individuals)")
+                        self._log(
+                            f"    Saved: bodyId_level/ ({len(bodyid_layers)} layers, "
+                            "query + top matches, batch mode with plot_individuals)"
+                        )
                         
                     except Exception as e:
                         self._log(f"    Warning: BodyId batch visualization failed: {e}, falling back to individual mode...")
@@ -6715,52 +6778,94 @@ class HomologFinder:
             # 2. Type-level visualizations: Batch all types as separate layers
             #    Each layer contains all bodyIds of that type, using plot_individuals()
             # =====================================================================
+            query_types = set()
+            if 'source_type' in results_df.columns and query_bodyid_set:
+                source_rows = (
+                    results_df[results_df['source_bodyId'].map(_is_query_bodyid)]
+                    if 'source_bodyId' in results_df.columns
+                    else results_df.iloc[0:0]
+                )
+                query_types = {
+                    str(value) for value in source_rows['source_type'].dropna().tolist()
+                    if str(value)
+                }
+            if not query_types and not str(query).strip().isdigit():
+                query_types.add(str(query))
+
             if type_summary is not None and not type_summary.empty:
                 ts = type_summary
                 type_col_name = 'target_type' if 'target_type' in ts.columns else ('target' if 'target' in ts.columns else None)
                 if type_col_name:
-                    top_type_rows = ts.head(top_n) if top_n and top_n > 0 else ts
-                    unique_types = top_type_rows[type_col_name].dropna().unique().tolist()
+                    type_values = ts[type_col_name].dropna().tolist()
                 else:
-                    unique_types = []
+                    type_values = []
             else:
-                unique_types = top_matches[target_col].dropna().unique().tolist()
+                type_values = top_matches[target_col].dropna().tolist()
+
+            unique_types = []
+            seen_types = set()
+            for value in type_values:
+                target_type = str(value)
+                if not target_type or target_type in seen_types:
+                    continue
+                # A type-only same-dataset result cannot distinguish query
+                # members from the matching type, so leave that type to the
+                # explicit query layer. BodyId-level rows are filtered below
+                # and may still render non-query members of the type.
+                if (
+                    same_dataset and not target_bodyid_col
+                    and target_type in query_types
+                ):
+                    continue
+                seen_types.add(target_type)
+                unique_types.append(target_type)
+                if top_n and top_n > 0 and len(unique_types) >= top_n:
+                    break
+
+            type_layers = []
+            type_layer_names = []
+            if same_dataset and query_bodyids:
+                type_layers.append(
+                    query_bodyids if len(query_bodyids) > 1 else query_bodyids[0]
+                )
+                type_layer_names.append(query_layer_name)
 
             if unique_types:
-                self._log(f"  Creating type-level visualizations for {len(unique_types)} types (batch mode with plot_individuals)...")
+                self._log(
+                    f"  Creating type-level visualizations for {len(unique_types)} "
+                    "result types plus the query (batch mode with plot_individuals)..."
+                )
                 
                 # Build type layers: each layer is a list of bodyIds for that type (grouped)
-                type_layers = []
-                type_layer_names = []
-                
                 for target_type in unique_types:
                     if not target_type:
                         continue
                     
                     # Get all bodyIds for this type from results
-                    type_rows = results_df[results_df[target_col] == target_type]
+                    type_rows = candidate_results[
+                        candidate_results[target_col] == target_type
+                    ]
                     
                     if target_bodyid_col:
-                        bodyids_for_type = type_rows[target_bodyid_col].dropna().unique().tolist()
+                        bodyids_for_type = _body_ids(
+                            type_rows[target_bodyid_col].dropna().unique().tolist()
+                        )
                         if bodyids_for_type:
-                            try:
-                                bodyid_list = [int(bid) for bid in bodyids_for_type]
-                                # Multiple bodyIds for type -> group them as single layer
-                                if len(bodyid_list) > 1:
-                                    type_layers.append(bodyid_list)
-                                else:
-                                    type_layers.append(bodyid_list[0])
-                            except (ValueError, TypeError):
-                                type_layers.append(str(target_type))
+                            # Multiple bodyIds for a type share one layer.
+                            type_layers.append(
+                                bodyids_for_type
+                                if len(bodyids_for_type) > 1
+                                else bodyids_for_type[0]
+                            )
                         else:
-                            type_layers.append(str(target_type))
+                            continue
                     else:
                         type_layers.append(str(target_type))
                     
                     safe_name = str(target_type).replace('/', '_').replace(':', '_').replace('*', '_')
                     type_layer_names.append(safe_name)
                 
-                if type_layers:
+            if type_layers:
                     try:
                         # Get correct client for target dataset
                         target_client = self.clients.get(vis_target_dataset)
@@ -6818,9 +6923,14 @@ class HomologFinder:
             # =====================================================================
             self._log(f"  Creating source neurons visualization...")
             
-            if 'source_bodyId' in results_df.columns:
-                source_bodyids = results_df['source_bodyId'].dropna().unique().tolist()
-            else:
+            source_bodyids = query_bodyids or []
+            if not source_bodyids and 'source_bodyId' in results_df.columns:
+                source_bodyids = _body_ids(
+                    results_df['source_bodyId'].dropna().unique().tolist()
+                )
+            if not source_bodyids and str(query).strip().isdigit():
+                source_bodyids = [int(str(query).strip())]
+            if not source_bodyids:
                 source_bodyids = [query]
             
             if source_bodyids:
