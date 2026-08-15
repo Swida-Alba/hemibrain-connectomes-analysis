@@ -1,5 +1,7 @@
 """FindHomologs Tab - Cross-dataset homolog finding."""
 
+import re
+
 from nicegui import ui
 from ..config import DEFAULTS, DATASETS, SIMILARITY_METRICS
 from ..components.common import (
@@ -46,14 +48,13 @@ def create_find_homologs_tab():
         with ui.card().classes("w-full drocat-card").props('id="card-findhomologs-neurons"'):
             section_header("Source Neuron", "search")
             source_input = neuron_list_input(
-                label="Source Neuron (type or bodyId)",
+                label="Source Neuron(s) (type or bodyId)",
                 show_filter=False,
-                show_upload=False,
-                max_items=1,
+                show_upload=True,
                 suggestions=_type_suggest,
                 available_neurons=lambda: source_dataset.value
                 if source_dataset is not None else "",
-                hint="Single neuron type or bodyId to find cross-dataset homologs for. Only one value is accepted.",
+                hint="Enter one or more neuron types or bodyIds. Each input is searched independently.",
             ).classes("drocat-fixed-neuron-input")
 
         with ui.card().classes("w-full drocat-card"):
@@ -123,17 +124,23 @@ def create_find_homologs_tab():
 
     async def run_homologs():
         source_vals = source_input.get_value()[1]
-        source = str(source_vals[0]).strip() if source_vals else ""
-        if not source:
-            ui.notify("Please enter a source neuron", type="warning")
+        sources = []
+        seen = set()
+        for value in source_vals or []:
+            text = str(value).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            sources.append(value)
+        if not sources:
+            ui.notify("Please enter at least one source neuron", type="warning")
             return
 
         output_panel.clear()
         output_panel.set_running(True)
         visualization_values = visualization_settings.values()
 
-        constructor_params = {
-            "source": source,
+        base_params = {
             "source_dataset": source_dataset.value,
             "target_dataset": target_dataset.value,
             "output_dir": output_dir.value,
@@ -157,13 +164,63 @@ def create_find_homologs_tab():
         }
 
         method_name = "find_homologs_fast" if use_fast.value else "find_homologs"
-        result = await output_panel.run(runner, "find_homologs", constructor_params, method_name,
-                                        output_dir=output_dir.value)
+        results = []
+        files_by_path = {}
+        last_output_folder = None
 
-        output_panel.set_running(False)
-        output_panel.set_status("Completed" if result["returncode"] == 0 else "Failed",
-                                "green" if result["returncode"] == 0 else "red")
-        output_panel.show_files(result["files"], result.get("output_folder") or output_dir.value)
+        def _saveas_for_query(index, query):
+            """Keep user-named multi-query runs in separate folders."""
+            base = saveas.value.strip()
+            if not base or len(sources) == 1:
+                return base
+            safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(query)).strip("_")
+            safe = safe[:60] or f"query_{index + 1}"
+            return f"{base}_{index + 1}_{safe}"
+
+        try:
+            for index, source in enumerate(sources):
+                if len(sources) > 1:
+                    output_panel.log(
+                        f"--- Homolog query {index + 1}/{len(sources)}: {source} ---",
+                        "system",
+                    )
+                constructor_params = dict(base_params)
+                constructor_params.update({
+                    "source": source,
+                    "saveas": _saveas_for_query(index, source),
+                })
+                result = await output_panel.run(
+                    runner, "find_homologs", constructor_params, method_name,
+                    output_dir=output_dir.value,
+                )
+                results.append(result)
+                last_output_folder = result.get("output_folder") or last_output_folder
+                for file_info in result.get("files", []):
+                    path = file_info.get("path")
+                    if path:
+                        files_by_path[path] = file_info
+                if result.get("cancelled"):
+                    break
+
+            cancelled = any(result.get("cancelled") for result in results)
+            succeeded = bool(results) and all(
+                result.get("returncode") == 0 for result in results
+            )
+            if cancelled:
+                output_panel.set_status("Cancelled", "red")
+            else:
+                output_panel.set_status(
+                    "Completed" if succeeded else "Failed",
+                    "green" if succeeded else "red",
+                )
+            if files_by_path:
+                display_dir = (
+                    output_dir.value if len(sources) > 1
+                    else last_output_folder or output_dir.value
+                )
+                output_panel.show_files(list(files_by_path.values()), display_dir)
+        finally:
+            output_panel.set_running(False)
 
     output_panel.run_button.on_click(run_homologs)
     output_panel.cancel_button.on_click(runner.cancel)
