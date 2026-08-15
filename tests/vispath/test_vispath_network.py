@@ -205,6 +205,21 @@ class TestGeneratedHtmlStructure:
         # manual edge widths are marked so they are recognizable as custom
         assert "e.data('customSize', true)" in js
 
+    def test_selection_events_resync_geometry_controls(self, network_html):
+        """A select event must re-show and repopulate geometry controls.
+
+        Cytoscape can deliver the tap callback before it updates the
+        element's selected state.  The selection listener therefore needs to
+        re-sync after selection, while the final unselect must clear the rows.
+        """
+        js = _script_text(network_html)
+        start = js.index("cy.on('select unselect', 'node, edge'")
+        end = js.index("        });", start) + len("        });")
+        selection_handler = js[start:end]
+        assert "const selected = cy.$(':selected')" in selection_handler
+        assert "syncSelectedGeometryInputs(null)" in selection_handler
+        assert "syncSelectedGeometryInputs(primary)" in selection_handler
+
     def test_snapshots_are_complete_deep_copies(self, network_html):
         js = _script_text(network_html)
         # data()/position() return live references in Cytoscape; snapshots

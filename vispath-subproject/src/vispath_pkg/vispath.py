@@ -6409,11 +6409,27 @@ class VisualizePath:
         }}
         registerDragHistory();
 
-        // Keep the align buttons' enabled state in sync with ANY selection
-        // change (shift/box selection, programmatic) — tap selections are
-        // additionally refreshed via syncSelectedGeometryInputs.
-        cy.on('select unselect', 'node, edge', function() {{
-            updateAlignButtons();
+        // Keep the selection controls in sync with ANY selection change
+        // (tap, shift/box selection, or programmatic selection).  A Cytoscape
+        // tap handler can run before the element has been marked selected, so
+        // refresh the geometry rows again from the selection event; otherwise
+        // updateAlignButtons() sees an empty selection and hides the rows
+        // immediately after the tap handler shows them.
+        cy.on('select unselect', 'node, edge', function(evt) {{
+            const selected = cy.$(':selected');
+            if (selected.length === 0) {{
+                syncSelectedGeometryInputs(null);
+                return;
+            }}
+
+            // Prefer the last tapped element when it is still selected.  For
+            // shift/box/programmatic selection, use the event target or the
+            // first remaining selected element as the geometry primary.
+            let primary = selectedElement;
+            if (!primary || !primary.selected()) {{
+                primary = (evt.target && evt.target.selected()) ? evt.target : selected[0];
+            }}
+            syncSelectedGeometryInputs(primary);
         }});
 
         function undo() {{
