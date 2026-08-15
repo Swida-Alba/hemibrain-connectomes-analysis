@@ -104,7 +104,7 @@ class TestRunnerIntegration:
 
         folders = [p for p in tmp_path.iterdir() if p.is_dir()]
         assert len(folders) == 1
-        assert folders[0].name.startswith("flylignt-downloads_R10A06_")
+        assert folders[0].name.startswith("flylight-downloads_R10A06_")
 
     def test_tab_builds(self):
         """The FlyLight tab renders all controls and the output panel."""

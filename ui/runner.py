@@ -804,7 +804,7 @@ print("[DROCAT] Done.")
     # many runs — it must never be scanned as the current run's folder.
     _RUN_FOLDER_PREFIX_RE = re.compile(
         r"^(find-paths-complete|find-paths-shortest|find-network|cross-dataset|plot-3d|plot-network|"
-        r"homologs|similar-morphology|similar-connectivity|similar|profiling|NB-find-lines|NB-find-neurons|NB-colabeling|flylignt-downloads|"
+        r"homologs|similar-morphology|similar-connectivity|similar|profiling|NB-find-lines|NB-find-neurons|NB-colabeling|flylight-downloads|flylignt-downloads|"
         r"findpath|findallpath|findshortestpath|findnetwork|finddirect|findhomologs|interdataset|"
         r"plot3d|plotpath|colabel|findlines|findneuron|findsimilar)_"
     )

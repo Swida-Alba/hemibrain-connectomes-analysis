@@ -167,11 +167,15 @@ LIBRARY_TO_DATASET = {
     'FlyEM_Male_CNS_VNC_v0.9': 'male-cns_v0_9',
     'FlyEM_Male_CNS_v0.9': 'male-cns_v0_9',
     'FlyEM_Male_CNS': 'male-cns_v0_9',
+    'FlyEM_Male_CNS_Brain_v1.0': 'male-cns_v1_0',
+    'FlyEM_Male_CNS_VNC_v1.0': 'male-cns_v1_0',
+    'FlyEM_Male_CNS_v1.0': 'male-cns_v1_0',
     'FlyWire_FAFB': 'flywire_FAFB_v783',
     'FlyWire_FAFB_v783': 'flywire_FAFB_v783',
     'FlyWire_FAFB_v783_realign': 'flywire_FAFB_v783',
     'FlyWire_BANC': 'flywire_BANC_v626',
     'FlyWire_BANC_v626': 'flywire_BANC_v626',
+    'FlyWire_BANC_v888': 'flywire_BANC_v888',
     'FlyEM_Optic_Lobe': 'optic-lobe_v1_1',
 }
 
@@ -187,11 +191,15 @@ LIBRARY_TO_DATASET_NAME = {
     'FlyEM_Male_CNS_VNC_v0.9': 'male-cns:v0.9',
     'FlyEM_Male_CNS_v0.9': 'male-cns:v0.9',
     'FlyEM_Male_CNS': 'male-cns:v0.9',
+    'FlyEM_Male_CNS_Brain_v1.0': 'male-cns:v1.0',
+    'FlyEM_Male_CNS_VNC_v1.0': 'male-cns:v1.0',
+    'FlyEM_Male_CNS_v1.0': 'male-cns:v1.0',
     'FlyWire_FAFB': 'flywire_FAFB_v783',
     'FlyWire_FAFB_v783': 'flywire_FAFB_v783',
     'FlyWire_FAFB_v783_realign': 'flywire_FAFB_v783',
     'FlyWire_BANC': 'flywire_BANC_v626',
     'FlyWire_BANC_v626': 'flywire_BANC_v626',
+    'FlyWire_BANC_v888': 'flywire_BANC_v888',
     'FlyEM_Optic_Lobe': 'optic-lobe:v1.1',
 }
 
@@ -202,12 +210,15 @@ DATASET_ABBREVIATIONS = {
     'hemibrain:v1.2.1': 'HEMI',
     'male-cns_v0_9': 'MCNS',
     'male-cns:v0.9': 'MCNS',
+    'male-cns_v1_0': 'MCNS',
+    'male-cns:v1.0': 'MCNS',
     'manc_v1_0': 'MANC',
     'manc:v1.0': 'MANC',
     'manc_v1_2_1': 'MANC',
     'manc:v1.2.1': 'MANC',
     'flywire_FAFB_v783': 'FAFB',
     'flywire_BANC_v626': 'BANC',
+    'flywire_BANC_v888': 'BANC',
     'optic-lobe_v1_1': 'OLOB',
     'optic-lobe:v1.1': 'OLOB',
 }
@@ -1316,6 +1327,12 @@ class NeuronBridgeFinder:
                 key = (str(body_id), ds)
                 if key not in type_cache:
                     ds_folder = self._dataset_name_to_folder(ds)
+                    # Unrecognized dataset values (e.g. 'unknown' placeholders
+                    # for skipped bodyIds) have no local neuron table; skip
+                    # enrichment for them instead of crashing on os.path.join.
+                    if ds_folder is None:
+                        type_cache[key] = None
+                        continue
                     neuron_df = self._load_neuron_df_for_dataset(ds_folder)
                     if neuron_df is not None and 'bodyId' in neuron_df.columns and 'type' in neuron_df.columns:
                         match = neuron_df[neuron_df['bodyId'].astype(str) == str(body_id)]
@@ -3787,6 +3804,8 @@ class NeuronBridgeFinder:
         pd.DataFrame or None
             Loaded DataFrame, or None if not found.
         """
+        if not dataset:
+            return None
         # Check cache
         if dataset in self._neuron_dfs:
             return self._neuron_dfs[dataset]

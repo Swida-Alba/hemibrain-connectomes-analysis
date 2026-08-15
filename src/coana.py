@@ -7898,7 +7898,10 @@ class FindNeuronConnection:
                 f'paths below this traversal probability were excluded.'
             )
         keywords = getattr(self, 'keyword_in_path_to_remove', None) or []
-        if keywords and [str(k) for k in keywords] != ['None']:
+        if isinstance(keywords, str):
+            keywords = [keywords]
+        keywords = [str(k) for k in keywords]
+        if keywords and keywords != ['None']:
             notes.append(
                 f'- [filter] keyword_in_path_to_remove={keywords}: paths containing '
                 f'these keywords were removed from the outputs.'
