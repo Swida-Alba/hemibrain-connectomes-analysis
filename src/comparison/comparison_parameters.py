@@ -16,6 +16,11 @@ from typing import List, Union, Optional, Any, Dict, TYPE_CHECKING
 from datetime import datetime
 import os
 
+try:
+    from ..utils.naming_utils import make_unique_dataset_labels
+except ImportError:  # pragma: no cover - supports direct ``comparison`` imports
+    from utils.naming_utils import make_unique_dataset_labels
+
 if TYPE_CHECKING:
     from .label_mapper import LabelMapper
 
@@ -384,7 +389,7 @@ class ComparisonParameters:
     by their biological identity even when type names differ (e.g., MeVPLo2 in male-cns = MTe07 in flywire).
     
     Features:
-    - Auto-loads mappings from male-cns_v0_9_allneurons_neuron_df.csv
+    - Auto-loads mappings from male-cns_v1_0_allneurons_neuron_df.csv
     - Handles 1-to-1 type mappings automatically
     - Warns about N-to-1 mappings that could cause incorrect aggregation
     - Priority order: male-cns > flywire > manc > hemibrain > optic-lobe
@@ -586,8 +591,9 @@ class ComparisonParameters:
         if self.verbose:
             print("\n=== ComparisonParameters Initialization Summary ===")
             print(f"Datasets Included ({len(self.datasets)}):")
+            display_nicknames = self.get_dataset_nicknames()
             for i, ds in enumerate(self.datasets):
-                nickname = self.datasets_nickname[i] if self.datasets_nickname and i < len(self.datasets_nickname) else "N/A"
+                nickname = display_nicknames[i] if i < len(display_nicknames) else "N/A"
                 print(f"  - {ds} (Nickname: {nickname})")
                 
             print(f"\nSource Neurons:")
@@ -857,15 +863,14 @@ class ComparisonParameters:
         - ['hemibrain:v1.2.1', 'male-cns:v0.9'] -> 'HM'
         
         Returns:
-            Combined string of single-character dataset codes
+            Combined compact dataset codes. Release suffixes are included when
+            selected datasets share the same family code.
         """
-        codes = []
-        used_codes = set()
-        
-        for ds in self.datasets:
+        dataset_names = self.get_dataset_names()
+        base_codes = []
+
+        for ds_name in dataset_names:
             # Get dataset name string
-            ds_name = ds.dataset if hasattr(ds, 'dataset') else str(ds)
-            
             # Normalize: lowercase, remove version info
             ds_lower = ds_name.lower()
             # Remove version suffixes like :v1.2.1, _v783, etc.
@@ -883,15 +888,14 @@ class ComparisonParameters:
             # Fallback: use first character uppercase
             if code is None:
                 code = ds_clean[0].upper() if ds_clean else 'X'
-                # Ensure uniqueness
-                while code in used_codes:
-                    # Try next character or append number
-                    code = chr(ord(code) + 1) if code < 'Z' else 'X'
-            
-            codes.append(code)
-            used_codes.add(code)
-        
-        return ''.join(codes)
+
+            base_codes.append(code)
+
+        # Keep compact one-character codes for distinct dataset families, but
+        # append the release when two selected datasets share a family code.
+        # This prevents e.g. ``MM`` from hiding which male-cns release ran.
+        unique_codes = make_unique_dataset_labels(dataset_names, base_codes)
+        return ''.join(unique_codes)
     
     def get_display_nickname(self, dataset_name: str) -> str:
         """
@@ -943,12 +947,10 @@ class ComparisonParameters:
         """
         dataset_names = self.get_dataset_names()
         
-        if self.datasets_nickname and len(self.datasets_nickname) == len(dataset_names):
-            # User provided nicknames
-            return {name: nick for name, nick in zip(dataset_names, self.datasets_nickname)}
-        
-        # Auto-generate using DEFAULT_DISPLAY_NICKNAMES
-        return {name: self.get_display_nickname(name) for name in dataset_names}
+        return {
+            name: nickname
+            for name, nickname in zip(dataset_names, self.get_dataset_nicknames())
+        }
     
     @property
     def output_name(self) -> str:
@@ -1037,10 +1039,15 @@ class ComparisonParameters:
         Returns:
             List of short dataset labels for visualizations
         """
-        if self.datasets_nickname and len(self.datasets_nickname) == len(self.datasets):
-            return self.datasets_nickname
-        # Fallback to DEFAULT_DISPLAY_NICKNAMES
-        return [self.get_display_nickname(n) for n in self.get_dataset_names()]
+        dataset_names = self.get_dataset_names()
+        if self.datasets_nickname and len(self.datasets_nickname) == len(dataset_names):
+            base_nicknames = list(self.datasets_nickname)
+        else:
+            base_nicknames = [self.get_display_nickname(n) for n in dataset_names]
+
+        # A family nickname is intentionally concise, but it must become
+        # release-aware when the selection contains the same family twice.
+        return make_unique_dataset_labels(dataset_names, base_nicknames)
     
     def get_source_neurons_for_dataset(self, dataset: str) -> List[Union[str, int]]:
         """
@@ -1544,6 +1551,7 @@ class ComparisonParameters:
             return
         
         # Get mapping summary
+        display_nicknames = self.get_dataset_nicknames()
         summary = self._auto_type_mapper.get_source_target_mapping_summary(
             [n for n in neurons if isinstance(n, str)],
             datasets,
@@ -1559,8 +1567,8 @@ class ComparisonParameters:
                     if mapped != type_name:
                         # Use nickname if available
                         ds_idx = datasets.index(ds) if ds in datasets else -1
-                        ds_label = self.datasets_nickname[ds_idx] if (
-                            self.datasets_nickname and ds_idx >= 0 and ds_idx < len(self.datasets_nickname)
+                        ds_label = display_nicknames[ds_idx] if (
+                            ds_idx >= 0 and ds_idx < len(display_nicknames)
                         ) else ds
                         mapping_strs.append(f"{ds_label}:{mapped}")
                 if mapping_strs:

@@ -6016,6 +6016,7 @@ class ComparisonAnalyzer:
             return None
         
         dataset_names = self.parameters.get_dataset_names()
+        dataset_nickname_map = self.parameters.get_nickname_map()
         
         # Determine threshold
         if threshold is None:
@@ -6078,11 +6079,11 @@ class ComparisonAnalyzer:
             for dataset in available_ds:
                 weight = row[dataset]
                 if weight > 0:
-                    # Use nickname if available
-                    idx = dataset_names.index(dataset)
-                    nickname = (self.parameters.datasets_nickname[idx] 
-                               if self.parameters.datasets_nickname and idx < len(self.parameters.datasets_nickname)
-                               else self.parameters._sanitize_name(dataset))
+                    # Use the collision-aware nickname map so two releases
+                    # from the same dataset family remain distinguishable.
+                    nickname = dataset_nickname_map.get(
+                        dataset, self.parameters._sanitize_name(dataset)
+                    )
                     
                     # Add weight for this dataset
                     edge_info[f'{nickname} wt'] = int(weight)
@@ -6422,6 +6423,7 @@ class ComparisonAnalyzer:
             return None
 
         dataset_names = self.parameters.get_dataset_names()
+        dataset_nickname_map = self.parameters.get_nickname_map()
 
         if threshold is None:
             threshold = self.parameters.thresholds[len(self.parameters.thresholds) // 2]
@@ -6464,10 +6466,11 @@ class ComparisonAnalyzer:
             for dataset in available_ds:
                 weight = row[dataset]
                 if weight > 0:
-                    idx = dataset_names.index(dataset)
-                    nickname = (self.parameters.datasets_nickname[idx]
-                               if self.parameters.datasets_nickname and idx < len(self.parameters.datasets_nickname)
-                               else self.parameters._sanitize_name(dataset))
+                    # Keep release-qualified aliases unique in reciprocal
+                    # graph hover labels as well.
+                    nickname = dataset_nickname_map.get(
+                        dataset, self.parameters._sanitize_name(dataset)
+                    )
                     edge_info[f'{nickname} wt'] = int(weight)
 
                     if not ratio_data.empty and dataset in ratio_data.columns:

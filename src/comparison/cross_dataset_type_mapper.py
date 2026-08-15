@@ -26,6 +26,11 @@ import pandas as pd
 
 from comparison.label_mapper import LabelMapper
 
+try:
+    from ..utils.naming_utils import dataset_version, make_unique_dataset_labels
+except ImportError:  # pragma: no cover - supports direct ``comparison`` imports
+    from utils.naming_utils import dataset_version, make_unique_dataset_labels
+
 # Dataset priority for type name resolution (lower index = higher priority)
 DATASET_PRIORITY = [
     'male-cns:v1.0',
@@ -144,6 +149,11 @@ class CrossDatasetTypeMapper:
         
         # Dataset types index: {dataset: {type: set(bodyIds)}}
         self._dataset_types: Dict[str, Dict[str, Set[str]]] = defaultdict(lambda: defaultdict(set))
+
+        # Unsupported releases are reported once per mapper instance.  The
+        # mapping file is release-specific, so an unknown release must not be
+        # silently treated as the nearest supported release.
+        self._unsupported_dataset_warnings: Set[str] = set()
         
         # Determine path to neuron_df
         if neuron_df_path:
@@ -443,6 +453,9 @@ class CrossDatasetTypeMapper:
             if not self.load():
                 return None
         
+        self._warn_if_unsupported_dataset(source_dataset)
+        self._warn_if_unsupported_dataset(target_dataset)
+
         # Normalize dataset names
         src_ds = self._normalize_dataset_name(source_dataset)
         tgt_ds = self._normalize_dataset_name(target_dataset)
@@ -462,26 +475,60 @@ class CrossDatasetTypeMapper:
         return None
     
     def _normalize_dataset_name(self, dataset: str) -> str:
-        """Normalize dataset name to standard format."""
-        # Handle version suffixes and underscores
-        ds_lower = dataset.lower()
-        
+        """Normalize a dataset name without discarding its release.
+
+        The neuron mapping file currently describes a specific set of
+        releases (male-cns v1.0, FAFB v783, BANC v626, and so on).  Older code
+        collapsed every family to those releases, which made a selected
+        ``male-cns:v0.9`` indistinguishable from ``male-cns:v1.0`` and BANC
+        v888 indistinguishable from v626.  Keep the release token in the
+        normalized key so unsupported releases remain native and can be
+        reported explicitly by the caller.
+
+        Bare family names retain the historical default release because they
+        are aliases for the supported mapping columns (for example ``banc``
+        means BANC v626).  Explicit versions are always preserved.
+        """
+        if dataset is None:
+            return dataset
+
+        raw_dataset = str(dataset).strip()
+        ds_lower = raw_dataset.lower()
+        version = dataset_version(raw_dataset)
+
         if 'male-cns' in ds_lower or 'male_cns' in ds_lower:
-            return 'male-cns:v1.0'
-        elif 'banc' in ds_lower:
-            return 'flywire_BANC_v626'
-        elif 'fafb' in ds_lower or ('flywire' in ds_lower and 'banc' not in ds_lower):
-            return 'flywire_FAFB_v783'
-        elif 'hemibrain' in ds_lower:
-            return 'hemibrain:v1.2.1'
-        elif 'manc' in ds_lower:
-            if 'v1.2' in ds_lower or 'v1_2' in ds_lower:
-                return 'manc:v1.2.1'
-            return 'manc:v1.0'
-        elif 'optic' in ds_lower:
-            return 'optic-lobe:v1.1'
-        
-        return dataset
+            return f"male-cns:{version or 'v1.0'}"
+        if 'banc' in ds_lower:
+            return f"flywire_BANC_{version or 'v626'}"
+        if 'fafb' in ds_lower or ('flywire' in ds_lower and 'banc' not in ds_lower):
+            return f"flywire_FAFB_{version or 'v783'}"
+        if 'hemibrain' in ds_lower:
+            return f"hemibrain:{version or 'v1.2.1'}"
+        if 'manc' in ds_lower:
+            return f"manc:{version or 'v1.0'}"
+        if 'optic' in ds_lower:
+            return f"optic-lobe:{version or 'v1.1'}"
+
+        return raw_dataset
+
+    def _warn_if_unsupported_dataset(self, dataset: str) -> None:
+        """Log once when a selected release has no validated type mapping."""
+        if not self._loaded:
+            return
+
+        normalized = self._normalize_dataset_name(dataset)
+        if normalized in self._type_mappings:
+            return
+        if normalized in self._unsupported_dataset_warnings:
+            return
+
+        self._unsupported_dataset_warnings.add(normalized)
+        self._log(
+            f"No release-specific cross-dataset type mapping is available for "
+            f"'{dataset}' (normalized as '{normalized}'). Keeping its native "
+            "type names; it will not be treated as another release.",
+            level='warn',
+        )
     
     def resolve_type_across_datasets(
         self,
@@ -503,6 +550,11 @@ class CrossDatasetTypeMapper:
         if not self._loaded:
             if not self.load():
                 return {ds: None for ds in datasets}
+
+        for dataset in datasets:
+            self._warn_if_unsupported_dataset(dataset)
+        if source_dataset is not None:
+            self._warn_if_unsupported_dataset(source_dataset)
         
         result = {}
         
@@ -590,18 +642,57 @@ class CrossDatasetTypeMapper:
         'optic-lobe_v1_1': 'optic-lobe v1.1',
     }
     
-    def get_dataset_short_code(self, dataset: str) -> str:
+    def _get_base_dataset_short_code(self, dataset: str) -> str:
+        """Return the family code before release disambiguation."""
+        norm_ds = self._normalize_dataset_name(dataset)
+        code = self.DATASET_SHORT_CODES.get(norm_ds)
+        if code:
+            return code
+
+        # Unknown releases still get the same family code as their supported
+        # siblings; make_unique_dataset_labels() adds the release only when
+        # that family occurs more than once in the selected dataset list.
+        ds_lower = str(dataset).lower()
+        if 'male-cns' in ds_lower or 'male_cns' in ds_lower:
+            return 'M'
+        if 'banc' in ds_lower:
+            return 'B'
+        if 'fafb' in ds_lower or 'flywire' in ds_lower:
+            return 'F'
+        if 'hemibrain' in ds_lower:
+            return 'H'
+        if 'manc' in ds_lower:
+            return 'N'
+        if 'optic' in ds_lower:
+            return 'O'
+        return (str(dataset)[:1] or 'X').upper()
+
+    def _get_dataset_short_codes(self, datasets: List[str]) -> List[str]:
+        """Return unique display codes for a selected dataset list."""
+        base_codes = [self._get_base_dataset_short_code(ds) for ds in datasets]
+        return make_unique_dataset_labels(datasets, base_codes)
+
+    def get_dataset_short_code(self, dataset: str, datasets: Optional[List[str]] = None) -> str:
         """
-        Get the one-character short code for a dataset.
+        Get a display code for a dataset.
+
+        With a dataset list, the code is collision-aware.  For example,
+        ``['male-cns:v1.0', 'male-cns:v0.9']`` receives ``M_v1_0`` and
+        ``M_v0_9``.  Without context, the compact family code is returned for
+        backwards compatibility.
         
         Args:
             dataset: Dataset name.
             
         Returns:
-            One-character short code (e.g., 'M' for male-cns, 'F' for FAFB).
+            Compact or release-qualified display code.
         """
-        norm_ds = self._normalize_dataset_name(dataset)
-        return self.DATASET_SHORT_CODES.get(norm_ds, dataset[0].upper())
+        if datasets is not None:
+            codes = self._get_dataset_short_codes(datasets)
+            for selected_dataset, code in zip(datasets, codes):
+                if selected_dataset == dataset:
+                    return code
+        return self._get_base_dataset_short_code(dataset)
     
     def get_dataset_full_name(self, dataset: str) -> str:
         """
@@ -614,7 +705,28 @@ class CrossDatasetTypeMapper:
             Full dataset name for display.
         """
         norm_ds = self._normalize_dataset_name(dataset)
-        return self.DATASET_FULL_NAMES.get(norm_ds, dataset)
+        known_name = self.DATASET_FULL_NAMES.get(norm_ds)
+        if known_name:
+            return known_name
+
+        ds_lower = str(dataset).lower()
+        if 'male-cns' in ds_lower or 'male_cns' in ds_lower:
+            family_name = 'male-cns'
+        elif 'banc' in ds_lower:
+            family_name = 'FlyWire BANC'
+        elif 'fafb' in ds_lower or 'flywire' in ds_lower:
+            family_name = 'FlyWire FAFB'
+        elif 'hemibrain' in ds_lower:
+            family_name = 'hemibrain'
+        elif 'manc' in ds_lower:
+            family_name = 'MANC'
+        elif 'optic' in ds_lower:
+            family_name = 'optic-lobe'
+        else:
+            return str(dataset)
+
+        version = dataset_version(dataset)
+        return f"{family_name} {version}" if version else family_name
     
     def get_all_dataset_short_codes(self, datasets: List[str]) -> Dict[str, str]:
         """
@@ -626,12 +738,11 @@ class CrossDatasetTypeMapper:
         Returns:
             Dict mapping short code to full dataset name.
         """
-        result = {}
-        for ds in datasets:
-            code = self.get_dataset_short_code(ds)
-            full_name = self.get_dataset_full_name(ds)
-            result[code] = full_name
-        return result
+        codes = self._get_dataset_short_codes(datasets)
+        return {
+            code: self.get_dataset_full_name(dataset)
+            for dataset, code in zip(datasets, codes)
+        }
     
     def get_display_name(
         self,
@@ -702,9 +813,21 @@ class CrossDatasetTypeMapper:
         
         # Build dataset code -> name mapping for hover info
         dataset_names = {}
+        dataset_codes = self._get_dataset_short_codes(datasets)
         for ds, mapped_name in mappings.items():
             if mapped_name:
-                code = self.get_dataset_short_code(ds)
+                # ``mappings`` uses the original full dataset identifiers as
+                # keys.  Resolve the code in the same selected-list context
+                # used by the legend so collision-qualified codes cannot be
+                # overwritten in the hover dictionary.
+                code = next(
+                    (
+                        code
+                        for selected_ds, code in zip(datasets, dataset_codes)
+                        if selected_ds == ds
+                    ),
+                    self.get_dataset_short_code(ds),
+                )
                 dataset_names[code] = f"{mapped_name}{hemi_suffix}" if hemi_suffix else mapped_name
         
         return display_name, dataset_names

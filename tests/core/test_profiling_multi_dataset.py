@@ -25,7 +25,7 @@ from comparison.profile_comparator import (  # noqa: E402
 )
 
 DS_A = "hemibrain:v1.2.1"
-DS_B = "male-cns:v0.9"  # normalizes to the male-cns v1.0 canonical
+DS_B = "male-cns:v0.9"  # remains distinct from the v1.0 mapping source
 
 
 class FakeMapper:
@@ -90,7 +90,7 @@ def test_type_mapper_default_path_uses_male_cns_v1_0():
     assert mapper._neuron_df_path.endswith(
         "male-cns_v1_0/male-cns_v1_0_allneurons_neuron_df.csv"
     )
-    assert mapper._normalize_dataset_name("male-cns:v0.9") == "male-cns:v1.0"
+    assert mapper._normalize_dataset_name("male-cns:v0.9") == "male-cns:v0.9"
     assert mapper._normalize_dataset_name("male_cns_v1_0") == "male-cns:v1.0"
 
 
