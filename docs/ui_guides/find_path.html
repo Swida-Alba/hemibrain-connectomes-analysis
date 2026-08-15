@@ -110,19 +110,33 @@
   </div>
 
   <h2>Output &amp; examples</h2>
-  <p>One timestamped folder per run, prefixed with the function name:</p>
-  <pre><code>{output_dir}/find-paths-complete_{DATASET}_{source}_to_{target}_{params}_{timestamp}/
-  aMe12_to_aMe10_allpaths_type.csv
-  connection_type.csv
-  conn_mat_type_weight.csv
-  neurons_included.csv
-  *_{heatmap,Sankey,network}.html
-  parameters.txt</code></pre>
+  <p>One timestamped folder per run, named after the dataset abbreviation,
+    query and parameters
+    (<code>MCNS</code> = male-cns, <code>FAFB</code> = flywire FAFB, ...):</p>
+  <pre><code>{output_dir}/find-paths-complete_MCNS_aMe12_to_PPL101_L1w3r0p0_20260815_142520/
+  aMe12_to_PPL101_allpaths_type.csv  # paths (path, weights, probabilities,
+                                     #   ratios, min_weight, path_prob, ...)
+  all_attributes.json
+  parameters.txt, user_warning_notes.txt
+  data_details/
+    conn_mat_type_weight|ratio|prob|nt.csv   # type-level matrices
+    connection_type.csv                      # edges per type pair
+    source_neurons.csv, target_neurons.csv, neurons_included.csv
+    total_weight_layer.csv, parameters.csv
+  visualization/
+    Network_*.html, Heatmap_*.html, Sankey_*.html
+    visualization_data/                     # data backing the HTML files
+  hemisphere_symmetry/...   # when Symmetry Analysis is on
+  find_reciprocal/...       # when Find Reciprocal Connections is on</code></pre>
   <div class="example">
-    <div class="example-title">Example folder</div>
-    <pre><code>find-paths-complete_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_183000/  &lt;!-- Complete Paths --&gt;
-find-paths-shortest_MCNS_aMe12_to_aMe10_L5w3r0p0_20260801_183000/  &lt;!-- Shortest Paths --&gt;</code></pre>
+    <div class="example-title">Example folders</div>
+    <pre><code>find-paths-complete_MCNS_aMe12_to_PPL101_L1w3r0p0_20260815_142520/  &lt;!-- Complete Paths --&gt;
+find-paths-shortest_MCNS_aMe12_to_PPL101_L1w3r0p0_20260815_142717/  &lt;!-- Shortest Paths --&gt;</code></pre>
   </div>
+  <p class="small">With <b>Skip BodyId</b> off, bodyId-level tables
+    (<code>..._allpaths_bodyId.csv</code>) are written next to the type-level
+    ones; with Output Format = xlsx, the tables become multi-sheet Excel
+    workbooks. The full reference is in <code>docs/OUTPUT_FILES.md</code>.</p>
 
   <h2>Common issues &amp; tips</h2>
   <div class="callout tip">

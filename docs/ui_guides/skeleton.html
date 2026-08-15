@@ -147,10 +147,17 @@
   </ul>
 
   <h2>Output</h2>
-  <pre><code>{output_dir}/plot-3d_{DATASET}_{layers}_{timestamp}/
-    {layers}.html              - interactive 3D scene
-    {layers}_neuron_info.xlsx  - per-neuron metadata
-    parameters.txt             - exact parameters of the run</code></pre>
+  <p>One timestamped folder per run, named after the dataset abbreviation
+    and the layer names:</p>
+  <pre><code>{output_dir}/plot-3d_MCNS_aMe12_SMP238_PPL101_20260815_151243/
+    aMe12_SMP238_PPL101.html            - interactive 3D scene
+    aMe12_SMP238_PPL101_neuron_info.xlsx - per-layer metadata (neuron_df{i},
+                                          roi_count_df{i} sheets)
+    parameters.txt                      - exact parameters of the run
+    user_warning_notes.txt              - notes/warnings of the run</code></pre>
+  <p class="small">With <b>Export Views</b> on, PNG screenshots
+    (<code>{view}_{name}.png</code>) are written into the same folder; the
+    rotating <b>Export Video</b> adds videos/GIFs.</p>
 
   <div class="callout warn">
     <b>3D export needs Chrome</b> when Export Method = webdriver and

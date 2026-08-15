@@ -61,14 +61,17 @@
   </ul>
 
   <h2>Output</h2>
-  <pre><code>{output_dir}/NB-find-lines_{DATASET or ALL}_{query}_{timestamp}/
-  {query}_lines.csv
-  all_lines.csv
-  line_summary.csv          (sorted by weighted_score)
-  gal4_lexa_summary.csv     (when separated)
-  split_gal4_summary.csv    (when separated)
-  images/...                (when downloading)
-  images_summary.pdf</code></pre>
+  <p>The folder name uses the dataset abbreviation (<code>MCNS</code> =
+    male-cns, <code>FAFB</code> = flywire FAFB, ...) or <code>ALL</code> for
+    all-datasets searches:</p>
+  <pre><code>{output_dir}/NB-find-lines_MCNS_aMe12_20260815_145107/
+  aMe12_lines.csv            # all matched lines with scores
+  line_summary.csv           # summary per line (sorted by weighted_score)
+  gal4_lexa_summary.csv      # (when Split-GAL4 separation is on)
+  split_gal4_summary.csv     # (when Split-GAL4 separation is on)
+  parameters.json
+  images/...                 # (when image download is on)
+  {query}_summary.pdf        # (when a PDF/PPTX summary is requested)</code></pre>
 
   <div class="callout warn">
     <b>Weighted score</b> = avg match score × coverage. A line labeling all

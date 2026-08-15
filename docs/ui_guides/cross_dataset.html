@@ -66,12 +66,36 @@
   </ul>
 
   <h2>Output</h2>
+  <p>One timestamped folder per run, e.g.
+    <code>cross-dataset_aMe12_to_PPL101_MFB_v626B_v888_20260815_142812/</code>
+    (male-cns v1.0 + FAFB v783 + BANC v626 + BANC v888):</p>
   <pre><code>{output_dir}/cross-dataset_{source}_to_{target}_{dataset_codes}_{timestamp}/
-  dataset_data/{dataset}/...
-  comparison_results/path_count_comparison.csv
-  comparison_results/edge_weight_comparison.csv
-  comparison_results/presence_matrices/...
-  report.html</code></pre>
+  comparison_report.html, comparison_report.txt   # interactive + text report
+  label_map.json, parameters.json
+  dataset_metadata_comparison.csv
+  auto_type_mapping.csv, auto_type_mapping_conflicts.csv
+  comparison_report_used_data/            # CSVs backing the report
+  comparison_results/
+    edge_presence_matrix.csv, edge_presence_matrix_minsyn_{N}.csv
+    path_presence_matrix.csv, path_presence_matrix_minsyn_{N}.csv
+    edge_weight_comparison.csv, path_count_comparison.csv
+    unified_edge_comparison.csv, unified_summary.csv
+    unique_to_{dataset}.csv               # edges unique per dataset
+    top_edges_comparison.csv, top_edges_overlap.csv
+    degree_in.csv, degree_out.csv, degree_statistics.csv
+    neuron_counts_by_type.csv, neuron_counts_summary.csv
+    motif_analysis.csv, threshold_sensitivity.csv
+    dataset_metadata_comparison.csv
+  comparison_visualizations/              # edge/path heatmap PNGs + data
+    edge_heatmap_{N}.png, path_heatmap_{N}.png, path_counts.png
+    by_ratio/..., by_probability/..., visualization_data/...
+  similarity_matrices/similarity_threshold_{N}.csv
+  dataset_data/{dataset_folder}/minsyn_{N}/...   # per-dataset FindAllPath
+                                                 # outputs (see Complete
+                                                 # Paths guide), incl.
+                                                 # hemisphere_symmetry/
+                                                 # and find_reciprocal/
+                                                 # when enabled</code></pre>
 
   <div class="callout tip">
     <b>Deprecated datasets</b> (e.g. male-cns:v0.9) may no longer answer

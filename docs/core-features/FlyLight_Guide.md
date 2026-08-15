@@ -286,7 +286,7 @@ downloader.download('SS01015', dry_run=True)
 
 | Parameter                 | Type                     | Default  | Description                                                                                                                                                                                                                                                                           |
 | ------------------------- | ------------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `line_name`               | `str` or `list`          | Required | Driver line name(s). Can be single string, comma-separated string ('SS01015,VT037867'), or list (['SS01015', 'VT037867']). With `add_timestamp=True`, output folders use the `flylignt-downloads_{line(s)}_{timestamp}` prefix. |
+| `line_name`               | `str` or `list`          | Required | Driver line name(s). Can be single string, comma-separated string ('SS01015,VT037867'), or list (['SS01015', 'VT037867']). With `add_timestamp=True`, output folders use the `flylight-downloads_{line(s)}_{timestamp}` prefix. |
 | `output_dir`              | `str` or `None`          | `None`   | Override output directory.                                                                                                                                                                                                                                                            |
 | `max_files`               | `int` or `None`          | `None`   | Maximum files to download **per line**. When downloading multiple lines, this limit applies to each line separately.                                                                                                                                                                  |
 | `dry_run`                 | `bool`                   | `False`  | List files without downloading.                                                                                                                                                                                                                                                       |
@@ -556,7 +556,7 @@ paths = downloader.download(
     generate_summary=['pdf', 'pptx'],  # Generate summary documents
     add_timestamp=True
 )
-# Output folder: flylignt-downloads_SS01015_VT037867_20240103_121530/
+# Output folder: flylight-downloads_SS01015_VT037867_20240103_121530/
 
 # Or using a list
 paths = downloader.download(

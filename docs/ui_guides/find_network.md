@@ -28,23 +28,29 @@ for enrichment, hemisphere-aware analysis, and visualization.
   traversal probabilities with **global** incoming-weight denominators,
   LabelMapper standardization, custom grouping when a mapping is selected.
 - Hemisphere-aware analysis (same helpers as Find All Paths):
-  **Separate Hemispheres** labels, **Symmetry Analysis** on the unfiltered
+  **Hemisphere-aware** labels, **Symmetry Analysis** on the unfiltered
   table, and the **Keep Only Hemisphere-Conserved Edges** filter.
 
 ## Outputs (nothing redundant)
 
+The folder name uses the dataset abbreviation (`MCNS` = male-cns, `FAFB` =
+flywire FAFB, ...) and a sanitized query name (e.g. `aMe.*` → `aMe`):
+
 ```
-{output_dir}/find-network_{DATASET}_{group}_w{minsyn}r{ratio}p{prob}_{timestamp}/
+{output_dir}/find-network_MCNS_aMe_w3r0p0_20260815_142745/
   parameters.txt, all_attributes.json
   data_details/
     neurons.csv                     # all queried neurons
     connection_type.csv             # type-level mutual connections
+    parameters.csv
     connection_info_bodyId.csv      # (when Skip BodyId is off)
     connection_custom_groups.csv    # (when a custom grouping is used)
     hemisphere_unconserved_edges.csv# (when the conserved filter is on)
   visualization/
     Network_*.html, Heatmap_*.html  # NO Sankey
-    visualization_data/             # visualization inputs
+    visualization_data/             # *_data_connections.csv,
+                                    # *_data_original_paths.csv,
+                                    # network_edges_input.csv
   user_warning_notes.txt            # (when any output-affecting option applied)
 ```
 

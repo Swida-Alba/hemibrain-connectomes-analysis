@@ -69,14 +69,20 @@
 
   <h2>Output</h2>
   <p>Each run is saved in its own timestamped folder named after the query
-  (the <b>Save Folder Name</b> field overrides this):</p>
-  <pre><code>{output_dir}/homologs_{SRC}_to_{TGT}_{query}_{timestamp}/
+  and the dataset abbreviations (<code>MCNS</code> = male-cns,
+  <code>FAFB</code> = flywire FAFB, ...); the <b>Save Folder Name</b> field
+  overrides this:</p>
+  <pre><code>{output_dir}/homologs_MCNS_to_FAFB_aMe12_20260815_143540/
   README.txt
-  results/bodyid_results.csv
-  results/type_summary.csv
-  homolog_results.csv
-  profiles/query/...
-  profiles/matches/...
+  results/
+    homolog_results.csv          # full ranked results (all metrics)
+    bodyid_results.csv           # bodyId-level results
+    type_summary.csv             # type-level summary
+    source_status_summary.json   # per-source-neuron status
+  profiles/
+    query/{type}.csv, query/source_bodyids.csv
+    matches/{type}.csv, matches/top_target_bodyids.csv
+  overlaps/{source}_vs_{target}.csv    # partner overlap details
   visualization/...            (when visualization enabled)</code></pre>
 </main>
 </body>

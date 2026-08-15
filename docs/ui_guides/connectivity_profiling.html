@@ -80,16 +80,25 @@
   </ul>
 
   <h2>Output</h2>
-  <pre><code>{output_dir}/profiling_{DATASET}_{query}_{timestamp}/
+  <p>The folder name uses the first dataset's abbreviation
+    (<code>MCNS</code> = male-cns, <code>FAFB</code> = flywire FAFB, ...) and
+    a sanitized query name (e.g. <code>aMe.*</code> → <code>aMe</code>):</p>
+  <pre><code>{output_dir}/profiling_MCNS_aMe_20260815_143922/
   report.html                        # overall summary with ALL heatmaps
-  intra_dataset/{dataset}/           # per-dataset N×N comparisons
+  parameters.json, README.txt
+  intra_dataset/{dataset_folder}/    # per-dataset N×N comparisons
     results/similarity_{direction}_{metric}.csv             # type level
-    results/bodyid_similarity_{metric}_{direction}.csv     # bodyId level
+    results/bodyid_similarity_{metric}_{direction}.csv      # bodyId level
     results/type_avg_bodyid_similarity_{metric}_{direction}.csv
-    visualization/heatmap_*.html
+    visualization/heatmap_intra_*.html, heatmap_intra_type_avg_*.html
   cross_dataset/                     # same neuron across datasets (2+ datasets)
-    mapping_summary.csv              # resolved names + same name (1/0) flag
-  profiles/{dataset}/aggregated/*_profile.json</code></pre>
+    mapping_summary.csv              # resolved names + same-name flag
+    all_types/
+      results/similarity_{direction}_{metric}.csv
+      visualization/heatmap_inter_all_types_*.html
+  profiles/{dataset_folder}/
+    aggregated/{type}_profile.json
+    individual/{bodyId}_{type}_profile.json</code></pre>
 
   <div class="callout warn">
     <b>First run on a new dataset</b> - profile extraction needs connection

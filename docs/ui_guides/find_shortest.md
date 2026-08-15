@@ -65,12 +65,21 @@ network/Sankey/heatmap visualizations.
 
 ## Output
 
+Same layout as Find All Paths (see the Complete Paths guide):
+
 ```
-{output_dir}/find-paths-shortest_{DATASET}_{source}_to_{target}_L{depth}w{minsyn}r{ratio}p{prob}_{timestamp}/
-  *_allpaths_type.csv            # type-level shortest paths
-  data_details/                  # parameters, neuron lists, connection tables
-  visualization/                 # network / Sankey / heatmap HTML + inputs
-  bodyId_visualization/          # (when Skip BodyId is off)
+{output_dir}/find-paths-shortest_MCNS_aMe12_to_PPL101_L1w3r0p0_20260815_142717/
+  aMe12_to_PPL101_allpaths_type.csv  # shortest paths (same columns as Find All Paths)
+  all_attributes.json
+  parameters.txt, user_warning_notes.txt
+  data_details/                      # matrices, connection_type.csv, neuron lists, parameters.csv
+  visualization/                     # Network / Sankey / Heatmap HTML + visualization_data/ inputs
+  hemisphere_symmetry/...            # when Symmetry Analysis is on
+  find_reciprocal/...                # when Find Reciprocal Connections is on
 ```
 
 `Lmax` in the folder name means the search ran with unlimited depth.
+
+With **Skip BodyId** off, bodyId-level tables (`..._allpaths_bodyId.csv`) are
+written next to the type-level ones. The full reference is in
+`docs/OUTPUT_FILES.md`.

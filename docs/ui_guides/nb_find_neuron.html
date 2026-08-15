@@ -46,11 +46,16 @@
   </table>
 
   <h2>Output</h2>
-  <pre><code>{output_dir}/NB-find-neurons_{lines}_{timestamp}/
-  {line}_matched_neurons.csv
-  {line}_type_summary.csv
-  viz_{line}/...               (3D visualizations)
-  individual_profiles/...      (PDF/PPTX)</code></pre>
+  <pre><code>{output_dir}/NB-find-neurons_SS01015_20260815_143937/
+  all_neurons.csv                       # combined matches across datasets
+  {line}_neurons.csv                    # all matches for the line
+  {line}_{dataset_folder}_neurons.csv   # per-dataset matches
+  {line}_{dataset_folder}_types.csv     # per-dataset type aggregates
+  {line}_type_mapped.csv                # cross-dataset type mapping
+  labeling_distribution.html            # score distribution
+  parameters.json
+  plot-3d_{dataset}/...                 # 3D views (when Visualize Top N > 0)
+  individual_profiles/...               # PDF/PPTX (when enabled)</code></pre>
 </main>
 </body>
 </html>

@@ -176,10 +176,17 @@
 
   <h2>Output</h2>
   <p>Each run is saved in its own timestamped folder with two always-written
-    result tables (mirroring the homolog finding outputs):</p>
-  <pre><code>morphological: {output_dir}/similar-morphology_{DATASET}_{query}_{timestamp}/
+    result tables:</p>
+  <pre><code>morphological: {output_dir}/similar-morphology_flywire_FAFB_v783_aMe12_20260815_143601/
                  results.csv, type_summary.csv, README.txt
-profile:       {output_dir}/similar-connectivity_{SRC}_to_{TGT}_{query}_{timestamp}/</code></pre>
+profile:       {output_dir}/similar-connectivity_FAFB_to_FAFB_aMe12_20260815_143654/
+                 README.txt
+                 results/
+                   homolog_results.csv, bodyid_results.csv, type_summary.csv
+                   intra_type_results.csv          # same-dataset searches
+                   source_status_summary.json
+                 profiles/query/..., profiles/matches/...
+                 overlaps/{source}_vs_{target}.csv</code></pre>
   <ul>
     <li><b>results.csv</b> always holds <b>bodyId-level</b> similarities
       (ranked <code>target_bodyId</code> rows), whatever the query kind.
