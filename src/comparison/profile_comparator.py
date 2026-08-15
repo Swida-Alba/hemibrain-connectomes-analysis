@@ -6546,9 +6546,14 @@ class HomologFinder:
         batch visualization instead of creating separate VisualizeSkeleton instances.
         
         Creates three types of visualizations:
-        1. bodyId_level/: Individual target bodyIds with independent profiles via plot_individuals()
-        2. type_level/: Target types with independent profiles per type via plot_individuals()
-        3. source_neurons/: All source neurons plotted together
+        1. bodyId_level/: The query (when source and target datasets match)
+           followed by the top target bodyIds, with independent profiles via
+           plot_individuals()
+        2. type_level/: The query (when source and target datasets match)
+           followed by target types with independent profiles per type via
+           plot_individuals()
+        3. source_neurons/: The source/query neurons plotted in their source
+           dataset (also used as the cross-dataset reference scene)
         
         Uses VisualizeSkeleton module to create interactive HTML + PNG exports.
         The plot_individuals() method efficiently generates separate visualizations
@@ -6771,7 +6776,9 @@ class HomologFinder:
                         # Fallback to individual visualization (original method)
                         self._visualize_bodyids_individual(
                             top_matches, target_col, target_bodyid_col, 
-                            vis_target_dataset, bodyid_dir, files_saved
+                            vis_target_dataset, bodyid_dir, files_saved,
+                            reference_bodyids=query_bodyids if same_dataset else None,
+                            reference_name=query_layer_name,
                         )
             
             # =====================================================================
@@ -6866,57 +6873,62 @@ class HomologFinder:
                     type_layer_names.append(safe_name)
                 
             if type_layers:
-                    try:
-                        # Get correct client for target dataset
-                        target_client = self.clients.get(vis_target_dataset)
-                        if target_client:
-                            set_default_client(target_client)
-                        
-                        # Create single VisualizeSkeleton with all types as separate layers
-                        vs_type = VisualizeSkeleton(**_visualizer_kwargs(
-                            {
-                                'show_fig': False,
-                                'export_views': False,
-                                'brain_mesh': 'template',
-                                'neuron_alpha': 0.2,
-                                'legend_mode': 'layer',
-                                'verbose': 'simple',
-                                'skip_synapse': True,
-                                'cache_neurons': True,
-                            },
-                            dataset=vis_target_dataset,
-                            neuron_layers=type_layers,
-                            custom_layer_names=type_layer_names,
-                            output_dir=str(type_dir),
-                            client=target_client,
-                        ))
-                        
-                        # Plot all types together first
-                        vs_type.plot_neurons()
-                        
-                        # Generate individual plots for each type
-                        vs_type.plot_individuals(
-                            output_format=['png', 'html'],
-                            views=['front'],
-                            summary_format=['pdf'],
-                            neuron_alpha=0.6,
-                        )
-                        
-                        if files_saved is not None:
-                            for name in type_layer_names:
-                                files_saved.append(f'visualization/type_level/individual_profiles/front_{name}.png')
-                                files_saved.append(f'visualization/type_level/individual_profiles/{name}.html')
-                            files_saved.append('visualization/type_level/individual_profiles.pdf')
-                        
-                        self._log(f"    Saved: type_level/ ({len(type_layers)} types, batch mode with plot_individuals)")
-                        
-                    except Exception as e:
-                        self._log(f"    Warning: Type batch visualization failed: {e}, falling back to individual mode...")
-                        # Fallback to individual visualization
-                        self._visualize_types_individual(
-                            unique_types, results_df, target_col, target_bodyid_col,
-                            vis_target_dataset, type_dir, files_saved
-                        )
+                try:
+                    # Get correct client for target dataset
+                    target_client = self.clients.get(vis_target_dataset)
+                    if target_client:
+                        set_default_client(target_client)
+
+                    # Create single VisualizeSkeleton with all types as separate layers
+                    vs_type = VisualizeSkeleton(**_visualizer_kwargs(
+                        {
+                            'show_fig': False,
+                            'export_views': False,
+                            'brain_mesh': 'template',
+                            'neuron_alpha': 0.2,
+                            'legend_mode': 'layer',
+                            'verbose': 'simple',
+                            'skip_synapse': True,
+                            'cache_neurons': True,
+                        },
+                        dataset=vis_target_dataset,
+                        neuron_layers=type_layers,
+                        custom_layer_names=type_layer_names,
+                        output_dir=str(type_dir),
+                        client=target_client,
+                    ))
+
+                    # Plot all types together first
+                    vs_type.plot_neurons()
+
+                    # Generate individual plots for each type
+                    vs_type.plot_individuals(
+                        output_format=['png', 'html'],
+                        views=['front'],
+                        summary_format=['pdf'],
+                        neuron_alpha=0.6,
+                    )
+
+                    if files_saved is not None:
+                        for name in type_layer_names:
+                            files_saved.append(f'visualization/type_level/individual_profiles/front_{name}.png')
+                            files_saved.append(f'visualization/type_level/individual_profiles/{name}.html')
+                        files_saved.append('visualization/type_level/individual_profiles.pdf')
+
+                    self._log(
+                        f"    Saved: type_level/ ({len(type_layers)} layers, "
+                        "query + top types, batch mode with plot_individuals)"
+                    )
+
+                except Exception as e:
+                    self._log(f"    Warning: Type batch visualization failed: {e}, falling back to individual mode...")
+                    # Fallback to individual visualization
+                    self._visualize_types_individual(
+                        unique_types, results_df, target_col, target_bodyid_col,
+                        vis_target_dataset, type_dir, files_saved,
+                        reference_bodyids=query_bodyids if same_dataset else None,
+                        reference_name=query_layer_name,
+                    )
             
             # =====================================================================
             # 3. Source neurons visualization: All source neurons together
@@ -7048,7 +7060,9 @@ class HomologFinder:
         target_bodyid_col: str,
         vis_target_dataset: str,
         bodyid_dir: 'Path',
-        files_saved: List[str]
+        files_saved: List[str],
+        reference_bodyids: Optional[List[int]] = None,
+        reference_name: str = 'query',
     ):
         """Fallback method: visualize bodyIds individually (original approach)."""
         from visualize_skeleton import VisualizeSkeleton
@@ -7057,6 +7071,34 @@ class HomologFinder:
         target_client = self.clients.get(vis_target_dataset)
         if target_client:
             set_default_client(target_client)
+
+        if reference_bodyids:
+            try:
+                vs = VisualizeSkeleton(**self._homolog_visualizer_kwargs(
+                    {
+                        'show_fig': False,
+                        'brain_mesh': 'template',
+                        'neuron_alpha': 0.6,
+                        'legend_mode': 'layer',
+                        'verbose': 'simple',
+                    },
+                    dataset=vis_target_dataset,
+                    neuron_layers=[reference_bodyids],
+                    custom_layer_names=[reference_name],
+                    saveas=reference_name,
+                    output_dir=str(bodyid_dir),
+                    client=target_client,
+                ))
+                vs.plot_neurons()
+                if files_saved is not None:
+                    files_saved.append(f'visualization/bodyId_level/{reference_name}.html')
+                    files_saved.append(f'visualization/bodyId_level/{reference_name}.png')
+                self._log(
+                    f"    Saved: bodyId_level/{reference_name}.html "
+                    "(query reference)"
+                )
+            except Exception as e:
+                self._log(f"    Warning: Could not visualize query reference: {e}")
         
         for idx, row in top_matches.iterrows():
             target_type = row.get(target_col, '')
@@ -7103,7 +7145,9 @@ class HomologFinder:
         target_bodyid_col: str,
         vis_target_dataset: str,
         type_dir: 'Path',
-        files_saved: List[str]
+        files_saved: List[str],
+        reference_bodyids: Optional[List[int]] = None,
+        reference_name: str = 'query',
     ):
         """Fallback method: visualize types individually (original approach)."""
         from visualize_skeleton import VisualizeSkeleton
@@ -7112,6 +7156,34 @@ class HomologFinder:
         target_client = self.clients.get(vis_target_dataset)
         if target_client:
             set_default_client(target_client)
+
+        if reference_bodyids:
+            try:
+                vs = VisualizeSkeleton(**self._homolog_visualizer_kwargs(
+                    {
+                        'show_fig': False,
+                        'brain_mesh': 'template',
+                        'neuron_alpha': 0.6,
+                        'legend_mode': 'layer',
+                        'verbose': 'simple',
+                    },
+                    dataset=vis_target_dataset,
+                    neuron_layers=[reference_bodyids],
+                    custom_layer_names=[reference_name],
+                    saveas=reference_name,
+                    output_dir=str(type_dir),
+                    client=target_client,
+                ))
+                vs.plot_neurons()
+                if files_saved is not None:
+                    files_saved.append(f'visualization/type_level/{reference_name}.html')
+                    files_saved.append(f'visualization/type_level/{reference_name}.png')
+                self._log(
+                    f"    Saved: type_level/{reference_name}.html "
+                    "(query reference)"
+                )
+            except Exception as e:
+                self._log(f"    Warning: Could not visualize query reference: {e}")
         
         for target_type in unique_types:
             if not target_type:

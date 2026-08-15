@@ -1717,6 +1717,11 @@ class MorphologyComparer:
         results = type_df if self.level == "type" else bodyid_df
         if results.empty:
             self._log("No similar neurons found.")
+            # Keep the query-only reference visualization useful even when a
+            # search has no ranked matches.  The query and empty result tables
+            # are still saved in the normal per-run folder.
+            self._save_results(results, bodyid_df, type_df, query_df)
+            self._visualize_top_results(results, query_df=query_df)
         else:
             self._save_results(results, bodyid_df, type_df, query_df)
             self._visualize_top_results(results, query_df=query_df)

@@ -21,7 +21,8 @@
 
   <h2>Quick start</h2>
   <ol>
-    <li>Enter the <b>Source Neuron</b> (type or bodyId).</li>
+    <li>Enter one or more <b>Source Neurons</b> (types or bodyIds). Each
+      input is searched independently and receives its own output folder.</li>
     <li>Choose <b>Source Dataset</b> and <b>Target Dataset</b>.</li>
     <li>Click <b>Find Homologs</b> (Fast Search is on by default).</li>
   </ol>
@@ -50,7 +51,10 @@
     <li><b>Vector Pre-filtering</b>: cosine pre-filter for speed.</li>
     <li><b>2-Hop Expansion</b>: include untyped partners via 2-hop typed
       partners.</li>
-    <li><b>Visualize Candidates</b>: render top matches as 3D skeletons.</li>
+    <li><b>Visualize Candidates</b>: render the queried neuron plus the top-N
+      matches as 3D skeletons. For cross-dataset searches, the query is shown
+      in the source-dataset visualization and matches in the target-dataset
+      visualization.</li>
     <li><b>Auto Type Mapping</b>: canonicalize partner type names across
       datasets (recommended for cross-dataset searches).</li>
     <li><b>Pre-build Full Dataset Cache</b>: leave OFF; the search fetches

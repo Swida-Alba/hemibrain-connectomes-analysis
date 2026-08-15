@@ -144,7 +144,7 @@
     reference, not a guaranteed winner.</p>
 
   <h2>3D visualization of the found neurons</h2>
-  <p>Both similarity modes can render their found neurons as interactive 3D
+  <p>Both similarity modes can render the query and found neurons as interactive 3D
     skeleton views (same engine as the 3D Skeleton tab and the NeuronBridge
     FindNeuron visualization). Each mode has its own visualization list and
     settings, so morphological results and connectivity results are never
@@ -154,8 +154,8 @@
       0 = disabled): number of top morphology result types/rows to render.</li>
     <li><b>Connectivity — Visualize Top N Candidates</b> (default 5;
       0 = disabled): number of top connectivity-similar candidates to render.
-      The connectivity renderer also includes the source neuron(s) as a
-      separate reference list.</li>
+      The query is included as the first reference layer, so the scene contains
+      query + top-N candidates.</li>
     <li><b>Visualize By</b> (default <code>type</code>) applies independently
       within each mode:
       <code>type</code> renders one layer per top type, containing all of
@@ -163,12 +163,15 @@
       members from the vector cache, bounded by <b>BodyIds / Type</b>);
       <code>bodyId</code> renders one layer per top result neuron.</li>
   </ul>
-  <p>Morphological output is saved next to its results in
+  <p>When multiple queries are entered, the tab runs them sequentially and
+    saves each query in its own run folder. Morphological output is saved next
+    to its results in
     <code>{run_folder}/plot-3d_{dataset}/</code>. Connectivity output is saved
     in separate <code>visualization/bodyId_level/</code>,
     <code>visualization/type_level/</code>, and
-    <code>visualization/source_neurons/</code> folders. Each layer is colored
-    per type and labeled
+    <code>visualization/source_neurons/</code> folders. Each scene starts with
+    a query reference layer, followed by up to the requested top-N result
+    layers. Each layer is colored per type and labeled
     <code>r{rank}_{type}_x{N}</code> (rank = similarity rank of the type,
     N = member count). The intra-type reference row is never rendered. The
     interactive HTML files are listed in the output panel; a visualization
