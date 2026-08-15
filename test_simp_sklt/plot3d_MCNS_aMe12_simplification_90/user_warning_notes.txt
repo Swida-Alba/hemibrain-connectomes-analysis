@@ -1,5 +1,0 @@
-DROCAT user warning notes
-============================================================
-The following visualization settings affect rendering only; they do not trim analysis graphs or change query results.
-
-- [skeleton mesh simplification] dataset=male-cns:v1.0; skeleton_mesh_simplification=0.90 (applied to the rendered tube mesh).

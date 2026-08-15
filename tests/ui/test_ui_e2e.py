@@ -496,6 +496,11 @@ class TestRunner:
             for el in client.elements.values()
             if getattr(el, "_props", {}).get("label")
         ]
+        texts = [
+            getattr(el, "text", "")
+            for el in client.elements.values()
+            if getattr(el, "text", "")
+        ]
         # morphological mode controls
         for label in ("Query Neuron(s)", "Level", "Method", "Metric",
                       "NBLAST Prefilter", "Candidate Source", "Candidate Expansion (×)",
@@ -504,8 +509,9 @@ class TestRunner:
             assert label in labels, f"missing morphological control: {label}"
         # connection-profile mode controls (relocated loose knobs)
         for label in ("Query Neuron (type or bodyId)", "Min Shared Partners",
-                      "Candidate Prune %", "Top K Partners"):
-            assert label in labels, f"missing profile control: {label}"
+                      "Candidate Prune %", "Top K Partners",
+                      "Visualize Top Candidates", "Visualize Top N Candidates"):
+            assert label in labels or label in texts, f"missing profile control: {label}"
 
         # The two top-N inputs must keep distinct defaults (regression: the
         # profile panel used to shadow the morphological one via a shared
@@ -523,6 +529,7 @@ class TestRunner:
         assert by_label["Candidate Expansion (×)"].value == DEFAULTS["morph_candidate_expansion"] == 3
         # 3D visualization defaults: enabled with 6 top types, grouped by type
         assert by_label["Visualize Top N Types / Neurons"].value == DEFAULTS["morph_visualize_top_n"]
+        assert by_label["Visualize Top N Candidates"].value == 5
         assert by_label["Visualize By"].value == DEFAULTS["morph_visualize_by"]
         assert by_label["Mesh Simplification"].value == 0.95
         assert any(
@@ -570,7 +577,14 @@ class TestRunner:
             if getattr(el, "text", "") == "Default Simplification"
         )
         dataset = controls["Dataset"]
-        mesh = controls["Mesh Simplification"]
+        # Both modes have an advanced visualization editor.  The first
+        # occurrence belongs to the initially visible morphological panel;
+        # the profile panel has an independent editor later in the element
+        # tree.
+        mesh = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Mesh Simplification"
+        )
 
         assert mesh.value == 0.95
         dataset.value = "flywire_FAFB_v783"
@@ -610,13 +624,18 @@ class TestRunner:
             "find_similar_profile",
             {"source": "aMe12", "source_dataset": "male-cns:v1.0",
              "target_dataset": "male-cns:v1.0",
-             "min_shared_partners": 1, "vector_prune_fraction": 1.0},
+             "min_shared_partners": 1, "vector_prune_fraction": 1.0,
+             "visualize_skeleton": True, "visualize_top_n": 5,
+             "visualization_settings": {"brain_mesh": "template"}},
             "find_homologs_fast",
             None,
         )
         assert "from comparison.profile_comparator import HomologFinder" in profile_script
         assert "finder.find_homologs_fast()" in profile_script
         assert "min_shared_partners=1" in profile_script
+        assert "visualize_skeleton=True" in profile_script
+        assert "visualize_top_n=5" in profile_script
+        assert "visualization_settings={'brain_mesh': 'template'}" in profile_script
 
     def test_homologs_empty_saveas_uses_auto_folder(self, tmp_path):
         """UI sends saveas='' when blank; results must land in a per-run

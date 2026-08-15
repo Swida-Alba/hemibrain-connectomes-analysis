@@ -450,6 +450,13 @@ ROI_PALETTE = [
     "#b3b3b3", "#1b9e77", "#d95f02", "#7570b3",
 ]
 
+# The assigned-point overlays are intentionally much smaller than the full
+# reference skeleton.  These are one fifth of the previous overlay sizes.
+SKELETON_DOT_SIZE = 0.44
+SNAPPED_SKELETON_DOT_SIZE = 0.60
+SYNAPSE_DOT_SIZE = 0.70
+SNAPPED_SYNAPSE_DOT_SIZE = 0.80
+
 
 def _roi_color_map(rois):
     names = sorted({str(roi) for roi in rois if str(roi) != OUTSIDE_ROI})
@@ -500,6 +507,7 @@ def _add_segmented_skeleton_dot_traces(
     import navis
 
     shown_rois = set()
+    trace_indices = []
     for body_id, result in sorted(skeleton_results.items()):
         points = result.nodes
         if points.empty:
@@ -529,6 +537,7 @@ def _add_segmented_skeleton_dot_traces(
                 )
             customdata = group[["node_id"]].to_numpy()
             label = "snapped skeleton dots" if bool(was_snapped) else "skeleton dots"
+            trace_indices.append(len(vs.fig_3d.data))
             vs.fig_3d.add_trace(
                 go.Scatter3d(
                     x=coords["x"],
@@ -539,12 +548,15 @@ def _add_segmented_skeleton_dot_traces(
                     legendgroup=f"skeleton-roi:{roi}",
                     showlegend=roi not in shown_rois,
                     marker=dict(
-                        size=3.0 if bool(was_snapped) else 2.2,
+                        size=(
+                            SNAPPED_SKELETON_DOT_SIZE
+                            if bool(was_snapped) else SKELETON_DOT_SIZE
+                        ),
                         color=roi_colors.get(roi, "#777777"),
                         symbol="circle-open" if bool(was_snapped) else "circle",
                         opacity=0.90,
                         line=(
-                            dict(color=roi_colors.get(roi, "#777777"), width=1.0)
+                            dict(color=roi_colors.get(roi, "#777777"), width=0.20)
                             if bool(was_snapped) else None
                         ),
                     ),
@@ -557,6 +569,7 @@ def _add_segmented_skeleton_dot_traces(
                 )
             )
             shown_rois.add(roi)
+    return trace_indices
 
 
 def _add_segmented_synapse_traces(
@@ -578,7 +591,57 @@ def _add_segmented_synapse_traces(
     if highlight_snapped and "was_snapped" in segmented_synapses.columns:
         group_columns.append("was_snapped")
 
-    for group_key, group in segmented_synapses.groupby(group_columns, sort=True):
+    grouped = list(segmented_synapses.groupby(group_columns, sort=True))
+    available_categories = set()
+    for group_key, _group in grouped:
+        if len(group_columns) == 2:
+            _roi, synapse_type = group_key
+            was_snapped = False
+        else:
+            _roi, synapse_type, was_snapped = group_key
+        available_categories.add((bool(was_snapped), str(synapse_type)))
+
+    # Use four compact, explicit legend entries rather than one legend item
+    # for every ROI/type combination.  Each proxy shares its legendgroup with
+    # the real traces, so toggling the entry controls that whole category.
+    for was_snapped in (False, True):
+        status = "snapped" if was_snapped else "direct"
+        status_title = "Snapped synapses" if was_snapped else "Direct synapses"
+        for synapse_type in ("pre", "post"):
+            if (was_snapped, synapse_type) not in available_categories:
+                continue
+            base_symbol = "circle" if synapse_type == "pre" else "diamond"
+            symbol = f"{base_symbol}-open" if was_snapped else base_symbol
+            legendgroup = f"synapses:{status}:{synapse_type}"
+            vs.fig_3d.add_trace(
+                go.Scatter3d(
+                    # A null placeholder keeps the proxy out of the plot but
+                    # still makes Plotly render its legend entry.
+                    x=[None], y=[None], z=[None],
+                    mode="markers",
+                    name=f"{status_title}: {synapse_type}",
+                    legendgroup=legendgroup,
+                    legendgrouptitle=dict(text=status_title),
+                    showlegend=True,
+                    marker=dict(
+                        size=(
+                            SNAPPED_SYNAPSE_DOT_SIZE
+                            if was_snapped else SYNAPSE_DOT_SIZE
+                        ),
+                        color="#444444",
+                        symbol=symbol,
+                        opacity=0.90,
+                        line=(
+                            dict(color="#444444", width=0.24)
+                            if was_snapped else None
+                        ),
+                    ),
+                    hoverinfo="skip",
+                )
+            )
+
+    trace_indices = []
+    for group_key, group in grouped:
         if len(group_columns) == 2:
             roi, synapse_type = group_key
             was_snapped = False
@@ -595,20 +658,27 @@ def _add_segmented_synapse_traces(
         if bool(was_snapped) and "nearest_roi_distance" in group.columns:
             customdata = group[["nearest_roi_distance"]].to_numpy()
             snap_hover = "<br>snap distance=%{customdata[0]:.1f}"
+        status = "snapped" if bool(was_snapped) else "direct"
         label = "snapped synapses" if bool(was_snapped) else "synapses"
+        legendgroup = f"synapses:{status}:{str(synapse_type)}"
+        trace_indices.append(len(vs.fig_3d.data))
         vs.fig_3d.add_trace(
             go.Scatter3d(
                 x=coords["x"], y=coords["y"], z=coords["z"],
                 mode="markers",
                 name=f"{label} [{roi}] ({synapse_type})",
-                legendgroup=f"synapses:{roi}",
+                legendgroup=legendgroup,
+                showlegend=False,
                 marker=dict(
-                    size=4.0 if bool(was_snapped) else 3.5,
+                    size=(
+                        SNAPPED_SYNAPSE_DOT_SIZE
+                        if bool(was_snapped) else SYNAPSE_DOT_SIZE
+                    ),
                     color=roi_colors.get(roi, "#444444"),
                     symbol=symbol,
                     opacity=0.90,
                     line=(
-                        dict(color=roi_colors.get(roi, "#444444"), width=1.2)
+                        dict(color=roi_colors.get(roi, "#444444"), width=0.24)
                         if bool(was_snapped) else None
                     ),
                 ),
@@ -619,6 +689,70 @@ def _add_segmented_synapse_traces(
                 ),
             )
         )
+    return trace_indices
+
+
+def _add_marker_size_sliders(vs, skeleton_trace_indices, synapse_trace_indices):
+    """Add Plotly sliders that resize all traces in each marker category."""
+    sliders = []
+    if skeleton_trace_indices:
+        skeleton_sizes = [0.22, 0.44, 0.66, 0.88, 1.32, 1.76, 2.20]
+        sliders.append(
+            dict(
+                active=1,
+                currentvalue={"prefix": "Skeleton dot size: ", "suffix": " px"},
+                pad={"t": 28},
+                x=0.06,
+                len=0.40,
+                y=-0.13,
+                steps=[
+                    dict(
+                        method="restyle",
+                        args=[{"marker.size": size}, skeleton_trace_indices],
+                        label=f"{size:g}",
+                    )
+                    for size in skeleton_sizes
+                ],
+            )
+        )
+    if synapse_trace_indices:
+        synapse_sizes = [0.35, 0.70, 1.05, 1.40, 2.10, 2.80, 3.50]
+        sliders.append(
+            dict(
+                active=1,
+                currentvalue={"prefix": "Synapse dot size: ", "suffix": " px"},
+                pad={"t": 28},
+                x=0.54,
+                len=0.40,
+                y=-0.13,
+                steps=[
+                    dict(
+                        method="restyle",
+                        args=[{"marker.size": size}, synapse_trace_indices],
+                        label=f"{size:g}",
+                    )
+                    for size in synapse_sizes
+                ],
+            )
+        )
+    if sliders:
+        vs.fig_3d.update_layout(
+            sliders=sliders,
+            margin=dict(b=130),
+        )
+
+
+def _sort_legend_by_name(vs):
+    """Alphabetize all visible legend entries by their displayed name."""
+    visible = [
+        (index, str(trace.name or ""))
+        for index, trace in enumerate(vs.fig_3d.data)
+        if trace.showlegend is not False
+    ]
+    for rank, (index, _name) in enumerate(
+        sorted(visible, key=lambda item: (item[1].casefold(), item[1], item[0]))
+    ):
+        vs.fig_3d.data[index].legendrank = rank
 
 
 def _visualize(
@@ -642,6 +776,8 @@ def _visualize(
         neuron_layers=[body_ids],
         skeleton_mode="line",
         skeleton_mesh_simplification=0.0,
+        neuron_colors=["rgba(105, 105, 105, 0.16)"],
+        neuron_alpha=0.16,
         cache_neurons=False,
         cache_synapses=False,
         skip_synapse=True,
@@ -657,10 +793,10 @@ def _visualize(
         verbose="simple",
     )
 
-    # Use the production visualizer for its native male-CNS template mesh, but
-    # do not call plot_skeleton(): it emits connected line traces.  Raw
-    # skeleton nodes are added below as independent dots so disconnected
-    # branches cannot be joined accidentally.
+    # Keep the full aMe12 skeleton as a faint production-rendered reference.
+    # The ROI-assigned overlay below is dots-only, so disconnected branches
+    # cannot be joined by the assigned-point visualization.
+    vs.plot_skeleton()
     vs.plot_mesh()
     skeleton_roi_column = "snapped_roi" if highlight_snapped else "derived_roi"
     skeleton_rois = {
@@ -678,7 +814,7 @@ def _visualize(
         target_space="JRCFIB2022M",
         roi_colors=roi_colors,
     )
-    _add_segmented_skeleton_dot_traces(
+    skeleton_trace_indices = _add_segmented_skeleton_dot_traces(
         vs,
         skeleton_results,
         source_space="JRCFIB2022Mraw",
@@ -687,7 +823,7 @@ def _visualize(
         roi_column=skeleton_roi_column,
         highlight_snapped=highlight_snapped,
     )
-    _add_segmented_synapse_traces(
+    synapse_trace_indices = _add_segmented_synapse_traces(
         vs,
         segmented_synapses,
         source_space="JRCFIB2022Mraw",
@@ -696,9 +832,15 @@ def _visualize(
         roi_colors=roi_colors,
         highlight_snapped=highlight_snapped,
     )
+    _add_marker_size_sliders(vs, skeleton_trace_indices, synapse_trace_indices)
+    _sort_legend_by_name(vs)
     vs.fig_3d.update_layout(
         title=title,
-        legend=dict(itemsizing="constant"),
+        legend=dict(
+            itemsizing="constant",
+            groupclick="togglegroup",
+            tracegroupgap=10,
+        ),
     )
     vs.save_figure()
     return Path(vs.save_folder)

@@ -432,6 +432,28 @@ def create_find_similar_tab():
                     hint="Fetch connections for EVERY uncached neuron before "
                          "searching. Very slow on first use (can take hours).",
                 )
+                with ui.row().classes("w-full items-center gap-4"):
+                    profile_visualize = checkbox_input(
+                        "Visualize Top Candidates",
+                        True,
+                        hint="Generate a separate 3D visualization list for the "
+                             "highest-ranked connectivity-similar candidates.",
+                    )
+                    profile_visualization_settings = skeleton_visualization_settings(
+                        default_top_n=5,
+                        top_n_label="Visualize Top N Candidates",
+                        top_n_hint=(
+                            "Number of top connectivity-similar candidates to "
+                            "render. This list is independent of morphological "
+                            "similarity results."
+                        ),
+                        default_visualize_by="type",
+                        dataset_provider=lambda: [
+                            source_dataset.value,
+                            target_dataset.value,
+                        ],
+                        dataset_watchers=[source_dataset, target_dataset],
+                    )
 
         def sync_mode():
             is_morph = mode_value["value"] == "Morphological similarity"
@@ -535,6 +557,7 @@ def create_find_similar_tab():
         output_panel.clear()
         output_panel.set_running(True)
 
+        visualization_values = profile_visualization_settings.values()
         constructor_params = {
             "source": source,
             "source_dataset": source_dataset.value,
@@ -552,6 +575,12 @@ def create_find_similar_tab():
             "min_synapse_threshold": 3,
             "ensure_cache_complete": full_cache.value,
             "morphological_enrichment": True,
+            "visualize_skeleton": profile_visualize.value,
+            "visualize_top_n": (
+                visualization_values["visualize_top_n"]
+                if profile_visualize.value else 0
+            ),
+            "visualization_settings": visualization_values,
             "verbose": True,
         }
         method_name = "find_homologs_fast" if use_fast.value else "find_novel_homologs"
