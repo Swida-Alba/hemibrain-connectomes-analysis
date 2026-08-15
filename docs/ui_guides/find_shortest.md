@@ -63,6 +63,23 @@ options (separate L/R, conserved-edge filter, symmetry analysis),
 reciprocal enrichment, CSV/XLSX outputs, and the final
 network/Sankey/heatmap visualizations.
 
+## All-neurons queries (all_neurons)
+
+Typing the special chip `all_neurons` as the **source or target** loads the
+full (typed) neuron set on that side, so the run fetches every adjacent
+neuron at the given thresholds (Min Synapse Count / Min Connection Ratio /
+Min Traversal Prob.):
+
+- `all_neurons` replaces every other chip in the same input.
+- Both source and target = `all_neurons` is not allowed.
+- An `all_neurons` side forces **Max Intermediate Layers = 0** (direct
+  connections only) — the search stays bounded instead of exploring the
+  whole graph. With shortest-path semantics this reports every direct edge
+  (one hop) from or to the other side.
+
+The backend (`InitializeNeuronInfo`) enforces the same rules, so script and
+API callers get identical behavior.
+
 ## Output
 
 Same layout as Find All Paths (see the Complete Paths guide):

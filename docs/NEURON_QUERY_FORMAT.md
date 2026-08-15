@@ -46,6 +46,31 @@ sourceNeurons = None
 sourceNeurons = []
 ```
 
+## Special Token: `all_neurons`
+
+For the pathfinding entry points (`FindNeuronConnection` used by the
+Complete Paths and Shortest Paths tools), the string token `'all_neurons'`
+loads the full typed-neuron set on one side, so the run fetches all
+adjacent neurons at the given thresholds:
+
+```python
+# All neurons that connect TO PPL101 at the given thresholds
+fc = FindNeuronConnection(
+    sourceNeurons=['all_neurons'],
+    targetNeurons=['PPL101'],
+)
+```
+
+Semantics (enforced in `InitializeNeuronInfo`, so the UI and direct
+script/API callers behave identically):
+
+- `'all_neurons'` is matched case-insensitively and **replaces every other
+  chip** in the same query. Internally it resolves to an empty-list
+  `getNeurons` query (all typed neurons from local data, works offline).
+- Both sides = `'all_neurons'` is **not allowed** (raises `ValueError`).
+- An `all_neurons` side **forces `max_interlayer = 0`** (direct connections
+  only); a previous value is ignored with a warning.
+
 ## Restricting the Search Columns
 
 When a name is resolved (e.g. `'MTe07'`), the legacy format searches columns

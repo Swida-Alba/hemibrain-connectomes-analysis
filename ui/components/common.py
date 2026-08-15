@@ -1919,6 +1919,25 @@ def combo_input(
 # Utility Functions
 # =============================================================================
 
+ALL_NEURONS_TOKEN = "all_neurons"
+"""Special chip accepted as source or target in the Complete/Shortest Paths
+tabs: loads the full neuron set on that side so the run fetches all adjacent
+neurons at the given thresholds. It replaces every other chip and forces
+Max Intermediate Layers = 0 (direct connections only)."""
+
+
+def uses_all_neurons_token(values: List) -> bool:
+    """True when the 'all_neurons' token is among the input chips.
+
+    The token is matched case-insensitively and, when present, replaces every
+    other chip in the same input (enforced by the UI and the backend).
+    """
+    return any(
+        str(value or "").strip().casefold() == ALL_NEURONS_TOKEN
+        for value in (values or [])
+    )
+
+
 def apply_filter_mode(neurons: List, mode: str) -> List:
     """Convert an input mode into the backend's query representation.
 

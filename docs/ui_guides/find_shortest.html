@@ -29,6 +29,28 @@
     <li>Click <b>Shortest Paths</b>.</li>
   </ol>
 
+  <h2>All-neurons queries (<code>all_neurons</code>)</h2>
+  <p>Typing the special chip <code>all_neurons</code> as the <b>source or
+    target</b> loads the full (typed) neuron set on that side, so the run
+    fetches <b>every adjacent neuron at the given thresholds</b> (Min
+    Synapse Count / Min Connection Ratio / Min Traversal Prob.):</p>
+  <ul>
+    <li><code>all_neurons</code> <b>replaces every other chip</b> in the
+      same input.</li>
+    <li>Source and target cannot both be <code>all_neurons</code>.</li>
+    <li>An <code>all_neurons</code> side forces <b>Max Intermediate Layers
+      = 0</b> (direct connections only). With shortest-path semantics this
+      reports every direct edge (one hop) from or to the other side at the
+      given thresholds.</li>
+  </ul>
+  <div class="callout info">
+    <b>Script/API parity:</b> the backend
+    (<code>FindNeuronConnection.InitializeNeuronInfo</code>) enforces the
+    same rules, so passing <code>sourceNeurons=['all_neurons']</code> in
+    code behaves identically. All typed neurons are loaded from local data
+    (works offline with Cache Only).
+  </div>
+
   <h2>Depth cap (default: 2 intermediate layers)</h2>
   <ul>
     <li><b>Max Intermediate Layers (optional) = 0</b> means unlimited search depth.

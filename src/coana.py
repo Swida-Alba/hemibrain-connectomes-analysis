@@ -6320,6 +6320,48 @@ class FindNeuronConnection:
             'elapsed_time': elapsed
         }
 
+    _ALL_NEURONS_TOKEN = 'all_neurons'
+    '''Special query token accepted for sourceNeurons/targetNeurons: loads the
+    full (typed) neuron set so one side can fetch all adjacent neurons at the
+    given connection thresholds. See InitializeNeuronInfo for the enforced
+    constraints (no both-sides token; forced max_interlayer=0).'''
+
+    @classmethod
+    def _query_uses_all_neurons(cls, query) -> bool:
+        '''True when *query* is (or contains) the all-neurons token.
+
+        The token is recognized case-insensitively as a bare string item of a
+        (possibly nested) query list. Dict filters never carry the token — a
+        {'contains': 'all_neurons'} dict is a literal type-name filter.
+        '''
+        if query is None:
+            return False
+        if isinstance(query, dict):
+            return False
+        if isinstance(query, str):
+            return query.strip().lower() == cls._ALL_NEURONS_TOKEN
+        if isinstance(query, (list, tuple)):
+            return any(cls._query_uses_all_neurons(item) for item in query)
+        return False
+
+    def _apply_all_neurons_query(self, query, role: str):
+        '''Replace an all-neurons query with [] (all typed neurons).
+
+        ``getNeurons([])`` is the codebase's recommended "all neurons" form:
+        every neuron that has a type, resolved from local data. It works
+        offline (cache_only), unlike ``None`` which triggers an unrestricted
+        server-side fetch that also returns untyped fragments.
+        '''
+        if not self._query_uses_all_neurons(query):
+            return query
+        self._vprint(
+            f'\033[36mSpecial query "all_neurons" detected for {role}: '
+            f'loading all typed neurons of {self.dataset} (any other '
+            f'{role} query items are ignored).\033[0m',
+            level='always',
+        )
+        return []
+
     def _expand_group_labels(self, neurons, role: str):
         """Expand custom-group labels in a query into their member neurons.
 
@@ -6571,6 +6613,32 @@ class FindNeuronConnection:
             self._requested_source_neurons = deepcopy(self.sourceNeurons)
         if not hasattr(self, '_requested_target_neurons'):
             self._requested_target_neurons = deepcopy(self.targetNeurons)
+
+        # Special 'all_neurons' token: load the full neuron set on one side so
+        # the run fetches all adjacent neurons at the given thresholds.
+        # Enforced here so script/API callers get the same semantics as the UI:
+        # - both sides = 'all_neurons' is not allowed (full set vs itself);
+        # - the token replaces every other chip in its query;
+        # - an all-neurons side forces max_interlayer = 0 (direct connections
+        #   only), keeping the run bounded instead of exploding combinatorially.
+        source_all = self._query_uses_all_neurons(self.sourceNeurons)
+        target_all = self._query_uses_all_neurons(self.targetNeurons)
+        if source_all and target_all:
+            raise ValueError(
+                "sourceNeurons=targetNeurons='all_neurons' is not allowed: "
+                "both sides cannot be the full neuron set."
+            )
+        if source_all or target_all:
+            self.sourceNeurons = self._apply_all_neurons_query(self.sourceNeurons, 'source')
+            self.targetNeurons = self._apply_all_neurons_query(self.targetNeurons, 'target')
+            if self.max_interlayer != 0:
+                self._vprint(
+                    f'\033[33m⚠️  "all_neurons" query detected: forcing '
+                    f'max_interlayer=0 (direct connections only); the previous '
+                    f'value {self.max_interlayer} is ignored.\033[0m',
+                    level='always',
+                )
+                self.max_interlayer = 0
 
         # Expand custom-group labels (from an active mapping) into members so
         # a pushed group label resolves as a query.

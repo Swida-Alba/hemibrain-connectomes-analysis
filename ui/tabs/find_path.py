@@ -7,7 +7,8 @@ from nicegui import ui
 from ..config import DEFAULTS, PATHFINDING_ALGORITHMS, FILTER_OPTIONS, OUTPUT_FORMATS, NETWORK_LAYOUTS, SEARCH_COLUMNS
 from ..components.common import (
     dataset_selector, neuron_list_input, number_input, select_input,
-    checkbox_input, dir_input, apply_filter_mode, section_header, param_grid, tool_page,
+    checkbox_input, dir_input, apply_filter_mode, section_header, param_grid,
+    tool_page, ALL_NEURONS_TOKEN, uses_all_neurons_token,
 )
 from ..components.mapping_editor import custom_grouping_block
 from ..components.output_panel import OutputPanel
@@ -54,17 +55,25 @@ def create_find_path_tab():
             source_input = neuron_list_input(
                 label="Source Neurons",
                 placeholder="Type or upload CSV/TSV/Excel (e.g., aMe12, aMe10)",
-                hint="Enter neuron types, bodyIds, or patterns. Upload CSV/TSV/Excel for large lists.",
+                hint="Enter neuron types, bodyIds, or patterns. Upload CSV/TSV/Excel for large lists. "
+                     "Type 'all_neurons' to load every neuron in the dataset.",
                 suggestions=_type_suggest,
                 available_neurons=lambda: dataset.value if dataset is not None else "",
             ).classes("drocat-fixed-neuron-input")
             target_input = neuron_list_input(
                 label="Target Neurons",
                 placeholder="Type or upload CSV/TSV/Excel (e.g., PPL101, DN1p)",
-                hint="Enter neuron types, bodyIds, or patterns. Upload CSV/TSV/Excel for large lists.",
+                hint="Enter neuron types, bodyIds, or patterns. Upload CSV/TSV/Excel for large lists. "
+                     "Type 'all_neurons' to load every neuron in the dataset.",
                 suggestions=_type_suggest,
                 available_neurons=lambda: dataset.value if dataset is not None else "",
             ).classes("drocat-fixed-neuron-input")
+            ui.label(
+                "Tip: type 'all_neurons' as the only chip of one side to load every "
+                "neuron in the dataset and fetch all adjacent neurons at your "
+                "thresholds. It forces Max Intermediate Layers = 0 (direct "
+                "connections only) and cannot be used on both sides."
+            ).classes("text-caption drocat-muted")
             mapping_select, _grouper_card, resolve_grouping = custom_grouping_block(
                 label="Custom Grouping",
                 tab_key="find_path",
@@ -265,8 +274,21 @@ def create_find_path_tab():
         src_mode, src_neurons = source_input.get_value()
         tgt_mode, tgt_neurons = target_input.get_value()
 
-        sources = apply_filter_mode(src_neurons, src_mode)
-        targets = apply_filter_mode(tgt_neurons, tgt_mode)
+        # 'all_neurons' is a special token: it loads the full neuron set on
+        # that side (fetch all adjacent neurons at the given thresholds),
+        # replaces every other chip, and forces direct connections only.
+        # The backend enforces the same rules for script/API callers.
+        src_all = uses_all_neurons_token(src_neurons)
+        tgt_all = uses_all_neurons_token(tgt_neurons)
+        if src_all and tgt_all:
+            ui.notify(
+                "'all_neurons' cannot be used as both source and target",
+                type="warning",
+            )
+            return
+
+        sources = [ALL_NEURONS_TOKEN] if src_all else apply_filter_mode(src_neurons, src_mode)
+        targets = [ALL_NEURONS_TOKEN] if tgt_all else apply_filter_mode(tgt_neurons, tgt_mode)
 
         if not sources:
             ui.notify("Please enter at least one source neuron", type="warning")
@@ -274,6 +296,13 @@ def create_find_path_tab():
         if not targets:
             ui.notify("Please enter at least one target neuron", type="warning")
             return
+
+        if src_all or tgt_all:
+            ui.notify(
+                "'all_neurons' used — Max Intermediate Layers is forced to 0 "
+                "(direct connections only)",
+                type="warning",
+            )
 
         # Resolve custom grouping first: an invalid inline board aborts the
         # run before the output panel enters its running state.
@@ -295,7 +324,7 @@ def create_find_path_tab():
             "min_synapse_num": int(min_synapse.value),
             "min_ratio": float(min_ratio.value),
             "min_traversal_probability": float(min_traversal.value),
-            "max_interlayer": int(max_interlayer.value),
+            "max_interlayer": 0 if (src_all or tgt_all) else int(max_interlayer.value),
             "filter_by": filter_by.value,
             "pathfinding": pathfinding_algo.value,
             "graph_edge_limit_bodyid": int(edge_limit_bodyid.value),

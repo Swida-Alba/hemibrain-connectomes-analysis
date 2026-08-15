@@ -35,10 +35,33 @@
     <tr><th>Example</th><th>What it does</th></tr>
     <tr><td><code>aMe12</code>, <code>aMe10</code> (source)</td><td>Two source types: all their bodyIds are starting points</td></tr>
     <tr><td><code>PPL101</code>, <code>PPL103</code> (target)</td><td>Two target types</td></tr>
+    <tr><td><code>all_neurons</code> (source or target)</td><td>Loads the full (typed) neuron set on that side to fetch all adjacent neurons at the given thresholds. Replaces every other chip, and forces <b>Max Intermediate Layers = 0</b> (direct connections only). Source and target cannot both be <code>all_neurons</code>.</td></tr>
     <tr><td><code>KC.*</code> with Filter = Starts with</td><td>Expands to <code>KC.*</code> - all KC types</td></tr>
     <tr><td><code>720575940610453042</code></td><td>A single bodyId (kept as integer)</td></tr>
     <tr><td><code>aMe12, aMe10</code> pasted</td><td>Both added as chips, duplicates removed</td></tr>
   </table>
+
+  <h2 id="all-neurons-queries">All-neurons queries (<code>all_neurons</code>)</h2>
+  <p>Typing the special chip <code>all_neurons</code> as the <b>source or
+    target</b> loads the full (typed) neuron set on that side, so the run
+    fetches <b>every adjacent neuron at the given thresholds</b> (Min
+    Synapse Count / Min Connection Ratio / Min Traversal Prob.):</p>
+  <ul>
+    <li><code>all_neurons</code> <b>replaces every other chip</b> in the
+      same input.</li>
+    <li>Source and target cannot both be <code>all_neurons</code>.</li>
+    <li>An <code>all_neurons</code> side forces <b>Max Intermediate Layers
+      = 0</b> (direct connections only) — the search stays bounded instead
+      of exploring the whole graph. Use it to list all partners of a neuron
+      group above a synapse threshold.</li>
+  </ul>
+  <div class="callout info">
+    <b>Script/API parity:</b> the backend
+    (<code>FindNeuronConnection.InitializeNeuronInfo</code>) enforces the
+    same rules, so passing <code>sourceNeurons=['all_neurons']</code> in
+    code behaves identically. All typed neurons are loaded from local data
+    (works offline with Cache Only).
+  </div>
 
   <h2>Parameters</h2>
   <table>
