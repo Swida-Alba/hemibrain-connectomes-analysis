@@ -6507,9 +6507,13 @@ class VisualizePath:
                     return;
                 }}
 
-                // Get current node size to ensure arrows stay outside nodes
-                const nodeSize = parseFloat(document.getElementById('nodeSizeSlider')?.value || 40);
-                const nodeRadius = nodeSize / 2;
+                // Anchor distances must follow the ACTUAL size of each
+                // endpoint node: nodes can be individually resized via the
+                // geometry editor, so the global slider is only a fallback
+                // for nodes that still use the default stylesheet width.
+                const globalNodeSize = parseFloat(document.getElementById('nodeSizeSlider')?.value || 40);
+                const sourceNodeSize = edge.source().numericStyle('width') || globalNodeSize;
+                const targetNodeSize = edge.target().numericStyle('width') || globalNodeSize;
                 
                 // Compute perpendicular offset in CANONICAL direction (smaller ID -> larger ID)
                 // to ensure reciprocal edges offset in opposite directions relative to canvas
@@ -6526,8 +6530,8 @@ class VisualizePath:
                 let sourceOffsetY = 0;
                 let targetOffsetX = 0;
                 let targetOffsetY = 0;
-                let sourceDistance = nodeRadius;
-                let targetDistance = nodeRadius;
+                let sourceDistance = sourceNodeSize / 2;
+                let targetDistance = targetNodeSize / 2;
                 let perpX = 0;
                 let perpY = 0;
 
@@ -13085,9 +13089,74 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
         function exportSVG() {{
             const gd = document.getElementById('heatmap');
             const filename = 'heatmap_' + currentScale + '_' + new Date().getTime() + '.svg';
-            // SVG is vector: always exported at native size (PPT-safe).
-            exportPlotlyToImage(gd, 'svg', filename, 1, currentWidth, currentHeight, function() {{
-                showStatus('✅ SVG exported: ' + currentWidth + 'x' + currentHeight + 'px', 'success');
+            // SVG at native size. Heatmaps with up to 100 cells export as
+            // vector <rect> cells (editable shapes); larger heatmaps keep
+            // Plotly's embedded pixel image so the colors stay crisp after
+            // PowerPoint's Convert-to-Shape.
+            Plotly.toImage(gd, {{ format: 'svg', width: currentWidth, height: currentHeight }}).then(function(dataUrl) {{
+                const svgString = decodeURIComponent(dataUrl.split(',')[1]);
+                const imgMatch = svgString.match(/<image[^>]*xlink:href="data:image\/png;base64,[^"]+"[^>]*>/);
+                if (!imgMatch) {{
+                    downloadBlob(new Blob([svgString], {{ type: 'image/svg+xml' }}), filename);
+                    showStatus('✅ SVG exported: ' + currentWidth + 'x' + currentHeight + 'px', 'success');
+                    return;
+                }}
+                const imgTag = imgMatch[0];
+                const pngUrl = imgTag.match(/xlink:href="([^"]+)"/)[1];
+                vectorizeHeatmapCells(svgString, imgTag, pngUrl).then(function(finalSvg) {{
+                    downloadBlob(new Blob([finalSvg], {{ type: 'image/svg+xml' }}), filename);
+                    showStatus('✅ SVG exported: ' + currentWidth + 'x' + currentHeight + 'px', 'success');
+                }});
+            }}).catch(function(error) {{
+                console.error('SVG export failed:', error);
+                showStatus('⚠️ SVG export failed. See console.', 'error');
+            }});
+        }}
+        
+        // Replace the rasterized heatmap-cell <image> with one <rect> per cell
+        // (colors taken from the rendered pixels, so the visual result is
+        // identical) - but only for heatmaps with at most 100 cells. Larger
+        // heatmaps keep the embedded pixel image to avoid color diffusion.
+        function vectorizeHeatmapCells(svgString, imgTag, pngUrl) {{
+            return new Promise(function(resolve) {{
+                const img = new Image();
+                img.onload = function() {{
+                    const cols = img.naturalWidth;
+                    const rows = img.naturalHeight;
+                    if (!rows || !cols || rows * cols > 100) {{
+                        resolve(svgString);  // >100 cells: keep the embedded pixel image
+                        return;
+                    }}
+                    const x = parseFloat((imgTag.match(/ x="([^"]+)"/) || [])[1] || '0');
+                    const y = parseFloat((imgTag.match(/ y="([^"]+)"/) || [])[1] || '0');
+                    const w = parseFloat((imgTag.match(/ width="([^"]+)"/) || [])[1] || '0');
+                    const h = parseFloat((imgTag.match(/ height="([^"]+)"/) || [])[1] || '0');
+                    const canvas = document.createElement('canvas');
+                    canvas.width = cols;
+                    canvas.height = rows;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0);
+                    const data = ctx.getImageData(0, 0, cols, rows).data;
+                    const cellW = w / cols;
+                    const cellH = h / rows;
+                    let rects = '<g class="heatmap-cells-vector" shape-rendering="crispEdges">';
+                    for (let r = 0; r < rows; r++) {{
+                        for (let c = 0; c < cols; c++) {{
+                            const i = (r * cols + c) * 4;
+                            const a = data[i + 3];
+                            if (a === 0) continue;  // fully transparent (masked) cell
+                            const fill = a < 255
+                                ? 'rgba(' + data[i] + ',' + data[i + 1] + ',' + data[i + 2] + ',' + (a / 255) + ')'
+                                : 'rgb(' + data[i] + ',' + data[i + 1] + ',' + data[i + 2] + ')';
+                            rects += '<rect x="' + (x + c * cellW).toFixed(2) + '" y="' + (y + r * cellH).toFixed(2) +
+                                '" width="' + cellW.toFixed(2) + '" height="' + cellH.toFixed(2) + '" fill="' + fill + '"/>';
+                        }}
+                    }}
+                    rects += '</g>';
+                    resolve(svgString.replace(imgTag, rects));
+                }};
+                img.onerror = function() {{ resolve(svgString); }};
+                img.src = pngUrl;
             }});
         }}
         

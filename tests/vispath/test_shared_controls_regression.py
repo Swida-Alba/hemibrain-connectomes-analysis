@@ -175,3 +175,38 @@ class TestHeatmapCallerKwargs:
         # Non-finite cells render as an em dash in hover text; json.dumps
         # escapes it as \u2014 (ensure_ascii) inside the embedded JSON.
         assert "\\u2014" in heat_html
+
+
+class TestPptSafeSvgExport:
+    """Plotly renders the heatmap colormap to a rows×cols canvas and embeds
+    it as a data-URL PNG inside the exported SVG. The export then:
+      - vectorizes the cells (one <rect> per cell) for heatmaps with at most
+        100 cells, keeping text and axis elements vector;
+      - keeps the embedded pixel image for larger heatmaps so the colors stay
+        crisp (no diffusion) after PowerPoint's Convert-to-Shape."""
+
+    def test_heatmap_export_vectorizes_small_heatmaps(self, tmp_path):
+        heat_html = _heatmap_html(tmp_path)
+        assert "function vectorizeHeatmapCells" in heat_html
+        assert 'class="heatmap-cells-vector"' in heat_html
+        assert "shape-rendering" in heat_html
+        # Export path routes through the vectorizer
+        assert "vectorizeHeatmapCells(svgString, imgTag, pngUrl)" in heat_html
+        # Text must stay text: the export never outlines labels
+        assert "decodeURIComponent(dataUrl.split(',')[1])" in heat_html
+
+    def test_heatmap_export_keeps_pixel_image_above_100_cells(self, tmp_path):
+        heat_html = _heatmap_html(tmp_path)
+        # The vectorizer bails out (keeping Plotly's embedded pixel image)
+        # when the heatmap has more than 100 cells
+        assert "rows * cols > 100" in heat_html
+
+    def test_network_and_sankey_exports_do_not_rasterize(self, tmp_path):
+        net_html, sankey_html = _network_sankey_htmls(tmp_path)
+        # Cytoscape-svg draws nodes/edges/labels as real SVG elements
+        # (exported through the shared vector backend, never rasterized)
+        assert "exportCytoscapeToImage" in net_html
+        assert "cyObj.svg" in net_html
+        # Sankey goes through Plotly's vector pipeline (nodes/links are paths)
+        assert "exportPlotlyToImage" in sankey_html
+        assert "vectorizeHeatmapCells" not in sankey_html
