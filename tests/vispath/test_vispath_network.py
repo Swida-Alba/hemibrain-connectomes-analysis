@@ -283,6 +283,19 @@ class TestGeneratedHtmlStructure:
         # every operation that changes the visible graph must re-detect
         assert js.count("reapplyDeadEndHiding();") >= 5  # filter, hide node, self-loops, orphans, import
 
+    def test_edge_anchors_follow_actual_node_sizes(self, network_html):
+        """Individually resized nodes (geometry editor) must re-anchor their
+        edges to their ACTUAL size, not the global node-size slider."""
+        js = _script_text(network_html)
+        # refreshEdgeStyles derives the anchor distances from each endpoint
+        # node's computed width, with the global slider only as fallback
+        assert "const sourceNodeSize = edge.source().numericStyle('width')" in js
+        assert "const targetNodeSize = edge.target().numericStyle('width')" in js
+        assert "let sourceDistance = sourceNodeSize / 2;" in js
+        assert "let targetDistance = targetNodeSize / 2;" in js
+        # the geometry editor refreshes edge styles after resizing
+        assert "refreshEdgeStyles(false);  // keep endpoints/offsets attached to resized nodes" in js
+
     def test_deadend_hidden_classes_have_display_none_style(self, network_html):
         """Regression: dead-end classes were assigned and counted, but no
         stylesheet rule hid them, so Hide Dead Ends reported counts without
