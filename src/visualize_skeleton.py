@@ -3730,7 +3730,8 @@ class VisualizeSkeleton:
                     sys.stdout = old_stdout
                     sys.stderr = old_stderr
 
-    def _xform_neurons_safe(self, neuron_vols, source, target, layer_label='layer'):
+    def _xform_neurons_safe(self, neuron_vols, source, target, layer_label='layer',
+                            progress_bar=None):
         """
         Transform neurons one at a time with explicit progress and per-neuron fallback.
 
@@ -3739,15 +3740,19 @@ class VisualizeSkeleton:
         the run, the only clue is a tqdm bar stuck at some percentage. This helper
         instead:
 
-          * resolves the bridging transform sequence once and prints it,
-          * shows the neuron currently being transformed in the bar postfix, so a
-            stall immediately identifies the culprit neuron,
-          * prints an explicit heartbeat line every HEARTBEAT neurons (flushed via
-            tqdm.write so it always reaches the UI log, even in non-TTY pipes),
+          * resolves the bridging transform sequence once and shows it in the
+            existing layer progress bar,
+          * shows the neuron currently being transformed in that bar's postfix,
+            so a stall immediately identifies the culprit neuron,
           * keeps the untransformed original on a per-neuron failure instead of
             aborting the whole layer,
           * releases each original neuron as soon as its copy is transformed to
             keep peak memory flat on very large layers.
+
+        ``progress_bar`` is the outer layer bar used by ``plot_neurons``. Keeping
+        transformation state in that bar avoids nested bars and prevents every
+        status update from becoming a permanent log line. When the helper is
+        called directly, it creates a private single-line bar as a fallback.
         """
         from navis.transforms import registry as _registry
 
@@ -3767,53 +3772,79 @@ class VisualizeSkeleton:
                 n_nodes_total += int(n.n_nodes)
             elif hasattr(n, 'vertices') and getattr(n, 'vertices', None) is not None:
                 n_nodes_total += len(n.vertices)
-        tqdm.write(f'  🔀 {layer_label}: transforming {total} neurons, '
-                   f'{n_nodes_total:,} points  [{source} -> {target}]')
 
         # Resolve the transform sequence once (raises if no path exists, so the
         # caller can trigger the transform download + retry flow).
         path, seq = _registry.shortest_bridging_seq(source, target)
-        tqdm.write(f'     Resolved transform path: {" -> ".join(str(p) for p in path)} '
-                   f'({len(seq)} step(s))')
+        path_label = '→'.join(str(p) for p in path)
 
-        HEARTBEAT = 250
         start = time.time()
         xf_neurons = []
         failed = []
-        pbar = tqdm(total=total, desc='  Transforming', unit='neuron', mininterval=0.5)
+        owns_progress_bar = progress_bar is None
+        if progress_bar is not None:
+            pbar = progress_bar
+        else:
+            pbar = tqdm(
+                total=total,
+                desc=f'  Transforming {layer_label}',
+                unit='neuron',
+                mininterval=0.5,
+                disable=not self.verbose,
+                leave=False,
+                file=sys.stdout,
+            )
+
+        def set_status(status, refresh=True):
+            """Refresh the shared bar without emitting a standalone log line."""
+            if pbar is not None and hasattr(pbar, 'set_postfix_str'):
+                pbar.set_postfix_str(status, refresh=refresh)
+
+        set_status(
+            f'{layer_label}: xform 0/{total} | {n_nodes_total:,} pts | {path_label}',
+        )
         try:
             for i, n in enumerate(neurons):
                 label = getattr(n, 'name', None) or str(getattr(n, 'id', i))
-                pbar.set_postfix_str(f'last={label}')
+                # Refresh before the potentially slow transform so a stalled
+                # neuron remains visible in the one-line progress display.
+                set_status(f'{layer_label}: xform {i}/{total} | current={label}')
                 if not isinstance(n, navis.BaseNeuron):
                     # Volumes or other non-neuron objects pass through untouched
                     xf_neurons.append(n)
                     neurons[i] = None
-                    pbar.update(1)
+                    if owns_progress_bar:
+                        pbar.update(1)
                     continue
                 try:
                     xf_neurons.append(navis.xform(n, transform=seq))
                 except Exception as e:
                     failed.append((label, str(e)))
-                    tqdm.write(f'     ⚠️  Transform failed for {label}: {e} '
-                               f'(keeping original coordinates)')
                     xf_neurons.append(n)
                 # Free the original as soon as its copy is done to keep peak
                 # memory flat (large layers double memory inside navis.xform).
                 neurons[i] = None
-                pbar.update(1)
-                if (i + 1) % HEARTBEAT == 0 or (i + 1) == total:
-                    elapsed = time.time() - start
-                    rate = (i + 1) / max(elapsed, 1e-6)
-                    tqdm.write(f'     ... {i + 1}/{total} neurons transformed '
-                               f'({elapsed:.1f}s elapsed, {rate:.0f} neurons/s)')
+                if owns_progress_bar:
+                    pbar.update(1)
+
+            if failed:
+                failed_labels = ', '.join(label for label, _ in failed[:3])
+                if len(failed) > 3:
+                    failed_labels += ', …'
+                set_status(
+                    f'{layer_label}: xform {total}/{total} | ⚠ {len(failed)} failed',
+                )
+            else:
+                elapsed = time.time() - start
+                set_status(f'{layer_label}: xform {total}/{total} | done {elapsed:.1f}s')
         finally:
-            pbar.close()
+            if owns_progress_bar:
+                pbar.close()
 
         if failed:
-            tqdm.write(f'  ⚠️  {layer_label}: {len(failed)}/{total} neurons could not '
-                       f'be transformed and were kept in source coordinates')
-        tqdm.write(f'  ✓ {layer_label}: transform finished in {time.time() - start:.1f}s')
+            if self.verbose:
+                tqdm.write(f'  ⚠️  {layer_label}: {len(failed)}/{total} neurons could not '
+                           f'be transformed ({failed_labels}); kept in source coordinates')
         return navis.NeuronList(xf_neurons)
 
     def _validate_inputs(self):
@@ -7011,6 +7042,7 @@ class VisualizeSkeleton:
                         source=template_info['source'],
                         target=template_info['target'],
                         layer_label=f"Layer {i} ({layer_name})",
+                        progress_bar=layer_pbar,
                     )
                 except Exception as e:
                     tqdm.write(f'  ⚠️  Layer {i} transform failed: {e}')
@@ -7024,6 +7056,7 @@ class VisualizeSkeleton:
                                 source=template_info['source'],
                                 target=template_info['target'],
                                 layer_label=f"Layer {i} ({layer_name}, retry)",
+                                progress_bar=layer_pbar,
                             )
                         except Exception as retry_e:
                             tqdm.write(f'  ⚠️  Transformation still failed, setting brain_mesh to "none"')
