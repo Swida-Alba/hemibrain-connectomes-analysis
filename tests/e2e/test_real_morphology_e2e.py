@@ -435,7 +435,7 @@ class TestVisualization:
         res = comparer.find_similar()
         assert not res.empty
         run_dir = Path(comparer.output_folder)
-        htmls = list(run_dir.glob(f"plot3d_*/*.html"))
+        htmls = list(run_dir.glob(f"plot-3d_*/*.html"))
         assert len(htmls) == 1, f"expected one plot3d html in {run_dir}"
         assert htmls[0].stat().st_size > 100_000
         content = htmls[0].read_text(errors="ignore")
@@ -451,6 +451,6 @@ class TestVisualization:
         )
         res = comparer.find_similar()
         assert not res.empty
-        htmls = list(Path(comparer.output_folder).glob(f"plot3d_*/*.html"))
+        htmls = list(Path(comparer.output_folder).glob(f"plot-3d_*/*.html"))
         assert len(htmls) == 1
         assert htmls[0].stat().st_size > 100_000

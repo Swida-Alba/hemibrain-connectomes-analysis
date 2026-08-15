@@ -7043,7 +7043,7 @@ class NeuronBridgeFinder:
                 else:  # 'Brain' or default
                     export_views = ['front']
                 
-                # Custom folder name: plot3d_{dataset_folder} (VisualizeSkeleton prepends 'plot3d_')
+                # Custom folder name: plot-3d_{dataset_folder} (VisualizeSkeleton prepends 'plot-3d_')
                 custom_saveas = dataset_folder
                 
                 # Compute per-layer alpha based on relative scores.  An
@@ -7263,7 +7263,7 @@ class NeuronBridgeFinder:
                 line_info += '_etc'
             # Sanitize folder name (remove special characters)
             line_info = ''.join(c if c.isalnum() or c in '-_' else '_' for c in line_info)
-            output_path = os.path.join(output_dir, f'findneuron_{line_info}_{timestamp}')
+            output_path = os.path.join(output_dir, f'NB-find-neurons_{line_info}_{timestamp}')
             os.makedirs(output_path, exist_ok=True)
             self._vprint(f"   📁 Output folder: {output_path}")
             
@@ -7816,7 +7816,7 @@ class NeuronBridgeFinder:
                 lines_info += f'_etc{len(line_list)}'
             # Sanitize folder name
             lines_info = ''.join(c if c.isalnum() or c in '-_' else '_' for c in lines_info)
-            output_path = os.path.join(output_dir, f'colabel_{lines_info}_{timestamp}')
+            output_path = os.path.join(output_dir, f'NB-colabeling_{lines_info}_{timestamp}')
             os.makedirs(output_path, exist_ok=True)
             self._vprint(f"   📁 Output folder: {output_path}")
             
@@ -8665,7 +8665,7 @@ class NeuronBridgeFinder:
             # Sanitize folder name (remove special characters)
             query_info = ''.join(c if c.isalnum() or c in '-_' else '_' for c in query_info)
             ds_abbr = dataset_abbrev(dataset) if isinstance(dataset, str) else 'ALL'
-            output_path = os.path.join(output_dir, f'findlines_{ds_abbr}_{query_info}_{timestamp}')
+            output_path = os.path.join(output_dir, f'NB-find-lines_{ds_abbr}_{query_info}_{timestamp}')
             os.makedirs(output_path, exist_ok=True)
             self._vprint(f"   📁 Output folder: {output_path}")
             

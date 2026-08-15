@@ -164,7 +164,7 @@
       <code>bodyId</code> renders one layer per top result neuron.</li>
   </ul>
   <p>Morphological output is saved next to its results in
-    <code>{run_folder}/plot3d_{dataset}/</code>. Connectivity output is saved
+    <code>{run_folder}/plot-3d_{dataset}/</code>. Connectivity output is saved
     in separate <code>visualization/bodyId_level/</code>,
     <code>visualization/type_level/</code>, and
     <code>visualization/source_neurons/</code> folders. Each layer is colored
@@ -177,9 +177,9 @@
   <h2>Output</h2>
   <p>Each run is saved in its own timestamped folder with two always-written
     result tables (mirroring the homolog finding outputs):</p>
-  <pre><code>morphological: {output_dir}/findsimilar_{DATASET}_{query}_{timestamp}/
+  <pre><code>morphological: {output_dir}/similar-morphology_{DATASET}_{query}_{timestamp}/
                  results.csv, type_summary.csv, README.txt
-profile:       {output_dir}/findhomologs_{SRC}_to_{TGT}_{query}_{timestamp}/</code></pre>
+profile:       {output_dir}/similar-connectivity_{SRC}_to_{TGT}_{query}_{timestamp}/</code></pre>
   <ul>
     <li><b>results.csv</b> always holds <b>bodyId-level</b> similarities
       (ranked <code>target_bodyId</code> rows), whatever the query kind.

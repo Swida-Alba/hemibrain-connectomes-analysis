@@ -1597,10 +1597,9 @@ class FlyLightDownloader:
                 - Single string: 'R10A06'
                 - Comma-separated: 'R10A06,VT037867'
                 - List: ['R10A06', 'VT037867']
-                Output folder naming:
-                - 1 line: {line_name}_{timestamp}
-                - 2-3 lines: {line1}_{line2}_{line3}_{timestamp}
-                - 4+ lines: {line1}_{line2}_{line3}_etc{N}_{timestamp}
+                With ``add_timestamp=True``, output folders are prefixed
+                ``flylignt-downloads_`` followed by the combined line name
+                and timestamp.
             output_dir: Override output directory (optional)
             max_files: Maximum number of files to download **per line** (optional).
                 When downloading multiple lines, this limit applies to each line separately.
@@ -1612,7 +1611,8 @@ class FlyLightDownloader:
             generate_summary: Generate image summary after download.
                 Options: 'pdf', 'pptx', ['pdf', 'pptx'], False/None to disable
             summary_images_per_page: (columns, rows) for summary layout. Default: (5, 3)
-            add_timestamp: If True, add timestamp to output folder name. Default: False
+            add_timestamp: If True, create a timestamped
+                ``flylignt-downloads_...`` output folder. Default: True
             background_color: Background color for summary slides/pages. Default: 'black'
             
         Returns:
@@ -1659,7 +1659,7 @@ class FlyLightDownloader:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
         if add_timestamp:
-            output_path = Path(output_dir or self.output_dir) / f"{combined_name}_{timestamp}"
+            output_path = Path(output_dir or self.output_dir) / f"flylignt-downloads_{combined_name}_{timestamp}"
         else:
             output_path = Path(output_dir or self.output_dir)
         

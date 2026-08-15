@@ -123,7 +123,7 @@ The gallery reference (`gallery.html`) provides: light canvas `#f7f8fa`, white s
 - **Compact uploads**: the CSV/XLSX upload button in `neuron_list_input` and the path-file upload in the Visualization tab are now small round icon buttons attached to the input row; the actual file picker lives inside a dropdown menu, so the form stays clean. A one-line caption reports the loaded count/status.
 - **Tab reorder** (matching the user's requested workflow): Find Path → Direct → Visualization → Cross-Dataset → Find Lines → Find Neurons → Co-Labeling → Homologs → Profiling → Settings.
 - **Live execution log**: generated subprocesses now run unbuffered (`python -u` + `PYTHONUNBUFFERED=1`), so backend `print()`/`tqdm` output streams into the log console line-by-line instead of arriving in buffered chunks.
-- **Hemisphere analysis in the UI**: the Find Path, Direct, and Cross-Dataset tabs now expose `Separate Hemispheres (L/R)`, `Keep Only Hemisphere-Conserved Edges`, `Symmetry Analysis`, and (path/cross-dataset) `Find Reciprocal Connections` — matching the backend flags in `FindNeuronConnection` and `ComparisonParameters`. Dependent options disable automatically until hemisphere separation is enabled.
+- **Hemisphere analysis in the UI**: the Find Path, Shortest Paths, and Cross-Dataset tabs now expose `Hemisphere-aware`, `Keep Only Hemisphere-Conserved Edges`, `Symmetry Analysis`, and (path/cross-dataset) `Find Reciprocal Connections` — matching the backend flags in `FindNeuronConnection` and `ComparisonParameters`. Dependent options disable automatically until hemisphere-aware mode is enabled.
 
 ### 3.3 Usability improvements
 

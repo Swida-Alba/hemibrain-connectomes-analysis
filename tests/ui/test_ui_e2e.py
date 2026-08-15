@@ -626,7 +626,8 @@ class TestRunner:
              "target_dataset": "male-cns:v1.0",
              "min_shared_partners": 1, "vector_prune_fraction": 1.0,
              "visualize_skeleton": True, "visualize_top_n": 5,
-             "visualization_settings": {"brain_mesh": "template"}},
+             "visualization_settings": {"brain_mesh": "template"},
+             "output_folder_prefix": "similar-connectivity"},
             "find_homologs_fast",
             None,
         )
@@ -636,10 +637,11 @@ class TestRunner:
         assert "visualize_skeleton=True" in profile_script
         assert "visualize_top_n=5" in profile_script
         assert "visualization_settings={'brain_mesh': 'template'}" in profile_script
+        assert "output_folder_prefix='similar-connectivity'" in profile_script
 
     def test_homologs_empty_saveas_uses_auto_folder(self, tmp_path):
         """UI sends saveas='' when blank; results must land in a per-run
-        findhomologs_ folder instead of being dumped into output_dir."""
+        homologs_ folder instead of being dumped into output_dir."""
         import sys
         sys.path.insert(0, str(PROJECT_ROOT / "src"))
         import pandas as pd
@@ -673,7 +675,7 @@ class TestRunner:
         folders = [p for p in tmp_path.iterdir() if p.is_dir()]
         assert len(folders) == 1, [p.name for p in tmp_path.iterdir()]
         folder = folders[0]
-        assert folder.name.startswith("findhomologs_MCNS_to_MCNS_aMe12_"), folder.name
+        assert folder.name.startswith("homologs_MCNS_to_MCNS_aMe12_"), folder.name
         assert (folder / "README.txt").exists()
         assert (folder / "results" / "homolog_results.csv").exists()
         # Nothing is dumped into the output root itself
@@ -807,7 +809,7 @@ class TestRunner:
         assert seen["bids"] == list(range(2, 22))
 
     def test_interdataset_output_name_prefix(self):
-        """Inter-dataset runs use the interdataset_ folder prefix."""
+        """Cross-dataset runs use the cross-dataset_ folder prefix."""
         import sys
         sys.path.insert(0, str(PROJECT_ROOT / "src"))
         from comparison.comparison_parameters import ComparisonParameters
@@ -818,11 +820,11 @@ class TestRunner:
             target_neurons=["PPL101"],
             output_folder="/tmp/drocat-test",
         )
-        assert params.output_name.startswith("interdataset_aMe12_to_PPL101_"), params.output_name
+        assert params.output_name.startswith("cross-dataset_aMe12_to_PPL101_"), params.output_name
         assert "comp_" not in params.output_name
         # Empty-string saveas must fall back to the auto name
         params.saveas = ""
-        assert params.output_name.startswith("interdataset_aMe12_to_PPL101_"), params.output_name
+        assert params.output_name.startswith("cross-dataset_aMe12_to_PPL101_"), params.output_name
 
     def test_scan_output_files_empty(self):
         from ui.runner import ScriptRunner
@@ -856,7 +858,7 @@ class TestRunner:
         sr = ScriptRunner()
         with tempfile.TemporaryDirectory() as tmpdir:
             old = Path(tmpdir) / "aMe12_to_aMe10"
-            new = Path(tmpdir) / "findpath_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_120000"
+            new = Path(tmpdir) / "find-paths-complete_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_120000"
             old.mkdir()
             new.mkdir()
             sr._run_logs = [
@@ -884,7 +886,7 @@ class TestRunner:
         from ui.runner import ScriptRunner
         sr = ScriptRunner()
         with tempfile.TemporaryDirectory() as tmpdir:
-            run = Path(tmpdir) / "findsimilar_hemibrain_v1_2_1_aMe12_20260801_120000"
+            run = Path(tmpdir) / "similar-morphology_hemibrain_v1_2_1_aMe12_20260801_120000"
             run.mkdir()
             (run / "results.csv").write_text("rank,target_bodyId\n1,201")
             sr._run_logs = [
@@ -913,17 +915,17 @@ class TestRunner:
         from ui.runner import ScriptRunner
         sr = ScriptRunner()
         with tempfile.TemporaryDirectory() as tmpdir:
-            run = Path(tmpdir) / "findpath_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_120000"
+            run = Path(tmpdir) / "find-paths-complete_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_120000"
             run.mkdir()
             sr._run_logs = [("stdout", f"  📁 Created output folder: {run}")]
             assert sr._resolve_scan_dir(tmpdir) == str(run)
 
     def test_resolve_scan_dir_accepts_direct_run_folder(self):
-        """plot_path passes its pre-created plotpath_ folder directly."""
+        """plot_path passes its pre-created plot-network_ folder directly."""
         from ui.runner import ScriptRunner
         sr = ScriptRunner()
         with tempfile.TemporaryDirectory() as tmpdir:
-            run = Path(tmpdir) / "plotpath_my_paths_20260801_120000"
+            run = Path(tmpdir) / "plot-network_my_paths_20260801_120000"
             run.mkdir()
             sr._run_logs = [("stdout", "plotting network...")]
             assert sr._resolve_scan_dir(str(run)) == str(run)
@@ -971,6 +973,56 @@ class TestRunner:
         assert normalize_palette_range(-5, 200) == (0, 100)
         assert move_color(["a", "b", "c"], 1, -1) == ["b", "a", "c"]
         assert move_color(["a", "b", "c"], 0, -1) == ["a", "b", "c"]
+
+    def test_palette_catalog_names_embed_their_correct_bokeh_sources(self):
+        """Every displayed name must retain its own source palette."""
+        import bokeh.palettes as bp
+
+        from ui.components.palette_picker import get_palette_catalog
+
+        catalog = dict(get_palette_catalog())
+
+        # Cover each source family, including the two sizes used by the
+        # catalog.  This catches a name accidentally pointing at a nearby
+        # sequential or diverging palette.
+        expected_sources = {
+            "Category20": "Category20",
+            "Blues": "Blues256",
+            "BuGn": "BuGn9",
+            "Viridis": "Viridis256",
+            "BrBG": "BrBG11",
+            "Spectral": "Spectral11",
+        }
+        for name, source_name in expected_sources.items():
+            source = getattr(bp, source_name)
+            if isinstance(source, dict):
+                source = source[max(source.keys())]
+            assert catalog[name] == list(source)
+
+        # The preview cannot be correct when two displayed names resolve to
+        # the same sequence.  Keep this invariant explicit in the test.
+        assert len({tuple(colors) for colors in catalog.values()}) == len(catalog)
+
+    def test_palette_picker_preview_uses_the_full_named_palette(self):
+        """A long palette preview must include both ends of its source."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.palette_picker import get_palette_catalog, palette_picker
+
+        client = Client(page("/palette-picker-full-preview"))
+        with client:
+            picker = palette_picker("Palette", value="Blues")
+
+        source = dict(get_palette_catalog())["Blues"]
+        assert picker.get_colors() == source
+        strips = [
+            el for el in client.elements.values()
+            if "drocat-palette-strip" in getattr(el, "_classes", [])
+        ]
+        preview_style = getattr(strips[-1], "_style", {})
+        background = preview_style.get("background", "")
+        assert source[0] in background
+        assert source[-1] in background
 
     def test_palette_editor_set_palette_and_on_change(self):
         """palette_editor exposes set_palette() (programmatic, no callback)
@@ -1165,12 +1217,73 @@ class TestRunner:
             for el in client.elements.values()
         )
 
+    def test_palette_editor_supports_free_form_alpha_overrides(self):
+        """Custom palette entries accept mixed syntax and optional per-entry alpha."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.palette_picker import COLOR_FORMAT_HINT, palette_editor
+
+        client = Client(page("/palette-editor-alpha-overrides"))
+        with client:
+            editor = palette_editor("Neuron Colors", value="Category10")
+
+        toggle = next(
+            el for el in client.elements.values()
+            if getattr(el, "tag", "") == "q-btn-toggle"
+        )
+        toggle.value = "Custom colors"
+
+        format_input = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Color format"
+        )
+        alpha_input = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Alpha (0–1)"
+        )
+        alpha_toggle = next(
+            el for el in client.elements.values()
+            if getattr(el, "tag", "") == "q-checkbox"
+        )
+        add_button = next(
+            el for el in client.elements.values()
+            if getattr(el, "text", "") == "Add color"
+        )
+        add_handler = next(iter(add_button._event_listeners.values())).handler
+
+        assert "#RRGGBBAA" in COLOR_FORMAT_HINT
+        assert "global opacity" in COLOR_FORMAT_HINT
+        assert alpha_input._props.get("disable") is True
+
+        # Explicit alpha in the typed format is kept as-is.
+        format_input.value = "rgba(10, 20, 30, 0.25)"
+        add_handler(None)
+        # A color without alpha gets a separate per-entry override only when
+        # the checkbox is enabled; otherwise it remains eligible for the
+        # renderer's global opacity fallback.
+        format_input.value = "#abcdef"
+        add_handler(None)
+        alpha_toggle.value = True
+        alpha_input.value = 0.35
+        format_input.value = "rgb(255, 0, 0)"
+        add_handler(None)
+
+        assert editor.get_custom_colors() == [
+            "rgba(10, 20, 30, 0.25)",
+            "#abcdef",
+            "rgba(255, 0, 0, 0.35)",
+        ]
+
     def test_palette_editor_long_palette_uses_gradient_preview(self):
         """Long (sequential) palettes render as a gradient strip without
         drag targets; the range slider still slices them."""
         from nicegui import Client
         from nicegui.page import page
-        from ui.components.palette_picker import palette_editor
+        from ui.components.palette_picker import (
+            palette_editor,
+            palette_slice,
+            sample_palette,
+        )
 
         client = Client(page("/palette-editor-gradient"))
         with client:
@@ -1194,6 +1307,56 @@ class TestRunner:
             getattr(el, "_props", {}).get("aria-label") == "Reset palette"
             for el in client.elements.values()
         )
+
+        # The range must be rendered as the complete selected gradient, not
+        # truncated to the first 32 source colors.
+        range_el = next(
+            el for el in client.elements.values()
+            if getattr(el, "tag", "") == "q-range"
+        )
+        range_listener = next(
+            listener for listener in range_el._event_listeners.values()
+            if listener.type == "update:modelValue" and listener.args is None
+        )
+        range_el._handle_event({
+            "listener_id": range_listener.id,
+            "args": {"min": 20, "max": 60},
+        })
+        selected = palette_slice(editor.get_palette_order(), 20, 60)
+        assert editor.get_colors() == selected
+        assert editor.get_colors_for_count(3) == sample_palette(selected, 3)
+
+        preview_strips = [
+            el for el in client.elements.values()
+            if "drocat-palette-strip" in getattr(el, "_classes", [])
+        ]
+        preview_style = getattr(preview_strips[-1], "_style", {})
+        assert selected[0] in preview_style.get("background", "")
+        assert selected[-1] in preview_style.get("background", "")
+
+    def test_shared_visualization_settings_preserve_continuous_palette_metadata(self):
+        from ui.components.skeleton_visualization_settings import (
+            SkeletonVisualizationSettings,
+        )
+
+        class PaletteField:
+            value = None
+
+            def get_colors(self):
+                from ui.components.palette_picker import _PaletteSelection
+
+                return _PaletteSelection(
+                    ["#000000", "#ffffff"],
+                    continuous=True,
+                )
+
+        values = SkeletonVisualizationSettings(
+            fields={"neuron_colors": PaletteField()}
+        ).values()
+        assert values["neuron_colors"] == {
+            "colors": ["#000000", "#ffffff"],
+            "continuous": True,
+        }
 
     def test_roi_mesh_traces_have_independent_legend_entries(self):
         """Each resolved ROI stays separately toggleable in the Plotly legend."""
@@ -2216,7 +2379,7 @@ class TestTabs:
 
     def test_pathfinding_tabs_have_hemisphere_filter_select(self):
         """Find All Paths and Shortest expose the 'Hemisphere' selector
-        (both / left / right) next to 'Separate Hemispheres'."""
+        (both / left / right) next to 'Hemisphere-aware'."""
         from nicegui import Client
         from nicegui.page import page
         from ui.tabs.find_path import create_find_path_tab
@@ -2239,7 +2402,7 @@ class TestTabs:
                 for el in client.elements.values()
                 if getattr(el, "text", "")
             ]
-            assert "Separate Hemispheres (L/R)" in texts
+            assert "Hemisphere-aware" in texts
             assert "Hemisphere" in labels
 
     def test_restructured_tabs_have_independent_block_cards(self):
@@ -2308,7 +2471,7 @@ class TestTabs:
 
     def test_interdataset_symmetry_off_without_hemispheres(self):
         """Regression: the cross-dataset tab must NOT pass symmetry_analysis=True
-        (or keep-hemisphere-conserved) when Separate Hemispheres is unchecked —
+        (or keep-hemisphere-conserved) when Hemisphere-aware is unchecked —
         the dependent checkboxes are unchecked AND disabled by default, so a
         greyed-out True never reaches ComparisonParameters."""
         from nicegui import Client
@@ -2326,6 +2489,10 @@ class TestTabs:
         sep = by_id["checkbox-separate-hemi"]
         sym = by_id["checkbox-symmetry"]
         cons = by_id["checkbox-hemi-conserved"]
+        assert any(
+            getattr(el, "text", "") == "Hemisphere-aware"
+            for el in client.elements.values()
+        )
         assert sep.value is False
         # symmetry is unchecked AND disabled while hemispheres are off
         assert sym.value is False, "symmetry must be unchecked without hemispheres"
@@ -2450,7 +2617,7 @@ class TestTabs:
 
     def test_path_tabs_uncheck_hemisphere_dependents(self):
         """Find All Paths and Find Shortest UNCHECK (not just disable) the
-        hemisphere-dependent options when Separate Hemispheres is off, so a
+        hemisphere-dependent options when Hemisphere-aware is off, so a
         greyed-out True never reaches the backend."""
         from nicegui import Client
         from nicegui.page import page
@@ -2466,11 +2633,11 @@ class TestTabs:
             for el in client.elements.values():
                 label = (getattr(el, "_props", {}).get("label")
                          or getattr(el, "text", ""))
-                if label in ("Separate Hemispheres (L/R)",
+                if label in ("Hemisphere-aware",
                              "Keep Only Hemisphere-Conserved Edges",
                              "Symmetry Analysis"):
                     by_label[label] = el
-            sep = by_label["Separate Hemispheres (L/R)"]
+            sep = by_label["Hemisphere-aware"]
             keep = by_label["Keep Only Hemisphere-Conserved Edges"]
             sym = by_label["Symmetry Analysis"]
             sep.value = True
@@ -3564,6 +3731,21 @@ class TestComponents:
         assert panel._format_size(1536) == "1.5 KB"
         assert panel._format_size(1048576) == "1.0 MB"
 
+    def test_output_panel_renders_one_status_badge(self):
+        """The runner header owns the only status badge for the panel."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.output_panel import OutputPanel
+
+        client = Client(page("/output-panel-single-status-test"))
+        with client:
+            panel = OutputPanel("Test")
+            panel.create()
+
+        assert panel.status_label is not None
+        assert panel.page_progress is not None
+        assert panel.page_progress.status_label is None
+
     def test_output_panel_progress_refreshes_same_bar_in_place(self):
         """Progress lines refresh their own bar; new bars start fresh lines."""
         from nicegui import Client
@@ -3602,6 +3784,53 @@ class TestComponents:
         assert len(children) == 5
         assert children[4].text == "done"
 
+    def test_output_panel_counter_progress_updates_overall_bar(self):
+        """tqdm/LineProgress counters advance the active outer step."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.output_panel import OutputPanel
+
+        client = Client(page("/output-panel-counter-progress-test"))
+        with client:
+            panel = OutputPanel("Test")
+            panel.create()
+
+        panel.page_progress.start("find_path")
+        panel.page_progress.update_phase("initialize", "Initializing Complete Paths")
+        assert panel.page_progress.current_value == pytest.approx(0.0)
+        assert panel.progress_label.text == (
+            "Step 1/5: Initialize source and target neurons"
+        )
+        panel.page_progress.update_phase(
+            "initialize_complete", "Initialization complete"
+        )
+        assert panel.page_progress.current_value == pytest.approx(0.2)
+        assert panel.progress_label.text == (
+            "Step 2/5: Discover connections layer by layer"
+        )
+        panel.page_progress.update_phase("execute", "Running Complete Paths")
+        panel.log("Deriving type-level paths: 0/100 (0.0%) [00:00<?, 0.0it/s]", "progress")
+        assert panel.page_progress.current_value == pytest.approx(1 / 5)
+        assert panel.progress_label.text == "Step 2/5: Deriving type-level paths"
+
+        panel.log(
+            "Deriving type-level paths: 50/100 (50.0%) [00:01<00:01, 50.0it/s]",
+            "progress",
+        )
+        assert panel.page_progress.current_value == pytest.approx(1.5 / 5)
+
+        # The tqdm/LineProgress format is also refreshed in place in the log.
+        assert len(panel.log_area.default_slot.children) == 1
+        assert panel.log_area.default_slot.children[0].text.startswith(
+            "Deriving type-level paths: 50/100"
+        )
+
+        stopped_value = panel.page_progress.current_value
+        panel.set_running(False)
+        assert panel.page_progress.current_value == pytest.approx(stopped_value)
+        panel.set_status("Failed", "red")
+        assert panel.progress_label.text == "Failed during Deriving type-level paths"
+
     def test_output_panel_step_progress_events_drive_determinate_bar(self):
         """[DROCAT][progress] events switch the bar to a determinate step
         fraction, set the step label, and never appear in the log."""
@@ -3620,26 +3849,117 @@ class TestComponents:
         # The event is consumed: bar value + label update, no log line.
         panel.log("[DROCAT][progress] 1/6 Resolving query neuron", "stdout")
         assert panel.progress_bar.value == pytest.approx(1 / 6)
-        assert panel.progress_label.text == "Step 1/6 — Resolving query neuron"
+        assert "indeterminate" not in panel.progress_bar._props
+        assert panel.progress_label.text == "Step 1/6: Resolving query neuron"
         assert panel.log_area.default_slot.children == []
 
         # A later step moves the bar forward and replaces the label.
         panel.log("[DROCAT][progress] 3/6 Expanding candidate types to the scoring pool", "stdout")
         assert panel.progress_bar.value == pytest.approx(0.5)
-        assert panel.progress_label.text == "Step 3/6 — Expanding candidate types to the scoring pool"
+        assert panel.progress_label.text == "Step 3/6: Expanding candidate types to the scoring pool"
 
         # The final step completes the bar; regular output still logs after.
         panel.log("[DROCAT][progress] 6/6 Saving results & visualization", "stdout")
         assert panel.progress_bar.value == pytest.approx(1.0)
-        assert panel.progress_label.text == "Step 6/6 — Saving results & visualization"
+        assert panel.progress_label.text == "Step 6/6: Saving results & visualization"
         panel.log("regular line", "stdout")
         assert len(panel.log_area.default_slot.children) == 1
         assert panel.log_area.default_slot.children[0].text == "regular line"
 
-        # Ending the run hides the progress row and clears the label.
+        # Ending the run keeps the progress row visible; the caller's final
+        # status determines success vs failure.
         panel.set_running(False)
-        assert panel.progress_label.text == ""
-        assert panel.progress_row.visible is False
+        assert panel.progress_label.text == "Step 6/6: Saving results & visualization"
+        assert panel.progress_row.visible is True
+        panel.set_status("Completed", "green")
+        assert panel.progress_bar.value == pytest.approx(1.0)
+        assert panel.progress_label.text == "Completed successfully!"
+        assert panel.progress_row.visible is True
+
+    def test_output_panel_places_function_progress_above_execution_log(self):
+        """The tracker stays in the output card and uses backend stages."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.common import tool_page
+        from ui.components.output_panel import OutputPanel
+
+        client = Client(page("/page-progress-test"))
+        with client:
+            _form, results = tool_page("Progress Test")
+            with results:
+                panel = OutputPanel("Test")
+                panel.create()
+
+        assert panel.page_progress is not None
+        assert panel.progress_bar._style.get("height") == "12px"
+        assert panel.page_progress.progress_bar._style.get("height") == "12px"
+        assert panel.page_progress.steps_container is None
+        assert not any(
+            "drocat-progress-step" in getattr(element, "_classes", [])
+            for element in client.elements.values()
+        )
+
+        panel.page_progress.start("find_similar_morphology")
+        assert panel.page_progress.step_labels == [
+            "Resolve query neuron",
+            "Discover candidates from connectivity",
+            "Expand candidate types to the scoring pool",
+            "Load and vectorize skeletons",
+            "Score morphological similarity",
+            "Save results and visualization",
+        ]
+        panel.log(
+            "[DROCAT][progress] 3/6 Expanding candidate types",
+            "stdout",
+        )
+        assert panel.page_progress.current_value == pytest.approx(0.5)
+        assert panel.page_progress.progress_label.text == (
+            "Step 3/6: Expanding candidate types"
+        )
+        assert panel.page_progress.step_labels[2] == "Expanding candidate types"
+
+        # A tool without backend step events still advances through the
+        # generic lifecycle phases used by ScriptRunner.
+        panel.page_progress.start("find_path")
+        panel.page_progress.update_phase("initialize", "Initializing Complete Paths")
+        assert panel.page_progress.current_value == pytest.approx(0.0)
+        assert panel.page_progress.progress_label.text == (
+            "Step 1/5: Initialize source and target neurons"
+        )
+        panel.page_progress.update_phase("initialize_complete")
+        assert panel.page_progress.current_value == pytest.approx(0.2)
+        assert panel.page_progress.progress_label.text == (
+            "Step 2/5: Discover connections layer by layer"
+        )
+
+        panel.page_progress.update_step(2, 5, "Discovering connections")
+        failed_value = panel.page_progress.current_value
+        panel.page_progress.finish(False)
+        assert panel.page_progress.current_value == pytest.approx(failed_value)
+        assert panel.page_progress.progress_label.text == (
+            "Failed during Discovering connections"
+        )
+
+        panel.page_progress.start(
+            "find_homologs", method_name="find_homologs"
+        )
+        assert panel.page_progress.step_labels == [
+            "Build source profiles",
+            "Build target profiles",
+            "Compare and score candidates",
+            "Save homolog results",
+        ]
+
+        panel.page_progress.start(
+            "find_similar_morphology",
+            context={"candidate_source": "cache"},
+        )
+        assert panel.page_progress.step_labels == [
+            "Resolve query neuron",
+            "Load vector cache",
+            "Score morphological similarity",
+            "Save results and visualization",
+        ]
 
     def test_output_dir_fields_sync_and_persist(self, tmp_path, monkeypatch):
         """Global changes update inherited fields but leave tab overrides
@@ -3744,7 +4064,7 @@ class TestComponents:
         from ui.components.output_panel import OutputPanel
         from ui.runner import ScriptRunner
 
-        run_folder = tmp_path / "findpath_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_120000"
+        run_folder = tmp_path / "find-paths-complete_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_120000"
         run_folder.mkdir()
         (run_folder / "connections.csv").write_text("a,b\n1,2")
 

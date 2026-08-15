@@ -170,7 +170,7 @@ def create_find_shortest_tab():
                     placeholder="e.g., aMe_clock_shortest",
                 ).classes("w-full drocat-input").tooltip(
                     "Custom output folder name. Leave empty for the unified auto name "
-                    "(findshortestpath_<dataset>_<src>_to_<tgt>_<params>_<timestamp>)."
+                    "(find-paths-shortest_<dataset>_<src>_to_<tgt>_<params>_<timestamp>)."
                 )
             with ui.row().classes("gap-4"):
                 skip_bodyid = checkbox_input(
@@ -186,7 +186,7 @@ def create_find_shortest_tab():
             section_header("Hemisphere Analysis", "sync_alt")
             with ui.row().classes("gap-4"):
                 separate_hemi = checkbox_input(
-                    "Separate Hemispheres (L/R)", False,
+                    "Hemisphere-aware", False,
                     hint="Split type/group aggregation into _L/_R/_U hemisphere labels.",
                 )
                 hemi_filter = select_input(
@@ -197,7 +197,7 @@ def create_find_shortest_tab():
                 )
                 keep_hemi_conserved = checkbox_input(
                     "Keep Only Hemisphere-Conserved Edges", False,
-                    hint="Keep only edges conserved between hemispheres (requires Separate Hemispheres).",
+                    hint="Keep only edges conserved between hemispheres (requires Hemisphere-aware).",
                 )
                 symmetry_analysis = checkbox_input(
                     "Symmetry Analysis", False,

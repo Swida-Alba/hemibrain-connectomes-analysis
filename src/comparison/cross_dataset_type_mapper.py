@@ -459,15 +459,19 @@ class CrossDatasetTypeMapper:
         # Normalize dataset names
         src_ds = self._normalize_dataset_name(source_dataset)
         tgt_ds = self._normalize_dataset_name(target_dataset)
-        
-        if src_ds == tgt_ds:
+        src_mapping_key = self._get_type_mapping_key(source_dataset)
+        tgt_mapping_key = self._get_type_mapping_key(target_dataset)
+
+        # Different releases can share one type namespace.  In that case the
+        # native name is already the correct name in the target release.
+        if src_ds == tgt_ds or src_mapping_key == tgt_mapping_key:
             return type_name
 
         base_name, hemi_suffix = self._split_hemi_suffix(type_name)
         
-        if src_ds in self._type_mappings:
-            if base_name in self._type_mappings[src_ds]:
-                mapped = self._type_mappings[src_ds][base_name].get(tgt_ds)
+        if src_mapping_key in self._type_mappings:
+            if base_name in self._type_mappings[src_mapping_key]:
+                mapped = self._type_mappings[src_mapping_key][base_name].get(tgt_mapping_key)
                 if mapped and hemi_suffix:
                     return f"{mapped}{hemi_suffix}"
                 return mapped
@@ -511,13 +515,40 @@ class CrossDatasetTypeMapper:
 
         return raw_dataset
 
+    def _get_type_mapping_key(self, dataset: str) -> str:
+        """Return the crosswalk namespace used for *dataset*.
+
+        Dataset identifiers remain release-specific for data access, cache
+        paths, labels, and legends.  Type names use a broader schema
+        namespace, however:
+
+        * Male-CNS v0.9 and v1.0 use the Male-CNS ``type`` namespace.
+        * FAFB and BANC releases use the shared FlyWire ``flywireType``
+          namespace.  The v1.0 neuron table stores that crosswalk under the
+          existing FAFB v783 mapping key, and the BANC v626 entries contain
+          the same values.
+
+        Keeping this translation separate prevents a release collision from
+        either losing a valid mapping or renaming one release into another.
+        """
+        normalized = self._normalize_dataset_name(dataset)
+
+        if normalized.startswith('male-cns:'):
+            return 'male-cns:v1.0'
+
+        if normalized.startswith('flywire_FAFB_') or normalized.startswith('flywire_BANC_'):
+            return 'flywire_FAFB_v783'
+
+        return normalized
+
     def _warn_if_unsupported_dataset(self, dataset: str) -> None:
         """Log once when a selected release has no validated type mapping."""
         if not self._loaded:
             return
 
         normalized = self._normalize_dataset_name(dataset)
-        if normalized in self._type_mappings:
+        mapping_key = self._get_type_mapping_key(dataset)
+        if mapping_key in self._type_mappings:
             return
         if normalized in self._unsupported_dataset_warnings:
             return
@@ -564,9 +595,11 @@ class CrossDatasetTypeMapper:
         
         if source_dataset:
             src_ds = self._normalize_dataset_name(source_dataset)
+            src_mapping_key = self._get_type_mapping_key(source_dataset)
             for ds in datasets:
                 tgt_ds = self._normalize_dataset_name(ds)
-                if tgt_ds == src_ds:
+                tgt_mapping_key = self._get_type_mapping_key(ds)
+                if tgt_ds == src_ds or tgt_mapping_key == src_mapping_key:
                     result[ds] = type_name
                 else:
                     result[ds] = self.get_mapped_type(type_name, source_dataset, ds)
@@ -743,6 +776,16 @@ class CrossDatasetTypeMapper:
             code: self.get_dataset_full_name(dataset)
             for dataset, code in zip(datasets, codes)
         }
+
+    def _get_male_cns_mapping_name(
+        self,
+        mappings: Dict[str, Optional[str]],
+    ) -> Optional[str]:
+        """Return the Male-CNS name from a release-aware mapping result."""
+        for dataset, mapped_name in mappings.items():
+            if mapped_name and self._get_type_mapping_key(dataset) == 'male-cns:v1.0':
+                return mapped_name
+        return None
     
     def get_display_name(
         self,
@@ -767,8 +810,9 @@ class CrossDatasetTypeMapper:
         base_name, hemi_suffix = self._split_hemi_suffix(type_name)
         mappings = self.resolve_type_across_datasets(base_name, datasets, source_dataset)
         
-        # Get male-cns name as canonical (primary display name)
-        mcns_name = mappings.get('male-cns:v1.0') or mappings.get('male-cns_v1_0')
+        # Get the Male-CNS name as canonical (primary display name).  This
+        # works whether the selected Male-CNS release is v0.9 or v1.0.
+        mcns_name = self._get_male_cns_mapping_name(mappings)
         
         if not mcns_name:
             # Use the original type name as canonical
@@ -848,8 +892,8 @@ class CrossDatasetTypeMapper:
         if not self._loaded:
             self.load()
         
-        norm_ds = self._normalize_dataset_name(dataset)
-        return type_name in self._n_to_1_types.get(norm_ds, set())
+        mapping_key = self._get_type_mapping_key(dataset)
+        return type_name in self._n_to_1_types.get(mapping_key, set())
     
     def get_n_to_1_conflicts(self) -> List[TypeMappingConflict]:
         """Get all N-to-1 type mapping conflicts."""
@@ -907,12 +951,19 @@ class CrossDatasetTypeMapper:
         if not self._loaded:
             self.load()
         
-        # Find which datasets have this type name directly
+        # Find which type namespaces have this name directly.  The selected
+        # dataset may be an older release, but the index is intentionally
+        # stored by shared schema namespace (Male-CNS or FlyWire), not by a
+        # particular release.
         datasets_with_type = []
         for ds in datasets:
-            norm_ds = self._normalize_dataset_name(ds)
-            if norm_ds in self._dataset_types and type_name in self._dataset_types[norm_ds]:
-                datasets_with_type.append(norm_ds)
+            mapping_key = self._get_type_mapping_key(ds)
+            if (
+                mapping_key in self._dataset_types
+                and type_name in self._dataset_types[mapping_key]
+                and mapping_key not in datasets_with_type
+            ):
+                datasets_with_type.append(mapping_key)
         
         if len(datasets_with_type) <= 1:
             return None
@@ -921,9 +972,9 @@ class CrossDatasetTypeMapper:
         # Use the highest priority dataset as source
         source_ds = None
         for priority_ds in DATASET_PRIORITY:
-            norm_ds = self._normalize_dataset_name(priority_ds)
-            if norm_ds in datasets_with_type:
-                source_ds = norm_ds
+            mapping_key = self._get_type_mapping_key(priority_ds)
+            if mapping_key in datasets_with_type:
+                source_ds = mapping_key
                 break
         
         if not source_ds:
@@ -1108,8 +1159,10 @@ class CrossDatasetTypeMapper:
             source_ds = self._detect_type_source(type_name)
             mappings = self.resolve_type_across_datasets(type_name, datasets, source_ds)
             
-            # Use male-cns name as label if available
-            mcns_name = mappings.get('male-cns:v1.0') or mappings.get('male-cns_v1_0') or type_name
+            # Use the Male-CNS namespace name as label if available.  The
+            # selected release may be v0.9 even though the crosswalk source
+            # is the v1.0 neuron table.
+            mcns_name = self._get_male_cns_mapping_name(mappings) or type_name
             labels.append(mcns_name)
             
             # Build dataset mapping
@@ -1183,10 +1236,12 @@ class CrossDatasetTypeMapper:
             # Resolve to each dataset
             mappings_for_type = {}
             has_different = False
+            source_mapping_key = self._get_type_mapping_key(source_ds)
             
             for ds in datasets:
                 norm_ds = self._normalize_dataset_name(ds)
-                if norm_ds == source_ds:
+                target_mapping_key = self._get_type_mapping_key(ds)
+                if norm_ds == source_ds or target_mapping_key == source_mapping_key:
                     per_dataset[ds][neuron] = neuron
                     mappings_for_type[ds] = neuron
                 else:
@@ -1259,8 +1314,7 @@ class CrossDatasetTypeMapper:
             
             # Check if any dataset has different mapping
             for ds in datasets:
-                norm_ds = self._normalize_dataset_name(ds)
-                if norm_ds != source_ds:
+                if self._get_type_mapping_key(ds) != self._get_type_mapping_key(source_ds):
                     mapped = self.get_mapped_type(type_name, source_ds, ds)
                     if mapped and mapped != type_name:
                         mapped_count += 1
@@ -1316,12 +1370,11 @@ class CrossDatasetTypeMapper:
             return type_name
         
         # If already from male-cns, return as-is
-        norm_src = self._normalize_dataset_name(source_dataset)
-        if norm_src == 'male-cns:v1.0':
+        if self._get_type_mapping_key(source_dataset) == 'male-cns:v1.0':
             return type_name
         
         # Get male-cns mapping
-        mapped = self.get_mapped_type(type_name, norm_src, 'male-cns:v1.0')
+        mapped = self.get_mapped_type(type_name, source_dataset, 'male-cns:v1.0')
         return mapped if mapped else type_name
     
     def get_merge_mapping_for_types(
@@ -1468,10 +1521,9 @@ class CrossDatasetTypeMapper:
         if not self._loaded:
             self.load()
         
-        norm_ds = self._normalize_dataset_name(source_dataset)
-        
-        # If already male-cns, return as-is
-        if norm_ds == 'male-cns:v1.0':
+        # If already in the Male-CNS namespace, return as-is.  This includes
+        # male-cns:v0.9, whose native type names share the v1.0 namespace.
+        if self._get_type_mapping_key(source_dataset) == 'male-cns:v1.0':
             return partner_types.copy()
         
         standardized: Dict[str, float] = {}

@@ -147,7 +147,7 @@ class TestFindNetwork:
         assert kept == {("S", "A"), ("A", "S"), ("S", "B")}
 
         base = os.path.basename(fc.network_folder)
-        assert base.startswith("findnetwork_")
+        assert base.startswith("find-network_")
         details = os.path.join(fc.network_folder, "data_details")
         assert os.path.exists(os.path.join(details, "connection_type.csv"))
         assert os.path.exists(os.path.join(details, "neurons.csv"))

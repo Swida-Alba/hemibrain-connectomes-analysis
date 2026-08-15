@@ -16,6 +16,7 @@ import pandas as pd
 import numpy as np
 import polars as pl
 from .fast_graph_core import FastGraph
+from .shared_controls import SHARED_JS, js_escape, html_escape, json_safe
 import os
 import json
 import webbrowser
@@ -630,7 +631,7 @@ class VisualizePath:
                 self.base_filename = f'empty_network_{timestamp}'
             else:
                 # The UI passes a per-run folder that already ends in a
-                # timestamp (for example, ``plotpath_empty_network_...``).
+                # timestamp (for example, ``plot-network_empty_network_...``).
                 # Reuse that name so the generated file does not repeat the
                 # same timestamp. Standalone callers with an ordinary folder
                 # still receive the timestamped filename used historically.
@@ -2526,8 +2527,8 @@ class VisualizePath:
         # Create custom hover labels that show source, target, and original weights
         hover_labels = []
         for i, (src_idx, tgt_idx, orig_weight, abs_weight) in enumerate(zip(source_indices, target_indices, original_weights, weights)):
-            source_name = node_list[src_idx]
-            target_name = node_list[tgt_idx]
+            source_name = html_escape(node_list[src_idx])
+            target_name = html_escape(node_list[tgt_idx])
             hover_text = f"{source_name} → {target_name}<br>"
             hover_text += f"Weight: {orig_weight:,}"  # Show original (possibly negative)
             if ratios[i] != 0:
@@ -2536,7 +2537,7 @@ class VisualizePath:
                 hover_text += f"<br>Probability: {probs[i]:.3f}"
             # Add NT type to hover if available
             if nt_types_list[i] is not None:
-                hover_text += f"<br>NT: {nt_types_list[i]}"
+                hover_text += f"<br>NT: {html_escape(nt_types_list[i])}"
             hover_labels.append(hover_text)
         
         # Create Sankey figure using Plotly directly (like coana)
@@ -2683,7 +2684,7 @@ class VisualizePath:
         
         # Get the basic Plotly HTML
         import plotly.io as pio
-        basic_html = pio.to_html(fig, include_plotlyjs='cdn', full_html=False)
+        basic_html = pio.to_html(fig, include_plotlyjs='https://cdn.plot.ly/plotly-2.35.2.min.js', full_html=False)
         
         # Create custom HTML with interactive controls
         html_content = self._create_sankey_html_with_controls(
@@ -2699,7 +2700,8 @@ class VisualizePath:
             original_weights,
             simplification_applied,
             original_edge_count,
-            nt_types_list=nt_types_list
+            nt_types_list=nt_types_list,
+            edge_colors=edge_colors_updated
         )
         
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -2716,7 +2718,7 @@ class VisualizePath:
     
     def _create_sankey_html_with_controls(self, plotly_div, node_list, node_labels, node_colors_list, 
                                           source_indices, target_indices, weights, ratios=None, probs=None, original_weights=None,
-                                          simplification_applied=False, original_edge_count=0, nt_types_list=None):
+                                          simplification_applied=False, original_edge_count=0, nt_types_list=None, edge_colors=None):
         """
         Create HTML with interactive controls for Sankey diagram.
         
@@ -3069,7 +3071,7 @@ class VisualizePath:
                 <div class="control-group">
                     <label class="control-label">Node Width</label>
                     <div class="color-input-group">
-                        <input type="range" id="nodeWidth" min="1" max="50" value="5">
+                        <input type="range" id="nodeWidth" min="{self.min_node_size}" max="{self.max_node_size}" value="5">
                         <span class="slider-value" id="nodeWidthValue">5</span>
                     </div>
                 </div>
@@ -3077,7 +3079,7 @@ class VisualizePath:
                 <div class="control-group">
                     <label class="control-label">Font Size</label>
                     <div class="color-input-group">
-                        <input type="range" id="fontSize" min="8" max="20" value="12">
+                        <input type="range" id="fontSize" min="{self.min_font_size}" max="{self.max_font_size}" value="12">
                         <span class="slider-value" id="fontSizeValue">12px</span>
                     </div>
                 </div>
@@ -3087,7 +3089,7 @@ class VisualizePath:
             <div class="control-row" id="ntControlRow" style="display: {'flex' if has_nt_types else 'none'};">
                 <div class="control-group">
                     <label class="control-label">
-                        <input type="checkbox" id="colorByNt" onchange="toggleNtColoring()"> Color by NT
+                        <input type="checkbox" id="colorByNt" onchange="toggleNtColoring()" {'checked' if self.color_edges_by_nt else ''}> Color by NT
                     </label>
                 </div>
                 
@@ -3136,7 +3138,7 @@ class VisualizePath:
                     <button class="btn-secondary" onclick="zoomIn()">🔍 +</button>
                     <button class="btn-secondary" onclick="zoomOut()">🔍 -</button>
                     <button class="btn-secondary" onclick="resetZoom()">⟲</button>
-                    <button class="btn-secondary" onclick="toggleLabels()">🏷️ Labels</button>
+                    <button class="btn-secondary" id="toggleLabelsBtn" onclick="toggleLabels()">🏷️ Hide Labels</button>
                 </div>
                 
                 <div class="btn-group">
@@ -3176,21 +3178,21 @@ class VisualizePath:
     
     <script>
         // Store original data
-        const nodeList = {node_list};
-        const nodeLabels = {node_labels};
-        const nodeColors = {node_colors_list};
-        const sourceIndices = {source_indices};
-        const targetIndices = {target_indices};
-        const weights = {weights};
-        const ratios = {ratios};
-        const probs = {probs};
-        const originalWeights = {original_weights};  // Original (possibly negative) weights
+        const nodeList = {json_safe(node_list)};
+        const nodeLabels = {json_safe(node_labels)};
+        const nodeColors = {json_safe(node_colors_list)};
+        const sourceIndices = {json_safe(source_indices)};
+        const targetIndices = {json_safe(target_indices)};
+        const weights = {json_safe(weights)};
+        const ratios = {json_safe(ratios)};
+        const probs = {json_safe(probs)};
+        const originalWeights = {json_safe(original_weights)};  // Original (possibly negative) weights
         const hasRatios = {str(has_ratios).lower()};
         const hasProbs = {str(has_probs).lower()};
         
         // NT type data for edge coloring
-        const ntTypes = {nt_types_list};  // NT type for each edge
-        const ntGroups = {nt_groups_for_edges};  // NT group for each edge (excitatory, inhibitory, modulatory, unknown)
+        const ntTypes = {json_safe(nt_types_list)};  // NT type for each edge
+        const ntGroups = {json_safe(nt_groups_for_edges)};  // NT group for each edge (excitatory, inhibitory, modulatory, unknown)
         const hasNtTypes = {str(has_nt_types).lower()};
         
         // NT group colors (can be modified via controls)
@@ -3201,8 +3203,14 @@ class VisualizePath:
             'unknown': '{NT_GROUP_COLORS["unknown"]}'
         }};
         
-        // Whether to color edges by NT group
-        let colorEdgesByNt = false;
+        // Whether to color edges by NT group (seeded from the Python-side
+        // color_edges_by_nt option so server-computed colors are not lost)
+        let colorEdgesByNt = {str(self.color_edges_by_nt).lower()};
+        
+        // Server-computed initial edge colors (NT/custom/link_color aware).
+        // Used until the user picks a custom edge color in the UI.
+        const initialEdgeColors = {json_safe(edge_colors) if edge_colors is not None else 'null'};
+        let edgeColorCustomized = false;
         
         // Current metric being displayed
         let currentMetric = 'weight';
@@ -3242,6 +3250,20 @@ class VisualizePath:
             return ntGroupColors[group] || ntGroupColors['unknown'];
         }}
         
+        // Parse '#rrggbb' or 'rgb(r,g,b)' / 'rgba(r,g,b,a)' into {{r, g, b}}
+        function parseColorStringRGB(color) {{
+            if (!color || typeof color !== 'string') return null;
+            const rgbaMatch = color.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+            if (rgbaMatch) {{
+                return {{ r: parseInt(rgbaMatch[1], 10), g: parseInt(rgbaMatch[2], 10), b: parseInt(rgbaMatch[3], 10) }};
+            }}
+            const hexMatch = color.match(/^#?([0-9a-fA-F]{{2}})([0-9a-fA-F]{{2}})([0-9a-fA-F]{{2}})/);
+            if (hexMatch) {{
+                return {{ r: parseInt(hexMatch[1], 16), g: parseInt(hexMatch[2], 16), b: parseInt(hexMatch[3], 16) }};
+            }}
+            return null;
+        }}
+        
         // Toggle visibility panel
         function toggleVisibilityPanel() {{
             const panel = document.getElementById('visibility-panel');
@@ -3254,7 +3276,7 @@ class VisualizePath:
             nodeLabels.forEach((label, idx) => {{
                 const item = document.createElement('div');
                 item.className = 'list-item';
-                item.innerHTML = `<span><span class="color-indicator" style="background: ${{nodeColors[idx]}}"></span>${{label}}</span>`;
+                item.innerHTML = `<span><span class="color-indicator" style="background: ${{nodeColors[idx]}}"></span>${{escapeHtml(label)}}</span>`;
                 item.onclick = () => toggleNode(idx);
                 item.id = `node-item-${{idx}}`;
                 nodeListEl.appendChild(item);
@@ -3265,7 +3287,7 @@ class VisualizePath:
                 const item = document.createElement('div');
                 item.className = 'list-item';
                 const metricDisplay = getMetricDisplay(idx);
-                item.innerHTML = `<span>${{nodeList[src]}} → ${{nodeList[targetIndices[idx]]}}</span><span style="color: #999;" id="edge-metric-${{idx}}">${{metricDisplay}}</span>`;
+                item.innerHTML = `<span>${{escapeHtml(nodeList[src])}} → ${{escapeHtml(nodeList[targetIndices[idx]])}}</span><span style="color: #999;" id="edge-metric-${{idx}}">${{metricDisplay}}</span>`;
                 item.onclick = () => toggleEdge(idx);
                 item.id = `edge-item-${{idx}}`;
                 edgeListEl.appendChild(item);
@@ -3347,6 +3369,7 @@ class VisualizePath:
         }});
         document.getElementById('edgeColor').addEventListener('input', (e) => {{
             document.getElementById('edgeColorText').value = e.target.value;
+            edgeColorCustomized = true;
         }});
         document.getElementById('edgeOpacity').addEventListener('input', (e) => {{
             document.getElementById('edgeOpacityValue').textContent = e.target.value + '%';
@@ -3403,10 +3426,13 @@ class VisualizePath:
             document.getElementById('fontSize').value = 12;
             document.getElementById('fontSizeValue').textContent = '12px';
             
+            // Clearing customization restores the server-computed edge colors
+            edgeColorCustomized = false;
+            
             // Reset NT group colors if available
             if (hasNtTypes) {{
-                document.getElementById('colorByNt').checked = false;
-                colorEdgesByNt = false;
+                document.getElementById('colorByNt').checked = {str(self.color_edges_by_nt).lower()};
+                colorEdgesByNt = {str(self.color_edges_by_nt).lower()};
                 document.getElementById('excitatoryColor').value = '{NT_GROUP_COLORS["excitatory"]}';
                 document.getElementById('excitatoryColorText').value = '{NT_GROUP_COLORS["excitatory"]}';
                 document.getElementById('inhibitoryColor').value = '{NT_GROUP_COLORS["inhibitory"]}';
@@ -3427,6 +3453,16 @@ class VisualizePath:
                 else if (nodeTypes[idx] === 'target') nodeColors[idx] = '{self.target_color}';
                 else nodeColors[idx] = '{self.intermediate_color}';
             }});
+            
+            // Reset metric, zoom, labels, and background
+            document.getElementById('metricSelect').value = 'weight';
+            currentMetric = 'weight';
+            zoomLevel = 1.0;
+            applyZoom();
+            labelsVisible = true;
+            const labelsBtn = document.getElementById('toggleLabelsBtn');
+            if (labelsBtn) labelsBtn.textContent = '🏷️ Hide Labels';
+            if (typeof bgCtrl !== 'undefined' && bgCtrl.reset) bgCtrl.reset('🎨 BG: ');
             
             showAll();
         }}
@@ -3467,6 +3503,11 @@ class VisualizePath:
             // Metric display name for hover text
             const metricDisplayName = (currentMetric === 'ratio') ? 'Ratio' : (currentMetric === 'prob' ? 'Probability' : 'Synapses');
             
+            // Ratio/probability are 0..1; normalize them to the synapse-weight
+            // scale so link widths stay comparable without a magic ×1000 factor.
+            const maxAbsWeight = Math.max(...weights.map(Math.abs), 0);
+            const metricScaleFactor = (currentMetric === 'ratio' || currentMetric === 'prob') && maxAbsWeight > 0 ? maxAbsWeight : 1;
+            
             sourceIndices.forEach((src, idx) => {{
                 const tgt = targetIndices[idx];
                 if (hiddenEdges.has(idx) || hiddenNodes.has(src) || hiddenNodes.has(tgt)) {{
@@ -3482,9 +3523,9 @@ class VisualizePath:
                     
                     // Use selected metric value
                     const metricValue = metricValues[idx];
-                    // For ratio and prob, scale them for better visualization (multiply by a factor)
+                    // Normalize ratio/prob to the weight scale (see above)
                     const scaledValue = (currentMetric === 'ratio' || currentMetric === 'prob') 
-                        ? metricValue * 1000  // Scale up for better visibility
+                        ? metricValue * metricScaleFactor
                         : metricValue;
                     visibleWeights.push(scaledValue);
                     
@@ -3496,9 +3537,9 @@ class VisualizePath:
                     // Add NT info to hover text if available
                     let ntInfo = '';
                     if (hasNtTypes && ntTypes[idx] && ntTypes[idx] !== 'unknown') {{
-                        ntInfo = '<br><b>NT Type:</b> ' + ntTypes[idx].toUpperCase();
+                        ntInfo = '<br><b>NT Type:</b> ' + escapeHtml(ntTypes[idx].toUpperCase());
                     }}
-                    const hoverStr = '<b>Source:</b> ' + nodeLabels[src] + '<br><b>Target:</b> ' + nodeLabels[tgt] + '<br><b>' + metricDisplayName + ':</b> ' + valueStr + ntInfo;
+                    const hoverStr = '<b>Source:</b> ' + escapeHtml(nodeLabels[src]) + '<br><b>Target:</b> ' + escapeHtml(nodeLabels[tgt]) + '<br><b>' + metricDisplayName + ':</b> ' + valueStr + ntInfo;
                     visibleHoverText.push(hoverStr);
                     
                     // Determine edge color based on NT group (if enabled) or default coloring
@@ -3517,10 +3558,21 @@ class VisualizePath:
                         g = 144;
                         b = 226;
                     }} else {{
-                        // Use selected edge color for positive edges
-                        r = parseInt(edgeColor.substr(1,2), 16);
-                        g = parseInt(edgeColor.substr(3,2), 16);
-                        b = parseInt(edgeColor.substr(5,2), 16);
+                        // Server-computed initial color (NT/custom/link_color aware)
+                        // until the user picks a custom edge color in the UI.
+                        const serverRGB = (!edgeColorCustomized && initialEdgeColors && initialEdgeColors[idx])
+                            ? parseColorStringRGB(initialEdgeColors[idx])
+                            : null;
+                        if (serverRGB) {{
+                            r = serverRGB.r;
+                            g = serverRGB.g;
+                            b = serverRGB.b;
+                        }} else {{
+                            // Use selected edge color for positive edges
+                            r = parseInt(edgeColor.substr(1,2), 16);
+                            g = parseInt(edgeColor.substr(3,2), 16);
+                            b = parseInt(edgeColor.substr(5,2), 16);
+                        }}
                     }}
                     
                     visibleLinkColors.push(`rgba(${{r}},${{g}},${{b}},${{edgeOpacity}})`);
@@ -3610,29 +3662,18 @@ class VisualizePath:
         
         function toggleLabels() {{
             labelsVisible = !labelsVisible;
+            const btn = document.getElementById('toggleLabelsBtn');
+            if (btn) {{
+                btn.textContent = labelsVisible ? '🏷️ Hide Labels' : '🏷️ Show Labels';
+            }}
             updateDiagram();
         }}
         
-        // Background color toggle
-        let bgMode = 0; // 0: white, 1: black, 2: custom
-        const bgColors = ['#ffffff', '#000000', 'custom'];
-        const bgLabels = ['White', 'Dark', 'Custom'];
+        // Background color toggle (shared controller)
+        const bgCtrl = createBackgroundController(['#ffffff', '#000000', 'custom'], ['White', 'Dark', 'Custom'], applyBackground);
         
         function toggleBackground() {{
-            bgMode = (bgMode + 1) % 3;
-            const btn = document.getElementById('bgToggleBtn');
-            const colorPicker = document.getElementById('customBgColor');
-            
-            if (bgMode === 2) {{
-                // Custom mode - show color picker
-                colorPicker.style.display = 'inline-block';
-                btn.textContent = '🎨 BG: Custom';
-                applyCustomBackground();
-            }} else {{
-                colorPicker.style.display = 'none';
-                btn.textContent = '🎨 BG: ' + bgLabels[bgMode];
-                applyBackground(bgColors[bgMode]);
-            }}
+            bgCtrl.toggle('🎨 BG: ');
         }}
         
         function applyBackground(color) {{
@@ -3653,78 +3694,21 @@ class VisualizePath:
         }}
         
         function applyCustomBackground() {{
-            const color = document.getElementById('customBgColor').value;
-            applyBackground(color);
+            bgCtrl.applyCustom();
         }}
         
-        function isColorDark(color) {{
-            // Convert hex to RGB and calculate luminance
-            let r, g, b;
-            if (color.startsWith('#')) {{
-                const hex = color.slice(1);
-                r = parseInt(hex.substr(0, 2), 16);
-                g = parseInt(hex.substr(2, 2), 16);
-                b = parseInt(hex.substr(4, 2), 16);
-            }} else {{
-                return false;
-            }}
-            const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-            return luminance < 0.5;
-        }}
+{SHARED_JS}
         
-        // Export functions
+        // Export functions (shared backend)
         function exportPNG() {{
-            const MAX_SAFE_SCALE = 4;
-            let scale = parseFloat(document.getElementById('exportScale').value) || 2;
-            // Warn / cap large scales to avoid browser OOM or failures
-            if (scale > MAX_SAFE_SCALE) {{
-                const proceed = confirm(`Exporting at ${{scale}}× may fail in your browser (very large image).\n\nClick OK to attempt the requested ${{scale}}× export, or Cancel to export at a safer ${{MAX_SAFE_SCALE}}×.`);
-                if (!proceed) {{
-                    scale = MAX_SAFE_SCALE;
-                }}
-            }}
-
+            const scale = getExportScale('exportScale', 2, 4);
             const gd = document.querySelector('.plotly-graph-div');
-
-            try {{
-                Plotly.toImage(gd, {{
-                    format: 'png',
-                    width: gd.offsetWidth * scale,
-                    height: gd.offsetHeight * scale,
-                    scale: scale
-                }}).then(function(dataUrl) {{
-                    const link = document.createElement('a');
-                    link.download = `sankey_diagram_${{scale}}x.png`;
-                    link.href = dataUrl;
-                    link.click();
-                    console.log(`PNG exported at ${{scale}}x scale with transparent background`);
-                }}).catch(function(error) {{
-                    console.error('PNG export failed:', error);
-                    alert('PNG export failed. Try exporting SVG or lowering the scale (≤4). See console for details.');
-                }});
-            }} catch (err) {{
-                console.error('PNG export failed (synchronous error):', err);
-                alert('PNG export failed. Try exporting SVG or lowering the scale (≤4). See console for details.');
-            }}
+            exportPlotlyToImage(gd, 'png', 'sankey_diagram_' + scale + 'x.png', scale, gd.offsetWidth, gd.offsetHeight);
         }}
         
         function exportSVG() {{
             const gd = document.querySelector('.plotly-graph-div');
-            
-            Plotly.toImage(gd, {{
-                format: 'svg',
-                width: gd.offsetWidth,
-                height: gd.offsetHeight
-            }}).then(function(dataUrl) {{
-                const link = document.createElement('a');
-                link.download = 'sankey_diagram.svg';
-                link.href = dataUrl;
-                link.click();
-                console.log('SVG exported with transparent background');
-            }}).catch(function(error) {{
-                console.error('SVG export failed:', error);
-                alert('SVG export failed. Please try again.');
-            }});
+            exportPlotlyToImage(gd, 'svg', 'sankey_diagram.svg', 1, gd.offsetWidth, gd.offsetHeight);
         }}
         
         // Initialize on load
@@ -4461,7 +4445,7 @@ class VisualizePath:
     </script>
     <style>
         body {{
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
             margin: 0;
             padding: 0;
             background: #f5f5f5;
@@ -4728,7 +4712,7 @@ class VisualizePath:
             </div>
             
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px;">
-                <button class="btn secondary" id="toggleLabelsBtn" onclick="toggleLabels()" style="font-size: 12px; padding: 6px; width: 100%;">👁️ Hide Labels</button>
+                <button class="btn secondary" id="toggleLabelsBtn" onclick="toggleLabels()" style="font-size: 12px; padding: 6px; width: 100%;">🏷️ Hide Labels</button>
                 <button class="btn" id="showAllBtn" onclick="showAllNodes()" style="background: #ff9800; font-size: 12px; padding: 6px; width: 100%; display: none;">👁️ Show All</button>
             </div>
             
@@ -4799,6 +4783,7 @@ class VisualizePath:
                     <label style="display: block; margin-bottom: 5px; font-weight: bold; font-size: 13px;">Edge Width Scale:</label>
                     <select id="edgeWidthScale" onchange="updateEdgeWidths()" style="width: 100%; padding: 5px;">
                         <option value="linear" {'selected' if self.edge_width_scale == 'linear' else ''}>Linear</option>
+                        <option value="log_e" {'selected' if self.edge_width_scale == 'log' and str(self.edge_width_log_base) not in ('2', '10') else ''}>Logarithmic (ln)</option>
                         <option value="log_2" {'selected' if self.edge_width_scale == 'log' and str(self.edge_width_log_base) == '2' else ''}>Logarithmic (log₂)</option>
                         <option value="log_10" {'selected' if self.edge_width_scale == 'log' and str(self.edge_width_log_base) == '10' else ''}>Logarithmic (log₁₀)</option>
                         <option value="sqrt" {'selected' if self.edge_width_scale == 'sqrt' else ''}>Square Root</option>
@@ -5131,8 +5116,8 @@ class VisualizePath:
         }}
         
         const elements = {{
-            nodes: {json.dumps(nodes_data, default=_json_default)},
-            edges: {json.dumps(edges_data, default=_json_default)}
+            nodes: {json_safe(nodes_data, default=_json_default)},
+            edges: {json_safe(edges_data, default=_json_default)}
         }};
 
         const cy = cytoscape({{
@@ -5148,7 +5133,7 @@ class VisualizePath:
                         'text-valign': 'center',
                         'text-halign': 'center',
                         'font-size': '12px',
-                        'font-family': "'Segoe UI', Tahoma, Geneva, Verdana, sans-serif",
+                        'font-family': "-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif",
                         'width': '40px',
                         'height': '40px',
                         'border-width': '0px',  // No border
@@ -5218,7 +5203,7 @@ class VisualizePath:
                         'arrow-scale': 1.5,
                         'label': '',
                         'font-size': '10px',
-                        'font-family': "'Segoe UI', Tahoma, Geneva, Verdana, sans-serif",
+                        'font-family': "-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif",
                         'text-background-color': '#fff',
                         'text-background-opacity': 0.95,
                         'text-background-padding': '8px',
@@ -5730,18 +5715,18 @@ class VisualizePath:
             const data = node.data();
             const info = document.getElementById('hoverInfo');
             let html = `
-                <b>Node:</b> ${{data.label}}<br>
-                <b>Type:</b> ${{data.node_type}}<br>
-                <b>Color:</b> ${{data.color}}
+                <b>Node:</b> ${{escapeHtml(data.label)}}<br>
+                <b>Type:</b> ${{escapeHtml(data.node_type)}}<br>
+                <b>Color:</b> ${{escapeHtml(data.color)}}
             `;
             if (data.hemisphere) {{
-                html += `<br><b>Hemisphere:</b> ${{data.hemisphere}}`;
+                html += `<br><b>Hemisphere:</b> ${{escapeHtml(data.hemisphere)}}`;
             }}
             // Add dataset info if available
             if (data.dataset_info && Object.keys(data.dataset_info).length > 0) {{
                 html += `<br><span style="color: #888; font-size: 0.9em;">─────────────</span><br><b>Names by dataset:</b>`;
                 for (const [code, name] of Object.entries(data.dataset_info).sort()) {{
-                    html += `<br>&nbsp;&nbsp;${{code}}: ${{name}}`;
+                    html += `<br>&nbsp;&nbsp;${{escapeHtml(code)}}: ${{escapeHtml(name)}}`;
                 }}
             }}
             info.innerHTML = html;
@@ -5757,7 +5742,7 @@ class VisualizePath:
             // Get display weight (add negative sign if needed)
             const displayWeight = data.is_negative === 1 ? -data.weight : data.weight;
             
-            let html = `<b>Connection:</b> ${{source}} → ${{target}}<br>`;
+            let html = `<b>Connection:</b> ${{escapeHtml(source)}} → ${{escapeHtml(target)}}<br>`;
             
             // Highlight the current metric
             if (currentMetric === 'weight') {{
@@ -5784,7 +5769,7 @@ class VisualizePath:
             // Display NT type if available
             if (data.nt_type && data.nt_type !== '') {{
                 const ntColor = getNTColor(data.nt_type);
-                html += `<br><b>NT:</b> <span style="color: ${{ntColor}}; font-weight: bold;">${{data.nt_type}}</span>`;
+                html += `<br><b>NT:</b> <span style="color: ${{ntColor}}; font-weight: bold;">${{escapeHtml(data.nt_type)}}</span>`;
             }}
             
             // Display custom edge labels (e.g., multi-dataset synapse strengths)
@@ -5792,7 +5777,7 @@ class VisualizePath:
                 html += `<br><span style="color: #888; font-size: 0.9em;">─────────────</span>`;
                 for (const [labelName, labelValue] of Object.entries(data.custom_labels)) {{
                     const formattedValue = typeof labelValue === 'number' ? labelValue.toLocaleString() : labelValue;
-                    html += `<br><b>${{labelName}}:</b> ${{formattedValue}}`;
+                    html += `<br><b>${{escapeHtml(labelName)}}:</b> ${{escapeHtml(formattedValue)}}`;
                 }}
             }}
             
@@ -5849,6 +5834,12 @@ class VisualizePath:
 
         // Keyboard shortcut: H to hide selected nodes
         document.addEventListener('keydown', function(e) {{
+            // Ignore shortcuts while typing in inputs/textareas (undo/redo
+            // below uses the same guard)
+            const tag = e.target && e.target.tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable)) {{
+                return;
+            }}
             if (e.key === 'h' || e.key === 'H') {{
                 const selected = cy.$('node:selected');
                 if (selected.length > 0) {{
@@ -5992,60 +5983,19 @@ class VisualizePath:
             if (visible.length > 0) cy.fit(visible, 80);
         }}
 
+        // Export functions (shared backend)
         function exportPNG() {{
-            // Get the scale from the input
-            const MAX_SAFE_SCALE = 4;
-            const scaleInput = document.getElementById('exportScale');
-            let scale = scaleInput ? parseFloat(scaleInput.value) : 2;
-
-            if (scale > MAX_SAFE_SCALE) {{
-                const proceed = confirm(`Exporting at ${{scale}}× may fail in your browser (very large image).\n\nClick OK to attempt the requested ${{scale}}× export, or Cancel to export at a safer ${{MAX_SAFE_SCALE}}×.`);
-                if (!proceed) {{
-                    scale = MAX_SAFE_SCALE;
-                }}
-            }}
-
-            console.log(`Exporting PNG at ${{scale}}× resolution with transparent background...`);
-
-            try {{
-                const png64 = cy.png({{
-                    scale: scale,
-                    full: true
-                }});
-
-                const link = document.createElement('a');
-                link.href = png64;
-                link.download = `network_selected_paths_${{scale}}x.png`;
-                link.click();
-
-                console.log(`PNG exported successfully at ${{scale}}× scale with transparent background`);
-            }} catch (err) {{
-                console.error('PNG export failed:', err);
-                alert('PNG export failed. Try exporting SVG or lowering the scale (≤4). See console for details.');
-            }}
+            const scale = getExportScale('exportScale', 2, 4);
+            exportCytoscapeToImage(cy, 'png', 'network_selected_paths_' + scale + 'x.png', scale, bgCtrl.getColor());
         }}
         
         function exportSVG() {{
-            console.log('Exporting SVG with transparent background...');
-            
-            const svgContent = cy.svg({{
-                full: true
-            }});
-            
-            const blob = new Blob([svgContent], {{ type: 'image/svg+xml' }});
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = 'network_selected_paths.svg';
-            link.click();
-            URL.revokeObjectURL(url);
-            
-            console.log('SVG exported successfully with transparent background');
+            exportCytoscapeToImage(cy, 'svg', 'network_selected_paths.svg', 1, bgCtrl.getColor());
         }}
 
         // Layout Persistence Functions
         // Use file-specific storage key with timestamp so each HTML copy has independent saved layouts
-        const LAYOUT_STORAGE_KEY = '{storage_key}';
+        const LAYOUT_STORAGE_KEY = '{js_escape(storage_key)}';
 
         // Evict stale saved-layout keys (keep the newest 20 per storage family)
         try {{
@@ -6101,7 +6051,7 @@ class VisualizePath:
                     nodeSize: document.getElementById('nodeSizeSlider').value,
                     // Metadata
                     timestamp: new Date().toISOString(),
-                    graphName: '{output_name}'
+                    graphName: '{js_escape(output_name)}'
                 }};
                 
                 localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(state));
@@ -6165,9 +6115,13 @@ class VisualizePath:
                     }});
                 }}
                 
-                // Restore zoom and pan
-                cy.zoom(state.zoom);
-                cy.pan(state.pan);
+                // Restore zoom and pan (validate the saved state first)
+                if (Number.isFinite(state.zoom)) {{
+                    cy.zoom(state.zoom);
+                }}
+                if (state.pan && Number.isFinite(state.pan.x) && Number.isFinite(state.pan.y)) {{
+                    cy.pan(state.pan);
+                }}
                 
                 // Restore label visibility
                 if (state.labelsVisible !== undefined && state.labelsVisible !== labelsVisible) {{
@@ -6204,15 +6158,8 @@ class VisualizePath:
             }}
         }}
         
-        function showLayoutStatus(message) {{
-            const statusDiv = document.getElementById('layoutStatus');
-            statusDiv.textContent = message;
-            statusDiv.style.color = '#666';
-            
-            // Clear after 3 seconds
-            setTimeout(() => {{
-                statusDiv.textContent = '';
-            }}, 3000);
+        function showLayoutStatus(message, type) {{
+            showStatusInContainer('layoutStatus', message, type || 'info');
         }}
 
         function showAllNodes() {{
@@ -6526,6 +6473,16 @@ class VisualizePath:
             const shouldShowStatus = (showStatus === undefined) ? true : showStatus;
             const offsetMagnitude = Math.max(0, parseFloat(reciprocalOffset) || 0);  // Keep reciprocal edges parallel but separated
 
+            // Cache which (target -> source) pairs have a visible edge so the
+            // reciprocal check is O(1) per edge instead of a full selector
+            // scan per edge (O(E²) on large graphs).
+            const visibleReverseKeys = new Set();
+            cy.edges().forEach(e => {{
+                if (!e.hasClass('hidden') && !e.hasClass('filtered')) {{
+                    visibleReverseKeys.add(e.target().id() + '→' + e.source().id());
+                }}
+            }});
+
             // Recalculate edge styles to make single edges straight (no curve)
             // This is useful when parallel/reciprocal edges are hidden
             cy.edges().forEach(edge => {{
@@ -6533,14 +6490,8 @@ class VisualizePath:
                 const target = edge.target().id();
                 const canonicalSign = source.localeCompare(target) < 0 ? 1 : -1;
                 
-                // Check if there's a parallel edge (both directions)
-                const parallelEdge = cy.edges(`[source = "${{target}}"][target = "${{source}}"]`);
-                
-                // Count visible parallel edges (not hidden, not filtered)
-                const visibleParallel = parallelEdge.filter(e => 
-                    !e.hasClass('hidden') && !e.hasClass('filtered')
-                );
-                const hasVisibleParallel = visibleParallel.length > 0;
+                // Check if there's a visible parallel edge (both directions)
+                const hasVisibleParallel = visibleReverseKeys.has(target + '→' + source);
 
                 if (source === target) {{
                     // Keep loops curved for readability
@@ -6691,36 +6642,21 @@ class VisualizePath:
             if (labelsVisible) {{
                 // Hide labels
                 cy.nodes().addClass('labels-hidden');
-                btn.textContent = 'Show Labels';
+                btn.textContent = '🏷️ Show Labels';
                 labelsVisible = false;
             }} else {{
                 // Show labels
                 cy.nodes().removeClass('labels-hidden');
-                btn.textContent = 'Hide Labels';
+                btn.textContent = '🏷️ Hide Labels';
                 labelsVisible = true;
             }}
         }}
         
-        // Background color toggle for network
-        let bgMode = 0; // 0: white, 1: black, 2: custom
-        const bgColors = ['#ffffff', '#000000', 'custom'];
-        const bgLabels = ['White', 'Dark', 'Custom'];
+        // Background color toggle (shared controller)
+        const bgCtrl = createBackgroundController(['#ffffff', '#000000', 'custom'], ['White', 'Dark', 'Custom'], applyBackground);
         
         function toggleBackground() {{
-            bgMode = (bgMode + 1) % 3;
-            const btn = document.getElementById('bgToggleBtn');
-            const colorPicker = document.getElementById('customBgColor');
-            
-            if (bgMode === 2) {{
-                // Custom mode - show color picker
-                colorPicker.style.display = 'inline-block';
-                btn.textContent = 'Custom';
-                applyCustomBackground();
-            }} else {{
-                colorPicker.style.display = 'none';
-                btn.textContent = bgLabels[bgMode];
-                applyBackground(bgColors[bgMode]);
-            }}
+            bgCtrl.toggle('🎨 BG: ');
         }}
         
         function applyBackground(color) {{
@@ -6746,24 +6682,10 @@ class VisualizePath:
         }}
         
         function applyCustomBackground() {{
-            const color = document.getElementById('customBgColor').value;
-            applyBackground(color);
+            bgCtrl.applyCustom();
         }}
         
-        function isColorDark(color) {{
-            // Convert hex to RGB and calculate luminance
-            let r, g, b;
-            if (color.startsWith('#')) {{
-                const hex = color.slice(1);
-                r = parseInt(hex.substr(0, 2), 16);
-                g = parseInt(hex.substr(2, 2), 16);
-                b = parseInt(hex.substr(4, 2), 16);
-            }} else {{
-                return false;
-            }}
-            const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-            return luminance < 0.5;
-        }}
+{SHARED_JS}
 
         function updateFontSize(size) {{
             document.getElementById('fontSizeValue').textContent = size + 'px';
@@ -6923,6 +6845,10 @@ class VisualizePath:
                         scaled = w;
                         break;
                     
+                    case 'log_e':
+                        scaled = Math.log(w + 1);  // Natural log
+                        break;
+                    
                     case 'log_2':
                         scaled = Math.log(w + 1) / Math.log(2);  // Log base 2
                         break;
@@ -6957,8 +6883,10 @@ class VisualizePath:
                 // Set max based on log base
                 if (method === 'log_2') {{
                     maxScaled = 14;  // log2(10000) ≈ 13.3
-                }} else {{ // log_10
+                }} else if (method === 'log_10') {{
                     maxScaled = 4.5;  // log10(10000) = 4
+                }} else {{ // log_e (natural log)
+                    maxScaled = 9.2;  // ln(10000) ≈ 9.2
                 }}
                 
                 console.log(`Using FIXED scale for ${{method}}: [${{minScaled}}, ${{maxScaled}}]`);
@@ -7578,10 +7506,10 @@ class VisualizePath:
                     document.getElementById('selectedInfo').innerHTML = 
                         `<strong>Multi-Selection:</strong><br>` +
                         `${{selectionCount.nodes}} node(s), ${{selectionCount.edges}} edge(s)<br>` +
-                        `<em>Colors from: ${{element.data('label')}}</em>`;
+                        `<em>Colors from: ${{escapeHtml(element.data('label'))}}</em>`;
                 }} else {{
                     document.getElementById('selectedInfo').innerHTML = 
-                        `<strong>Node:</strong> ${{element.data('label')}} (${{element.data('node_type')}})`;
+                        `<strong>Node:</strong> ${{escapeHtml(element.data('label'))}} (${{escapeHtml(element.data('node_type'))}})`;
                 }}
             }} else {{
                 const lineColor = element.style('line-color');
@@ -7596,10 +7524,10 @@ class VisualizePath:
                     document.getElementById('selectedInfo').innerHTML = 
                         `<strong>Multi-Selection:</strong><br>` +
                         `${{selectionCount.nodes}} node(s), ${{selectionCount.edges}} edge(s)<br>` +
-                        `<em>Colors from: ${{sourceNode}} → ${{targetNode}}</em>`;
+                        `<em>Colors from: ${{escapeHtml(sourceNode)}} → ${{escapeHtml(targetNode)}}</em>`;
                 }} else {{
                     document.getElementById('selectedInfo').innerHTML = 
-                        `<strong>Edge:</strong> ${{sourceNode}} → ${{targetNode}}`;
+                        `<strong>Edge:</strong> ${{escapeHtml(sourceNode)}} → ${{escapeHtml(targetNode)}}`;
                 }}
             }}
             
@@ -7870,6 +7798,11 @@ class VisualizePath:
         function initializeLogBaseVisibility() {{
             const scalingMethod = document.getElementById('edgeWidthScale').value;
             const logBaseGroup = document.getElementById('logBaseGroup');
+            // The log-base picker group is not rendered in this template;
+            // guard so initialization never throws on page load.
+            if (!logBaseGroup) {{
+                return;
+            }}
             if (scalingMethod === 'log') {{
                 logBaseGroup.style.display = 'flex';
             }} else {{
@@ -8043,9 +7976,12 @@ class VisualizePath:
             const scaledWidth = calculateEdgeWidth(Math.abs(weightNum));
             edge.data('scaled_width', scaledWidth);
             
-            const positiveEdgeColor = document.getElementById('edgeColor').value;
-            const negativeEdgeColor = document.getElementById('negativeEdgeColor').value;
-            const updatedColor = weightNum < 0 ? negativeEdgeColor : positiveEdgeColor;
+            // The edge-color pickers (edgeColor/negativeEdgeColor) only exist
+            // in the Sankey template; keep the edge's current color instead,
+            // preferring its NT color when one is available.
+            const edgeNT = edge.data('nt_type') || '';
+            const currentColor = extractColorHex(edge.style('line-color'));
+            const updatedColor = edgeNT ? getNTColor(edgeNT) : currentColor;
             const currentOpacity = edge.data(EDGE_BASE_OPACITY_KEY) !== undefined ? edge.data(EDGE_BASE_OPACITY_KEY) : (parseFloat(edge.style('opacity')) || 1);
             const canApplyNow = !edge.selected() && !edge.hasClass('highlighted');
             setEdgeBaseAppearance(edge, updatedColor, currentOpacity, canApplyNow);
@@ -8069,6 +8005,9 @@ class VisualizePath:
             switch(scalingMethod) {{
                 case 'linear':
                     scaledValue = weight;
+                    break;
+                case 'log_e':
+                    scaledValue = weight > 0 ? Math.log(weight + 1) : 0;
                     break;
                 case 'log_2':
                     scaledValue = weight > 0 ? Math.log2(weight + 1) : 0;
@@ -8228,7 +8167,9 @@ class VisualizePath:
         
         // Update hover info display
         function updateHoverInfo(text) {{
-            document.getElementById('hoverInfo').innerHTML = text;
+            // textContent: the hover box only ever shows plain text (labels,
+            // counts, instructions), so no HTML parsing is needed or wanted.
+            document.getElementById('hoverInfo').textContent = text;
         }}
         
         // ===== EDGE FILTERING =====
@@ -8631,7 +8572,7 @@ class VisualizePath:
             
             setTimeout(() => {{
                 cacheHemispherePositions();
-                if (hemisphereMirrorEnabled) runHemisphereLayout();
+                if (hemisphereMirrorEnabled) runHemisphereMirrorLayout();
                 updateHoverInfo('✓ Layout refreshed for visible elements');
             }}, 600);
         }}
@@ -10124,7 +10065,10 @@ def visualize_network(
     return vp.visualize_network()
 
 
-def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=True, fontsize=12, conn_df=None, matrices_dict=None, verbose=True, zmin=None, zmax=None, init_width=None, init_height=None, init_clustered=True):
+def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=True, fontsize=12, conn_df=None, matrices_dict=None, verbose=True, zmin=None, zmax=None, init_width=None, init_height=None, init_clustered=True, metric_name=None):
+    # Remember whether the CALLER passed a colorscale: only then do we seed the
+    # heatmap with a custom colorscale (the default below is a legacy leftover).
+    provided_color_scale = color_scale
     if color_scale is None:
         color_scale = [[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']]
     '''Create interactive heatmap with comprehensive controls similar to network visualization
@@ -10218,6 +10162,10 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
         
         data_linear = cmat.values.copy()
         matrices_data[metric_type] = data_linear
+    
+    # Display label for the current metric: explicit metric_name wins over the
+    # heuristic ('weight' -> "Synapses", ratio/probability -> capitalized).
+    metric_label = metric_name if metric_name else metric_type.capitalize()
     
     is_large = cmat.shape[0] > 100 or cmat.shape[1] > 100
     
@@ -10366,26 +10314,37 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
         hover_row = []
         for j, col_label in enumerate(cmat.columns):
             value = cmat.iloc[i, j]
-            if metric_type == 'ratio' or metric_type == 'probability':
+            # NaN/Inf are documented as "no connection" - show an em dash
+            # instead of crashing int() formatting.
+            try:
+                finite_value = float(value)
+                is_finite = np.isfinite(finite_value)
+            except (TypeError, ValueError):
+                is_finite = False
+            if not is_finite:
+                value_str = '—'
+            elif metric_type == 'ratio' or metric_type == 'probability':
                 value_str = f'{value:.4f}'
             else:
                 value_str = f'{int(value):,}' if value == int(value) else f'{value:,.2f}'
             
+            row_label_safe = html_escape(row_label)
+            col_label_safe = html_escape(col_label)
             # Always use actual labels with type info if available
             if type_lookup:
                 try:
                     # Labels are already strings, use them directly for type lookup
                     row_id = str(row_label)
                     col_id = str(col_label)
-                    row_type = type_lookup['pre'].get(row_id, 'Unknown')
-                    col_type = type_lookup['post'].get(col_id, 'Unknown')
-                    hover_row.append(f'<b>Source:</b> {row_label} ({row_type})<br><b>Target:</b> {col_label} ({col_type})<br><b>{metric_type.capitalize()}:</b> {value_str}')
+                    row_type = html_escape(type_lookup['pre'].get(row_id, 'Unknown'))
+                    col_type = html_escape(type_lookup['post'].get(col_id, 'Unknown'))
+                    hover_row.append(f'<b>Source:</b> {row_label_safe} ({row_type})<br><b>Target:</b> {col_label_safe} ({col_type})<br><b>{metric_label}:</b> {value_str}')
                 except:
                     # Fall back to label-only display if type lookup fails
-                    hover_row.append(f'<b>Source:</b> {row_label}<br><b>Target:</b> {col_label}<br><b>{metric_type.capitalize()}:</b> {value_str}')
+                    hover_row.append(f'<b>Source:</b> {row_label_safe}<br><b>Target:</b> {col_label_safe}<br><b>{metric_label}:</b> {value_str}')
             else:
                 # No type info available - just show labels
-                hover_row.append(f'<b>Source:</b> {row_label}<br><b>Target:</b> {col_label}<br><b>{metric_type.capitalize()}:</b> {value_str}')
+                hover_row.append(f'<b>Source:</b> {row_label_safe}<br><b>Target:</b> {col_label_safe}<br><b>{metric_label}:</b> {value_str}')
         hover_text.append(hover_row)
     
     # Determine axis labels - ALWAYS use actual names, not numeric indices
@@ -10420,11 +10379,11 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
 <html>
 <head>
     <meta charset="utf-8">
-    <title>{title}</title>
-    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <title>{html_escape(title)}</title>
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <style>
         body {{
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
             margin: 0;
             padding: 20px;
             background-color: #f5f5f5;
@@ -10764,7 +10723,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
                         <option value="Jet">Jet</option>
                         <option value="RdBu">Red-Blue (Diverging)</option>
                         <option value="RdYlGn">Red-Yellow-Green</option>
-                        <option value="Custom">Custom</option>
+                        <option value="Custom" {'selected' if provided_color_scale is not None else ''}>Custom</option>
                     </select>
                     
                     <div id="customColorSection">
@@ -10832,7 +10791,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
                     </div>
                     <div style="margin-top: 8px; display: flex; gap: 4px;">
                         <button id="toggleLabelsBtn" onclick="toggleLabels()" style="flex: 1;">
-                            {'🏷️ Hide Text' if not is_large else '🏷️ Show Text'}
+                            {'🏷️ Hide Labels' if not is_large else '🏷️ Show Labels'}
                         </button>
                         <button id="toggleCellValuesBtn" onclick="toggleCellValues()" style="flex: 1;">
                             🔢 Show Values
@@ -10905,12 +10864,13 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
                     <h3>💾 Export & Saving</h3>
                     <div class="slider-control" style="margin-bottom: 8px;">
                         <label>
-                            <span>Export Scale:</span>
+                            <span>Export Scale (PNG):</span>
                             <span class="slider-value" id="exportScaleValue">2x</span>
                         </label>
                         <input type="range" id="exportScaleSlider" min="1" max="5" value="2" step="0.5" oninput="updateExportScale(this.value)">
                     </div>
                     <div class="button-group" style="flex-direction: column; margin-bottom: 8px;">
+                        <button class="export-btn" onclick="exportPNG()" style="width: 100%;">📥 Export PNG</button>
                         <button class="export-btn" onclick="exportSVG()" style="width: 100%;">📥 Export SVG</button>
                     </div>
                     <div class="button-group">
@@ -10990,9 +10950,9 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
         const dataLog2 = {'null' if data_log2 is None else json.dumps(data_log2.tolist())};
         const dataLog10 = {'null' if data_log10 is None else json.dumps(data_log10.tolist())};
         const dataSqrt = {'null' if data_sqrt is None else json.dumps(data_sqrt.tolist())};
-        const xLabels = {json.dumps(x_labels)};
-        const yLabels = {json.dumps(y_labels)};
-        const storageKey = '{storage_key}';
+        const xLabels = {json_safe(x_labels)};
+        const yLabels = {json_safe(y_labels)};
+        const storageKey = '{js_escape(storage_key)}';
         const useLazyTransforms = {json.dumps(use_lazy_transforms)};
         
         // Track current row/column order (for interactive reordering)
@@ -11001,7 +10961,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
         let currentYLabels = yLabels.slice();
         
         // Hover text - always use full array with proper labels (no compact mode)
-        const hoverText = {json.dumps(hover_text)};
+        const hoverText = {json_safe(hover_text)};
         
         // Cache for lazy-computed transforms
         let cachedDataLog2 = null;
@@ -11022,12 +10982,12 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
         
         // Current settings
         let currentScale = 'linear';
-        let currentColorscale = '{default_colorscale}';
+        let currentColorscale = '{'Custom' if provided_color_scale is not None else default_colorscale}';
         let currentFontSize = {fontsize};
         let useAutoRange = {json.dumps(zmin is None and zmax is None)};
-        let customZmin = {json.dumps(zmin)};
-        let customZmax = {json.dumps(zmax)};
-        let customColorScale = null;  // Store custom color scale
+        let customZmin = {json.dumps(float(zmin)) if zmin is not None else 'null'};
+        let customZmax = {json.dumps(float(zmax)) if zmax is not None else 'null'};
+        let customColorScale = {json_safe(provided_color_scale) if provided_color_scale is not None else 'null'};  // Custom color scale (caller-provided or built by the color panel)
         let use3PointScale = false;
         let currentWidth = {init_width if init_width else 800};
         let currentHeight = {init_height if init_height else 800};
@@ -11048,7 +11008,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
         let isTransposed = false;  // Track if matrix is transposed
         const metricType = '{metric_type}';
         const isLarge = {json.dumps(is_large)};
-        const originalTitle = '{title}';
+        const originalTitle = '{js_escape(title)}';
         
         // Data filter state
         let dataFilterActive = false;
@@ -11164,9 +11124,16 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
             let max = -Infinity;
             for (let row of data) {{
                 for (let val of row) {{
+                    // Skip non-finite cells (documented as "no connection")
+                    if (!Number.isFinite(val)) continue;
                     if (val < min) min = val;
                     if (val > max) max = val;
                 }}
+            }}
+            // Constant (or all non-finite) matrices: avoid a zero range
+            if (!Number.isFinite(min) || !Number.isFinite(max) || min === max) {{
+                if (!Number.isFinite(min)) {{ min = 0; max = 1; }}
+                else {{ max = min + 1; }}
             }}
             return {{min, max}};
         }}
@@ -11450,6 +11417,10 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
                 'ratio': 'Ratio',
                 'probability': 'Probability'
             }};
+            const metricNameOverride = '{js_escape(metric_name or '')}';
+            if (metricNameOverride) {{
+                metricDisplayNames[metricType] = metricNameOverride;
+            }}
             const metricDisplayName = metricDisplayNames[currentMetric] || currentMetric;
             
             const trace = {{
@@ -11934,7 +11905,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
         function toggleLabels() {{
             showLabels = !showLabels;
             const btn = document.getElementById('toggleLabelsBtn');
-            btn.textContent = showLabels ? '🏷️ Hide Text' : '🏷️ Show Text';
+            btn.textContent = showLabels ? '🏷️ Hide Labels' : '🏷️ Show Labels';
             
             // Update the layout to hide/show ALL text elements including colorbar
             const gd = document.getElementById('heatmap');
@@ -12960,7 +12931,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
                 div.className = 'drag-item';
                 div.draggable = true;
                 div.dataset.label = item;
-                div.innerHTML = '<span class="drag-handle">☰</span>' + item;
+                div.innerHTML = '<span class="drag-handle">☰</span>' + escapeHtml(item);
                 
                 div.addEventListener('dragstart', handleDragStart);
                 div.addEventListener('dragover', handleDragOver);
@@ -13102,31 +13073,21 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
             document.getElementById('exportScaleValue').textContent = value + 'x';
         }}
         
-        function exportSVG() {{
-            const filename = 'heatmap_' + currentScale + '_' + new Date().getTime() + '.svg';
-            
-            // Get the plotly graph element
+        // Export functions (shared backend)
+        function exportPNG() {{
             const gd = document.getElementById('heatmap');
-            
-            // Use current layout dimensions with scale parameter
-            // This preserves fonts and colors correctly
-            Plotly.toImage(gd, {{
-                format: 'svg',
-                width: currentWidth,
-                height: currentHeight,
-                scale: exportScale
-            }}).then(function(dataUrl) {{
-                const link = document.createElement('a');
-                link.download = filename;
-                link.href = dataUrl;
-                link.click();
-                const actualWidth = currentWidth * exportScale;
-                const actualHeight = currentHeight * exportScale;
-                showStatus(`✅ SVG exported: ${{actualWidth}}x${{actualHeight}}px`, 'success');
-                console.log('SVG exported:', actualWidth, 'x', actualHeight);
-            }}).catch(function(error) {{
-                console.error('SVG export failed:', error);
-                showStatus('⚠️ SVG export failed. See console.', 'error');
+            const filename = 'heatmap_' + currentScale + '_' + new Date().getTime() + '_' + exportScale + 'x.png';
+            exportPlotlyToImage(gd, 'png', filename, exportScale, currentWidth, currentHeight, function() {{
+                showStatus('✅ PNG exported: ' + Math.round(currentWidth * exportScale) + 'x' + Math.round(currentHeight * exportScale) + 'px', 'success');
+            }});
+        }}
+        
+        function exportSVG() {{
+            const gd = document.getElementById('heatmap');
+            const filename = 'heatmap_' + currentScale + '_' + new Date().getTime() + '.svg';
+            // SVG is vector: always exported at native size (PPT-safe).
+            exportPlotlyToImage(gd, 'svg', filename, 1, currentWidth, currentHeight, function() {{
+                showStatus('✅ SVG exported: ' + currentWidth + 'x' + currentHeight + 'px', 'success');
             }});
         }}
         
@@ -13235,7 +13196,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
                 // Restore label visibility
                 if (settings.showLabels !== undefined) {{
                     showLabels = settings.showLabels;
-                    document.getElementById('toggleLabelsBtn').textContent = showLabels ? '🏷️ Hide Text' : '🏷️ Show Text';
+                    document.getElementById('toggleLabelsBtn').textContent = showLabels ? '🏷️ Hide Labels' : '🏷️ Show Labels';
                 }}
                 
                 // Restore additional state
@@ -13391,26 +13352,13 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
             showStatus('✅ Reset to defaults', 'success');
         }}
         
-        // Background color toggle for heatmap
-        let bgMode = 0; // 0: white, 1: dark, 2: custom
-        const bgColors = ['#f5f5f5', '#000000', 'custom'];
-        const bgLabels = ['White', 'Dark', 'Custom'];
+        // Background color toggle (shared controller)
+        // White maps to #ffffff for parity with the network/Sankey templates
+        // (the page CSS default of #f5f5f5 remains until the first toggle).
+        const bgCtrl = createBackgroundController(['#ffffff', '#000000', 'custom'], ['White', 'Dark', 'Custom'], applyBackground);
         
         function toggleBackground() {{
-            bgMode = (bgMode + 1) % 3;
-            const btn = document.getElementById('bgToggleBtn');
-            const colorPicker = document.getElementById('customBgColor');
-            
-            if (bgMode === 2) {{
-                // Custom mode - show color picker
-                colorPicker.style.display = 'inline-block';
-                btn.textContent = 'Custom';
-                applyCustomBackground();
-            }} else {{
-                colorPicker.style.display = 'none';
-                btn.textContent = bgLabels[bgMode];
-                applyBackground(bgColors[bgMode]);
-            }}
+            bgCtrl.toggle('');
         }}
         
         function applyBackground(color) {{
@@ -13443,38 +13391,13 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
         }}
         
         function applyCustomBackground() {{
-            const color = document.getElementById('customBgColor').value;
-            applyBackground(color);
+            bgCtrl.applyCustom();
         }}
         
-        function isColorDark(color) {{
-            // Convert hex to RGB and calculate luminance
-            let r, g, b;
-            if (color.startsWith('#')) {{
-                const hex = color.slice(1);
-                r = parseInt(hex.substr(0, 2), 16);
-                g = parseInt(hex.substr(2, 2), 16);
-                b = parseInt(hex.substr(4, 2), 16);
-            }} else {{
-                return false;
-            }}
-            const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-            return luminance < 0.5;
-        }}
+{SHARED_JS}
         
         function showStatus(message, type) {{
-            console.log('showStatus called:', message, type);
-            const statusDiv = document.getElementById('settingsStatus');
-            console.log('statusDiv found:', statusDiv);
-            if (!statusDiv) {{
-                console.error('settingsStatus div not found!');
-                return;
-            }}
-            statusDiv.innerHTML = '<div class="status-message status-' + type + '">' + message + '</div>';
-            console.log('Status message displayed:', statusDiv.innerHTML);
-            setTimeout(() => {{
-                statusDiv.innerHTML = '';
-            }}, 3000);
+            showStatusInContainer('settingsStatus', message, type || 'info');
         }}
         
         // Try to load saved settings on page load

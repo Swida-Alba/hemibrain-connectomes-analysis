@@ -128,7 +128,7 @@ Use `scripts/FindDirect.py` for one-hop edges, `scripts/PlotPath.py` for path HT
 ### NeuronBridge FindLines Output
 
 ```
-findlines_aMe12_20241230/
+NB-find-lines_aMe12_20241230/
 ├── line_summary.csv           # Ranked by weighted_score
 ├── gal4_lexa_summary.csv      # GAL4/LexA lines
 ├── split_gal4_summary.csv     # Split-GAL4 lines

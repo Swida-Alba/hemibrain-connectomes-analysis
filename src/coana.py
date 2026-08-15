@@ -6710,7 +6710,7 @@ class FindNeuronConnection:
         
         # Remember whether the user explicitly requested a save folder.
         # With saveas empty, each method creates its own parameterized folder
-        # (findpath_..., finddirect_...); eagerly creating the auto-named
+        # (find-paths-complete_..., finddirect_...); eagerly creating the auto-named
         # save_folder here used to leave a stray empty folder like
         # '<dataset>_<src>_to_<tgt>' next to the real output.
         save_folder_explicit = bool(self.saveas or self.save_folder)
@@ -7476,7 +7476,7 @@ class FindNeuronConnection:
         else:
             network_folder = os.path.join(
                 self.output_dir,
-                f"findnetwork_{dataset_abbrev(self.dataset)}_{self.source_fname}_{param_suffix}",
+                f"find-network_{dataset_abbrev(self.dataset)}_{self.source_fname}_{param_suffix}",
             )
         if not os.path.exists(network_folder):
             os.makedirs(network_folder)
@@ -7999,7 +7999,7 @@ class FindNeuronConnection:
         if not os.path.exists(base_folder):
             os.makedirs(base_folder)
         
-        # Create path folder with parameters and timestamp
+        # Create complete-paths folder with parameters and timestamp
         timestamp = time.strftime('%Y%m%d_%H%M%S')
         param_suffix = (
             f"L{self.max_interlayer}"
@@ -8013,10 +8013,10 @@ class FindNeuronConnection:
             # If saveas is set, use save_folder directly
             self.path_folder = self.save_folder
         else:
-            # Unified per-run folder: tool_dataset_src_to_tgt_params_timestamp
+            # Unified per-run folder: find-paths-complete_dataset_src_to_tgt_params_timestamp
             self.path_folder = os.path.join(
                 self.output_dir,
-                f"findpath_{dataset_abbrev(self.dataset)}_{self.source_fname}"
+                f"find-paths-complete_{dataset_abbrev(self.dataset)}_{self.source_fname}"
                 f"_to_{self.target_fname}_{param_suffix.lstrip('_')}",
             )
             
@@ -9053,7 +9053,7 @@ class FindNeuronConnection:
         import datetime
         # Depth label for the folder name (always an exact bound now).
         depth_label = f'L{self.max_interlayer}'
-        folder_prefix = 'findshortestpath' if path_mode == 'shortest' else 'findallpath'
+        folder_prefix = 'find-paths-shortest' if path_mode == 'shortest' else 'find-paths-complete'
         param_suffix = f"_{depth_label}w{self.min_synapse_num}"
         param_suffix += f"r{_format_decimal_for_folder(self.min_ratio)}"
         param_suffix += f"p{_format_decimal_for_folder(self.min_traversal_probability)}"

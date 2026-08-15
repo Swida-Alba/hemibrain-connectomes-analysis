@@ -34,7 +34,7 @@ for enrichment, hemisphere-aware analysis, and visualization.
 ## Outputs (nothing redundant)
 
 ```
-{output_dir}/findnetwork_{DATASET}_{group}_w{minsyn}r{ratio}p{prob}_{timestamp}/
+{output_dir}/find-network_{DATASET}_{group}_w{minsyn}r{ratio}p{prob}_{timestamp}/
   parameters.txt, all_attributes.json
   data_details/
     neurons.csv                     # all queried neurons

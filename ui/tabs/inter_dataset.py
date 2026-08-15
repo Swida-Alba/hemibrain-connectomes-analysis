@@ -221,16 +221,16 @@ def create_inter_dataset_tab():
             section_header("Hemisphere Analysis", "sync_alt")
             with ui.row().classes("gap-4"):
                 separate_hemi = checkbox_input(
-                    "Separate Hemispheres (L/R)", False,
+                    "Hemisphere-aware", False,
                     hint="Split type/group aggregation into _L/_R/_U hemisphere labels.",
                 ).props('id=checkbox-separate-hemi')
                 keep_hemi_conserved = checkbox_input(
                     "Keep Only Hemisphere-Conserved Edges", False,
-                    hint="Keep only edges conserved between hemispheres (requires Separate Hemispheres).",
+                    hint="Keep only edges conserved between hemispheres (requires Hemisphere-aware).",
                 ).props('id=checkbox-hemi-conserved')
                 symmetry_analysis = checkbox_input(
                     "Symmetry Analysis", True,
-                    hint="Generate per-dataset hemisphere symmetry summaries (auto-enabled with Separate Hemispheres).",
+                    hint="Generate per-dataset hemisphere symmetry summaries (auto-enabled with Hemisphere-aware).",
                 ).props('id=checkbox-symmetry')
                 find_reciprocal = checkbox_input(
                     "Find Reciprocal Connections", False,
@@ -240,7 +240,7 @@ def create_inter_dataset_tab():
                 if separate_hemi.value:
                     keep_hemi_conserved.enable()
                     symmetry_analysis.enable()
-                    # auto-enabled with Separate Hemispheres (per the hint)
+                    # auto-enabled with Hemisphere-aware (per the hint)
                     symmetry_analysis.value = True
                 else:
                     # uncheck + disable the hemisphere-dependent options so a

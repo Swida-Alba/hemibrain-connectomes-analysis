@@ -260,7 +260,7 @@ When `visualize_top_n > 0`:
 - **PDF summary**: Natural-sorted individual neuron profiles
 
 ```
-plot3d_{dataset}/
+plot-3d_{dataset}/
 ├── {dataset}.html              # Interactive 3D viewer
 ├── exported_views/             # PNG exports
 │   ├── front.png
@@ -426,7 +426,7 @@ query = 'MBON01'
 ### FindLines Output Structure (EM→LM)
 
 ```
-findlines_{query}_{timestamp}/
+NB-find-lines_{query}_{timestamp}/
 ├── all_lines.csv              # All matches (row-level)
 ├── line_summary.csv           # Aggregated, sorted by weighted_score
 ├── gal4_lexa_summary.csv      # GAL4/LexA only
@@ -442,13 +442,13 @@ findlines_{query}_{timestamp}/
 ### FindNeuron Output Structure (LM→EM)
 
 ```
-findneuron_{lines}_{timestamp}/
+NB-find-neurons_{lines}_{timestamp}/
 ├── {line}_neurons.csv          # All neurons for this line
 ├── {line}_{dataset}_neurons.csv # Dataset-categorized neurons
 ├── {line}_{dataset}_types.csv   # Type summary with counts
 ├── all_neurons.csv             # Combined results
 ├── parameters.json             # Reproducibility parameters
-└── plot3d_{dataset}/           # 3D visualizations
+└── plot-3d_{dataset}/           # 3D visualizations
     ├── {dataset}.html          # Interactive viewer
     ├── exported_views/         # PNG exports
     └── individual_profiles/    # Per-neuron profiles + PDF
@@ -457,7 +457,7 @@ findneuron_{lines}_{timestamp}/
 ### Colabeling Output Structure
 
 ```
-colabel_{lines}_{timestamp}/
+NB-colabeling_{lines}_{timestamp}/
 ├── expression_matrix.csv      # Type × Line scores (dataset-prefixed)
 ├── expression_matrix_merged.csv  # Types merged across datasets
 ├── expression_matrix*.html    # Interactive heatmaps
@@ -470,7 +470,7 @@ colabel_{lines}_{timestamp}/
 ├── line_labeled_neurons/      # Per-line neuron details
 │   ├── {line}_neurons.csv
 │   └── {line}_{dataset}_types.csv
-└── plot3d_{dataset}/          # 3D visualizations
+└── plot-3d_{dataset}/          # 3D visualizations
 ```
 
 ### Line Summary Columns (Colabeling)

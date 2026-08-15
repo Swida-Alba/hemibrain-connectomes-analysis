@@ -41,6 +41,11 @@ navis, neuprint, or selenium.
 import os
 import io
 
+try:
+    from .color_utils import extract_rgb_tuple
+except ImportError:  # pragma: no cover - supports direct module execution
+    from utils.color_utils import extract_rgb_tuple
+
 def img2pptx(
     input_path: str | list,
     output_pptx: str = None,
@@ -144,19 +149,15 @@ def img2pptx(
             "Install with: pip install python-pptx"
         )
     
-    from PIL import Image, ImageColor
+    from PIL import Image
     import re
     
     def parse_color(color):
-        """Parse color from tuple, hex string, or named color. Returns (r, g, b)."""
-        if isinstance(color, (tuple, list)) and len(color) >= 3:
-            return tuple(int(c) for c in color[:3])
-        if isinstance(color, str):
-            if color.startswith('#'):
-                hex_col = color.lstrip('#')
-                return tuple(int(hex_col[i:i+2], 16) for i in (0, 2, 4))
-            return ImageColor.getrgb(color)[:3]
-        return (255, 255, 255)  # Default white
+        """Decode any supported color format to a PPTX RGB tuple."""
+        try:
+            return extract_rgb_tuple(color)
+        except (TypeError, ValueError):
+            return (255, 255, 255)  # Default white
     
     # Natural sort function for proper ordering
     def natural_sort_key(s):

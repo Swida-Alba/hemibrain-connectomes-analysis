@@ -575,6 +575,7 @@ def create_find_similar_tab():
             "min_synapse_threshold": 3,
             "ensure_cache_complete": full_cache.value,
             "morphological_enrichment": True,
+            "output_folder_prefix": "similar-connectivity",
             "visualize_skeleton": profile_visualize.value,
             "visualize_top_n": (
                 visualization_values["visualize_top_n"]

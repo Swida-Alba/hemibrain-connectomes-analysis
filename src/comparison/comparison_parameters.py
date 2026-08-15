@@ -957,11 +957,11 @@ class ComparisonParameters:
         """
         Get the output folder name.
 
-        Format: interdataset_{source_abbr}_to_{target_abbr}_{dataset_codes}_{timestamp}
+        Format: cross-dataset_{source_abbr}_to_{target_abbr}_{dataset_codes}_{timestamp}
 
         Examples:
-        - interdataset_aMe12_to_PPL101_MFB_20251120_143025
-        - interdataset_KC_etc_to_MBON_etc_HM_20251120_143025
+        - cross-dataset_aMe12_to_PPL101_MFB_20251120_143025
+        - cross-dataset_KC_etc_to_MBON_etc_HM_20251120_143025
 
         Returns:
             saveas value if provided, otherwise auto-generated name with timestamp
@@ -984,7 +984,7 @@ class ComparisonParameters:
         # Get dataset codes
         dataset_codes = self._get_dataset_short_codes()
         
-        return f"interdataset_{source_abbr}_to_{target_abbr}_{dataset_codes}_{self.run_timestamp}"
+        return f"cross-dataset_{source_abbr}_to_{target_abbr}_{dataset_codes}_{self.run_timestamp}"
     
     @property
     def full_output_path(self) -> str:

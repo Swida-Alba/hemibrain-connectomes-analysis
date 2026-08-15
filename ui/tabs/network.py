@@ -121,7 +121,7 @@ def create_network_tab():
                     placeholder="e.g., aMe_clock_network",
                 ).classes("w-full drocat-input").tooltip(
                     "Custom output folder name. Leave empty for the unified auto name "
-                    "(findnetwork_<dataset>_<group>_<params>_<timestamp>)."
+                    "(find-network_<dataset>_<group>_<params>_<timestamp>)."
                 )
             with param_grid(3):
                 output_format = select_input(

@@ -14,12 +14,119 @@ from typing import Callable, List, Optional, Tuple
 
 from nicegui import ui
 
+try:
+    from utils.color_utils import color_to_rgba_string, standardize_color
+except ModuleNotFoundError:  # Allow importing the UI package directly from the repo.
+    from src.utils.color_utils import color_to_rgba_string, standardize_color
+
+
+COLOR_FORMAT_HINT = (
+    "Accepted: named colors (red, royalblue, transparent), "
+    "#RGB/#RGBA/#RRGGBB/#RRGGBBAA, RGB(A) tuples/lists with 0-255 "
+    "channels or normalized 0-1 floats, CSS rgb()/rgba() (comma or "
+    "space/slash syntax), and hsl()/hsla(). RGB channels may be percentages; "
+    "alpha may be 0-1, a percentage, or 0-255. Explicit alpha overrides "
+    "the global opacity for that entry; omit alpha to inherit it."
+)
+
+
+def _prepare_custom_color(
+    value: str,
+    alpha_override: bool = False,
+    alpha_value: float = 1.0,
+) -> str:
+    """Validate a custom color and optionally attach an explicit alpha."""
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError("Enter a color value first")
+    if raw.lower() == "auto":
+        raise ValueError("Use a concrete color for custom entries; 'auto' is a preset")
+    # Parse once for an actionable error before storing the user's spelling.
+    standardize_color(raw)
+    if alpha_override:
+        return color_to_rgba_string(raw, alpha=float(alpha_value))
+    return raw
+
 
 _PALETTE_CATALOG: Optional[List[Tuple[str, List[str]]]] = None
 
+# Keep the display name and its source attribute together.  Bokeh exposes
+# both size-specific lists (for example ``Blues256``) and size-indexed mapping
+# objects (``Blues``).  Looking up names by string concatenation makes it easy
+# for a later refactor to attach the wrong source to a card; this table makes
+# every name-to-palette mapping explicit and deterministic.
+_PALETTE_SOURCE_SPECS = (
+    # Categorical palettes: use the largest size available from the mapping.
+    ("Category10", ("Category10",)),
+    ("Category20", ("Category20",)),
+    ("Category20b", ("Category20b",)),
+    ("Category20c", ("Category20c",)),
+    ("Accent", ("Accent",)),
+    ("Dark2", ("Dark2",)),
+    ("Paired", ("Paired",)),
+    ("Pastel1", ("Pastel1",)),
+    ("Pastel2", ("Pastel2",)),
+    ("Set1", ("Set1",)),
+    ("Set2", ("Set2",)),
+    ("Set3", ("Set3",)),
+    ("Colorblind", ("Colorblind",)),
+    # Sequential palettes: prefer the 256-level source, then the canonical
+    # 9-level source, then the Bokeh mapping for older Bokeh releases.
+    ("Blues", ("Blues256", "Blues9", "Blues")),
+    ("Greens", ("Greens256", "Greens9", "Greens")),
+    ("Greys", ("Greys256", "Greys9", "Greys")),
+    ("Oranges", ("Oranges256", "Oranges9", "Oranges")),
+    ("Purples", ("Purples256", "Purples9", "Purples")),
+    ("Reds", ("Reds256", "Reds9", "Reds")),
+    ("BuGn", ("BuGn256", "BuGn9", "BuGn")),
+    ("BuPu", ("BuPu256", "BuPu9", "BuPu")),
+    ("GnBu", ("GnBu256", "GnBu9", "GnBu")),
+    ("OrRd", ("OrRd256", "OrRd9", "OrRd")),
+    ("PuBu", ("PuBu256", "PuBu9", "PuBu")),
+    ("PuBuGn", ("PuBuGn256", "PuBuGn9", "PuBuGn")),
+    ("PuRd", ("PuRd256", "PuRd9", "PuRd")),
+    ("RdPu", ("RdPu256", "RdPu9", "RdPu")),
+    ("YlGn", ("YlGn256", "YlGn9", "YlGn")),
+    ("YlGnBu", ("YlGnBu256", "YlGnBu9", "YlGnBu")),
+    ("YlOrBr", ("YlOrBr256", "YlOrBr9", "YlOrBr")),
+    ("YlOrRd", ("YlOrRd256", "YlOrRd9", "YlOrRd")),
+    ("Viridis", ("Viridis256", "Viridis9", "Viridis")),
+    ("Plasma", ("Plasma256", "Plasma9", "Plasma")),
+    ("Inferno", ("Inferno256", "Inferno9", "Inferno")),
+    ("Magma", ("Magma256", "Magma9", "Magma")),
+    ("Cividis", ("Cividis256", "Cividis9", "Cividis")),
+    ("Turbo", ("Turbo256", "Turbo9", "Turbo")),
+    # Diverging palettes: prefer the canonical 11-level source.
+    ("BrBG", ("BrBG256", "BrBG11", "BrBG9", "BrBG")),
+    ("PiYG", ("PiYG256", "PiYG11", "PiYG9", "PiYG")),
+    ("PRGn", ("PRGn256", "PRGn11", "PRGn9", "PRGn")),
+    ("PuOr", ("PuOr256", "PuOr11", "PuOr9", "PuOr")),
+    ("RdBu", ("RdBu256", "RdBu11", "RdBu9", "RdBu")),
+    ("RdGy", ("RdGy256", "RdGy11", "RdGy9", "RdGy")),
+    ("RdYlBu", ("RdYlBu256", "RdYlBu11", "RdYlBu9", "RdYlBu")),
+    ("RdYlGn", ("RdYlGn256", "RdYlGn11", "RdYlGn9", "RdYlGn")),
+    ("Spectral", ("Spectral256", "Spectral11", "Spectral9", "Spectral")),
+)
+
+
+def _resolve_palette_source(module, candidates: Tuple[str, ...]) -> List[str]:
+    """Resolve one explicit Bokeh source, including older-version fallbacks."""
+    for attribute in candidates:
+        source = getattr(module, attribute, None)
+        if source is None:
+            continue
+        if isinstance(source, dict):
+            if not source:
+                continue
+            source = source[max(source.keys())]
+        colors = list(source)
+        if colors:
+            return colors
+    return []
+
 
 def get_palette_catalog() -> List[Tuple[str, List[str]]]:
-    """Catalog of palettes from bokeh.palettes (categorical/sequential/diverging)."""
+    """Return the curated catalog with an explicit source for every name."""
     global _PALETTE_CATALOG
     if _PALETTE_CATALOG is not None:
         return _PALETTE_CATALOG
@@ -29,44 +136,12 @@ def get_palette_catalog() -> List[Tuple[str, List[str]]]:
     catalog: List[Tuple[str, List[str]]] = []
     seen = set()
 
-    def add(name: str, colors) -> None:
-        colors = list(colors)
+    for name, candidates in _PALETTE_SOURCE_SPECS:
+        colors = _resolve_palette_source(bp, candidates)
         if not colors or name in seen:
-            return
+            continue
         seen.add(name)
         catalog.append((name, colors))
-
-    for name in [
-        "Category10", "Category20", "Category20b", "Category20c",
-        "Accent", "Dark2", "Paired", "Pastel1", "Pastel2",
-        "Set1", "Set2", "Set3", "Colorblind",
-    ]:
-        obj = getattr(bp, name, None)
-        if obj is None:
-            continue
-        add(name, obj[max(obj.keys())] if isinstance(obj, dict) else obj)
-
-    for base in [
-        "Blues", "Greens", "Greys", "Oranges", "Purples", "Reds",
-        "BuGn", "BuPu", "GnBu", "OrRd", "PuBu", "PuBuGn", "PuRd", "RdPu",
-        "YlGn", "YlGnBu", "YlOrBr", "YlOrRd",
-        "Viridis", "Plasma", "Inferno", "Magma", "Cividis", "Turbo",
-    ]:
-        for size in (256, 9):
-            obj = getattr(bp, f"{base}{size}", None)
-            if obj is not None:
-                add(base, obj)
-                break
-
-    for base in [
-        "BrBG", "PiYG", "PRGn", "PuOr", "RdBu", "RdGy",
-        "RdYlBu", "RdYlGn", "Spectral",
-    ]:
-        for size in (256, 11, 9):
-            obj = getattr(bp, f"{base}{size}", None)
-            if obj is not None:
-                add(base, obj)
-                break
 
     _PALETTE_CATALOG = catalog
     return catalog
@@ -82,11 +157,28 @@ def sample_palette(colors: List[str], n: int) -> List[str]:
     return [colors[i] for i in indices]
 
 
-def assign_palette_colors(colors: List[str], n: int) -> List[str]:
-    """Assign colors in their exact displayed order, cycling only if needed."""
+def assign_palette_colors(
+    colors: List[str], n: int, *, continuous: bool = False
+) -> List[str]:
+    """Assign colors, sampling continuous palettes across their full range.
+
+    Discrete palettes retain their exact displayed order and cycle only when
+    more colors are needed. Continuous palettes are sampled evenly so a small
+    number of layers still spans the selected gradient range.
+    """
     if n <= 0 or not colors:
         return []
+    if continuous:
+        return sample_palette(colors, n)
     return [colors[index % len(colors)] for index in range(n)]
+
+
+class _PaletteSelection(list):
+    """List-compatible palette value carrying continuous-preset metadata."""
+
+    def __init__(self, colors=(), *, continuous: bool = False):
+        super().__init__(colors)
+        self.is_continuous_palette = continuous
 
 
 def normalize_palette_range(start_pct: int, end_pct: int) -> Tuple[int, int]:
@@ -228,7 +320,7 @@ def palette_picker(
             preview.clear()
             with preview:
                 _render_color_strip(
-                    dict(catalog)[state["value"]][:24],
+                    dict(catalog)[state["value"]],
                     height=20,
                     classes="flex-grow",
                 )
@@ -246,7 +338,7 @@ def palette_picker(
                         + (" selected" if name == state["value"] else "")
                     ).on("click", lambda n=name: select(n))
                     with card:
-                        _render_color_strip(colors[:24], height=18)
+                        _render_color_strip(colors, height=18)
                         ui.label(name).classes("drocat-palette-name")
                     cards.append((card, name))
 
@@ -284,9 +376,9 @@ def palette_editor(
       reorder discrete palettes, use the range slider to select part of
       the palette live, and hit reset (beside the preview) to restore the
       original order and the full range.
-    - Custom colors: add single colors via the color input/picker; the
-      custom list reorders with the same drag-and-drop as the preset
-      preview, and entries can be removed
+    - Custom colors: add single colors via the native picker or a free-form
+      color string; an optional alpha override is stored per entry. Entries
+      without an explicit alpha inherit the renderer's global opacity.
 
     ``on_change`` fires when the user manually edits the palette state
     (picking a preset card, drag-reordering, adjusting the range, resetting);
@@ -308,6 +400,8 @@ def palette_editor(
         "end": 100,
         "custom": [],
         "preset_orders": {},
+        "custom_input_source": "picker",
+        "syncing_custom_input": False,
     }
     cards: List[Tuple[ui.element, str]] = []
 
@@ -327,7 +421,22 @@ def palette_editor(
     def effective_colors() -> List[str]:
         if state["mode"] == "custom" and state["custom"]:
             return state["custom"]
-        return effective_slice()
+        return _PaletteSelection(
+            effective_slice(),
+            continuous=(state["mode"] == "preset" and not is_discrete()),
+        )
+
+    def colors_for_count(n: int) -> List[str]:
+        """Return colors ready for a known number of rendered items."""
+        colors = effective_colors()
+        return assign_palette_colors(
+            colors,
+            max(0, int(n or 0)),
+            continuous=(
+                state["mode"] == "preset"
+                and not is_discrete()
+            ),
+        )
 
     def slice_start_index(colors: List[str]) -> int:
         """Index in ``colors`` where the displayed range slice starts."""
@@ -366,11 +475,11 @@ def palette_editor(
             with swatch_area:
                 if draggable:
                     _render_draggable_swatches(
-                        colors[:32], height=20, on_drop=handle_drop
+                        colors, height=20, on_drop=handle_drop
                     )
                 else:
                     _render_color_strip(
-                        colors[:32], height=20, classes="w-full"
+                        colors, height=20, classes="w-full"
                     )
             if state["mode"] == "custom" and state["custom"]:
                 status = "custom colors"
@@ -473,13 +582,56 @@ def palette_editor(
         # ---------------- Custom panel ----------------
         with ui.column().classes("w-full gap-1") as custom_panel:
             with ui.row().classes("w-full items-center gap-2"):
-                color_input = ui.color_input(value="#145cff").props("dense")
+                color_input = ui.color_input(value="#145cff").props("dense").tooltip(
+                    "Quick opaque color picker; use Color format for RGBA, hex-alpha, HSL, or tuple syntax."
+                )
+                format_input = ui.input(
+                    label="Color format",
+                    value="#145cff",
+                    placeholder="rgba(255, 0, 0, 0.5)",
+                ).props("dense outlined").classes("flex-grow").tooltip(
+                    COLOR_FORMAT_HINT
+                )
+                alpha_override = ui.checkbox(
+                    "Alpha override", value=False
+                ).tooltip(
+                    "When enabled, the Alpha value is embedded in this color and overrides the global opacity."
+                )
+                alpha_value = ui.number(
+                    label="Alpha (0–1)",
+                    value=1.0,
+                    min=0,
+                    max=1,
+                    step=0.05,
+                ).classes("w-28").tooltip(
+                    "Per-entry alpha override. Leave the checkbox off to inherit the global opacity."
+                )
+                alpha_value.disable()
                 ui.button(
                     "Add color", icon="add", on_click=lambda: add_custom_color()
                 ).props("flat dense color=primary")
             ui.label(
-                "Pick a color and press Add; drag rows to reorder."
+                "Pick a color or type a format and press Add. Supported: named colors; "
+                "#RGB/#RGBA/#RRGGBB/#RRGGBBAA; RGB(A) 0–255 or normalized 0–1; "
+                "rgb()/rgba(); hsl()/hsla(). Explicit alpha overrides the global "
+                "opacity, while colors without alpha inherit it. Drag rows to reorder."
             ).classes("text-caption drocat-muted")
+
+            def on_picker_change(event):
+                state["custom_input_source"] = "picker"
+                state["syncing_custom_input"] = True
+                format_input.set_value(event.value or color_input.value)
+                state["syncing_custom_input"] = False
+
+            def on_format_change(_event):
+                if not state["syncing_custom_input"]:
+                    state["custom_input_source"] = "text"
+
+            color_input.on_value_change(on_picker_change)
+            format_input.on_value_change(on_format_change)
+            alpha_override.on_value_change(
+                lambda event: alpha_value.set_enabled(bool(event.value))
+            )
 
             # Draggable custom-color rows: same drag-and-drop mechanism as
             # the preset preview row, but along the vertical list axis.
@@ -523,7 +675,21 @@ def palette_editor(
                     render_preview()
 
             def add_custom_color():
-                add_single_color(color_input.value or "#145cff")
+                raw = (
+                    format_input.value
+                    if state["custom_input_source"] == "text"
+                    else color_input.value
+                ) or "#145cff"
+                try:
+                    color = _prepare_custom_color(
+                        raw,
+                        alpha_override=bool(alpha_override.value),
+                        alpha_value=float(alpha_value.value or 1.0),
+                    )
+                except (TypeError, ValueError) as exc:
+                    ui.notify(str(exc), type="warning")
+                    return
+                add_single_color(color)
 
             def remove_custom(index: int):
                 del state["custom"][index]
@@ -582,6 +748,7 @@ def palette_editor(
     container.get_palette_order = lambda: list(palette_colors())
     container.get_range = lambda: (state["start"], state["end"])
     container.get_colors = effective_colors
+    container.get_colors_for_count = colors_for_count
     container.set_palette = lambda name: apply_palette(name, notify=False)
     return container
 
@@ -591,7 +758,7 @@ def color_swatch_picker(
     value: str = "auto",
     options: Optional[List[Tuple[str, str]]] = None,
 ) -> ui.element:
-    """Single-color swatches plus a native custom color picker."""
+    """Single-color swatches with free-form color and alpha support."""
     options = options or [
         ("auto", "Auto"),
         ("#94a3b8", "Gray"),
@@ -603,7 +770,11 @@ def color_swatch_picker(
         ("#000000", "Black"),
         ("#ffffff", "White"),
     ]
-    state = {"value": value if any(v == value for v, _ in options) else "auto"}
+    state = {
+        "value": value if any(v == value for v, _ in options) else "auto",
+        "input_source": "picker",
+        "syncing_input": False,
+    }
 
     with ui.column().classes("w-full gap-1") as container:
         ui.label(label).classes("drocat-mini-label")
@@ -623,10 +794,56 @@ def color_swatch_picker(
                 swatches.append((swatch, option_value))
 
         with ui.row().classes("w-full items-center gap-2"):
-            custom_input = ui.color_input(value="#3b82f6").props("dense")
+            custom_input = ui.color_input(value="#3b82f6").props("dense").tooltip(
+                "Quick opaque color picker; use Color format for alpha or other syntax."
+            )
+            format_input = ui.input(
+                label="Color format",
+                value="#3b82f6",
+                placeholder="rgba(200, 230, 240, 0.1)",
+            ).props("dense outlined").classes("flex-grow").tooltip(
+                COLOR_FORMAT_HINT
+            )
+            alpha_override = ui.checkbox(
+                "Alpha override", value=False
+            ).tooltip(
+                "Embed a per-mesh alpha that overrides any global opacity."
+            )
+            alpha_value = ui.number(
+                label="Alpha (0–1)",
+                value=1.0,
+                min=0,
+                max=1,
+                step=0.05,
+            ).classes("w-28").tooltip(
+                "Per-color alpha override. Leave it off to inherit the global opacity."
+            )
+            alpha_value.disable()
             ui.button(
-                "Use custom color", on_click=lambda: select(custom_input.value)
+                "Use custom color", on_click=lambda: select_custom_color()
             ).props("flat dense color=primary")
+
+        ui.label(
+            "Accepted: named colors; #RGB/#RGBA/#RRGGBB/#RRGGBBAA; RGB(A) "
+            "0–255 or normalized 0–1; rgb()/rgba(); hsl()/hsla(). Explicit "
+            "alpha wins for this mesh; omit it to inherit the global opacity."
+        ).classes("text-caption drocat-muted")
+
+        def on_picker_change(event):
+            state["input_source"] = "picker"
+            state["syncing_input"] = True
+            format_input.set_value(event.value or custom_input.value)
+            state["syncing_input"] = False
+
+        def on_format_change(_event):
+            if not state["syncing_input"]:
+                state["input_source"] = "text"
+
+        custom_input.on_value_change(on_picker_change)
+        format_input.on_value_change(on_format_change)
+        alpha_override.on_value_change(
+            lambda event: alpha_value.set_enabled(bool(event.value))
+        )
 
         def select(option_value: str):
             state["value"] = option_value
@@ -636,6 +853,23 @@ def color_swatch_picker(
                     replace="drocat-swatch"
                     + (" selected" if swatch_value == option_value else "")
                 )
+
+        def select_custom_color():
+            raw = (
+                format_input.value
+                if state["input_source"] == "text"
+                else custom_input.value
+            ) or "#3b82f6"
+            try:
+                color = _prepare_custom_color(
+                    raw,
+                    alpha_override=bool(alpha_override.value),
+                    alpha_value=float(alpha_value.value or 1.0),
+                )
+            except (TypeError, ValueError) as exc:
+                ui.notify(str(exc), type="warning")
+                return
+            select(color)
 
         for element, option_value in swatches:
             element.on("click", lambda v=option_value: select(v))

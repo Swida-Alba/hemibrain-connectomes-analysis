@@ -87,7 +87,7 @@
       without hemisphere notation is never silently dropped.</li>
   </ol>
 
-  <h3>Separate Hemispheres (L/R)</h3>
+  <h3>Hemisphere-aware</h3>
   <p>Splits type/group aggregation into <code>_L</code> / <code>_R</code> /
     <code>U</code> labels so ipsilateral and contralateral edges can be told
     apart (e.g. <code>KCg-m_L → MBON01_L</code> vs
@@ -111,7 +111,7 @@
 
   <h2>Output &amp; examples</h2>
   <p>One timestamped folder per run, prefixed with the function name:</p>
-  <pre><code>{output_dir}/findallpath_{DATASET}_{source}_to_{target}_{params}_{timestamp}/
+  <pre><code>{output_dir}/find-paths-complete_{DATASET}_{source}_to_{target}_{params}_{timestamp}/
   aMe12_to_aMe10_allpaths_type.csv
   connection_type.csv
   conn_mat_type_weight.csv
@@ -120,8 +120,8 @@
   parameters.txt</code></pre>
   <div class="example">
     <div class="example-title">Example folder</div>
-    <pre><code>findallpath_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_183000/
-findpath_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_183000/  &lt;!-- Find Path (per-path) mode --&gt;</code></pre>
+    <pre><code>find-paths-complete_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_183000/  &lt;!-- Complete Paths --&gt;
+find-paths-shortest_MCNS_aMe12_to_aMe10_L5w3r0p0_20260801_183000/  &lt;!-- Shortest Paths --&gt;</code></pre>
   </div>
 
   <h2>Common issues &amp; tips</h2>

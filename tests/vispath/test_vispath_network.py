@@ -526,7 +526,7 @@ class TestSaveDataMatrices:
 
 def test_empty_network_does_not_repeat_timestamp_in_folder_name(tmp_path):
     """A timestamped Net-Viz run folder contributes only one file timestamp."""
-    run_folder = tmp_path / "plotpath_empty_network_20260814_170906"
+    run_folder = tmp_path / "plot-network_empty_network_20260814_170906"
     visualizer = VisualizePath(
         path_file=None,
         output_folder=str(run_folder),
@@ -537,7 +537,7 @@ def test_empty_network_does_not_repeat_timestamp_in_folder_name(tmp_path):
 
     output_path = Path(visualizer.generate_empty_network_html())
 
-    assert output_path.name == "plotpath_empty_network_20260814_170906_network.html"
+    assert output_path.name == "plot-network_empty_network_20260814_170906_network.html"
     assert re.findall(r"\d{8}_\d{6}", output_path.stem) == ["20260814_170906"]
 
 

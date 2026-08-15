@@ -781,6 +781,31 @@ html, body {
 .drocat-page-mark .q-icon { font-size: 24px; }
 .drocat-page-title { font-size: 22px; font-weight: 700; letter-spacing: -.02em; color: var(--drocat-navy); }
 .drocat-page-sub { font-size: 13px; color: var(--drocat-muted); }
+.drocat-page-progress {
+    padding: 10px 0 12px !important;
+    border-color: var(--drocat-line-strong) !important;
+    background: linear-gradient(135deg, rgba(234, 240, 255, .72), var(--drocat-surface)) !important;
+}
+.drocat-page-progress-compact {
+    margin: 0 0 12px;
+    border-bottom: 1px solid var(--drocat-line);
+    background: transparent !important;
+}
+.drocat-page-progress-head { min-height: 30px; }
+.drocat-page-progress-mark {
+    width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
+    background: var(--drocat-cobalt);
+}
+.drocat-page-progress-mark .q-icon { font-size: 17px; }
+.drocat-page-progress-summary { min-height: 20px; }
+.drocat-progress-percent {
+    color: var(--drocat-navy); font-weight: 750; font-variant-numeric: tabular-nums;
+}
+.drocat-progress-bar {
+    height: 12px !important;
+    min-height: 12px !important;
+    border-radius: 999px;
+}
 
 .drocat-workspace {
     display: grid !important;

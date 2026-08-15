@@ -102,6 +102,12 @@ vs = VisualizeSkeleton(
 
 **Note:** `mesh_color`/`mesh_alpha` apply to ROI meshes only. Brain and VNC mesh colors are set separately via `brain_mesh_color` and `vnc_mesh_color`.
 
+**Color format and alpha:** `neuron_colors`, `synapse_colors`, and
+`mesh_color` accept named colors, `#RGB/#RGBA/#RRGGBB/#RRGGBBAA`, RGB(A)
+tuples/lists with 0–255 channels or 0–1 floats, CSS `rgb()/rgba()`, and
+`hsl()/hsla()`. Lists may mix formats. An embedded alpha overrides the
+corresponding global opacity; entries without alpha inherit it.
+
 **ROI Expansion:** Base names like `'AME'` auto-expand to `['AME(L)', 'AME(R)']`; each resolved mesh has its own legend entry.
 
 ---

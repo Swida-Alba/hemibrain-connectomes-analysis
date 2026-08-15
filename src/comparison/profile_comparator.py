@@ -2378,6 +2378,7 @@ class HomologFinder:
         morphological_enrichment: bool = True,
         use_auto_type_mapping: bool = True,
         ensure_cache_complete: bool = False,
+        output_folder_prefix: str = 'homologs',
     ):
         """
         Initialize HomologFinder with configuration and default parameters.
@@ -2440,6 +2441,10 @@ class HomologFinder:
                 This can take hours on first use with a new dataset. Default False:
                 the search fetches only the connections it needs (recommended for
                 the UI and normal first-time use).
+            output_folder_prefix: Prefix for auto-generated result folders.
+                The Homolog Finding tab uses ``homologs``; Similarity's
+                connectivity mode passes ``similar-connectivity``. Custom
+                ``saveas`` values are unaffected.
         
         Example:
             >>> # Set up finder with visualization
@@ -2475,8 +2480,11 @@ class HomologFinder:
         else:
             self.output_dir = output_dir
         # Normalize empty strings to None so the auto-generated per-run folder
-        # (findhomologs_..._timestamp) is used when no custom name is given.
+        # (homologs_..._timestamp) is used when no custom name is given.
         self.saveas = saveas or None
+        self.output_folder_prefix = (
+            str(output_folder_prefix or 'homologs').strip() or 'homologs'
+        )
         
         # Visualization settings
         self.visualize_skeleton = visualize_skeleton
@@ -6057,7 +6065,7 @@ class HomologFinder:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             safe_query = str(query).replace('/', '_').replace(':', '_').replace('*', '_')
             folder_name = (
-                f"findhomologs_{dataset_abbrev(source_dataset)}"
+                f"{self.output_folder_prefix}_{dataset_abbrev(source_dataset)}"
                 f"_to_{dataset_abbrev(target_dataset)}"
                 f"_{safe_query}_{timestamp}"
             )
@@ -7614,7 +7622,7 @@ class ConnectivityProfileComparer:
         - Separate heatmap files for EACH metric (not just one with switching)
         - Separate upstream/downstream and combined analysis
         - Interactive heatmap via VisualizePath with native Ward clustering
-        - Auto-generated output folder: connectivity_profiling_{query_name}_{timestamp}
+        - Auto-generated output folder: profiling_{query_name}_{timestamp}
         - Saves individual and aggregated connectivity profiles
     
     Query Input Formats:
@@ -7658,7 +7666,7 @@ class ConnectivityProfileComparer:
         comparison. This can be disabled via use_auto_type_mapping=False.
     
     Output Structure:
-        {output_dir}/connectivity_profiling_{query_name}_{timestamp}/
+        {output_dir}/profiling_{query_name}_{timestamp}/
         ├── parameters.json
         ├── README.txt
         ├── results/
@@ -9630,7 +9638,7 @@ class ConnectivityProfileComparer:
         Save results to output directory with separated type-level and bodyId-level outputs.
         
         Output Structure:
-            {output_dir}/connectivity_profiling_{query_name}_{timestamp}/
+            {output_dir}/profiling_{query_name}_{timestamp}/
             ├── parameters.json
             ├── README.txt
             ├── profiles/
@@ -10557,6 +10565,17 @@ a:hover { text-decoration: underline; }
                         if prefix_display else f"{metric_display} - {direction_display}"
                     )
                     
+                    # Match the report.html convention: diverging blue-white-red
+                    # for signed rank metrics, positive white-red otherwise, with
+                    # a fixed color range so the same value maps to the same
+                    # color in the report and in the VisPath editor.
+                    is_diverging = metric_key in {'rank_corr', 'rank_corr_union'}
+                    colorscale = (
+                        self._REPORT_DIVERGING_COLORSCALE if is_diverging
+                        else self._REPORT_POSITIVE_COLORSCALE
+                    )
+                    zmin, zmax = (-1.0, 1.0) if is_diverging else (0.0, 1.0)
+                    
                     VisConnMatInteractive(
                         cmat=matrix,
                         filename=str(html_path),
@@ -10565,6 +10584,10 @@ a:hover { text-decoration: underline; }
                         showfig=self.show_figures,
                         verbose=False,  # Suppress individual clustering messages
                         init_clustered=True,
+                        color_scale=colorscale,
+                        zmin=zmin,
+                        zmax=zmax,
+                        metric_name=metric_display,
                     )
                     
                     saved_files['heatmaps_generated'].append(str(html_path))
@@ -10778,7 +10801,7 @@ a:hover { text-decoration: underline; }
         """
         Save multi-dataset results in a reorganized output folder:
 
-            {output}/connectivity_profiling_{query}_{timestamp}/
+            {output}/profiling_{query}_{timestamp}/
             ├── report.html                  # overall summary (all heatmaps)
             ├── parameters.json
             ├── README.txt
@@ -11467,7 +11490,7 @@ a:hover { text-decoration: underline; }
         # Create output directory
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_ds_name = f"{ds_list[0]}_vs_{ds_list[1]}".replace(' ', '_').replace('/', '_')
-        base_dir = os.path.join(self.output_dir, f"{safe_ds_name}_{timestamp}_cross_dataset")
+        base_dir = os.path.join(self.output_dir, f"profiling_{safe_ds_name}_{timestamp}")
         cross_dir = os.path.join(base_dir, "cross_dataset")
         profiles_dir = os.path.join(base_dir, "profiles")
         

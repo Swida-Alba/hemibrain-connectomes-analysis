@@ -308,6 +308,7 @@ class ScriptRunner:
         method_name: str = "run",
         method_params: Optional[dict] = None,
         log_callback: Optional[Callable[[str, str], None]] = None,
+        progress_callback: Optional[Callable[[str, str], None]] = None,
         output_dir: Optional[str] = None,
     ) -> dict:
         """
@@ -319,6 +320,9 @@ class ScriptRunner:
             method_name: Key in tool's 'methods' dict
             method_params: Parameters for the method call (if any)
             log_callback: Callback(line, stream) for log output
+            progress_callback: Callback(phase, label) for coarse lifecycle
+                progress. Structured backend progress still travels through
+                ``log_callback``.
             output_dir: Expected output directory to scan for results
 
         Returns:
@@ -336,6 +340,15 @@ class ScriptRunner:
         self._run_logs = []
         self._neuron_match = None
         start_time = datetime.now()
+
+        def _progress(phase: str, label: str = "") -> None:
+            if progress_callback:
+                try:
+                    progress_callback(phase, label)
+                except Exception:
+                    # A page may have been closed while the subprocess keeps
+                    # unwinding; progress reporting must never fail the run.
+                    pass
 
         def _log(line: str, level: str = "stdout"):
             """Record every log line and forward it to the UI callback."""
@@ -358,12 +371,19 @@ class ScriptRunner:
                         self._neuron_match["any_pair"]
                         or (source_count > 0 and target_count > 0)
                     )
+                # The generated coana scripts emit this marker immediately
+                # after InitializeNeuronInfo().  Only now is it correct to
+                # advance initialized tabs from step 1 to their execution
+                # step; the subprocess may still be printing initialization
+                # messages when it first starts.
+                _progress("initialize_complete", "Initialization complete")
                 return
             self._run_logs.append((level, line))
             if log_callback:
                 log_callback(line, level)
 
         # Generate the script
+        _progress("prepare", "Preparing inputs")
         script_content = self._generate_script(
             tool_name, constructor_params, method_name, method_params
         )
@@ -400,7 +420,9 @@ class ScriptRunner:
             # Run unbuffered so log lines stream to the UI in real time
             env["PYTHONUNBUFFERED"] = "1"
 
-            # Create subprocess
+            # Create subprocess.  Keep the tracker on its initialization step
+            # until the generated script confirms that initialization ended.
+            _progress("initialize", f"Initializing {label}")
             self.process = await asyncio.create_subprocess_exec(
                 python_exe,
                 "-u",
@@ -438,6 +460,7 @@ class ScriptRunner:
             # fails before creating its per-run folder must not fall back to
             # the shared storage root — that would list files from previous
             # runs (e.g. an earlier BANC run while running male-cns).
+            _progress("collect", "Collecting output files")
             scan_dir = self._resolve_scan_dir(output_dir)
             files = self._scan_output_files(scan_dir) if scan_dir else []
 
@@ -776,11 +799,13 @@ print("[DROCAT] Done.")
     ]
 
     # Per-run output folder prefixes used by every DROCAT tool
-    # (findpath_, findhomologs_, plotpath_, ...). A directory whose name does
+    # (find-paths-complete_, homologs_, similar-morphology_, ...). A directory whose name does
     # not start with one of these is a shared storage root that may contain
     # many runs — it must never be scanned as the current run's folder.
     _RUN_FOLDER_PREFIX_RE = re.compile(
-        r"^(findpath|findallpath|findshortestpath|findnetwork|finddirect|findhomologs|profiling|interdataset|"
+        r"^(find-paths-complete|find-paths-shortest|find-network|cross-dataset|plot-3d|plot-network|"
+        r"homologs|similar-morphology|similar-connectivity|similar|profiling|NB-find-lines|NB-find-neurons|NB-colabeling|flylignt-downloads|"
+        r"findpath|findallpath|findshortestpath|findnetwork|finddirect|findhomologs|interdataset|"
         r"plot3d|plotpath|colabel|findlines|findneuron|findsimilar)_"
     )
 

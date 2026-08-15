@@ -86,7 +86,7 @@ def test_bodyid_query_ranks_same_type(dataset, tmp_path_factory):
     bids, data = _sample_bodyids(dataset, cfg["n"], cfg["min_members"], cfg["seed"])
     assert len(bids) >= cfg["n"], f"not enough typed types in the {dataset} cache"
 
-    out = tmp_path_factory.mktemp(f"similar_{dataset}".replace(":", "_"))
+    out = tmp_path_factory.mktemp(f"similar-morphology_{dataset}".replace(":", "_"))
     presence = quality = 0
     failures = []
     for bid in bids:
@@ -127,7 +127,7 @@ def test_male_cns_v1_0_bodyid_profile_first_same_type(tmp_path_factory):
         pytest.skip(f"vector cache missing or untyped for {dataset}")
     # aMe4 has 12 vectorized members: a bodyId query must recover them
     query = 532888
-    out = tmp_path_factory.mktemp("similar_malcns_live")
+    out = tmp_path_factory.mktemp("similar-morphology_malcns_live")
     comparer = morph.MorphologyComparer(
         query=query, dataset=dataset, level="bodyid", method="vector",
         candidate_source="auto", top_n=30, candidate_expansion=3,

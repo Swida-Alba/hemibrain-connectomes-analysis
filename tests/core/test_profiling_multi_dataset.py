@@ -630,6 +630,7 @@ def test_run_multi_dataset_output_structure(tmp_path, monkeypatch):
     assert not any("/per_neuron/" in path for path in result["matrices_saved"])
 
     out = Path(result["output_path"])
+    assert out.name.startswith("profiling_")
     assert (out / "report.html").exists()
     assert (out / "parameters.json").exists()
     assert (out / "README.txt").exists()

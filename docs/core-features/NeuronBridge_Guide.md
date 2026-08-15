@@ -263,7 +263,7 @@ print(results[results['line_type'] == 'split_gal4']['line'].unique()[:5])
 
 **Separate Output Files** (when `separate_splitgal4=True`):
 ```
-output/findlines_20241223_123456/
+output/NB-find-lines_20241223_123456/
 ├── all_lines.csv              # Combined results (all lines)
 ├── line_summary.csv           # Aggregated stats (all lines)
 ├── gal4_lexa_lines.csv        # GAL4/LexA results only
@@ -376,7 +376,7 @@ results = nbf.analyze_colabeling(
 
 **Output Files**:
 ```
-output/colabel_LH173_VT037867_SS00731_etc_20241223_123456/
+output/NB-colabeling_LH173_VT037867_SS00731_etc_20241223_123456/
 ├── expression_matrix.csv               # Type × Line score matrix (dataset-prefixed types)
 ├── expression_matrix.html              # Interactive heatmap (per-dataset)
 ├── expression_matrix_merged.csv        # Type × Line matrix (types merged across datasets)
@@ -553,7 +553,7 @@ results = nbf.find_lines_batch(
 
 **Output Files** (when `output_dir` is specified):
 ```
-output/findlines_aMe12_20241223_123456/
+output/NB-find-lines_aMe12_20241223_123456/
 ├── all_lines.csv              # Combined results (row-level matches)
 ├── line_summary.csv           # Aggregated stats per line, SORTED BY weighted_score
 ├── gal4_lexa_summary.csv      # GAL4/LexA summary, SORTED BY weighted_score
@@ -802,7 +802,7 @@ results = nbf.find_neurons_batch(
 output/findneurons_20241223_123456/
 ├── {line}_neurons.csv         # Matched neurons for each line
 ├── all_neurons.csv            # Combined results
-└── plot3d_{dataset}/          # Per-dataset visualization folder
+└── plot-3d_{dataset}/          # Per-dataset visualization folder
     ├── {dataset}.html         # Interactive 3D skeleton viewer
     ├── parameters.txt         # Visualization settings record
     ├── exported_views/        # Static PNG exports
@@ -852,7 +852,7 @@ results = nbf.find_neurons_batch(
 )
 
 # Results include neurons grouped by type in 3D viewer
-# Individual profiles saved to plot3d_{dataset}/individual_profiles/
+# Individual profiles saved to plot-3d_{dataset}/individual_profiles/
 ```
 
 ### Example: Filter and Visualize Specific Types

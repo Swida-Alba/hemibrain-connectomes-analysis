@@ -660,7 +660,7 @@ def test_relocate_viz_outputs_organizes_visualization_folder(tmp_path):
     import coana
 
     fc = object.__new__(coana.FindNeuronConnection)
-    run = tmp_path / "findallpath_X_to_Y_L2w3r0_20260101_000000"
+    run = tmp_path / "find-paths-complete_X_to_Y_L2w3r0_20260101_000000"
     run.mkdir()
     fc.allpath_folder = str(run)
     fc._vprint = lambda *a, **k: None
@@ -1339,7 +1339,7 @@ class TestFindShortestPathPipeline:
         entry = next(iter(_FINDALLPATH_GRAPH_CACHE.values()))
         assert entry["depth"] == 4 and entry["complete"] is True
         # High bound (semi-unlimited) -> exact L{bound} folder name.
-        assert os.path.basename(fc.allpath_folder).startswith("findshortestpath_")
+        assert os.path.basename(fc.allpath_folder).startswith("find-paths-shortest_")
         assert "_L99" in os.path.basename(fc.allpath_folder)
         # The one shortest path (TS->TA->TB->TC->TT) was saved.
         path_csv = os.path.join(fc.allpath_folder, "src_to_tgt_allpaths_type.csv")
@@ -1513,14 +1513,14 @@ class TestFindShortestPathPipeline:
 
     def test_find_all_path_mode_unchanged_by_refactor(self, monkeypatch, tmp_path):
         # 'all' mode keeps full-depth discovery (no early stop) and the
-        # findallpath_ folder prefix with the depth in the suffix.
+        # find-paths-complete_ folder prefix with the depth in the suffix.
         fc, fetch_calls, _ = _make_pipeline_fc(
             monkeypatch, tmp_path, _CHAIN_EDGES, max_interlayer=3)
         fc.FindAllPath()
         # bound = 4 layer tables: S, A, B, C (T's layer would be the 5th).
         assert fetch_calls == [["S"], ["A"], ["B"], ["C"]]
         base = os.path.basename(fc.allpath_folder)
-        assert base.startswith("findallpath_") and "_L3" in base
+        assert base.startswith("find-paths-complete_") and "_L3" in base
         path_csv = os.path.join(fc.allpath_folder, "src_to_tgt_allpaths_type.csv")
         assert len(pl.read_csv(path_csv)) == 1
 

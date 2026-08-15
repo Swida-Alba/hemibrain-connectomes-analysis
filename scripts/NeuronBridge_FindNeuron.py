@@ -21,7 +21,7 @@ Key Features:
 Output Files:
     - {line_name}_neurons.csv: Matched EM neurons with scores and metadata
     - all_neurons.csv: Aggregated results from all searches
-    - plot3d_{dataset}/: 3D visualization folder (if visualize_top_n > 0)
+    - plot-3d_{dataset}/: 3D visualization folder (if visualize_top_n > 0)
       - {dataset}.html: Interactive 3D skeleton visualization
       - exported_views/: PNG exports (front, back, top, bottom, left, right)
       - individual_profiles/: Per-neuron PNG profiles + PDF summary
@@ -90,7 +90,7 @@ if __name__ == "__main__":
     
     # Visualize top N types/bodyIds per dataset using 3D skeleton (0 = disabled)
     # This creates interactive HTML visualizations showing the top N neuron types or bodyIds
-    # Output folder: plot3d_{dataset}/ (no timestamp, overwrites previous)
+    # Output folder: plot-3d_{dataset}/ (no timestamp, overwrites previous)
     visualize_top_n = 12
     
     # How to organize visualization: 'type' or 'bodyId'

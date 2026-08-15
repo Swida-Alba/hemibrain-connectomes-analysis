@@ -192,7 +192,7 @@ results = nbf.find_lines_batch(
 **Expected output:**
 ```
 🔍 Finding lines for 3 query(s)
-   Output: ./output/findlines_20231223_143022
+   Output: ./output/NB-find-lines_20231223_143022
 
 📋 Processing: aMe12
   Found 3 neurons to search
@@ -211,7 +211,7 @@ results = nbf.find_lines_batch(
    ⏱️  Note: Fetching neurons for each line to build similarity matrix
    🔍 [75/100] Fetching neurons for SS00324: 75%|███████▌  | 75/100 [2:05<0:42, 0.60line/s]
    🔢 Computing Jaccard similarities between 100 lines...
-   💾 Co-labeling matrix: ./output/findlines_20231223_143022/colabeling_matrix.csv
+   💾 Co-labeling matrix: ./output/NB-find-lines_20231223_143022/colabeling_matrix.csv
 
 📐 Calculating mutual information...
    ⏱️  Note: Fetching neuron types for each line (may take time)

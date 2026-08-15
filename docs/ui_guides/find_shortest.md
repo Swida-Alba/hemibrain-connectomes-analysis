@@ -66,7 +66,7 @@ network/Sankey/heatmap visualizations.
 ## Output
 
 ```
-{output_dir}/findshortestpath_{DATASET}_{source}_to_{target}_L{depth}w{minsyn}r{ratio}p{prob}_{timestamp}/
+{output_dir}/find-paths-shortest_{DATASET}_{source}_to_{target}_L{depth}w{minsyn}r{ratio}p{prob}_{timestamp}/
   *_allpaths_type.csv            # type-level shortest paths
   data_details/                  # parameters, neuron lists, connection tables
   visualization/                 # network / Sankey / heatmap HTML + inputs

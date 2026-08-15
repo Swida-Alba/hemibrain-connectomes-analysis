@@ -21,6 +21,7 @@ from .report_utils import img2pptx
 from .color_utils import (
     standardize_color,
     standardize_color_list,
+    color_has_explicit_alpha,
     extract_rgb_tuple,
     extract_rgba_tuple,
     color_to_hex,
@@ -46,6 +47,7 @@ __all__ = [
     # Color utilities
     'standardize_color',
     'standardize_color_list',
+    'color_has_explicit_alpha',
     'extract_rgb_tuple',
     'extract_rgba_tuple',
     'color_to_hex',

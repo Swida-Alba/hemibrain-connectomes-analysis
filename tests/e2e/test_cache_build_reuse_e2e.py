@@ -149,7 +149,7 @@ class TestVisualizationCacheBuildReuse:
         cache_dir = Path(work) / "cache" / FOLDER / "skeletons"
         assert (cache_dir / ".level").read_text().strip() == "simp90"
 
-        html = Path(work) / "plot3d_HEMI_e2e_probe" / "e2e_probe.html"
+        html = Path(work) / "plot-3d_HEMI_e2e_probe" / "e2e_probe.html"
         assert html.exists() and html.stat().st_size > 100_000
 
         # every cached file holds the simplified skeleton (<= ~20% of the
@@ -178,7 +178,7 @@ class TestVisualizationCacheBuildReuse:
         t0 = time.time()
         vs.plot_neurons()
         elapsed = time.time() - t0
-        html = Path(work) / "plot3d_HEMI_e2e_probe" / "e2e_probe.html"
+        html = Path(work) / "plot-3d_HEMI_e2e_probe" / "e2e_probe.html"
         assert html.exists()
         assert elapsed < 60.0, f"cache-hit render too slow: {elapsed:.1f}s"
 

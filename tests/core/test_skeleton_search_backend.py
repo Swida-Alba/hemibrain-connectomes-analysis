@@ -82,6 +82,40 @@ def test_neuron_colors_default_follows_background(tmp_path, monkeypatch):
     assert vs_custom.neuron_colors[0].startswith("rgba(255, 0, 0")  # user's red kept
 
 
+def test_mixed_color_alpha_uses_global_fallback_per_layer(tmp_path, monkeypatch):
+    """Explicit alpha overrides only its color; alpha-less entries inherit the global."""
+    def fake_get_neurons(requiredNeurons, dataset="", custom_group_names=None,
+                         client=None, verbose=True, search_columns="auto"):
+        return pd.DataFrame(), pd.DataFrame(), "auto_name", None
+
+    monkeypatch.setattr(vs_mod.sv, "getNeurons", fake_get_neurons)
+
+    visualizer = VisualizeSkeleton(
+        dataset="hemibrain:v1.2.1",
+        neuron_layers=["source", "target"],
+        neuron_colors=["#ff0000", "rgba(0, 255, 0, 0.25)"],
+        synapse_colors=["#0000ff", "rgba(255, 255, 0, 0.75)"],
+        mesh_color=["#111111", "rgba(100, 100, 100, 0.05)"],
+        neuron_alpha=0.4,
+        synapse_alpha=0.6,
+        mesh_alpha=0.2,
+        client=FakeClient(dataset="hemibrain:v1.2.1"),
+        verbose=False,
+        output_dir=str(tmp_path),
+        include_timestamp=False,
+    )
+
+    assert visualizer.neuron_colors == (
+        "rgba(255, 0, 0, 0.4)",
+        "rgba(0, 255, 0, 0.25)",
+    )
+    assert visualizer.synapse_colors == ("rgba(0, 0, 255, 0.6)",)
+    assert visualizer.mesh_color == [
+        "rgba(17, 17, 17, 0.2)",
+        "rgba(100, 100, 100, 0.05)",
+    ]
+
+
 def test_hemisphere_filter_keeps_left_and_unclassified():
     """'left' keeps L + U neurons; explicit right-hemisphere neurons drop."""
     vs = object.__new__(VisualizeSkeleton)

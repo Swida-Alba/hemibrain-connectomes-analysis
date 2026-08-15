@@ -84,6 +84,28 @@ class TestRunnerIntegration:
         assert "summary_images_per_page=(3, 2)" in script
         assert 'print("[DROCAT] Done.")' in script
 
+    def test_timestamped_downloads_use_requested_prefix(self, tmp_path, monkeypatch):
+        from flylight_downloader import FlyLightDownloader, FlyLightFile
+
+        downloader = FlyLightDownloader(output_dir=str(tmp_path), verbose=False)
+        file_info = FlyLightFile(
+            key="R10A06/R10A06_mip.png",
+            size=1,
+            last_modified="",
+            line_name="R10A06",
+        )
+        monkeypatch.setattr(
+            downloader,
+            "download_file",
+            lambda file, output_dir, flat_structure=False: Path(output_dir) / file.filename,
+        )
+
+        downloader.download("R10A06", files=[file_info], add_timestamp=True)
+
+        folders = [p for p in tmp_path.iterdir() if p.is_dir()]
+        assert len(folders) == 1
+        assert folders[0].name.startswith("flylignt-downloads_R10A06_")
+
     def test_tab_builds(self):
         """The FlyLight tab renders all controls and the output panel."""
         from nicegui import Client

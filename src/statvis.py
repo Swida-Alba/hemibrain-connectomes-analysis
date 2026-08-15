@@ -33,6 +33,39 @@ from tqdm import tqdm
 # FlyWire client support removed
 
 # ============================================================================
+# Local HTML/JS escaping helpers for the deprecated local heatmap template.
+# The canonical implementation lives in vispath_pkg.shared_controls; these
+# copies exist because the local fallback path must stay self-contained.
+# ============================================================================
+
+def _statvis_html_escape(value):
+    """Escape a string for safe embedding as HTML text content."""
+    if value is None:
+        return ""
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
+    )
+
+
+def _statvis_js_escape(value):
+    """Escape a string for safe embedding inside a JS single-quoted literal."""
+    if value is None:
+        return ""
+    text = str(value)
+    text = text.replace("\\", "\\\\")
+    text = text.replace("'", "\\'")
+    text = text.replace('"', '\\"')
+    text = text.replace("\n", "\\n").replace("\r", "\\r")
+    text = text.replace("<", "\\u003c").replace(">", "\\u003e")
+    text = text.replace("&", "\\u0026")
+    return text
+
+# ============================================================================
 # In-Memory Cache for Neuron DataFrames
 # ============================================================================
 # Avoids repeated CSV reads when getNeurons() is called multiple times
@@ -2219,7 +2252,7 @@ def VisConnMat(cmat,filename,title='',color_scale=None,showfig=True,fontsize=12,
 # to vispath_pkg if available.
 # ============================================================================
 
-def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=True, fontsize=12, conn_df=None, matrices_dict=None, verbose=True, zmin=None, zmax=None, init_width=None, init_height=None):
+def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=True, fontsize=12, conn_df=None, matrices_dict=None, verbose=True, zmin=None, zmax=None, init_width=None, init_height=None, init_clustered=True, metric_name=None):
     if color_scale is None:
         color_scale = [[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']]
     '''Create interactive heatmap with comprehensive controls.
@@ -2245,7 +2278,9 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=Tr
             zmin=zmin,
             zmax=zmax,
             init_width=init_width,
-            init_height=init_height
+            init_height=init_height,
+            init_clustered=init_clustered,
+            metric_name=metric_name
         )
     except ImportError:
         pass  # Fall through to local implementation
@@ -2521,11 +2556,11 @@ def _VisConnMatInteractive_local(cmat, filename, title='', color_scale=[[0, 'rgb
 <html>
 <head>
     <meta charset="utf-8">
-    <title>{title}</title>
-    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <title>{_statvis_html_escape(title)}</title>
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <style>
         body {{
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
             margin: 0;
             padding: 20px;
             background-color: #f5f5f5;
@@ -3072,7 +3107,7 @@ def _VisConnMatInteractive_local(cmat, filename, title='', color_scale=[[0, 'rgb
         const dataSqrt = {'null' if data_sqrt is None else json.dumps(data_sqrt.tolist())};
         const xLabels = {json.dumps(x_labels)};
         const yLabels = {json.dumps(y_labels)};
-        const storageKey = '{storage_key}';
+        const storageKey = '{_statvis_js_escape(storage_key)}';
         const useLazyTransforms = {json.dumps(use_lazy_transforms)};
         
         // Track current row/column order (for interactive reordering)
@@ -3123,7 +3158,7 @@ def _VisConnMatInteractive_local(cmat, filename, title='', color_scale=[[0, 'rgb
         let isTransposed = false;  // Track if matrix is transposed
         const metricType = '{metric_type}';
         const isLarge = {json.dumps(is_large)};
-        const originalTitle = '{title}';
+        const originalTitle = '{_statvis_js_escape(title)}';
         
         // Data filter state
         let dataFilterActive = false;
@@ -4753,7 +4788,7 @@ def _VisConnMatInteractive_local(cmat, filename, title='', color_scale=[[0, 'rgb
                 
                 // Apply clustering if enabled
                 if (useClusteredOrder && clusteringAvailable) {{
-                    const effectiveRowOrder = isTransposed ? colOrderClustered : rowOrderClusterled;
+                    const effectiveRowOrder = isTransposed ? colOrderClustered : rowOrderClustered;
                     labels = reorderLabels(labels, effectiveRowOrder);
                 }}
                 label.textContent = 'Reorder Rows (Y-axis)';
@@ -4763,7 +4798,7 @@ def _VisConnMatInteractive_local(cmat, filename, title='', color_scale=[[0, 'rgb
                 
                 // Apply clustering if enabled
                 if (useClusteredOrder && clusteringAvailable) {{
-                    const effectiveColOrder = isTransposed ? rowOrderClustered : colOrderClusterled;
+                    const effectiveColOrder = isTransposed ? rowOrderClustered : colOrderClustered;
                     labels = reorderLabels(labels, effectiveColOrder);
                 }}
                 label.textContent = 'Reorder Columns (X-axis)';
@@ -4940,6 +4975,129 @@ def _VisConnMatInteractive_local(cmat, filename, title='', color_scale=[[0, 'rgb
             setTimeout(() => {{
                 statusDiv.innerHTML = '';
             }}, 3000);
+        }}
+        
+        function updateExportScale(value) {{
+            exportScale = parseFloat(value);
+            document.getElementById('exportScaleValue').textContent = value + 'x';
+        }}
+        
+        function exportSVG() {{
+            const filename = 'heatmap_' + currentScale + '_' + new Date().getTime() + '.svg';
+            const gd = document.getElementById('heatmap');
+            // SVG is vector: exported at native size (PPT-safe).
+            Plotly.toImage(gd, {{
+                format: 'svg',
+                width: currentWidth,
+                height: currentHeight
+            }}).then(function(dataUrl) {{
+                const link = document.createElement('a');
+                link.download = filename;
+                link.href = dataUrl;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                showStatus('✅ SVG exported: ' + currentWidth + 'x' + currentHeight + 'px', 'success');
+            }}).catch(function(error) {{
+                console.error('SVG export failed:', error);
+                showStatus('⚠️ SVG export failed. See console.', 'error');
+            }});
+        }}
+        
+        function resetSettings() {{
+            resetPlotSize();
+        }}
+        
+        function saveSettings() {{
+            try {{
+                const settings = {{
+                    scale: currentScale,
+                    colorscale: currentColorscale,
+                    fontSize: currentFontSize,
+                    width: currentWidth,
+                    height: currentHeight,
+                    exportScale: exportScale,
+                    showLabels: showLabels,
+                    showCellValues: showCellValues,
+                    useClusteredOrder: useClusteredOrder,
+                    clusteringMethod: currentClusteringMethod,
+                    isTransposed: isTransposed
+                }};
+                localStorage.setItem(storageKey, JSON.stringify(settings));
+                showStatus('✅ Settings saved', 'success');
+            }} catch (err) {{
+                console.error('Save failed:', err);
+                showStatus('⚠️ Save failed. See console.', 'error');
+            }}
+        }}
+        
+        function loadSettings(silent) {{
+            let saved = null;
+            try {{
+                const raw = localStorage.getItem(storageKey);
+                saved = raw ? JSON.parse(raw) : null;
+            }} catch (err) {{
+                console.error('Load failed:', err);
+            }}
+            if (!saved) {{
+                if (!silent) showStatus('⚠️ No saved settings found', 'warning');
+                createHeatmap();
+                return;
+            }}
+            
+            // Restore state and sync controls
+            if (saved.scale !== undefined) {{
+                currentScale = saved.scale;
+                document.querySelectorAll('[id^="btn-"]').forEach(btn => btn.classList.remove('active'));
+                const scaleBtn = document.getElementById('btn-' + currentScale);
+                if (scaleBtn) scaleBtn.classList.add('active');
+            }}
+            if (saved.fontSize !== undefined) {{
+                currentFontSize = saved.fontSize;
+                document.getElementById('fontSizeSlider').value = currentFontSize;
+                document.getElementById('fontSizeValue').textContent = currentFontSize + 'px';
+            }}
+            if (saved.width !== undefined) {{
+                currentWidth = saved.width;
+                document.getElementById('widthSlider').value = Math.min(2400, Math.max(400, currentWidth));
+                document.getElementById('widthValue').textContent = currentWidth + 'px';
+            }}
+            if (saved.height !== undefined) {{
+                currentHeight = saved.height;
+                document.getElementById('heightSlider').value = Math.min(2400, Math.max(400, currentHeight));
+                document.getElementById('heightValue').textContent = currentHeight + 'px';
+            }}
+            if (saved.exportScale !== undefined) {{
+                exportScale = saved.exportScale;
+                document.getElementById('exportScaleSlider').value = exportScale;
+                document.getElementById('exportScaleValue').textContent = exportScale + 'x';
+            }}
+            if (saved.showLabels !== undefined) {{
+                showLabels = saved.showLabels;
+                const btn = document.getElementById('toggleLabelsBtn');
+                if (btn) btn.textContent = showLabels ? '🏷️ Hide Labels' : '🏷️ Show Labels';
+            }}
+            if (saved.showCellValues !== undefined) {{
+                showCellValues = saved.showCellValues;
+                const btn = document.getElementById('toggleCellValuesBtn');
+                if (btn) btn.textContent = showCellValues ? '🔢 Hide Values' : '🔢 Show Values';
+            }}
+            if (saved.useClusteredOrder !== undefined) {{
+                useClusteredOrder = saved.useClusteredOrder;
+                document.getElementById('btn-original').classList.toggle('active', !useClusteredOrder);
+                document.getElementById('btn-clustered').classList.toggle('active', useClusteredOrder);
+            }}
+            if (saved.clusteringMethod !== undefined) {{
+                currentClusteringMethod = saved.clusteringMethod;
+                const sel = document.getElementById('clusteringMethodSelect');
+                if (sel) sel.value = currentClusteringMethod;
+            }}
+            if (saved.isTransposed !== undefined) {{
+                isTransposed = saved.isTransposed;
+            }}
+            
+            createHeatmap();
+            if (!silent) showStatus('✅ Settings loaded', 'success');
         }}
         
         // Try to load saved settings on page load

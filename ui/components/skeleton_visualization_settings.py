@@ -45,9 +45,20 @@ class SkeletonVisualizationSettings:
     def values(self) -> Dict[str, Any]:
         """Return values using the keyword names accepted by VisualizeSkeleton."""
         values: Dict[str, Any] = {}
+
+        def palette_value(field):
+            """Return a subprocess-safe value while retaining continuous metadata."""
+            colors = field.get_colors()
+            if getattr(colors, "is_continuous_palette", False):
+                return {
+                    "colors": list(colors),
+                    "continuous": True,
+                }
+            return colors
+
         for name, field in self.fields.items():
             if name in {"neuron_colors", "synapse_colors", "roi_colors"}:
-                values[name] = field.get_colors()
+                values[name] = palette_value(field)
             elif name in {"brain_mesh_color", "vnc_mesh_color"}:
                 values[name] = field.get_value()
             else:
@@ -158,7 +169,12 @@ def skeleton_visualization_settings(
                 0,
                 1,
                 0.1,
-                hint="Transparency of the neuron skeletons (0=invisible, 1=solid).",
+                hint=(
+                    "Global fallback opacity for skeletons (0=invisible, 1=solid). "
+                    "A color with explicit alpha (#RGBA/#RRGGBBAA, rgba(), or an "
+                    "RGBA tuple) overrides this value for that layer; colors "
+                    "without alpha inherit it."
+                ),
             )
             fields["brain_mesh"] = select_input(
                 "Brain Mesh",
@@ -222,7 +238,11 @@ def skeleton_visualization_settings(
                 0,
                 1,
                 0.1,
-                hint="Transparency of synapse markers.",
+                hint=(
+                    "Global fallback opacity for synapse markers. Explicit alpha "
+                    "on each synapse color overrides this value; colors without "
+                    "alpha inherit it."
+                ),
             )
             fields["mesh_alpha"] = number_input(
                 "ROI Mesh Opacity",
@@ -230,7 +250,10 @@ def skeleton_visualization_settings(
                 0,
                 1,
                 0.05,
-                hint="Transparency applied to ROI meshes.",
+                hint=(
+                    "Global fallback opacity for ROI meshes. Explicit per-ROI "
+                    "alpha overrides this value; colors without alpha inherit it."
+                ),
             )
         fields["synapse_colors"] = palette_editor(
             "Synapse Colors",

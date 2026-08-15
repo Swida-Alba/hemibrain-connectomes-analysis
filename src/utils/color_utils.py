@@ -7,13 +7,20 @@ utilities for the visualization components in the connectome analysis toolkit.
 
 Supported Input Formats
 -----------------------
-- **Named colors**: 'red', 'blue', 'lightgray', 'darkslategray', etc.
-- **Hex colors**: '#ff0000', '#f00', '#FF0000FF' (with alpha)
-- **RGB tuples**: (255, 0, 0) or (1.0, 0.0, 0.0) (normalized)
-- **RGBA tuples**: (255, 0, 0, 0.5) or (1.0, 0.0, 0.0, 0.5)
-- **CSS rgb/rgba strings**: 'rgb(255, 0, 0)', 'rgba(255, 0, 0, 0.5)'
-- **Bokeh palettes**: bokeh.palettes.Category10[10], etc.
-- **Matplotlib colormaps**: 'viridis', 'plasma', etc.
+- **Named colors**: 'red', 'blue', 'lightgray', 'rebeccapurple', etc.
+- **Hex colors**: '#RGB', '#RGBA', '#RRGGBB', '#RRGGBBAA' (the leading '#'
+  is optional for hexadecimal strings)
+- **RGB tuples/lists**: (255, 0, 0) or (1.0, 0.0, 0.0). Integer channels
+  use 0-255; floating-point channels in 0-1 use normalized RGB.
+- **RGBA tuples/lists**: (255, 0, 0, 128), (1.0, 0.0, 0.0, 0.5)
+- **CSS rgb/rgba strings**: comma or modern space/slash syntax, including
+  percentages and normalized decimal channels
+- **CSS hsl/hsla strings**: e.g. 'hsl(210 100% 50% / 50%)'
+- **Bokeh palette values**: bokeh.palettes.Category10[10], etc.
+
+When a palette contains both alpha-bearing and alpha-less colors, only the
+alpha-bearing entries override the caller's default alpha. Entries without an
+alpha inherit that default.
 
 Standard Output Format
 ----------------------
@@ -44,7 +51,10 @@ Usage Examples
 'rgba(255, 0, 0, 0.5)'
 """
 
+import colorsys
+import math
 import re
+from numbers import Integral, Real
 from typing import Union, List, Tuple, Any
 
 
@@ -201,195 +211,278 @@ CSS_NAMED_COLORS = {
 }
 
 
+def _is_numeric(value: Any) -> bool:
+    """Return whether *value* is a finite real number (excluding booleans)."""
+    if isinstance(value, bool):
+        return False
+    try:
+        return isinstance(value, Real) and math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _as_color_sequence(value: Any) -> Any:
+    """Convert numpy-like color arrays to ordinary Python lists when possible."""
+    if isinstance(value, (str, bytes, tuple, list)):
+        return value
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        try:
+            return tolist()
+        except (TypeError, ValueError):
+            pass
+    return value
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, float(value)))
+
+
+def _normalize_alpha(value: Any, default: float = 1.0) -> float:
+    """Normalize alpha from 0–1, percentage, or 0–255 notation."""
+    if value is None:
+        value = default
+    if isinstance(value, str):
+        token = value.strip()
+        if token.endswith("%"):
+            try:
+                return _clamp(float(token[:-1]) / 100.0, 0.0, 1.0)
+            except ValueError as exc:
+                raise ValueError(f"Invalid alpha value: {value!r}") from exc
+        try:
+            value = float(token)
+        except ValueError as exc:
+            raise ValueError(f"Invalid alpha value: {value!r}") from exc
+    if not _is_numeric(value):
+        raise ValueError(f"Alpha must be numeric, got {value!r}")
+    number = float(value)
+    if number > 1.0:
+        number /= 255.0
+    return _clamp(number, 0.0, 1.0)
+
+
+def _is_color_sequence(value: Any) -> bool:
+    """Return whether *value* is one RGB/RGBA tuple or list.
+
+    RGB channels must be numeric.  The alpha channel may additionally use
+    the same percentage/string notation accepted by CSS alpha values.
+    """
+    value = _as_color_sequence(value)
+    if not isinstance(value, (tuple, list)) or len(value) not in (3, 4):
+        return False
+    if not all(_is_numeric(channel) for channel in value[:3]):
+        return False
+    if len(value) == 4:
+        if value[3] is None:
+            return False
+        try:
+            _normalize_alpha(value[3])
+        except ValueError:
+            return False
+    return True
+
+
 def _parse_hex_color(hex_str: str) -> Tuple[int, int, int, float]:
-    """
-    Parse hex color string to RGBA tuple.
-    
-    Parameters
-    ----------
-    hex_str : str
-        Hex color string like '#ff0000', '#f00', '#ff0000ff'
-        
-    Returns
-    -------
-    tuple
-        (r, g, b, a) where r, g, b are 0-255 and a is 0.0-1.0
-        
-    Examples
-    --------
-    >>> _parse_hex_color('#ff0000')
-    (255, 0, 0, 1.0)
-    >>> _parse_hex_color('#f00')
-    (255, 0, 0, 1.0)
-    >>> _parse_hex_color('#ff000080')
-    (255, 0, 0, 0.502)
-    """
-    hex_str = hex_str.lstrip('#')
-    
-    if len(hex_str) == 3:
-        # Short form: #RGB -> #RRGGBB
-        hex_str = ''.join(c * 2 for c in hex_str)
-    elif len(hex_str) == 4:
-        # Short form with alpha: #RGBA -> #RRGGBBAA
-        hex_str = ''.join(c * 2 for c in hex_str)
-    
-    if len(hex_str) == 6:
-        r = int(hex_str[0:2], 16)
-        g = int(hex_str[2:4], 16)
-        b = int(hex_str[4:6], 16)
-        a = 1.0
-    elif len(hex_str) == 8:
-        r = int(hex_str[0:2], 16)
-        g = int(hex_str[2:4], 16)
-        b = int(hex_str[4:6], 16)
-        a = int(hex_str[6:8], 16) / 255.0
-    else:
-        raise ValueError(f"Invalid hex color format: #{hex_str}")
-    
+    """Parse ``#RGB``, ``#RGBA``, ``#RRGGBB`` or ``#RRGGBBAA``."""
+    value = hex_str.strip().lstrip("#")
+    if len(value) not in (3, 4, 6, 8) or not re.fullmatch(r"[0-9a-fA-F]+", value):
+        raise ValueError(
+            f"Invalid hex color format: {hex_str!r}; use #RGB, #RGBA, "
+            "#RRGGBB, or #RRGGBBAA"
+        )
+    if len(value) in (3, 4):
+        value = "".join(char * 2 for char in value)
+    r = int(value[0:2], 16)
+    g = int(value[2:4], 16)
+    b = int(value[4:6], 16)
+    a = int(value[6:8], 16) / 255.0 if len(value) == 8 else 1.0
     return (r, g, b, a)
+
+
+def _split_css_components(body: str) -> List[str]:
+    """Split comma or modern space/slash CSS color components."""
+    body = body.strip()
+    if "," in body:
+        return [part.strip() for part in body.split(",") if part.strip()]
+    if "/" in body:
+        color_part, alpha_part = body.split("/", 1)
+        return color_part.split() + [alpha_part.strip()]
+    return body.split()
+
+
+def _token_is_fractional(token: str) -> bool:
+    return "." in token or "e" in token.lower()
+
+
+def _parse_rgb_channel(value: Any, normalized: bool = False) -> int:
+    """Parse one RGB channel, accepting 0–255, normalized 0–1, or percent."""
+    if isinstance(value, str) and value.strip().endswith("%"):
+        # Divide explicitly instead of multiplying by 2.55; the latter can
+        # turn an exact 50% channel into 127.499999... before rounding.
+        number = float(value.strip()[:-1]) * 255.0 / 100.0
+    else:
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid RGB channel: {value!r}") from exc
+        if normalized:
+            number *= 255.0
+    return int(round(_clamp(number, 0.0, 255.0)))
 
 
 def _parse_rgb_string(rgb_str: str) -> Tuple[int, int, int, float]:
-    """
-    Parse CSS rgb/rgba string to RGBA tuple.
-    
-    Parameters
-    ----------
-    rgb_str : str
-        CSS color string like 'rgb(255, 0, 0)' or 'rgba(255, 0, 0, 0.5)'
-        
-    Returns
-    -------
-    tuple
-        (r, g, b, a) where r, g, b are 0-255 and a is 0.0-1.0
-        
-    Examples
-    --------
-    >>> _parse_rgb_string('rgb(255, 0, 0)')
-    (255, 0, 0, 1.0)
-    >>> _parse_rgb_string('rgba(255, 0, 0, 0.5)')
-    (255, 0, 0, 0.5)
-    """
-    # Extract numbers from the string
-    numbers = re.findall(r'[\d.]+', rgb_str)
-    
-    if len(numbers) < 3:
-        raise ValueError(f"Invalid rgb/rgba format: {rgb_str}")
-    
-    r = float(numbers[0])
-    g = float(numbers[1])
-    b = float(numbers[2])
-    a = float(numbers[3]) if len(numbers) > 3 else 1.0
-    
-    # Handle normalized values (0-1 range)
-    if r <= 1 and g <= 1 and b <= 1 and max(r, g, b) <= 1:
-        # Could be normalized, but only if all values are <= 1
-        # Check if any non-zero value is greater than 1 to determine
-        if max(r, g, b) > 0 or (r == 0 and g == 0 and b == 0):
-            # Looks like 0-1 range only if max is <= 1 and not all zeros with large value
-            pass  # Keep as is, will normalize below
-    
-    # Convert to 0-255 range if in normalized form
-    if r <= 1 and g <= 1 and b <= 1:
-        # Heuristic: if all values are small decimals, assume normalized
-        # This check looks for values like (0.5, 0.3, 0.2) vs (128, 64, 32)
-        if all(v <= 1 for v in [r, g, b]) and any(0 < v < 1 for v in [r, g, b]):
-            r = int(r * 255)
-            g = int(g * 255)
-            b = int(b * 255)
-        else:
-            r = int(r)
-            g = int(g)
-            b = int(b)
+    """Parse CSS ``rgb()/rgba()`` including modern space/slash syntax."""
+    match = re.fullmatch(r"\s*(rgba?)\s*\((.*)\)\s*", rgb_str, re.IGNORECASE)
+    if not match:
+        raise ValueError(f"Invalid rgb/rgba format: {rgb_str!r}")
+
+    function_name = match.group(1).lower()
+    components = _split_css_components(match.group(2))
+    if len(components) not in (3, 4):
+        raise ValueError(
+            f"{function_name}() requires 3 RGB channels and optional alpha: {rgb_str!r}"
+        )
+
+    rgb_components = components[:3]
+    has_percent = any(str(component).strip().endswith("%") for component in rgb_components)
+    numeric_components = []
+    for component in rgb_components:
+        try:
+            numeric_components.append(float(str(component).strip()))
+        except ValueError:
+            numeric_components.append(255.0)
+    # CSS integer channels are 0–255.  Decimal channels in the 0–1 range are
+    # also accepted as normalized RGB for the color editor's common scientific
+    # notation (e.g. rgb(1.0, 0.0, 0.5)).
+    normalized = (
+        not has_percent
+        and all(0.0 <= value <= 1.0 for value in numeric_components)
+        and any(_token_is_fractional(str(component).strip()) for component in rgb_components)
+    )
+    r, g, b = (
+        _parse_rgb_channel(component, normalized=normalized)
+        for component in rgb_components
+    )
+    alpha = (
+        _normalize_alpha(components[3], default=1.0)
+        if len(components) == 4
+        else 1.0
+    )
+    return (r, g, b, alpha)
+
+
+def _parse_hsl_string(hsl_str: str) -> Tuple[int, int, int, float]:
+    """Parse CSS ``hsl()/hsla()`` into an RGBA tuple."""
+    match = re.fullmatch(r"\s*(hsla?)\s*\((.*)\)\s*", hsl_str, re.IGNORECASE)
+    if not match:
+        raise ValueError(f"Invalid hsl/hsla format: {hsl_str!r}")
+    components = _split_css_components(match.group(2))
+    if len(components) not in (3, 4):
+        raise ValueError(
+            f"hsl() requires hue, saturation, lightness, and optional alpha: {hsl_str!r}"
+        )
+
+    hue_token = components[0].strip().lower()
+    if hue_token.endswith("turn"):
+        hue = float(hue_token[:-4]) * 360.0
+    elif hue_token.endswith("rad"):
+        hue = math.degrees(float(hue_token[:-3]))
+    elif hue_token.endswith("deg"):
+        hue = float(hue_token[:-3])
     else:
-        r = int(r)
-        g = int(g)
-        b = int(b)
-    
-    # Clamp values
-    r = max(0, min(255, r))
-    g = max(0, min(255, g))
-    b = max(0, min(255, b))
-    a = max(0.0, min(1.0, a))
-    
-    return (r, g, b, a)
+        hue = float(hue_token)
+
+    def parse_percentage(token: str, name: str) -> float:
+        token = token.strip()
+        if token.endswith("%"):
+            value = float(token[:-1]) / 100.0
+        else:
+            value = float(token)
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"{name} must be 0–100% or 0–1, got {token!r}")
+        return value
+
+    saturation = parse_percentage(components[1], "Saturation")
+    lightness = parse_percentage(components[2], "Lightness")
+    red, green, blue = colorsys.hls_to_rgb(
+        (hue % 360.0) / 360.0, lightness, saturation
+    )
+    alpha = (
+        _normalize_alpha(components[3], default=1.0)
+        if len(components) == 4
+        else 1.0
+    )
+    return (
+        int(round(red * 255)),
+        int(round(green * 255)),
+        int(round(blue * 255)),
+        alpha,
+    )
 
 
 def _parse_tuple_color(color_tuple: Tuple, default_alpha: float = 1.0) -> Tuple[int, int, int, float]:
+    """Parse RGB/RGBA tuples or lists in absolute or normalized notation."""
+    color_tuple = _as_color_sequence(color_tuple)
+    if not isinstance(color_tuple, (tuple, list)) or len(color_tuple) not in (3, 4):
+        raise ValueError(
+            f"Color tuple must contain 3 RGB or 4 RGBA values, got {color_tuple!r}"
+        )
+    if not all(_is_numeric(value) for value in color_tuple[:3]):
+        raise ValueError(f"RGB tuple channels must be numeric, got {color_tuple!r}")
+    if len(color_tuple) == 4 and color_tuple[3] is None:
+        raise ValueError(f"RGBA tuple alpha must be numeric or a percentage, got {color_tuple!r}")
+
+    rgb_values = color_tuple[:3]
+    # The unambiguous normalized tuple form is floats in 0–1. Integer tuples
+    # such as (1, 0, 0) remain the conventional 0–255 form.
+    normalized = (
+        all(0.0 <= float(value) <= 1.0 for value in rgb_values)
+        and any(not isinstance(value, Integral) for value in rgb_values)
+    )
+    rgb = tuple(_parse_rgb_channel(value, normalized=normalized) for value in rgb_values)
+    alpha = (
+        _normalize_alpha(color_tuple[3], default=default_alpha)
+        if len(color_tuple) == 4
+        else _normalize_alpha(default_alpha, default=1.0)
+    )
+    return (rgb[0], rgb[1], rgb[2], alpha)
+
+
+def color_has_explicit_alpha(color: Any) -> bool:
+    """Return whether *color* carries its own alpha channel.
+
+    This deliberately distinguishes a color with no alpha (which should use
+    the caller's global opacity) from a color whose alpha happens to normalize
+    to ``1.0``.  It understands RGBA tuples, ``#RGBA``/``#RRGGBBAA``, CSS
+    ``rgba()/hsla()`` and modern CSS ``/ alpha`` syntax, including mixed lists.
     """
-    Parse RGB or RGBA tuple to standardized RGBA tuple.
-    
-    Parameters
-    ----------
-    color_tuple : tuple
-        RGB tuple (r, g, b) or RGBA tuple (r, g, b, a)
-        Values can be 0-255 integers or 0.0-1.0 floats
-    default_alpha : float
-        Default alpha value if not provided in tuple
-        
-    Returns
-    -------
-    tuple
-        (r, g, b, a) where r, g, b are 0-255 and a is 0.0-1.0
-        
-    Examples
-    --------
-    >>> _parse_tuple_color((255, 0, 0))
-    (255, 0, 0, 1.0)
-    >>> _parse_tuple_color((1.0, 0.0, 0.0))
-    (255, 0, 0, 1.0)
-    >>> _parse_tuple_color((255, 0, 0, 0.5))
-    (255, 0, 0, 0.5)
-    """
-    if len(color_tuple) < 3:
-        raise ValueError(f"Color tuple must have at least 3 values, got {len(color_tuple)}")
-    
-    r, g, b = color_tuple[0], color_tuple[1], color_tuple[2]
-    a = color_tuple[3] if len(color_tuple) > 3 else default_alpha
-    
-    # Determine if values are normalized (0-1) or absolute (0-255)
-    # Heuristic: if all RGB values are <= 1.0 and at least one is a float with decimal
-    is_normalized = False
-    if all(isinstance(v, float) for v in [r, g, b]):
-        if all(v <= 1.0 for v in [r, g, b]):
-            is_normalized = True
-    elif all(v <= 1.0 for v in [r, g, b]) and any(0 < v < 1 for v in [r, g, b]):
-        is_normalized = True
-    
-    if is_normalized:
-        r = int(r * 255)
-        g = int(g * 255)
-        b = int(b * 255)
-    else:
-        r = int(r)
-        g = int(g)
-        b = int(b)
-    
-    # Handle alpha - only treat as 0-255 range if it's clearly an integer > 1
-    # Values like 1.5 should be clamped, not divided by 255
-    if isinstance(a, (int, float)):
-        if isinstance(a, int) and a > 1:
-            # Integer > 1 is likely 0-255 range (e.g., 128 for 50% opacity)
-            a = a / 255.0
-        # Otherwise keep as-is (will be clamped below)
-        a = float(a)
-    else:
-        a = default_alpha
-    
-    # Clamp values
-    r = max(0, min(255, r))
-    g = max(0, min(255, g))
-    b = max(0, min(255, b))
-    a = max(0.0, min(1.0, a))
-    
-    return (r, g, b, a)
+    color = _as_color_sequence(color)
+    if isinstance(color, str):
+        value = color.strip().lower()
+        if value in ("transparent", "none"):
+            return True
+        if value.startswith("#"):
+            return len(value) in (5, 9)
+        if len(value) in (4, 8) and re.fullmatch(r"[0-9a-f]+", value):
+            return True
+        if re.match(r"^(rgba|hsla)\s*\(", value):
+            return True
+        modern_match = re.match(r"^(rgb|hsl)\s*\((.*)\)$", value)
+        if modern_match:
+            return len(_split_css_components(modern_match.group(2))) == 4
+        return False
+    if isinstance(color, (tuple, list)):
+        if _is_color_sequence(color) and len(color) == 4:
+            return True
+        return any(color_has_explicit_alpha(item) for item in color)
+    return False
 
 
 def standardize_color(
     color: Any,
     default_alpha: float = 1.0,
     output_format: str = 'rgba'
-) -> str:
+) -> Any:
     """
     Standardize a color input to a consistent RGBA format string.
     
@@ -401,10 +494,11 @@ def standardize_color(
     color : str, tuple, list
         Color in any supported format:
         - Named colors: 'red', 'blue', 'lightgray', etc.
-        - Hex colors: '#ff0000', '#f00', '#FF0000FF'
-        - RGB tuples: (255, 0, 0) or (1.0, 0.0, 0.0)
-        - RGBA tuples: (255, 0, 0, 0.5) or (1.0, 0.0, 0.0, 0.5)
-        - CSS strings: 'rgb(255, 0, 0)', 'rgba(255, 0, 0, 0.5)'
+        - Hex colors: '#RGB', '#RGBA', '#RRGGBB', or '#RRGGBBAA'
+        - RGB tuples/lists: 0-255 channels or normalized 0-1 floats
+        - RGBA tuples/lists: byte or normalized channels with alpha
+        - CSS strings: rgb()/rgba() and hsl()/hsla(), including modern
+          space/slash syntax and percentage alpha
     default_alpha : float, default 1.0
         Default alpha value to use if not specified in the color
     output_format : str, default 'rgba'
@@ -441,68 +535,63 @@ def standardize_color(
     >>> standardize_color('red', output_format='hex')
     '#ff0000'
     """
-    r, g, b, a = 0, 0, 0, default_alpha
-    
     if color is None:
         raise ValueError("Color cannot be None")
-    
-    # Handle string inputs
+    default_alpha = _normalize_alpha(default_alpha, default=1.0)
+    color = _as_color_sequence(color)
+
     if isinstance(color, str):
         color_stripped = color.strip()
         color_lower = color_stripped.lower()
-        
-        # Check if it's already in rgba format
-        if color_lower.startswith('rgba('):
-            r, g, b, a = _parse_rgb_string(color_stripped)
-        # Check if it's in rgb format
-        elif color_lower.startswith('rgb('):
-            r, g, b, a = _parse_rgb_string(color_stripped)
-            a = default_alpha if a == 1.0 else a
-        # Check if it's a hex color
-        elif color_stripped.startswith('#') or (len(color_stripped) in [3, 6, 8] and all(c in '0123456789abcdefABCDEF' for c in color_stripped)):
-            if not color_stripped.startswith('#'):
-                color_stripped = '#' + color_stripped
+        if color_lower == 'auto':
+            return 'auto'
+        if color_lower == 'transparent':
+            r, g, b, a = 0, 0, 0, 0.0
+        elif color_stripped.startswith('#') or (
+            len(color_stripped) in (3, 4, 6, 8)
+            and re.fullmatch(r"[0-9a-fA-F]+", color_stripped)
+        ):
             r, g, b, a = _parse_hex_color(color_stripped)
-            # If hex didn't have alpha, use default
-            if len(color_stripped.lstrip('#')) <= 6:
+            if not color_has_explicit_alpha(color_stripped):
                 a = default_alpha
-        # Check if it's a named color
+        elif re.match(r"^rgba?\s*\(", color_lower):
+            r, g, b, a = _parse_rgb_string(color_stripped)
+            if not color_has_explicit_alpha(color_stripped):
+                a = default_alpha
+        elif re.match(r"^hsla?\s*\(", color_lower):
+            r, g, b, a = _parse_hsl_string(color_stripped)
+            if not color_has_explicit_alpha(color_stripped):
+                a = default_alpha
         elif color_lower in CSS_NAMED_COLORS:
             r, g, b = CSS_NAMED_COLORS[color_lower]
             a = default_alpha
-        # Check if it's 'auto' or other special value
-        elif color_lower == 'auto':
-            return 'auto'  # Return as-is for special handling
         else:
-            # Try matplotlib color converter as fallback
+            # Matplotlib adds the rest of the common CSS/X11 names and
+            # aliases such as tab:blue without making it a hard dependency
+            # for the core parser.
             try:
                 from matplotlib.colors import to_rgba
                 rgba = to_rgba(color_stripped)
-                r = int(rgba[0] * 255)
-                g = int(rgba[1] * 255)
-                b = int(rgba[2] * 255)
-                a = rgba[3] if rgba[3] != 1.0 else default_alpha
-            except (ImportError, ValueError):
-                raise ValueError(f"Cannot parse color: {color}")
-    
-    # Handle tuple/list inputs
+                r = int(round(rgba[0] * 255))
+                g = int(round(rgba[1] * 255))
+                b = int(round(rgba[2] * 255))
+                a = rgba[3] if color_has_explicit_alpha(color_stripped) else default_alpha
+            except (ImportError, ValueError) as exc:
+                raise ValueError(
+                    f"Cannot parse color {color!r}. Use a named color, "
+                    "#RGB/#RGBA/#RRGGBB/#RRGGBBAA, rgb()/rgba(), hsl()/hsla(), "
+                    "or a 3/4-value RGB(A) tuple."
+                ) from exc
     elif isinstance(color, (tuple, list)):
         r, g, b, a = _parse_tuple_color(color, default_alpha)
-    
-    # Handle numeric (single value = grayscale)
-    elif isinstance(color, (int, float)):
-        if isinstance(color, float) and color <= 1.0:
-            gray = int(color * 255)
-        else:
-            gray = int(color)
-        gray = max(0, min(255, gray))
-        r = g = b = gray
+    elif _is_numeric(color):
+        number = float(color)
+        gray = number * 255.0 if not isinstance(color, Integral) and 0.0 <= number <= 1.0 else number
+        r = g = b = int(round(_clamp(gray, 0.0, 255.0)))
         a = default_alpha
-    
     else:
         raise ValueError(f"Unsupported color type: {type(color)}")
-    
-    # Format output
+
     if output_format == 'rgba':
         return f'rgba({r}, {g}, {b}, {a})'
     elif output_format == 'rgb':
@@ -510,7 +599,7 @@ def standardize_color(
     elif output_format == 'hex':
         return f'#{r:02x}{g:02x}{b:02x}'
     elif output_format == 'hex_alpha':
-        alpha_int = int(a * 255)
+        alpha_int = int(round(a * 255))
         return f'#{r:02x}{g:02x}{b:02x}{alpha_int:02x}'
     elif output_format == 'tuple':
         return (r, g, b, a)
@@ -535,7 +624,7 @@ def standardize_color_list(
     ----------
     colors : list or tuple
         List of colors in any supported format. Can also be a bokeh palette
-        or matplotlib colormap name.
+        or a Bokeh palette. Mixed entries may use different supported formats.
     default_alpha : float, default 1.0
         Default alpha value to use if not specified in colors
     output_format : str, default 'rgba'
@@ -555,9 +644,21 @@ def standardize_color_list(
     >>> standardize_color_list(bokeh.palettes.Category10[3])
     ['rgba(31, 119, 180, 1.0)', 'rgba(255, 127, 14, 1.0)', 'rgba(44, 160, 44, 1.0)']
     """
-    if colors is None or len(colors) == 0:
+    if colors is None:
         return []
-    
+
+    colors = _as_color_sequence(colors)
+    if isinstance(colors, str):
+        colors = [colors]
+    elif _is_color_sequence(colors):
+        # A single RGB(A) tuple is one color, not three/four grayscale colors.
+        colors = [colors]
+    elif not isinstance(colors, (tuple, list)):
+        raise ValueError(f"Color list must be a sequence, got {type(colors)}")
+
+    if len(colors) == 0:
+        return []
+
     result = []
     for c in colors:
         try:
@@ -670,12 +771,13 @@ def color_to_rgba_string(color: Any, alpha: float = None) -> str:
     >>> color_to_rgba_string('red', alpha=0.5)
     'rgba(255, 0, 0, 0.5)'
     """
-    default_alpha = alpha if alpha is not None else 1.0
+    normalized_alpha = _normalize_alpha(alpha) if alpha is not None else None
+    default_alpha = normalized_alpha if normalized_alpha is not None else 1.0
     rgba = standardize_color(color, default_alpha=default_alpha, output_format='tuple')
     
     # Override alpha if explicitly specified
-    if alpha is not None:
-        return f'rgba({rgba[0]}, {rgba[1]}, {rgba[2]}, {alpha})'
+    if normalized_alpha is not None:
+        return f'rgba({rgba[0]}, {rgba[1]}, {rgba[2]}, {normalized_alpha})'
     return f'rgba({rgba[0]}, {rgba[1]}, {rgba[2]}, {rgba[3]})'
 
 
@@ -809,7 +911,7 @@ def set_alpha(color: Any, alpha: float) -> str:
     'rgba(255, 0, 0, 0.5)'
     """
     r, g, b, _ = standardize_color(color, output_format='tuple')
-    alpha = max(0.0, min(1.0, alpha))
+    alpha = _normalize_alpha(alpha)
     return f'rgba({r}, {g}, {b}, {alpha})'
 
 

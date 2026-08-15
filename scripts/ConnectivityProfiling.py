@@ -29,7 +29,7 @@ Profile Construction (consistent with ConnectivityProfiler):
     - Dynamic expansion: If top_k yields < top_m types, expand K
 
 Output Structure:
-    {output_dir}/connectivity_profiling_{query_name}_{timestamp}/
+    {output_dir}/profiling_{query_name}_{timestamp}/
     ├── parameters.json
     ├── README.txt
     ├── profiles/

@@ -17,7 +17,7 @@ The `ConnectivityProfiling.py` script compares connectivity profiles within one 
 - **Report Rendering**: Reports redraw heatmaps with Plotly and link to the local VisPath HTML for editing
 - **Interactive Visualization**: Heatmaps via VisualizePath with native Ward clustering
 - **Profile Saving**: Saves individual and aggregated connectivity profiles
-- **Auto-Generated Output**: Folder named `connectivity_profiling_{query_name}_{timestamp}`
+- **Auto-Generated Output**: Folder named `profiling_{query_name}_{timestamp}`
 
 ## Quick Start
 
@@ -156,7 +156,7 @@ comparer = ConnectivityProfileComparer(
 | `generate_heatmaps` | Generate visualizations    | `True`             |
 | `show_figures`      | Open in browser            | `False`            |
 
-Output folder is auto-generated as: `{output_dir}/connectivity_profiling_{query_name}_{timestamp}/`
+Output folder is auto-generated as: `{output_dir}/profiling_{query_name}_{timestamp}/`
 
 In the UI, the Profiling tab's **Output Directory** is passed directly to the
 backend and to the output-file browser. It inherits the Settings default unless
@@ -186,7 +186,7 @@ the tab has its own saved override.
 | `GENERATE_HEATMAPS` | Generate visualizations    | `True`             |
 | `SHOW_FIGURES`      | Open in browser            | `False`            |
 
-Output folder is auto-generated as: `{OUTPUT_DIR}/connectivity_profiling_{query_name}_{timestamp}/`
+Output folder is auto-generated as: `{OUTPUT_DIR}/profiling_{query_name}_{timestamp}/`
 
 ## Similarity Metrics
 
@@ -219,7 +219,7 @@ $$\text{RankCorr}_{union} = \rho_{spearman}(union)$$
 ## Output Structure
 
 ```
-{output_dir}/connectivity_profiling_{query_name}_{timestamp}/
+{output_dir}/profiling_{query_name}_{timestamp}/
 ├── parameters.json
 ├── README.txt
 ├── results/

@@ -669,6 +669,32 @@ Brain envelope and VNC outline meshes use separate color settings:
   mesh_color=['rgba(255,0,0,0.1)', 'rgba(0,255,0,0.2)', 'rgba(0,0,255,0.05)']
   ```
 
+#### Color Formats and Mixed Alpha Palettes
+
+The `neuron_colors`, `synapse_colors`, and `mesh_color` parameters accept the
+same color formats, and a single list may mix them:
+
+- Named colors such as `'red'`, `'royalblue'`, and `'transparent'`
+- Hex colors: `#RGB`, `#RGBA`, `#RRGGBB`, and `#RRGGBBAA`
+- RGB/RGBA tuples or lists using 0–255 channels, or normalized 0–1 floats
+- CSS `rgb()`/`rgba()` (comma or space/slash syntax, including percentages)
+- CSS `hsl()`/`hsla()`; alpha may be written as 0–1, a percentage, or 0–255
+
+An explicit alpha belongs only to that color entry and overrides the matching
+global opacity (`neuron_alpha`, `synapse_alpha`, or `mesh_alpha`). A color
+without alpha inherits the global opacity, so mixed input is valid:
+
+```python
+neuron_colors=['#ff0000', 'rgba(0, 255, 0, 0.25)', (0.0, 0.0, 1.0)]
+synapse_colors=['rgb(255 165 0 / 70%)', (0.2, 0.4, 1.0, 0.4)]
+mesh_color=['#888888', 'hsl(200 70% 50% / 20%)']
+```
+
+In the UI, use **Color format** for free-form values and enable **Alpha
+override** when the numeric alpha control should be embedded in the selected
+entry. Leaving that checkbox off keeps a color alpha-less so it follows the
+global opacity.
+
 **Automatic ROI Expansion:**
 When you specify a base ROI name like `'AME'`, it's automatically expanded to bilateral variants `['AME(L)', 'AME(R)']` if available:
 - Colors are expanded to match: `mesh_color='red'` → both sides get red

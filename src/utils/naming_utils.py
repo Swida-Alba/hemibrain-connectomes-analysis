@@ -7,12 +7,14 @@ user's output directory, named:
     {tool}_{dataset_abbreviation}_{detail}_{timestamp}
 
 Examples:
-    findpath_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_183000
+    find-paths-complete_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_183000
     finddirect_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_183005
     profiling_MCNS_aMe12_aMe10_aMe9_20260801_183010
-    findhomologs_MCNS_to_HEMI_aMe12_20260801_183015
-    findlines_MCNS_aMe12_20260801_183020
-    plot3d_MCNS_aMe12_20260801_183025
+    homologs_MCNS_to_HEMI_aMe12_20260801_183015
+    similar-morphology_MCNS_aMe12_20260801_183018
+    similar-connectivity_MCNS_to_HEMI_aMe12_20260801_183019
+    NB-find-lines_MCNS_aMe12_20260801_183020
+    plot-3d_MCNS_aMe12_20260801_183025
 """
 
 from collections import Counter

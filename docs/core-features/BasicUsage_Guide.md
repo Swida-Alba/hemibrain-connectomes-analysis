@@ -334,7 +334,7 @@ sort_by='completeness':
 ### Output Files
 
 ```
-local_data/neuronbridge_finding/findlines_{query}_{date}/
+local_data/neuronbridge_finding/NB-find-lines_{query}_{date}/
 ├── line_summary.csv              # All lines ranked by weighted_score
 ├── gal4_lexa_summary.csv         # GAL4/LexA lines only
 ├── split_gal4_summary.csv        # Split-GAL4 lines only
@@ -563,7 +563,7 @@ local_data/connection_data/YYYYMMDD_HHMMSS_{source}_{target}/
 ### NeuronBridge Output
 
 ```
-local_data/neuronbridge_finding/findlines_{query}_{timestamp}/
+local_data/neuronbridge_finding/NB-find-lines_{query}_{timestamp}/
 ├── line_summary.csv                 # Ranked by weighted_score
 ├── gal4_lexa_summary.csv            # GAL4/LexA only
 ├── split_gal4_summary.csv           # Split-GAL4 only

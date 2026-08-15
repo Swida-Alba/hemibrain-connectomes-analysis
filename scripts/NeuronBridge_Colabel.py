@@ -32,7 +32,7 @@ Output Files:
     - line_labeled_neurons/{line}_{dataset}_types.csv: Type summary per dataset
     - line_summary.csv: Summary statistics per line
     - colabeling_report.html: Comprehensive analysis report
-    - plot3d_{dataset}/: 3D visualization folder (if visualize_top_n > 0)
+    - plot-3d_{dataset}/: 3D visualization folder (if visualize_top_n > 0)
       - {dataset}.html: Interactive 3D skeleton visualization
       - exported_views/: PNG exports (front, back, top, bottom, left, right)
       - individual_profiles/: Per-neuron PNG profiles + PDF summary
@@ -103,7 +103,7 @@ if __name__ == "__main__":
     
     # Visualize top N types per dataset using 3D skeleton (0 = disabled)
     # This creates interactive HTML visualizations showing the top N neuron types
-    # Output folder: plot3d_{dataset}/ (no timestamp, overwrites previous)
+    # Output folder: plot-3d_{dataset}/ (no timestamp, overwrites previous)
     visualize_top_n = 5
     
     # Generate individual profile PNGs for each neuron type

@@ -495,10 +495,10 @@ class TestMorphologyComparer:
         assert res.iloc[0]["similarity"] >= res.iloc[1]["similarity"]
         # dotprops must never be persisted to disk
         assert not list((root / "cache" / "test_v1").rglob("*.dp")) 
-        # results saved with the findsimilar_ prefix
+        # results saved with the similar-morphology_ prefix
         run_dirs = [p for p in (root / "out").iterdir() if p.is_dir()]
         assert len(run_dirs) == 1
-        assert run_dirs[0].name.startswith("findsimilar_")
+        assert run_dirs[0].name.startswith("similar-morphology_")
         assert (run_dirs[0] / "results.csv").exists()
         assert (run_dirs[0] / "README.txt").exists()
 

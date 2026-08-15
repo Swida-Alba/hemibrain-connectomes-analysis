@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 
 from ..runner import open_folder, open_file
+from .page_progress import PageProgress
 
 
 # Label of a tqdm-style progress bar, e.g. "Building target profiles:" from
@@ -20,6 +21,15 @@ from ..runner import open_folder, open_file
 # instead of appending a new line.
 _PROGRESS_NAME_RE = re.compile(
     r"^\s*([^%]*?)\s*\d+%\||^\s*([^:]*?):\s*\d+(?:\.\d+)?(?:path|it|file)s?\s*\["
+)
+
+# Counter-bearing progress output from tqdm and the project's LineProgress,
+# e.g. ``Building paths: 45%|...| 9/20 [...]`` or
+# ``Deriving type-level paths: 120/500 (24.0%) [...]``.
+_PROGRESS_FRACTION_RE = re.compile(
+    r"^\s*(?P<label>.*?):\s*"
+    r"(?:(?:\d+(?:\.\d+)?)%\|.*?\|\s*)?"
+    r"(?P<current>[\d,]+)\s*/\s*(?P<total>[\d,]+)"
 )
 
 # Structured step-progress event emitted by backend pipelines, e.g.
@@ -35,10 +45,28 @@ _FILES_KEY = "__files__"
 
 def _progress_bar_name(message: str) -> str:
     """Extract the progress-bar label from a tqdm-style line ('' if none)."""
+    fraction = _progress_bar_fraction(message)
+    if fraction is not None:
+        return fraction[2]
     match = _PROGRESS_NAME_RE.match(message)
     if not match:
         return ""
     return (match.group(1) or match.group(2) or "").rstrip()
+
+
+def _progress_bar_fraction(message: str):
+    """Return ``(current, total, label)`` for a counter-bearing bar."""
+    match = _PROGRESS_FRACTION_RE.match(message)
+    if not match:
+        return None
+    try:
+        current = int(match.group("current").replace(",", ""))
+        total = int(match.group("total").replace(",", ""))
+    except ValueError:
+        return None
+    if total <= 0:
+        return None
+    return current, total, match.group("label").strip()
 
 
 _STATUS_COLORS = {
@@ -92,6 +120,7 @@ class OutputPanel:
         self.progress_bar = None
         self.progress_label: Optional[ui.label] = None
         self.progress_row = None
+        self.page_progress: Optional[PageProgress] = None
         self.run_button: Optional[ui.button] = None
         self.cancel_button: Optional[ui.button] = None
         self._files: List[dict] = []
@@ -135,14 +164,14 @@ class OutputPanel:
                 ).classes("drocat-cancel-btn")
                 self.cancel_button.disable()
 
-            # Progress row (visible while running): step label above the bar.
-            # Backends emit [DROCAT][progress] events to switch the bar from
-            # indeterminate to a determinate step fraction with a label.
-            self.progress_row = ui.column().classes("w-full gap-1 drocat-progress-row")
-            with self.progress_row:
-                self.progress_label = ui.label("").classes("text-caption drocat-muted")
-                self.progress_bar = ui.linear_progress(value=0, show_value=False).classes("w-full")
-                self.progress_row.set_visibility(False)
+            # Keep the tracker in the original progress-row position, directly
+            # above the execution log. Its bar is intentionally 3x the old
+            # 4px height (12px), while the compatibility attributes continue
+            # to expose the current bar and label to existing callers.
+            self.page_progress = PageProgress().create(compact=True, visible=False)
+            self.progress_row = self.page_progress.container
+            self.progress_label = self.page_progress.progress_label
+            self.progress_bar = self.page_progress.progress_bar
 
             # Log console
             ui.label("Execution Log").classes("drocat-mini-label")
@@ -185,17 +214,31 @@ class OutputPanel:
                 total = int(step_match.group(2))
                 label = step_match.group(3).strip()
                 if self.progress_bar is not None:
-                    self.progress_bar.props(":indeterminate='false'")
+                    self.progress_bar.props(
+                        ":indeterminate='false'", remove="indeterminate"
+                    )
                     self.progress_bar.value = min(1.0, step / max(1, total))
                 if self.progress_label is not None:
-                    text = f"Step {step}/{total}" + (f" — {label}" if label else "")
+                    text = f"Step {step}/{total}:" + (f" {label}" if label else "")
                     self.progress_label.text = text
+                if self.page_progress is not None:
+                    self.page_progress.update_step(step, total, label)
                 return
             # Progress lines (tqdm-style \r updates) refresh the previous line
             # of the SAME progress bar in place, so long-running functions
             # show a live-updating status instead of flooding the log. A new
             # bar (different label) starts a fresh line.
             if level == "progress":
+                fraction = _progress_bar_fraction(message)
+                if fraction is not None:
+                    current, total, label = fraction
+                    if self.page_progress is not None:
+                        self.page_progress.update_fraction(current, total, label)
+                    elif self.progress_bar is not None:
+                        self.progress_bar.props(
+                            ":indeterminate='false'", remove="indeterminate"
+                        )
+                        self.progress_bar.value = min(1.0, current / total)
                 children = self.log_area.default_slot.children
                 name = _progress_bar_name(message)
                 if (
@@ -237,6 +280,16 @@ class OutputPanel:
             self.status_label.text = status
             color = _STATUS_COLORS.get(status.lower(), color)
             self.status_label.props(f"color={color}")
+        if self.page_progress is not None:
+            normalized = status.lower()
+            if normalized in {"completed", "success"}:
+                self.page_progress.finish(True)
+            elif normalized in {"failed", "error", "cancelled"}:
+                self.page_progress.finish(False, status)
+            elif normalized == "running":
+                self.page_progress.set_status("Running", "blue")
+            else:
+                self.page_progress.set_status(status, color)
 
     def set_running(self, running: bool):
         """Update UI for running state."""
@@ -250,6 +303,9 @@ class OutputPanel:
                 self.progress_row.set_visibility(True)
             if self.progress_bar:
                 self.progress_bar.props("indeterminate")
+            if self.page_progress:
+                self.page_progress.start()
+                self.page_progress.container.set_visibility(True)
             # Make sure the results panel (with the log) is visible
             ui.run_javascript(
                 f"const card = document.getElementById('{self._dom_id}');"
@@ -262,12 +318,16 @@ class OutputPanel:
             if self.cancel_button:
                 self.cancel_button.disable()
             if self.progress_row:
-                self.progress_row.set_visibility(False)
+                # Keep the final progress and result status visible after the
+                # process stops; a later clear/new run can reset it.
+                self.progress_row.set_visibility(True)
             if self.progress_bar:
-                self.progress_bar.props(":indeterminate='false'")
-                self.progress_bar.value = 1.0 if self._files else 0.0
-            if self.progress_label:
-                self.progress_label.text = ""
+                self.progress_bar.props(
+                    ":indeterminate='false'", remove="indeterminate"
+                )
+            # ScriptRunner reports its collect phase before returning. Keep
+            # that last real phase/value unchanged until the caller applies
+            # the final Completed or Failed status.
 
     def _stop_file_streaming(self):
         """Stop the output-folder polling timer (run finished or cancelled)."""
@@ -316,6 +376,13 @@ class OutputPanel:
         failing the handler and leaving an empty log with a stuck Run button).
         """
         try:
+            if self.page_progress is not None:
+                self.page_progress.start(
+                    tool_name,
+                    method_name=method_name,
+                    context=constructor_params,
+                )
+                self.page_progress.container.set_visibility(True)
             # Stream output files during the run: poll every 1.5s. Started
             # even without a caller-provided dir: the run folder is resolved
             # from the backend's own output-folder marker in that case.
@@ -329,6 +396,7 @@ class OutputPanel:
                 method_name,
                 method_params=method_params,
                 log_callback=self.log,
+                progress_callback=self._runner_progress,
                 output_dir=output_dir,
             )
         except Exception as exc:  # noqa: BLE001
@@ -340,6 +408,11 @@ class OutputPanel:
             return {"returncode": -1, "files": [], "duration": 0, "cancelled": False}
         finally:
             self._stop_file_streaming()
+
+    def _runner_progress(self, phase: str, label: str = "") -> None:
+        """Forward generic subprocess lifecycle phases to the page tracker."""
+        if self.page_progress is not None:
+            self.page_progress.update_phase(phase, label)
 
     def show_files(self, files: List[dict], output_dir: Optional[str] = None):
         """Display output files mirroring the output folder structure.
@@ -436,3 +509,5 @@ class OutputPanel:
             self.files_container.clear()
             with self.files_container:
                 ui.label("No output files yet.").classes("drocat-empty")
+        if self.page_progress:
+            self.page_progress.reset()

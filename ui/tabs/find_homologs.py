@@ -99,7 +99,7 @@ def create_find_homologs_tab():
                 placeholder="e.g., aMe12_homologs",
             ).classes("w-full drocat-input").tooltip(
                 "Custom output folder name. Leave empty for the unified auto name "
-                "(findhomologs_<source_ds>_to_<target_ds>_<query>_<timestamp>)."
+                "(homologs_<source_ds>_to_<target_ds>_<query>_<timestamp>)."
             )
             full_cache = checkbox_input(
                 "Pre-build Full Dataset Cache", False,

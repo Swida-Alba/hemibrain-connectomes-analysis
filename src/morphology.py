@@ -2917,7 +2917,7 @@ class MorphologyComparer:
         otherwise) recorded in the README."""
         query_label = str(self.query)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        name = self.saveas or f"findsimilar_{_dataset_folder(self.dataset)}_{query_label[:40]}_{timestamp}"
+        name = self.saveas or f"similar-morphology_{_dataset_folder(self.dataset)}_{query_label[:40]}_{timestamp}"
         run_dir = Path(self.output_dir) / name
         run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2969,7 +2969,7 @@ class MorphologyComparer:
         for bodyId-level searches, or the vector-cache members capped at
         ``n_per_type`` for type-level searches); with ``'bodyId'`` each top
         result row is one layer. The intra-type reference row is never
-        rendered. Output goes to the same run folder (plot3d_{dataset}/
+        rendered. Output goes to the same run folder (plot-3d_{dataset}/
         subfolder); a visualization failure is logged but never fails the
         similarity search.
 
@@ -3115,7 +3115,7 @@ class MorphologyComparer:
                 **viz_kwargs,
             )
             vs.plot_neurons()
-            viz_dir = run_dir / f"plot3d_{_dataset_folder(self.dataset)}"
+            viz_dir = run_dir / f"plot-3d_{_dataset_folder(self.dataset)}"
             self._log(f"3D visualization saved to: {viz_dir}")
         except Exception as ex:
             self._log(f"3D visualization failed (search results kept): {ex}")

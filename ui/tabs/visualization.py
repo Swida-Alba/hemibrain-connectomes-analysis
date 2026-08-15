@@ -46,6 +46,18 @@ def _flatten_neuron_layers(neuron_layers) -> list:
     ]
 
 
+def _palette_colors_for_count(palette, count: int) -> list:
+    """Resolve a palette for a known render count.
+
+    Continuous preset selections must span the selected range; discrete and
+    custom palettes retain their displayed order/cycling behavior.
+    """
+    getter = getattr(palette, "get_colors_for_count", None)
+    if callable(getter):
+        return getter(count)
+    return assign_palette_colors(palette.get_colors(), count)
+
+
 COLOR_PRESETS = {
     "Cool": {"source": "#4A90E2", "intermediate": "#50E3C2", "target": "#B8E986", "link": "rgba(74,144,226,0.3)"},
     "Default": {"source": "#1f77b4", "intermediate": "rgba(44,160,44,1.0)", "target": "#d62728", "link": "rgba(100,100,100,0.6)"},
@@ -146,7 +158,11 @@ def create_skeleton_tab():
                     )
                     neuron_alpha = number_input(
                         "Neuron Opacity", 0.2, 0, 1, 0.1,
-                        hint="Transparency of neuron tubes (0=invisible, 1=solid).",
+                        hint=(
+                            "Global fallback opacity for skeletons (0=invisible, 1=solid). "
+                            "Explicit alpha in a layer color overrides it; colors without "
+                            "alpha inherit this value."
+                        ),
                     )
                     bg_color = select_input(
                         "Background", ["white", "black"], "white",
@@ -190,7 +206,8 @@ def create_skeleton_tab():
                 )
                 ui.label(
                     "The default follows the background (Category10 on white, "
-                    "Set3 on black) until a palette is picked manually."
+                    "Set3 on black) until a palette is picked manually. Custom colors "
+                    "may include per-layer alpha; colors without alpha use Neuron Opacity."
                 ).classes("text-caption drocat-muted")
 
             # ------------------------------------------------------------------
@@ -205,7 +222,8 @@ def create_skeleton_tab():
                 )
                 ui.label(
                     "Colors are assigned per connection between consecutive layers "
-                    "(one fewer than the number of neuron layers)."
+                    "(one fewer than the number of neuron layers). Custom alpha "
+                    "overrides Synapse Opacity per connection layer."
                 ).classes("text-caption drocat-muted")
                 ui.label("Synapse options").classes("drocat-mini-label")
                 with param_grid(3):
@@ -223,7 +241,10 @@ def create_skeleton_tab():
                     )
                     synapse_alpha = number_input(
                         "Synapse Opacity", 0.6, 0, 1, 0.1,
-                        hint="Transparency of synapse markers.",
+                        hint=(
+                            "Global fallback opacity for synapse markers. Explicit alpha "
+                            "in a synapse color overrides it; colors without alpha inherit it."
+                        ),
                     )
                     synapse_mode = select_input(
                         "Synapse Mode", ["cone", "scatter"], "cone",
@@ -245,8 +266,10 @@ def create_skeleton_tab():
                     )
                     mesh_alpha = number_input(
                         "ROI Mesh Opacity", 0.1, 0, 1, 0.05,
-                        hint="Transparency applied to all ROI meshes (per-ROI alpha can be "
-                             "embedded in custom colors instead).",
+                        hint=(
+                            "Global fallback opacity for ROI meshes. Explicit alpha in each "
+                            "ROI color overrides it; colors without alpha inherit it."
+                        ),
                     )
                 roi_select = multi_select_input(
                     "Mesh ROIs",
@@ -269,7 +292,7 @@ def create_skeleton_tab():
                 )
                 ui.label(
                     "Colors are assigned in the displayed order; every resolved ROI mesh "
-                    "has its own legend entry."
+                    "has its own legend entry. Use Custom colors for per-ROI alpha overrides."
                 ).classes("text-caption drocat-muted")
                 brain_mesh_picker = color_swatch_picker("Brain Mesh Color", value="auto")
 
@@ -514,18 +537,16 @@ def create_skeleton_tab():
         neurons = _flatten_neuron_layers(neuron_layers)
 
         # Assign the exact displayed palette order (including custom reordering).
-        neuron_colors = assign_palette_colors(
-            neuron_palette.get_colors(), len(neurons)
-        )
+        neuron_colors = _palette_colors_for_count(neuron_palette, len(neurons))
         # One color per connection between consecutive layers (n_layers - 1).
-        synapse_colors = assign_palette_colors(
-            synapse_palette.get_colors(), max(0, len(neurons) - 1)
+        synapse_colors = _palette_colors_for_count(
+            synapse_palette, max(0, len(neurons) - 1)
         )
 
         # Auto is a one-color gray palette; custom mode must not be gated by
         # the last selected preset name.
-        mesh_color = assign_palette_colors(
-            roi_palette.get_colors(), len(rois)
+        mesh_color = _palette_colors_for_count(
+            roi_palette, len(rois)
         ) if rois else (100, 100, 100)
 
         custom_names = layer_tree.get_custom_layer_names()
@@ -785,7 +806,7 @@ def create_net_viz_tab():
         )
 
     def make_plotpath_folder(empty_canvas=False):
-        """Create the per-run output subfolder (plotpath_{name}_{timestamp}).
+        """Create the per-run output subfolder (plot-network_{name}_{timestamp}).
 
         Every run gets its own timestamped folder inside the user-chosen
         output directory, matching the naming of the other tools.
@@ -798,7 +819,7 @@ def create_net_viz_tab():
             name = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
             if len(name) > 60:
                 name = name[:60]
-        run_folder = Path(path_output_dir.value) / f"plotpath_{name}_{timestamp}"
+        run_folder = Path(path_output_dir.value) / f"plot-network_{name}_{timestamp}"
         run_folder.mkdir(parents=True, exist_ok=True)
         path_file_path["output_folder"] = str(run_folder)
         return str(run_folder)
