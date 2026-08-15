@@ -248,7 +248,7 @@ def skeleton_specs() -> list:
         "neuron_layers": [["aMe12"], ["SMP238"], ["PPL101"]],
         "search_columns": "auto",
         "hemisphere": "both",
-        "custom_layer_names": None,
+        "custom_layer_names": [],
         "output_dir": out("skeleton_3layer"),
         "skeleton_mode": "tube",
         "brain_mesh": "template",
@@ -716,9 +716,33 @@ def build_scenarios(variants: str, only: list = None) -> list:
     return scenarios
 
 
+def reset_scenario_artifacts(names: list) -> None:
+    """Remove only the named scenarios' outputs + logs (keeps other results).
+
+    Used when re-running a subset with --scenario so a previous full run is
+    not wiped by reset_output_root().
+    """
+    if not names:
+        return
+    for name in names:
+        target = ROOT / name
+        if target.is_symlink():
+            raise RuntimeError(f"Refusing to remove symlinked path: {target}")
+        if target.exists():
+            shutil.rmtree(target)
+        for pattern in (f"{name}__*.log", f"{name}_*.log"):
+            for stale in ROOT.glob(pattern):
+                stale.unlink(missing_ok=True)
+
+
 async def main(keep_output: bool = False, only: list = None,
                variants: str = "full") -> None:
-    reset_output_root()
+    if only:
+        # Re-running a subset: keep every other scenario's artifacts.
+        reset_scenario_artifacts(only)
+        ROOT.mkdir(parents=True, exist_ok=True)
+    else:
+        reset_output_root()
     summary = []
     try:
         scenarios = build_scenarios(variants, only)
@@ -735,6 +759,17 @@ async def main(keep_output: bool = False, only: list = None,
             )
             if result["error"]:
                 print(f"         error: {result['error']}")
+
+        # Merge with any previous run's entries when re-running a subset.
+        if only:
+            try:
+                previous = json.loads((ROOT / "results.json").read_text())
+                known = {(r["name"], r["variant"]) for r in summary}
+                previous = [r for r in previous
+                            if (r.get("name"), r.get("variant")) not in known]
+                summary = previous + summary
+            except (OSError, ValueError):
+                pass
 
         (ROOT / "results.json").write_text(
             json.dumps(summary, indent=2, default=str), encoding="utf-8"
