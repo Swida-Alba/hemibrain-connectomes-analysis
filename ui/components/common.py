@@ -424,7 +424,7 @@ def neuron_list_input(
         upload_menu.close()
 
     with ui.column().classes("w-full gap-1") as container:
-        with ui.row().classes("w-full items-end gap-2"):
+        with ui.row().classes("w-full items-end gap-2 drocat-neuron-input-row"):
             # Chip-based list input. Quasar normally commits a new value only
             # on Enter; the input event below preserves the editor text so it
             # can also be committed when the user moves focus elsewhere.
@@ -471,7 +471,7 @@ def neuron_list_input(
                     },
                     value="exact",
                     label="Match by",
-                ).classes("w-32 drocat-select").props("dense outlined").tooltip(
+                ).classes("w-32 drocat-select drocat-neuron-match-filter").props("dense outlined").tooltip(
                     "How the query matches the Search Columns: exact, prefix "
                     "(starts with), substring (contains), suffix (ends with) "
                     "or regex pattern"
@@ -1365,18 +1365,23 @@ def select_input(
     default: Optional[str] = None,
     hint: str = "",
     help_doc: Optional[str] = None,
+    inline: bool = False,
 ) -> ui.select:
     """Create a dropdown select input with tooltip.
 
     help_doc: name of a docs/ui_guides/*.html file; a small "guide" link is
     rendered under the select so the option list can be explained in depth.
+    inline: use a compact fixed-width wrapper for placing the select beside
+    a related checkbox or control in a flex row.
     """
-    with ui.column().classes("gap-0 w-full"):
+    wrapper_classes = "gap-0 drocat-inline-select" if inline else "gap-0 w-full"
+    with ui.column().classes(wrapper_classes):
+        select_classes = "drocat-select" if inline else "w-full drocat-select"
         sel = ui.select(
             options=options,
             value=default or options[0],
             label=label,
-        ).classes("w-full drocat-select")
+        ).classes(select_classes)
         if hint:
             sel.tooltip(hint)
         if help_doc:

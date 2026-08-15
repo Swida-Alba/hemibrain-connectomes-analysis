@@ -35,7 +35,21 @@ def create_connectivity_profiling_tab():
     )
 
     with form_col:
-        with ui.card().classes("w-full drocat-card"):
+        with ui.card().classes("w-full drocat-card").props('id="card-profiling-datasets"'):
+            section_header("Datasets", "storage")
+            datasets_select = dataset_multi_selector(
+                label="Datasets to compare (select one or more)",
+                default=["male-cns:v1.0"],
+                hint="Select one or more datasets. One dataset with multiple thresholds "
+                     "is also supported. Two or more datasets profile the same query in "
+                     "each dataset (names mapped per dataset) and add within-dataset "
+                     "(intra) plus across-dataset (inter, same neuron) comparisons. "
+                     "The inter-dataset overview puts all queried neurons in rows and "
+                     "dataset pairs in columns.",
+            )
+            output_dir = dir_input(scope="connectivity_profiling")
+
+        with ui.card().classes("w-full drocat-card").props('id="card-profiling-neurons"'):
             section_header("Query Neurons", "search")
             query_input = neuron_list_input(
                 label="Neurons to Compare",
@@ -44,19 +58,7 @@ def create_connectivity_profiling_tab():
                 suggestions=_type_suggest,
                 available_neurons=lambda: list(datasets_select.value or [])
                 if datasets_select is not None else [],
-            )
-            with param_grid(2):
-                datasets_select = dataset_multi_selector(
-                    label="Datasets to compare (select one or more)",
-                    default=["male-cns:v1.0"],
-                    hint="Select one or more datasets. One dataset with multiple thresholds "
-                         "is also supported. Two or more datasets profile the same query in "
-                         "each dataset (names mapped per dataset) and add within-dataset "
-                         "(intra) plus across-dataset (inter, same neuron) comparisons. "
-                         "The inter-dataset overview puts all queried neurons in rows and "
-                         "dataset pairs in columns.",
-                )
-                output_dir = dir_input(scope="connectivity_profiling")
+            ).classes("drocat-fixed-neuron-input")
 
         with ui.card().classes("w-full drocat-card"):
             section_header("Profile Construction", "build")

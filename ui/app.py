@@ -274,6 +274,45 @@ html, body {
     align-content: flex-start;
     scrollbar-width: thin;
 }
+.drocat-fixed-neuron-input {
+    width: 100%;
+    min-width: 0;
+}
+.drocat-fixed-neuron-input .drocat-neuron-input-row {
+    flex-wrap: nowrap;
+    min-width: 0;
+}
+.drocat-fixed-neuron-input .drocat-chip-input-shell {
+    flex: 1 1 0%;
+    width: 0;
+    min-width: 0;
+}
+.drocat-fixed-neuron-input .drocat-chip-input-shell .q-field {
+    width: 100%;
+    min-width: 0;
+}
+.drocat-fixed-neuron-input .drocat-neuron-match-filter {
+    flex: 0 0 128px;
+    width: 128px !important;
+    min-width: 128px;
+}
+.drocat-fixed-neuron-input .drocat-upload-trigger {
+    flex: 0 0 34px;
+    width: 34px !important;
+    min-width: 34px;
+}
+@media (max-width: 760px) {
+    .drocat-fixed-neuron-input .drocat-neuron-input-row {
+        flex-wrap: wrap;
+    }
+    .drocat-fixed-neuron-input .drocat-chip-input-shell {
+        flex-basis: 100%;
+        width: 100%;
+    }
+    .drocat-fixed-neuron-input .drocat-neuron-match-filter {
+        flex: 1 1 128px;
+    }
+}
 .drocat-chip-input-shell.drocat-chip-list-collapsed
     .drocat-chip-input .q-field__control {
     max-height: 142px;
@@ -965,6 +1004,17 @@ html, body {
     line-height: 1.35 !important;
 }
 .drocat-param-grid { gap: 14px 16px !important; }
+
+/* Compact selects that sit beside a related checkbox.  The wrapper keeps
+   the field from claiming the entire flex row while still allowing the row
+   to wrap cleanly on narrow screens. */
+.drocat-inline-select {
+    flex: 0 1 170px;
+    width: 170px;
+    min-width: 150px;
+    max-width: 190px;
+}
+.drocat-inline-select .q-field { width: 100%; }
 
 /* ---------- LabelMapper / custom-group editors ---------- */
 .drocat-settings-mapping-controls {

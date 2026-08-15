@@ -329,6 +329,42 @@ class TestRunner:
         assert dataset_control._props.get("multiple") is True
         assert threshold_control.value == [3, 5]
 
+    def test_shortest_tab_removes_polynomial_explanation_and_thresholds_span_row(self):
+        """Keep the shortest tab concise and give thresholds a full row."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.find_shortest import create_find_shortest_tab
+        from ui.tabs.inter_dataset import create_inter_dataset_tab
+
+        shortest_client = Client(page("/shortest-no-explanation"))
+        with shortest_client:
+            create_find_shortest_tab()
+        shortest_texts = [
+            getattr(el, "text", "")
+            for el in shortest_client.elements.values()
+            if getattr(el, "text", "")
+        ]
+        assert not any(
+            "Only per-pair shortest paths are enumerated" in text
+            for text in shortest_texts
+        )
+
+        inter_client = Client(page("/interdataset-threshold-full-row"))
+        with inter_client:
+            create_inter_dataset_tab()
+        full_row_controls = [
+            el for el in inter_client.elements.values()
+            if "drocat-full-row-control" in getattr(el, "_classes", [])
+        ]
+        assert len(full_row_controls) == 1
+        ancestor = full_row_controls[0]
+        ancestor_ids = []
+        while ancestor is not None:
+            ancestor_ids.append(getattr(ancestor, "_props", {}).get("id", ""))
+            parent_slot = getattr(ancestor, "parent_slot", None)
+            ancestor = parent_slot.parent if parent_slot is not None else None
+        assert "card-interdataset-core" in ancestor_ids
+
     def test_generate_neuronbridge_script(self):
         from ui.runner import ScriptRunner
         sr = ScriptRunner()
@@ -567,16 +603,25 @@ class TestRunner:
         with client:
             create_find_similar_tab()
 
-        controls = {
-            getattr(el, "_props", {}).get("label"): el
-            for el in client.elements.values()
-            if getattr(el, "_props", {}).get("label")
-        }
         default_control = next(
             el for el in client.elements.values()
             if getattr(el, "text", "") == "Default Simplification"
         )
-        dataset = controls["Dataset"]
+        dataset = None
+        for el in client.elements.values():
+            if getattr(el, "_props", {}).get("label") != "Dataset":
+                continue
+            ancestor = el
+            while ancestor is not None:
+                if getattr(ancestor, "_props", {}).get("id", "") == \
+                        "card-findsimilar-morphology-dataset":
+                    dataset = el
+                    break
+                parent_slot = getattr(ancestor, "parent_slot", None)
+                ancestor = parent_slot.parent if parent_slot is not None else None
+            if dataset is not None:
+                break
+        assert dataset is not None
         # Both modes have an advanced visualization editor.  The first
         # occurrence belongs to the initially visible morphological panel;
         # the profile panel has an independent editor later in the element
@@ -2405,6 +2450,327 @@ class TestTabs:
             assert "Hemisphere-aware" in texts
             assert "Hemisphere" in labels
 
+    def test_hemisphere_filter_is_inline_with_aware_toggle(self):
+        """Keep the hemisphere selector beside its enabling checkbox."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.find_path import create_find_path_tab
+        from ui.tabs.find_shortest import create_find_shortest_tab
+        from ui.tabs.network import create_network_tab
+
+        controls = [
+            ("/hemi-inline-findpath", create_find_path_tab, "Hemisphere-aware"),
+            ("/hemi-inline-findshortest", create_find_shortest_tab, "Hemisphere-aware"),
+            ("/hemi-inline-network", create_network_tab, "Hemisphere-aware"),
+        ]
+        for name, builder, toggle_label in controls:
+            client = Client(page(name))
+            with client:
+                builder()
+
+            selector = next(
+                el for el in client.elements.values()
+                if getattr(el, "_props", {}).get("label") == "Hemisphere"
+            )
+            selector_wrapper = selector.parent_slot.parent
+            assert "drocat-inline-select" in selector_wrapper._classes
+            assert "w-full" not in selector_wrapper._classes
+
+            toggle = next(
+                el for el in client.elements.values()
+                if getattr(el, "text", "") == toggle_label
+            )
+            assert toggle.parent_slot.parent is selector_wrapper.parent_slot.parent
+
+    def test_reciprocal_connections_belong_to_core_parameters(self):
+        """Reciprocal enrichment is a core path option, not hemisphere analysis."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.inter_dataset import create_inter_dataset_tab
+        from ui.tabs.find_path import create_find_path_tab
+        from ui.tabs.find_shortest import create_find_shortest_tab
+
+        for name, builder, core_id, hemisphere_id in [
+            ("/reciprocal-core-findpath", create_find_path_tab,
+             "card-findpath-core", "card-findpath-hemisphere"),
+            ("/reciprocal-core-findshortest", create_find_shortest_tab,
+             "card-findshortest-core", "card-findshortest-hemisphere"),
+            ("/reciprocal-core-interdataset", create_inter_dataset_tab,
+             "card-interdataset-core", "card-interdataset-hemisphere"),
+        ]:
+            client = Client(page(name))
+            with client:
+                builder()
+
+            reciprocal = next(
+                el for el in client.elements.values()
+                if getattr(el, "text", "") == "Find Reciprocal Connections"
+            )
+            ancestors = []
+            node = reciprocal
+            while node is not None:
+                ancestors.append(getattr(node, "_props", {}).get("id", ""))
+                parent_slot = getattr(node, "parent_slot", None)
+                node = parent_slot.parent if parent_slot is not None else None
+
+            assert core_id in ancestors
+            assert hemisphere_id not in ancestors
+
+    def test_conserved_edges_checkbox_is_on_row_below_symmetry(self):
+        """Keep-only-conserved edges gets its own row below symmetry."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.find_path import create_find_path_tab
+        from ui.tabs.find_shortest import create_find_shortest_tab
+        from ui.tabs.inter_dataset import create_inter_dataset_tab
+        from ui.tabs.network import create_network_tab
+
+        controls = [
+            ("/conserved-row-findpath", create_find_path_tab),
+            ("/conserved-row-findshortest", create_find_shortest_tab),
+            ("/conserved-row-network", create_network_tab),
+            ("/conserved-row-interdataset", create_inter_dataset_tab),
+        ]
+        for name, builder in controls:
+            client = Client(page(name))
+            with client:
+                builder()
+
+            symmetry = next(
+                el for el in client.elements.values()
+                if getattr(el, "text", "") == "Symmetry Analysis"
+            )
+            conserved = next(
+                el for el in client.elements.values()
+                if getattr(el, "text", "") == "Keep Only Hemisphere-Conserved Edges"
+            )
+            aware = next(
+                el for el in client.elements.values()
+                if getattr(el, "text", "") in (
+                    "Hemisphere-aware", "Separate Hemispheres (L/R)"
+                )
+            )
+            aware_row = aware.parent_slot.parent
+            symmetry_row = symmetry.parent_slot.parent
+            conserved_row = conserved.parent_slot.parent
+            assert aware_row is not symmetry_row
+            assert symmetry_row is not conserved_row
+            assert aware_row is not conserved_row
+            assert "items-center" in conserved_row._classes
+            elements = list(client.elements.values())
+            assert elements.index(aware_row) < elements.index(symmetry_row)
+            assert elements.index(conserved_row) > elements.index(symmetry_row)
+
+    def test_path_tabs_start_with_dataset_and_fixed_full_width_neuron_rows(self):
+        """Path tabs mirror Cross-Dataset's dataset-first input layout."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.find_path import create_find_path_tab
+        from ui.tabs.find_shortest import create_find_shortest_tab
+        from ui.tabs.inter_dataset import create_inter_dataset_tab
+
+        controls = [
+            ("/layout-findpath", create_find_path_tab,
+             "card-findpath-dataset", "card-findpath-neurons", "card-findpath-core"),
+            ("/layout-findshortest", create_find_shortest_tab,
+             "card-findshortest-dataset", "card-findshortest-neurons", "card-findshortest-core"),
+            ("/layout-interdataset", create_inter_dataset_tab,
+             "card-interdataset-datasets", "card-interdataset-neurons", "card-interdataset-core"),
+        ]
+        for name, builder, dataset_id, neurons_id, core_id in controls:
+            client = Client(page(name))
+            with client:
+                builder()
+
+            ids = [
+                getattr(el, "_props", {}).get("id", "")
+                for el in client.elements.values()
+            ]
+            assert ids.index(dataset_id) < ids.index(neurons_id) < ids.index(core_id)
+
+            fixed_inputs = [
+                el for el in client.elements.values()
+                if "drocat-fixed-neuron-input" in getattr(el, "_classes", [])
+            ]
+            assert len(fixed_inputs) == 2
+            for container in fixed_inputs:
+                assert container.parent_slot.parent._props.get("id") == neurons_id
+                input_row = next(
+                    el for el in client.elements.values()
+                    if "drocat-neuron-input-row" in getattr(el, "_classes", [])
+                    and el.parent_slot.parent is container
+                )
+                assert "w-full" in input_row._classes
+                row_children = [
+                    el for el in client.elements.values()
+                    if getattr(getattr(el, "parent_slot", None), "parent", None)
+                    is input_row
+                ]
+                assert any(
+                    "drocat-neuron-match-filter" in getattr(el, "_classes", [])
+                    for el in row_children
+                )
+                assert any(
+                    "drocat-upload-trigger" in getattr(el, "_classes", [])
+                    for el in row_children
+                )
+
+            output_dirs = [
+                el for el in client.elements.values()
+                if getattr(el, "_props", {}).get("label") == "Output Directory"
+            ]
+            assert len(output_dirs) == 1
+            ancestor = output_dirs[0]
+            ancestor_ids = []
+            while ancestor is not None:
+                ancestor_ids.append(getattr(ancestor, "_props", {}).get("id", ""))
+                parent_slot = getattr(ancestor, "parent_slot", None)
+                ancestor = parent_slot.parent if parent_slot is not None else None
+            assert dataset_id in ancestor_ids
+
+    def test_network_and_similarity_tabs_use_standalone_dataset_cards(self):
+        """Network and similarity tabs keep dataset/output controls together."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.network import create_network_tab
+        from ui.tabs.find_homologs import create_find_homologs_tab
+        from ui.tabs.find_similar import create_find_similar_tab
+        from ui.tabs.connectivity_profiling import create_connectivity_profiling_tab
+
+        controls = [
+            ("/layout-network", create_network_tab,
+             ("card-network-dataset", "card-network-neurons"), 1),
+            ("/layout-findhomologs", create_find_homologs_tab,
+             ("card-findhomologs-datasets", "card-findhomologs-neurons"), 1),
+            ("/layout-findsimilar", create_find_similar_tab,
+             (
+                 "card-findsimilar-morphology-dataset",
+                 "card-findsimilar-morphology-neurons",
+                 "card-findsimilar-profile-dataset",
+                 "card-findsimilar-profile-neurons",
+             ), 2),
+            ("/layout-profiling", create_connectivity_profiling_tab,
+             ("card-profiling-datasets", "card-profiling-neurons"), 1),
+        ]
+        for name, builder, card_ids, expected_fixed_inputs in controls:
+            client = Client(page(name))
+            with client:
+                builder()
+
+            ids = [
+                getattr(el, "_props", {}).get("id", "")
+                for el in client.elements.values()
+            ]
+            for dataset_id, neurons_id in zip(card_ids[::2], card_ids[1::2]):
+                assert ids.index(dataset_id) < ids.index(neurons_id)
+
+            fixed_inputs = [
+                el for el in client.elements.values()
+                if "drocat-fixed-neuron-input" in getattr(el, "_classes", [])
+            ]
+            assert len(fixed_inputs) == expected_fixed_inputs
+            expected_neuron_cards = set(card_ids[1::2])
+            for container in fixed_inputs:
+                parent_card_id = container.parent_slot.parent._props.get("id")
+                assert parent_card_id in expected_neuron_cards
+
+            output_dirs = [
+                el for el in client.elements.values()
+                if getattr(el, "_props", {}).get("label") == "Output Directory"
+            ]
+            assert len(output_dirs) == expected_fixed_inputs
+            for output_dir in output_dirs:
+                ancestor = output_dir
+                ancestor_ids = []
+                while ancestor is not None:
+                    ancestor_ids.append(
+                        getattr(ancestor, "_props", {}).get("id", "")
+                    )
+                    parent_slot = getattr(ancestor, "parent_slot", None)
+                    ancestor = parent_slot.parent if parent_slot is not None else None
+                dataset_ancestors = [
+                    card_id for card_id in card_ids[::2]
+                    if card_id in ancestor_ids
+                ]
+                assert len(dataset_ancestors) == 1
+
+    def test_visualization_tabs_put_dataset_or_output_cards_at_the_top(self):
+        """Keep Skeleton and Net-Viz storage controls in their first card."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.visualization import create_skeleton_tab, create_net_viz_tab
+
+        controls = [
+            ("/layout-skeleton", create_skeleton_tab,
+             "card-skeleton-dataset", "card-3d", "Output Directory"),
+            ("/layout-net-viz-output", create_net_viz_tab,
+             "card-net-viz-output", "card-net-viz-source", "Path Output Directory"),
+        ]
+        for name, builder, storage_id, next_card_id, output_label in controls:
+            client = Client(page(name))
+            with client:
+                builder()
+
+            ids = [
+                getattr(el, "_props", {}).get("id", "")
+                for el in client.elements.values()
+            ]
+            assert ids.index(storage_id) < ids.index(next_card_id)
+
+            output_dir = next(
+                el for el in client.elements.values()
+                if getattr(el, "_props", {}).get("label") == output_label
+            )
+            ancestor = output_dir
+            ancestor_ids = []
+            while ancestor is not None:
+                ancestor_ids.append(
+                    getattr(ancestor, "_props", {}).get("id", "")
+                )
+                parent_slot = getattr(ancestor, "parent_slot", None)
+                ancestor = parent_slot.parent if parent_slot is not None else None
+            assert storage_id in ancestor_ids
+
+    def test_connectivity_similarity_is_intra_dataset_only(self):
+        """The connectivity-similarity UI exposes one shared dataset."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.find_similar import create_find_similar_tab
+
+        client = Client(page("/similar-connectivity-intra-dataset"))
+        with client:
+            create_find_similar_tab()
+
+        profile_card = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("id") ==
+            "card-findsimilar-profile-dataset"
+        )
+        profile_selectors = []
+        for el in client.elements.values():
+            if getattr(el, "_props", {}).get("label") != "Dataset":
+                continue
+            ancestor = el
+            ancestor_ids = []
+            while ancestor is not None:
+                ancestor_ids.append(
+                    getattr(ancestor, "_props", {}).get("id", "")
+                )
+                parent_slot = getattr(ancestor, "parent_slot", None)
+                ancestor = parent_slot.parent if parent_slot is not None else None
+            if getattr(profile_card, "_props", {}).get("id") in ancestor_ids:
+                profile_selectors.append(el)
+
+        assert len(profile_selectors) == 1
+        assert profile_selectors[0]._props.get("multiple") is not True
+        labels = [
+            getattr(el, "_props", {}).get("label")
+            for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label")
+        ]
+        assert "Source Dataset" not in labels
+        assert "Target Dataset" not in labels
+
     def test_restructured_tabs_have_independent_block_cards(self):
         """Tabs reviewed for card separation must expose their logical
         groups as independent cards (source / output / hemisphere /
@@ -2419,21 +2785,26 @@ class TestTabs:
 
         expected_blocks = [
             ("/blocks-findpath", create_find_path_tab, (
+                "card-findpath-dataset", "card-findpath-neurons",
                 "card-findpath-core", "card-findpath-output",
                 "card-findpath-hemisphere",
             )),
             ("/blocks-findshortest", create_find_shortest_tab, (
+                "card-findshortest-dataset", "card-findshortest-neurons",
                 "card-findshortest-core", "card-findshortest-output",
                 "card-findshortest-hemisphere",
             )),
             ("/blocks-interdataset", create_inter_dataset_tab, (
+                "card-interdataset-datasets", "card-interdataset-neurons",
+                "card-interdataset-core",
                 "card-interdataset-hemisphere",
             )),
             ("/blocks-nbfindlines", create_nb_find_lines_tab, (
                 "card-nb-image-download",
             )),
             ("/blocks-net-viz", create_net_viz_tab, (
-                "card-net-viz-source", "card-net-viz-rendering",
+                "card-net-viz-output", "card-net-viz-source",
+                "card-net-viz-rendering",
             )),
         ]
         for name, builder, blocks in expected_blocks:

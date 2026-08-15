@@ -50,7 +50,15 @@ def create_network_tab():
             "use the Find Path tab with Find Reciprocal Connections enabled."
         ).classes("text-caption text-amber-8 w-full")
 
-        with ui.card().classes("w-full drocat-card"):
+        with ui.card().classes("w-full drocat-card").props('id="card-network-dataset"'):
+            section_header("Dataset", "storage")
+            dataset = dataset_selector(
+                hint="Select the connectome dataset.",
+                allow_custom=True,
+            )
+            output_dir = dir_input(scope="network")
+
+        with ui.card().classes("w-full drocat-card").props('id="card-network-neurons"'):
             section_header("Neuron Selection", "hub")
             query_input = neuron_list_input(
                 label="Query Neurons",
@@ -59,20 +67,14 @@ def create_network_tab():
                      "Enter neuron types, bodyIds, or patterns; upload CSV/TSV/Excel for large lists.",
                 suggestions=_type_suggest,
                 available_neurons=lambda: dataset.value if dataset is not None else "",
+            ).classes("drocat-fixed-neuron-input")
+            mapping_select, _grouper_card, resolve_grouping = custom_grouping_block(
+                label="Custom Grouping",
+                tab_key="network",
+                datasets_provider=lambda: [dataset.value] if dataset.value else [],
+                watch_elements=[dataset],
+                query_inputs={"query": query_input},
             )
-            with param_grid(2):
-                dataset = dataset_selector(
-                    hint="Select the connectome dataset.",
-                    allow_custom=True,
-                )
-                output_dir = dir_input(scope="network")
-                mapping_select, _grouper_card, resolve_grouping = custom_grouping_block(
-                    label="Custom Grouping",
-                    tab_key="network",
-                    datasets_provider=lambda: [dataset.value] if dataset.value else [],
-                    watch_elements=[dataset],
-                    query_inputs={"query": query_input},
-                )
 
         with ui.card().classes("w-full drocat-card").props('id="card-network-core"'):
             section_header("Core Parameters", "tune")
@@ -139,9 +141,9 @@ def create_network_tab():
 
         with ui.card().classes("w-full drocat-card").props('id="card-network-hemisphere"'):
             section_header("Hemisphere Analysis", "sync_alt")
-            with ui.row().classes("gap-4"):
+            with ui.row().classes("items-center gap-4 flex-wrap"):
                 separate_hemi = checkbox_input(
-                    "Separate Hemispheres (L/R)", False,
+                    "Hemisphere-aware", False,
                     hint="Split type/group aggregation into _L/_R/_U hemisphere labels.",
                 )
                 hemi_filter = select_input(
@@ -149,14 +151,17 @@ def create_network_tab():
                     hint="'both': all neurons. 'left'/'right': restrict to that hemisphere. "
                          "Neurons WITHOUT an explicit hemisphere (no _L/_R instance suffix "
                          "or Soma side) are always included in every option.",
+                    inline=True,
                 )
-                keep_hemi_conserved = checkbox_input(
-                    "Keep Only Hemisphere-Conserved Edges", False,
-                    hint="Keep only edges conserved between hemispheres (requires Separate Hemispheres).",
-                )
+            with ui.row().classes("items-center gap-4 flex-wrap"):
                 symmetry_analysis = checkbox_input(
                     "Symmetry Analysis", False,
                     hint="Generate ipsilateral vs contralateral symmetry outputs.",
+                )
+            with ui.row().classes("items-center gap-4 flex-wrap"):
+                keep_hemi_conserved = checkbox_input(
+                    "Keep Only Hemisphere-Conserved Edges", False,
+                    hint="Keep only edges conserved between hemispheres (requires Hemisphere-aware).",
                 )
             def _sync_hemisphere_options():
                 if separate_hemi.value:

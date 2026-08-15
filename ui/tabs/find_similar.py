@@ -4,7 +4,7 @@ import time
 
 from nicegui import ui
 
-from ..config import DEFAULTS, PROJECT_ROOT, SRC_DIR, DATASETS, SIMILARITY_METRICS
+from ..config import DEFAULTS, PROJECT_ROOT, SRC_DIR, SIMILARITY_METRICS
 from ..components.common import (
     dataset_selector, neuron_list_input, number_input, select_input,
     checkbox_input, dir_input, section_header, param_grid, tool_page,
@@ -63,7 +63,19 @@ def create_find_similar_tab():
 
         # ================= Morphological similarity panel =================
         with ui.column().classes("w-full gap-1") as morph_panel:
-            with ui.card().classes("w-full drocat-card"):
+            with ui.card().classes("w-full drocat-card").props('id="card-findsimilar-morphology-dataset"'):
+                section_header("Dataset", "storage")
+                dataset = dataset_selector(
+                    disable_banc=True,
+                    hint="Dataset to search for similar neurons in.",
+                )
+                morph_output_dir = dir_input(scope="find_similar_morphology")
+                morph_dataset_warning = ui.label(
+                    "⚠️ BANC morphological similarity is unavailable because "
+                    "FlyWire does not provide BANC skeletons. Select a non-BANC dataset."
+                ).classes("text-caption text-amber-8").set_visibility(False)
+
+            with ui.card().classes("w-full drocat-card").props('id="card-findsimilar-morphology-neurons"'):
                 section_header("Query", "search")
                 query_input = neuron_list_input(
                     label="Query Neuron(s)",
@@ -73,17 +85,7 @@ def create_find_similar_tab():
                     suggestions=_morph_suggest,
                     available_neurons=lambda: dataset.value
                     if dataset is not None else "",
-                )
-                with param_grid(2):
-                    dataset = dataset_selector(
-                        disable_banc=True,
-                        hint="Dataset to search for similar neurons in.",
-                    )
-                    morph_output_dir = dir_input(scope="find_similar_morphology")
-                morph_dataset_warning = ui.label(
-                    "⚠️ BANC morphological similarity is unavailable because "
-                    "FlyWire does not provide BANC skeletons. Select a non-BANC dataset."
-                ).classes("text-caption text-amber-8").set_visibility(False)
+                ).classes("drocat-fixed-neuron-input")
 
             with ui.card().classes("w-full drocat-card"):
                 section_header("Similarity Parameters", "tune")
@@ -351,7 +353,16 @@ def create_find_similar_tab():
 
         # ============ Connectivity similarity panel ============
         with ui.column().classes("w-full gap-1") as profile_panel:
-            with ui.card().classes("w-full drocat-card"):
+            with ui.card().classes("w-full drocat-card").props('id="card-findsimilar-profile-dataset"'):
+                section_header("Dataset", "storage")
+                source_dataset = dataset_selector(
+                    label="Dataset",
+                    hint="Dataset used for both the query and candidate search. "
+                         "Connectivity similarity is intra-dataset only.",
+                )
+                profile_output_dir = dir_input(scope="find_similar_profiling")
+
+            with ui.card().classes("w-full drocat-card").props('id="card-findsimilar-profile-neurons"'):
                 section_header("Query", "search")
                 source_input = neuron_list_input(
                     label="Query Neuron (type or bodyId)",
@@ -362,19 +373,7 @@ def create_find_similar_tab():
                     suggestions=_profile_suggest,
                     available_neurons=lambda: source_dataset.value
                     if source_dataset is not None else "",
-                )
-                with param_grid(2):
-                    source_dataset = dataset_selector(
-                        label="Source Dataset",
-                        hint="Dataset where the query neuron lives.",
-                    )
-                    target_dataset = dataset_selector(
-                        label="Target Dataset",
-                        default=DATASETS[1],
-                        hint="Dataset to search in. Leave as the source for a "
-                             "within-dataset search.",
-                    )
-                profile_output_dir = dir_input(scope="find_similar_profiling")
+                ).classes("drocat-fixed-neuron-input")
 
             with ui.card().classes("w-full drocat-card"):
                 section_header("Search Parameters", "tune")
@@ -448,11 +447,8 @@ def create_find_similar_tab():
                             "similarity results."
                         ),
                         default_visualize_by="type",
-                        dataset_provider=lambda: [
-                            source_dataset.value,
-                            target_dataset.value,
-                        ],
-                        dataset_watchers=[source_dataset, target_dataset],
+                        dataset_provider=lambda: [source_dataset.value],
+                        dataset_watchers=[source_dataset],
                     )
 
         def sync_mode():
@@ -561,7 +557,7 @@ def create_find_similar_tab():
         constructor_params = {
             "source": source,
             "source_dataset": source_dataset.value,
-            "target_dataset": target_dataset.value,
+            "target_dataset": source_dataset.value,
             "output_dir": profile_output_dir.value,
             "top_n": int(profile_top_n.value),
             "top_k": int(top_k.value),

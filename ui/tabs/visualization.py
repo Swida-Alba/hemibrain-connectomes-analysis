@@ -97,6 +97,15 @@ def create_skeleton_tab():
             "Configure and render neuron morphology independently from network drawings."
         ).classes("text-caption drocat-muted")
 
+        with ui.card().classes("w-full drocat-card").props('id="card-skeleton-dataset"'):
+            section_header("Dataset", "storage")
+            dataset = dataset_selector(disable_banc=True)
+            output_dir = dir_input(scope="visualization_skeleton")
+            skeleton_dataset_warning = ui.label(
+                "⚠️ BANC skeleton visualization is unavailable because FlyWire "
+                "does not provide BANC skeletons. Select a non-BANC dataset."
+            ).classes("text-caption text-amber-8").set_visibility(False)
+
         # ================= 3D Skeleton panel =================
         with ui.card().classes("w-full drocat-card").props('id="card-3d"'):
             section_header("3D Skeleton · plot3dSkeleton", "view_in_ar")
@@ -104,20 +113,9 @@ def create_skeleton_tab():
                 "Render neuron morphology, synapses, and independent brain-region meshes."
             ).classes("text-caption drocat-muted")
             section_header("Neuron Selection (3D)", "hub")
-            # The dataset selector is rendered below the layer editor for the
-            # existing page flow. The shared layer inputs resolve this getter
-            # lazily when suggestions or the neuron viewer are opened.
-            dataset = None
             layer_tree = layer_tree_editor(
                 dataset_provider=lambda: dataset.value if dataset is not None else ""
             )
-            with param_grid(2):
-                dataset = dataset_selector(disable_banc=True)
-                output_dir = dir_input(scope="visualization_skeleton")
-            skeleton_dataset_warning = ui.label(
-                "⚠️ BANC skeleton visualization is unavailable because FlyWire "
-                "does not provide BANC skeletons. Select a non-BANC dataset."
-            ).classes("text-caption text-amber-8").set_visibility(False)
             with param_grid(3):
                 filter_mode = select_input(
                     "Match by",
@@ -636,6 +634,13 @@ def create_net_viz_tab():
             "HTML canvas for direct interactive drawing."
         ).classes("text-caption drocat-muted")
 
+        with ui.card().classes("w-full drocat-card").props('id="card-net-viz-output"'):
+            section_header("Output Directory", "folder")
+            path_output_dir = dir_input(
+                label="Path Output Directory",
+                scope="visualization_path",
+            )
+
         with ui.card().classes("w-full drocat-card").props('id="card-net-viz-source"'):
             section_header("Net-Viz Source", "source")
             with ui.row().classes("w-full items-end gap-3 flex-wrap"):
@@ -756,17 +761,12 @@ def create_net_viz_tab():
 
         with ui.card().classes("w-full drocat-card").props('id="card-net-viz-rendering"'):
             section_header("Rendering Options", "palette")
-            with param_grid(2):
-                path_output_dir = dir_input(
-                    label="Path Output Directory",
-                    scope="visualization_path",
-                )
-                path_layout = select_input(
-                    "Network Layout",
-                    NETWORK_LAYOUTS + ["hierarchical"],
-                    "hierarchical",
-                    hint="Layout algorithm for the HTML network visualization.",
-                )
+            path_layout = select_input(
+                "Network Layout",
+                NETWORK_LAYOUTS + ["hierarchical"],
+                "hierarchical",
+                hint="Layout algorithm for the HTML network visualization.",
+            )
             color_preset = palette_picker(
                 "Color Scheme",
                 value="Cool",

@@ -42,36 +42,37 @@ def create_find_shortest_tab():
     )
 
     with form_col:
-        with ui.card().classes("w-full drocat-card"):
+        with ui.card().classes("w-full drocat-card").props('id="card-findshortest-dataset"'):
+            section_header("Dataset", "storage")
+            dataset = dataset_selector(
+                hint="Select the connectome dataset.",
+                allow_custom=True,
+            )
+            output_dir = dir_input(scope="find_shortest")
+
+        with ui.card().classes("w-full drocat-card").props('id="card-findshortest-neurons"'):
             section_header("Neuron Selection", "hub")
-            with param_grid(2):
-                source_input = neuron_list_input(
-                    label="Source Neurons",
-                    placeholder="Type or upload CSV/TSV/Excel (e.g., aMe12, aMe10)",
-                    hint="Enter neuron types, bodyIds, or patterns. Upload CSV/TSV/Excel for large lists.",
-                    suggestions=_type_suggest,
-                    available_neurons=lambda: dataset.value if dataset is not None else "",
-                )
-                target_input = neuron_list_input(
-                    label="Target Neurons",
-                    placeholder="Type or upload CSV/TSV/Excel (e.g., PPL101, DN1p)",
-                    hint="Enter neuron types, bodyIds, or patterns. Upload CSV/TSV/Excel for large lists.",
-                    suggestions=_type_suggest,
-                    available_neurons=lambda: dataset.value if dataset is not None else "",
-                )
-            with param_grid(2):
-                dataset = dataset_selector(
-                    hint="Select the connectome dataset.",
-                    allow_custom=True,
-                )
-                output_dir = dir_input(scope="find_shortest")
-                mapping_select, _grouper_card, resolve_grouping = custom_grouping_block(
-                    label="Custom Grouping",
-                    tab_key="find_shortest",
-                    datasets_provider=lambda: [dataset.value] if dataset.value else [],
-                    watch_elements=[dataset],
-                    query_inputs={"source": source_input, "target": target_input},
-                )
+            source_input = neuron_list_input(
+                label="Source Neurons",
+                placeholder="Type or upload CSV/TSV/Excel (e.g., aMe12, aMe10)",
+                hint="Enter neuron types, bodyIds, or patterns. Upload CSV/TSV/Excel for large lists.",
+                suggestions=_type_suggest,
+                available_neurons=lambda: dataset.value if dataset is not None else "",
+            ).classes("drocat-fixed-neuron-input")
+            target_input = neuron_list_input(
+                label="Target Neurons",
+                placeholder="Type or upload CSV/TSV/Excel (e.g., PPL101, DN1p)",
+                hint="Enter neuron types, bodyIds, or patterns. Upload CSV/TSV/Excel for large lists.",
+                suggestions=_type_suggest,
+                available_neurons=lambda: dataset.value if dataset is not None else "",
+            ).classes("drocat-fixed-neuron-input")
+            mapping_select, _grouper_card, resolve_grouping = custom_grouping_block(
+                label="Custom Grouping",
+                tab_key="find_shortest",
+                datasets_provider=lambda: [dataset.value] if dataset.value else [],
+                watch_elements=[dataset],
+                query_inputs={"source": source_input, "target": target_input},
+            )
 
         with ui.card().classes("w-full drocat-card").props('id="card-findshortest-core"'):
             section_header("Core Parameters", "tune")
@@ -91,11 +92,10 @@ def create_find_shortest_tab():
                          "including the network_early preview). Limits memory usage for highly "
                          "connected neurons.",
                 )
-            ui.label(
-                "ℹ️ Only per-pair shortest paths are enumerated (all ties kept). "
-                "Shortest enumeration is polynomial — no combinatorial path explosion, "
-                "so deep searches stay fast."
-            ).classes("text-caption text-teal-8")
+            find_reciprocal = checkbox_input(
+                "Find Reciprocal Connections", False,
+                hint="Enrich the path graph with reciprocal direct connections.",
+            )
 
             # --- Advanced Settings (collapsed) ---
             with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
@@ -184,7 +184,7 @@ def create_find_shortest_tab():
 
         with ui.card().classes("w-full drocat-card").props('id="card-findshortest-hemisphere"'):
             section_header("Hemisphere Analysis", "sync_alt")
-            with ui.row().classes("gap-4"):
+            with ui.row().classes("items-center gap-4 flex-wrap"):
                 separate_hemi = checkbox_input(
                     "Hemisphere-aware", False,
                     hint="Split type/group aggregation into _L/_R/_U hemisphere labels.",
@@ -194,18 +194,17 @@ def create_find_shortest_tab():
                     hint="'both': all neurons. 'left'/'right': restrict to that hemisphere. "
                          "Neurons WITHOUT an explicit hemisphere (no _L/_R instance suffix "
                          "or Soma side) are always included in every option.",
+                    inline=True,
                 )
-                keep_hemi_conserved = checkbox_input(
-                    "Keep Only Hemisphere-Conserved Edges", False,
-                    hint="Keep only edges conserved between hemispheres (requires Hemisphere-aware).",
-                )
+            with ui.row().classes("items-center gap-4 flex-wrap"):
                 symmetry_analysis = checkbox_input(
                     "Symmetry Analysis", False,
                     hint="Generate ipsilateral vs contralateral symmetry outputs.",
                 )
-                find_reciprocal = checkbox_input(
-                    "Find Reciprocal Connections", False,
-                    hint="Enrich the path graph with reciprocal direct connections.",
+            with ui.row().classes("items-center gap-4 flex-wrap"):
+                keep_hemi_conserved = checkbox_input(
+                    "Keep Only Hemisphere-Conserved Edges", False,
+                    hint="Keep only edges conserved between hemispheres (requires Hemisphere-aware).",
                 )
             def _sync_hemisphere_options():
                 if separate_hemi.value:

@@ -29,7 +29,21 @@ def create_find_homologs_tab():
     )
 
     with form_col:
-        with ui.card().classes("w-full drocat-card"):
+        with ui.card().classes("w-full drocat-card").props('id="card-findhomologs-datasets"'):
+            section_header("Datasets", "storage")
+            with param_grid(2):
+                source_dataset = dataset_selector(
+                    label="Source Dataset",
+                    hint="Dataset where the source neuron lives.",
+                )
+                target_dataset = dataset_selector(
+                    label="Target Dataset",
+                    default=DATASETS[1],
+                    hint="Dataset to search for homologs in.",
+                )
+            output_dir = dir_input(scope="find_homologs")
+
+        with ui.card().classes("w-full drocat-card").props('id="card-findhomologs-neurons"'):
             section_header("Source Neuron", "search")
             source_input = neuron_list_input(
                 label="Source Neuron (type or bodyId)",
@@ -40,11 +54,7 @@ def create_find_homologs_tab():
                 available_neurons=lambda: source_dataset.value
                 if source_dataset is not None else "",
                 hint="Single neuron type or bodyId to find cross-dataset homologs for. Only one value is accepted.",
-            )
-            with param_grid(2):
-                source_dataset = dataset_selector(label="Source Dataset", hint="Dataset where the source neuron lives.")
-                target_dataset = dataset_selector(label="Target Dataset", default=DATASETS[1], hint="Dataset to search for homologs in.")
-            output_dir = dir_input(scope="find_homologs")
+            ).classes("drocat-fixed-neuron-input")
 
         with ui.card().classes("w-full drocat-card"):
             section_header("Search Parameters", "tune")

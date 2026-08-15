@@ -37,14 +37,15 @@ def create_inter_dataset_tab():
     )
 
     with form_col:
-        with ui.card().classes("w-full drocat-card"):
+        with ui.card().classes("w-full drocat-card").props('id="card-interdataset-datasets"'):
             section_header("Datasets", "storage")
             datasets_select = dataset_multi_selector(
                 label="Datasets to compare (one dataset with multiple thresholds is also supported)",
                 default=["male-cns:v1.0"],
             )
+            output_dir = dir_input(scope="inter_dataset")
 
-        with ui.card().classes("w-full drocat-card"):
+        with ui.card().classes("w-full drocat-card").props('id="card-interdataset-neurons"'):
             section_header("Neuron Selection", "hub")
             source_input = neuron_list_input(
                 label="Source Neurons",
@@ -52,15 +53,14 @@ def create_inter_dataset_tab():
                 hint="Source neurons for pathfinding. Type one query per chip or upload a CSV/TSV/Excel file (first column).",
                 suggestions=_type_suggest,
                 available_neurons=lambda: datasets_select.value if datasets_select is not None else [],
-            )
+            ).classes("drocat-fixed-neuron-input")
             target_input = neuron_list_input(
                 label="Target Neurons",
                 placeholder="Type or upload CSV/TSV/Excel with neuron types/bodyIds",
                 hint="Target neurons for pathfinding. Type one query per chip or upload a CSV/TSV/Excel file (first column).",
                 suggestions=_type_suggest,
                 available_neurons=lambda: datasets_select.value if datasets_select is not None else [],
-            )
-            output_dir = dir_input(scope="inter_dataset")
+            ).classes("drocat-fixed-neuron-input")
             mapping_select, _grouper_card, resolve_grouping = custom_grouping_block(
                 label="Custom Mapping",
                 datasets_provider=lambda: list(datasets_select.value or []),
@@ -70,7 +70,7 @@ def create_inter_dataset_tab():
                 query_inputs={"source": source_input, "target": target_input},
             )
 
-        with ui.card().classes("w-full drocat-card"):
+        with ui.card().classes("w-full drocat-card").props('id="card-interdataset-core"'):
             section_header("Core Parameters", "tune")
             with param_grid(3):
                 comparison_mode = select_input(
@@ -91,15 +91,19 @@ def create_inter_dataset_tab():
                          "and a high unreachable number (e.g. 99) gives an effectively "
                          "unlimited search.",
                 )
-                thresholds_input = neuron_list_input(
-                    label="Synapse Thresholds",
-                    initial=[3, 5, 10],
-                    unit_label="threshold",
-                    show_filter=False,
-                    show_upload=False,
-                    hint="List of min synapse thresholds to analyze. "
-                         "Type one threshold per chip (e.g. 3, 5, 10), or keep the defaults.",
-                )
+            thresholds_input = neuron_list_input(
+                label="Synapse Thresholds",
+                initial=[3, 5, 10],
+                unit_label="threshold",
+                show_filter=False,
+                show_upload=False,
+                hint="List of min synapse thresholds to analyze. "
+                     "Type one threshold per chip (e.g. 3, 5, 10), or keep the defaults.",
+            ).classes("w-full drocat-full-row-control")
+            find_reciprocal = checkbox_input(
+                "Find Reciprocal Connections", False,
+                hint="Build reciprocal graphs and include them in reports.",
+            )
 
             # --- Advanced Settings (collapsed) ---
             with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
@@ -219,23 +223,21 @@ def create_inter_dataset_tab():
 
         with ui.card().classes("w-full drocat-card").props('id="card-interdataset-hemisphere"'):
             section_header("Hemisphere Analysis", "sync_alt")
-            with ui.row().classes("gap-4"):
+            with ui.row().classes("items-center gap-4 flex-wrap"):
                 separate_hemi = checkbox_input(
                     "Hemisphere-aware", False,
                     hint="Split type/group aggregation into _L/_R/_U hemisphere labels.",
                 ).props('id=checkbox-separate-hemi')
-                keep_hemi_conserved = checkbox_input(
-                    "Keep Only Hemisphere-Conserved Edges", False,
-                    hint="Keep only edges conserved between hemispheres (requires Hemisphere-aware).",
-                ).props('id=checkbox-hemi-conserved')
+            with ui.row().classes("items-center gap-4 flex-wrap"):
                 symmetry_analysis = checkbox_input(
                     "Symmetry Analysis", True,
                     hint="Generate per-dataset hemisphere symmetry summaries (auto-enabled with Hemisphere-aware).",
                 ).props('id=checkbox-symmetry')
-                find_reciprocal = checkbox_input(
-                    "Find Reciprocal Connections", False,
-                    hint="Build reciprocal graphs and include them in reports.",
-                )
+            with ui.row().classes("items-center gap-4 flex-wrap"):
+                keep_hemi_conserved = checkbox_input(
+                    "Keep Only Hemisphere-Conserved Edges", False,
+                    hint="Keep only edges conserved between hemispheres (requires Hemisphere-aware).",
+                ).props('id=checkbox-hemi-conserved')
             def _sync_hemisphere_options():
                 if separate_hemi.value:
                     keep_hemi_conserved.enable()
