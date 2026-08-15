@@ -4204,7 +4204,13 @@ class TestComponents:
 
     def test_output_panel_step_progress_events_drive_determinate_bar(self):
         """[DROCAT][progress] events switch the bar to a determinate step
-        fraction, set the step label, and never appear in the log."""
+        fraction, set the step label, and never appear in the log.
+
+        The bar reflects COMPLETED steps: a ``k/total`` event marks the
+        START of step k, so it shows ``(k-1)/total``.  Even the final step
+        event leaves the bar below 100%; only the run's completion status
+        fills it.
+        """
         from nicegui import Client
         from nicegui.page import page
         from ui.components.output_panel import OutputPanel
@@ -4219,19 +4225,20 @@ class TestComponents:
 
         # The event is consumed: bar value + label update, no log line.
         panel.log("[DROCAT][progress] 1/6 Resolving query neuron", "stdout")
-        assert panel.progress_bar.value == pytest.approx(1 / 6)
+        assert panel.progress_bar.value == pytest.approx(0.0)
         assert "indeterminate" not in panel.progress_bar._props
         assert panel.progress_label.text == "Step 1/6: Resolving query neuron"
         assert panel.log_area.default_slot.children == []
 
         # A later step moves the bar forward and replaces the label.
         panel.log("[DROCAT][progress] 3/6 Expanding candidate types to the scoring pool", "stdout")
-        assert panel.progress_bar.value == pytest.approx(0.5)
+        assert panel.progress_bar.value == pytest.approx(2 / 6)
         assert panel.progress_label.text == "Step 3/6: Expanding candidate types to the scoring pool"
 
-        # The final step completes the bar; regular output still logs after.
+        # Starting the final step must NOT show 100%: only completed steps
+        # count, so the bar sits at 5/6 until the run completes.
         panel.log("[DROCAT][progress] 6/6 Saving results & visualization", "stdout")
-        assert panel.progress_bar.value == pytest.approx(1.0)
+        assert panel.progress_bar.value == pytest.approx(5 / 6)
         assert panel.progress_label.text == "Step 6/6: Saving results & visualization"
         panel.log("regular line", "stdout")
         assert len(panel.log_area.default_slot.children) == 1
@@ -4283,7 +4290,7 @@ class TestComponents:
             "[DROCAT][progress] 3/6 Expanding candidate types",
             "stdout",
         )
-        assert panel.page_progress.current_value == pytest.approx(0.5)
+        assert panel.page_progress.current_value == pytest.approx(2 / 6)
         assert panel.page_progress.progress_label.text == (
             "Step 3/6: Expanding candidate types"
         )
@@ -4330,6 +4337,99 @@ class TestComponents:
             "Load vector cache",
             "Score morphological similarity",
             "Save results and visualization",
+        ]
+
+    def test_progress_step_lists_follow_optional_run_parameters(self):
+        """Optional backend phases (image downloads, reports, exports) only
+        appear in a tab's step checklist when the matching parameter enables
+        them, mirroring the backend's per-branch step totals."""
+        from ui.components.page_progress import progress_steps_for
+
+        # Find Driver Lines: no image download -> 3 steps, else 4.
+        assert progress_steps_for("nb_find_lines", context={}) == [
+            "Resolve EM neuron queries",
+            "Fetch matching driver-line records",
+            "Aggregate and rank line matches",
+        ]
+        assert progress_steps_for(
+            "nb_find_lines",
+            context={"download_images": "flylight", "output_dir": "/tmp/out"},
+        ) == [
+            "Resolve EM neuron queries",
+            "Fetch matching driver-line records",
+            "Aggregate and rank line matches",
+            "Download images and save outputs",
+        ]
+        # The backend also gates the optional phase on an output folder.
+        assert len(progress_steps_for(
+            "nb_find_lines", context={"download_images": "flylight"}
+        )) == 3
+
+        # Find EM Neurons: 3D visualization is optional (flag + output dir).
+        assert len(progress_steps_for("nb_find_neuron", context={})) == 3
+        assert len(progress_steps_for(
+            "nb_find_neuron",
+            context={"visualize_top_n": 5, "output_dir": "/tmp/out"},
+        )) == 4
+        assert len(progress_steps_for(
+            "nb_find_neuron", context={"visualize_top_n": 5}
+        )) == 3
+
+        # Co-labeling: report/3D visualization gate the final phase.
+        assert len(progress_steps_for("nb_colabel", context={})) == 4
+        assert len(progress_steps_for(
+            "nb_colabel",
+            context={"generate_report": True, "output_dir": "/tmp/out"},
+        )) == 5
+        assert len(progress_steps_for(
+            "nb_colabel", context={"generate_report": True}
+        )) == 4
+
+        # FlyLight download: summary generation is optional.
+        assert len(progress_steps_for("flylight_download", context={})) == 3
+        assert len(progress_steps_for(
+            "flylight_download", context={"generate_summary": "pdf"}
+        )) == 4
+
+        # 3D skeleton: export phases extend the three core phases.
+        assert progress_steps_for("plot3d_skeleton", context={}) == [
+            "Load skeletons",
+            "Load synapses and meshes",
+            "Render and save the 3D scene",
+        ]
+        both = progress_steps_for("plot3d_skeleton", context={
+            "export_individual_profiles": True,
+            "export_video": True,
+        })
+        assert both == [
+            "Load skeletons",
+            "Load synapses and meshes",
+            "Render and save the 3D scene",
+            "Export individual profiles",
+            "Export rotating video",
+        ]
+        profiles_only = progress_steps_for(
+            "plot3d_skeleton", context={"export_individual_profiles": True}
+        )
+        assert profiles_only[-1] == "Export individual profiles"
+        assert len(profiles_only) == 4
+
+        # Find Network: backend order is save data -> visualizations.
+        assert progress_steps_for("find_network") == [
+            "Initialize queried neurons",
+            "Fetch mutual direct connections",
+            "Enrich and filter network edges",
+            "Save network data",
+            "Build network visualizations",
+        ]
+
+        # Cross-dataset: tables export before visualizations/HTML report.
+        assert progress_steps_for("inter_dataset") == [
+            "Resolve datasets and thresholds",
+            "Run path or edge analyses",
+            "Compute cross-dataset metrics",
+            "Export reports and result tables",
+            "Generate comparison visualizations and HTML report",
         ]
 
     def test_output_dir_fields_sync_and_persist(self, tmp_path, monkeypatch):

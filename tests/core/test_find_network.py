@@ -204,3 +204,51 @@ class TestFindNetwork:
             monkeypatch, tmp_path, edges, ["S", "A"], separate_hemispheres=True)
         fc.FindNetwork()
         assert enrich_inputs["separate_hemispheres"] is True
+
+    def test_step_progress_events_match_pipeline_phases(self, monkeypatch,
+                                                        tmp_path, capsys):
+        """FindNetwork emits the 5-step [DROCAT][progress] protocol in
+        backend execution order: fetch -> enrich -> save -> visualize
+        (step 1 comes from InitializeNeuronInfo before FindNetwork runs)."""
+        edges = [("S", "A", 10), ("A", "S", 8)]
+        fc, _, _, _, _ = _make_network_fc(
+            monkeypatch, tmp_path, edges, ["S", "A"])
+        fc.verbose_mode = "full"
+        fc.progress_events = True  # opt-in (UI-generated scripts set this)
+        fc.FindNetwork()
+
+        events = [ln.strip() for ln in capsys.readouterr().out.splitlines()
+                  if "[DROCAT][progress]" in ln]
+        assert events == [
+            "[DROCAT][progress] 2/5 Fetching mutual direct connections",
+            "[DROCAT][progress] 3/5 Enriching and filtering network edges",
+            "[DROCAT][progress] 4/5 Saving network data",
+            "[DROCAT][progress] 5/5 Building network visualizations",
+        ]
+
+    def test_step_progress_silent_mode_suppresses_events(self, monkeypatch,
+                                                         tmp_path, capsys):
+        """The structured events are opt-in: runs without progress_events
+        print none even in full-verbose mode."""
+        edges = [("S", "A", 10)]
+        fc, _, _, _, _ = _make_network_fc(
+            monkeypatch, tmp_path, edges, ["S", "A"])
+        fc.verbose_mode = "full"
+        fc.FindNetwork()
+
+        out = capsys.readouterr().out
+        assert "[DROCAT][progress]" not in out
+
+    def test_step_progress_empty_network_stops_at_fetch(self, monkeypatch,
+                                                        tmp_path, capsys):
+        """A run with no within-set connections stops after the fetch step."""
+        edges = [("S", "X", 50)]
+        fc, _, _, _, _ = _make_network_fc(
+            monkeypatch, tmp_path, edges, ["S", "A"])
+        fc.verbose_mode = "full"
+        fc.progress_events = True
+        fc.FindNetwork()
+
+        events = [ln.strip() for ln in capsys.readouterr().out.splitlines()
+                  if "[DROCAT][progress]" in ln]
+        assert events == ["[DROCAT][progress] 2/5 Fetching mutual direct connections"]

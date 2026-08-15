@@ -213,15 +213,13 @@ class OutputPanel:
                 step = int(step_match.group(1))
                 total = int(step_match.group(2))
                 label = step_match.group(3).strip()
-                if self.progress_bar is not None:
-                    self.progress_bar.props(
-                        ":indeterminate='false'", remove="indeterminate"
-                    )
-                    self.progress_bar.value = min(1.0, step / max(1, total))
                 if self.progress_label is not None:
                     text = f"Step {step}/{total}:" + (f" {label}" if label else "")
                     self.progress_label.text = text
                 if self.page_progress is not None:
+                    # Single source of truth for the bar value and step
+                    # label: update_step applies the completed-steps
+                    # semantics ((step - 1) / total, 100% only at finish).
                     self.page_progress.update_step(step, total, label)
                 return
             # Progress lines (tqdm-style \r updates) refresh the previous line
@@ -377,10 +375,15 @@ class OutputPanel:
         """
         try:
             if self.page_progress is not None:
+                # Method-level flags (visualization toggles, report/summary
+                # switches, export options) decide which steps a run has, so
+                # the step checklist is built from the merged parameter set.
+                context = dict(constructor_params or {})
+                context.update(method_params or {})
                 self.page_progress.start(
                     tool_name,
                     method_name=method_name,
-                    context=constructor_params,
+                    context=context,
                 )
                 self.page_progress.container.set_visibility(True)
             # Stream output files during the run: poll every 1.5s. Started

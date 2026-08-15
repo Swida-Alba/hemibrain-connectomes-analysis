@@ -501,6 +501,25 @@ class NeuronBridgeFinder:
                     print(msg, end=end)
             else:
                 print(msg, end=end)
+
+    def _progress(self, step: int, total: int, label: str = ""):
+        """Emit a structured step-progress event consumed by the web UI.
+
+        The line ``[DROCAT][progress] <step>/<total> <label>`` drives the
+        determinate progress bar + step label in the results panel; it is a
+        control event, never shown in the execution log.  Uses ``tqdm.write``
+        like :meth:`_vprint` so it never interleaves with an active bar.
+        """
+        if self.verbose:
+            msg = f"[DROCAT][progress] {int(step)}/{int(total)} {label}".rstrip()
+            if HAS_TQDM:
+                try:
+                    from tqdm import tqdm
+                    tqdm.write(msg)
+                    return
+                except Exception:
+                    pass
+            print(msg, flush=True)
     
     def _build_cache_index(self):
         """
@@ -7259,7 +7278,12 @@ class NeuronBridgeFinder:
         else:
             # Validate and normalize match_type using helper
             match_type = self._validate_match_type(match_type)
-            
+        
+        # Step protocol: the 3D visualization phase is optional (driven by
+        # visualize_top_n and an output folder), so the total varies.
+        total_steps = 4 if (visualize_top_n > 0 and output_dir) else 3
+        self._progress(1, total_steps, "Resolving driver-line queries")
+        
         # Parse line names
         if isinstance(line_names, str):
             lines = [ln.strip() for ln in line_names.split(',') if ln.strip()]
@@ -7307,6 +7331,7 @@ class NeuronBridgeFinder:
         
         # Process each line
         all_results = []
+        self._progress(2, total_steps, "Fetching matching EM neuron records")
         
         # Phase 1: Check cache and identify what needs to be fetched
         if HAS_TQDM and self.verbose and len(lines) > 1:
@@ -7538,6 +7563,7 @@ class NeuronBridgeFinder:
         
         # Combine results
         if all_results:
+            self._progress(3, total_steps, "Aggregating, ranking, and saving neurons")
             combined_df = pd.concat(all_results, ignore_index=True)
             
             # Show summary statistics
@@ -7570,6 +7596,7 @@ class NeuronBridgeFinder:
             
             # Visualize top N types per dataset if requested
             if visualize_top_n > 0 and output_path:
+                self._progress(4, 4, "Visualizing top neurons")
                 # For multiple lines, visualize each line separately
                 if len(lines) > 1:
                     self._vprint(f"\n🎨 Visualizing each line separately (multiple lines detected)...")
@@ -7825,6 +7852,12 @@ class NeuronBridgeFinder:
         self._vprint(f"   Min neuron score: {min_score:,.0f}")
         self._vprint(f"   Min type avg score: {min_type_avg_score:,.0f}")
         
+        # Step protocol: the report + 3D visualization phase is optional,
+        # so the total varies with the run's output flags.
+        wants_visuals = bool(generate_report) or (visualize_top_n > 0)
+        total_steps = 5 if (wants_visuals and output_dir) else 4
+        self._progress(1, total_steps, "Resolving driver lines and datasets")
+        
         # Create output directory if needed
         output_path = None
         if output_dir:
@@ -7872,6 +7905,7 @@ class NeuronBridgeFinder:
         }
         
         # Step 1: Fetch neurons for each line and build expression matrix
+        self._progress(2, total_steps, "Fetching matches and building the expression matrix")
         self._vprint(f"\n📊 Step 1: Fetching neurons and building expression matrix...")
         
         # Use _calculate_mutual_information which already does what we need
@@ -7941,6 +7975,7 @@ class NeuronBridgeFinder:
                 self._vprint(f"   💾 Line neurons: {neurons_dir}/ ({len(line_neurons_dict)} lines, split by dataset)")
         
         # Step 2: Build co-labeling matrices
+        self._progress(3, total_steps, "Building co-labeling matrices")
         self._vprint(f"\n📊 Step 2: Building co-labeling matrices...")
         
         for method in similarity_methods:
@@ -8011,6 +8046,7 @@ class NeuronBridgeFinder:
             )
         
         # Step 3: Calculate line summary statistics
+        self._progress(4, total_steps, "Computing line statistics and saving summaries")
         self._vprint(f"\n📊 Step 3: Computing line statistics...")
         
         line_summary_data = []
@@ -8096,6 +8132,7 @@ class NeuronBridgeFinder:
         
         # Step 4: Generate comprehensive report
         if generate_report and output_path:
+            self._progress(5, 5, "Generating visualizations and reports")
             self._vprint(f"\n📝 Step 4: Generating analysis report...")
             report_path = self._generate_colabeling_report(
                 results=results,
@@ -8108,6 +8145,7 @@ class NeuronBridgeFinder:
         
         # Step 5: Visualize top N types per dataset (3D skeleton)
         if visualize_top_n > 0 and output_path and not combined_neurons_df.empty:
+            self._progress(5, 5, "Generating visualizations and reports")
             self._vprint(f"\n🎨 Step 5: Visualizing top {visualize_top_n} types per dataset...")
             
             # Create a source_line label for folder naming
@@ -8587,6 +8625,12 @@ class NeuronBridgeFinder:
         if flylight_category is None:
             flylight_category = ['GAL4/LEXA', 'SplitGAL4']
 
+        # Step protocol: the image download + summary phase is optional
+        # (driven by download_images and an output folder), so the total
+        # varies between 3 and 4 steps.
+        total_steps = 4 if (download_images and output_dir) else 3
+        self._progress(1, total_steps, "Resolving EM neuron queries")
+
         # Handle LabelMapper input - expand to dataset-specific queries
         label_mapper_info = None  # Track LabelMapper for type info
         if HAS_LABELMAPPER and isinstance(queries, LabelMapper):
@@ -8713,6 +8757,7 @@ class NeuronBridgeFinder:
         
         # Process each query
         all_results = []
+        self._progress(2, total_steps, "Fetching matching driver-line records")
         
         # Phase 1: Check cache and identify what needs to be fetched
         if HAS_TQDM and self.verbose and len(query_list) > 1:
@@ -8913,6 +8958,7 @@ class NeuronBridgeFinder:
         
         # Combine results - use optimized path for large datasets
         if all_results:
+            self._progress(3, total_steps, "Aggregating and ranking line matches")
             combined_df = pd.concat(all_results, ignore_index=True)
             n_rows = len(combined_df)
             
@@ -8991,6 +9037,7 @@ class NeuronBridgeFinder:
 
             # Download images if requested
             if download_images and output_path:
+                self._progress(4, 4, "Downloading images and saving outputs")
                 # Normalize download_images parameter (case-insensitive)
                 download_source = download_images.lower() if isinstance(download_images, str) else None
                 

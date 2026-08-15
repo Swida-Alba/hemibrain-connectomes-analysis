@@ -8192,6 +8192,17 @@ class ConnectivityProfileComparer:
         """Print message if verbose."""
         if self.verbose:
             print(f"[ConnectivityProfileComparer] {msg}")
+
+    def _progress(self, step: int, total: int, label: str = ""):
+        """Emit a structured step-progress event consumed by the web UI.
+
+        The line ``[DROCAT][progress] <step>/<total> <label>`` drives the
+        determinate progress bar + step label in the results panel; it is a
+        control event, never shown in the execution log.
+        """
+        if self.verbose:
+            msg = f"[DROCAT][progress] {int(step)}/{int(total)} {label}".rstrip()
+            print(msg, flush=True)
     
     def _format_query_for_log(self, query: List, max_items: int = 5) -> str:
         """
@@ -10868,6 +10879,7 @@ a:hover { text-decoration: underline; }
         self._log(f"Starting connectivity profile comparison for {self.dataset}")
         self._log(f"Query: {self._format_query_for_log(self.query)}")
         self._log(f"Aggregation level: {self.aggregation_level}")
+        self._progress(1, 4, "Resolving queried neurons and datasets")
         
         # Step 0: Optionally ensure connection cache is complete BEFORE profile
         # extraction. Full-dataset completion is opt-in to avoid multi-hour
@@ -10876,6 +10888,7 @@ a:hover { text-decoration: underline; }
             self._ensure_connection_cache_complete()
         
         # Step 1: Extract both type-aggregated and individual bodyId profiles
+        self._progress(2, 4, "Extracting and aggregating connectivity profiles")
         self._log("Extracting type-aggregated and bodyId-level profiles...")
         type_profiles, bodyid_profiles = self._extract_all_profiles()
         
@@ -10905,6 +10918,7 @@ a:hover { text-decoration: underline; }
                 self._log(f"Skipping bodyId-level computation (skip_bodyId_level={self.skip_bodyId_level})")
         
         # Step 2: Compute type-level similarity matrices (aggregated profiles)
+        self._progress(3, 4, "Computing similarity matrices")
         self._log("Computing type-level similarity matrices (aggregated profiles)...")
         type_matrices = self._compute_similarity_matrices(type_profiles)
         
@@ -10922,6 +10936,9 @@ a:hover { text-decoration: underline; }
             type_avg_matrices = self._compute_type_avg_bodyid_matrices(bodyid_profiles)
         
         # Step 5: Save all results
+        save_label = ("Saving matrices, profiles, and heatmaps"
+                      if self.generate_heatmaps else "Saving matrices and profiles")
+        self._progress(4, 4, save_label)
         saved_files = self._save_results(
             type_profiles, bodyid_profiles,
             type_matrices, bodyid_matrices, type_avg_matrices
@@ -11432,6 +11449,7 @@ a:hover { text-decoration: underline; }
         self._log(f"Datasets ({len(ds_list)}): {', '.join(ds_list)}")
         self._log(f"Query: {self._format_query_for_log(self.query)}")
         self._log(f"Aggregation level: {self.aggregation_level}")
+        self._progress(1, 4, "Resolving queried neurons and datasets")
         
         # Auto type mapping: resolve each query name per dataset
         self._type_mapper = None
@@ -11456,6 +11474,7 @@ a:hover { text-decoration: underline; }
         profiles_by_dataset: Dict[str, Dict[str, ConnectivityProfile]] = {}
         bodyid_profiles_by_dataset: Dict[str, Dict[Tuple[str, int], ConnectivityProfile]] = {}
         matrices_by_dataset: Dict[str, Dict[str, Dict[str, Dict[str, pd.DataFrame]]]] = {}
+        self._progress(2, 4, "Extracting profiles and computing intra-dataset matrices")
         for ds in ds_list:
             self._log("")
             self._log(f"--- Dataset: {ds} ---")
@@ -11502,6 +11521,7 @@ a:hover { text-decoration: underline; }
             matrices_by_dataset[ds] = level_matrices
         
         # Step 2: inter-dataset comparisons (same queried neuron across datasets)
+        self._progress(3, 4, "Computing inter-dataset matrices")
         self._log("")
         self._log("Computing inter-dataset comparisons "
                   "(same queried neuron across datasets)...")
@@ -11511,6 +11531,7 @@ a:hover { text-decoration: underline; }
                   f"{len(anchor_profiles)} queried neurons/groups")
         
         # Step 3: save everything + overall report
+        self._progress(4, 4, "Saving results and report")
         saved_files = self._save_multi_dataset_results(
             profiles_by_dataset,
             bodyid_profiles_by_dataset,
@@ -11589,8 +11610,10 @@ a:hover { text-decoration: underline; }
             self._log("Auto type mapping: DISABLED")
         self._log("BodyId-level comparison: SKIPPED (not applicable for cross-dataset)")
         self._log("")
+        self._progress(1, 4, "Resolving queried neurons and datasets")
         
         # Step 1: Extract profiles from both datasets
+        self._progress(2, 4, "Extracting connectivity profiles")
         self._log("Step 1: Extracting profiles from both datasets...")
         profiles_by_dataset, row_labels, col_labels = self._extract_cross_dataset_profiles()
         
@@ -11606,12 +11629,14 @@ a:hover { text-decoration: underline; }
             }
         
         # Step 2: Compute cross-dataset similarity matrices
+        self._progress(3, 4, "Computing similarity matrices")
         self._log(f"Step 2: Computing {n_rows}×{n_cols} cross-dataset similarity matrices...")
         cross_matrices = self._compute_cross_dataset_similarity_matrices(
             profiles_by_dataset, row_labels, col_labels
         )
         
         # Step 3: Save results
+        self._progress(4, 4, "Saving results")
         self._log("Step 3: Saving results...")
         saved_files = self._save_cross_dataset_results(
             profiles_by_dataset, cross_matrices, row_labels, col_labels

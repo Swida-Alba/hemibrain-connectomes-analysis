@@ -1677,7 +1677,12 @@ class MorphologyComparer:
                         "Profile-first found no candidates; falling back to "
                         "the vector cache."
                     )
-                    self._progress(2, CACHE_DIRECT_TOTAL_STEPS,
+                    # The fallback switches the whole run to the 4-step
+                    # cache-direct protocol; later events (including the
+                    # final one) must keep that total so the bar never
+                    # regresses or jumps between step schemes.
+                    total_steps = CACHE_DIRECT_TOTAL_STEPS
+                    self._progress(2, total_steps,
                                    "Loading vector cache (fallback)")
                     self._progress(3, CACHE_DIRECT_TOTAL_STEPS,
                                    self._scoring_step_label())
@@ -1725,9 +1730,11 @@ class MorphologyComparer:
         else:
             self._save_results(results, bodyid_df, type_df, query_df)
             self._visualize_top_results(results, query_df=query_df)
-        self._progress(total_steps, total_steps,
-                       "Saving results & visualization" if not results.empty
-                       else "Search finished (no similar neurons found)")
+        final_label = "Search finished (no similar neurons found)"
+        if not results.empty:
+            final_label = ("Saving results & visualization"
+                           if self.visualize_top_n else "Saving results")
+        self._progress(total_steps, total_steps, final_label)
         return results
 
     def _scoring_step_label(self) -> str:

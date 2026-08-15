@@ -561,6 +561,28 @@ class FindNeuronConnection:
             # For progress mode, print with carriage return to overwrite
             print(f'\r{message}', end='', flush=True)
 
+    def _progress(self, step: int, total: int, label: str = ''):
+        '''Emit a structured step-progress event consumed by the web UI.
+
+        The line ``[DROCAT][progress] <step>/<total> <label>`` drives the
+        determinate progress bar + step label in the results panel; it is a
+        control event and never appears in the execution log.  Uses the same
+        transport as :meth:`_vprint` so events inside an active tqdm bar are
+        written via ``tqdm.write`` instead of interleaving with the bar.
+        '''
+        if self.verbose_mode == 'silent':
+            return
+        if not getattr(self, 'progress_events', False):
+            # Opt-in protocol: nested/internal callers stay quiet so the
+            # outer tool's step events keep owning the progress bar.
+            return
+        msg = f"[DROCAT][progress] {int(step)}/{int(total)} {label}".rstrip()
+        if getattr(self, '_in_progress_bar', False):
+            from tqdm import tqdm
+            tqdm.write(msg)
+        else:
+            print(msg, flush=True)
+
     def _normalize_hemisphere_value(self, value) -> str:
         if value is None or (isinstance(value, float) and np.isnan(value)):
             return 'U'
@@ -1804,6 +1826,16 @@ class FindNeuronConnection:
     '''
     Backward-compatible verbose flag. If provided, it overrides verbose_mode:
     True -> 'full', False -> 'silent'.
+    '''
+
+    progress_events: bool = False
+    '''
+    Emit the [DROCAT][progress] step protocol (default False).
+
+    Opt-in: only the web UI's generated scripts enable it, so nested
+    FindNeuronConnection runs inside other pipelines (homolog finding,
+    cross-dataset comparison, profiling, cache builders) stay silent and
+    never override the outer tool's progress protocol.
     '''
     
     def __post_init__(self):
@@ -6601,6 +6633,9 @@ class FindNeuronConnection:
         if self.client_type != 'flywire':
             self._ensure_neuprint_client()
         ''' initialize neuron info '''
+        # Step 1 of the 5-step pathfinding/network protocol shared by
+        # FindAllPath, FindShortestPath and FindNetwork.
+        self._progress(1, 5, 'Initializing source and target neurons')
         self._vprint('Fetching source and target neurons...', level='simple')
 
         source_search_infos = []
@@ -7567,6 +7602,7 @@ class FindNeuronConnection:
 
         self.source_df['bodyId'] = self.source_df['bodyId'].astype(str)
         node_ids = self.source_df['bodyId'].unique().tolist()
+        self._progress(2, 5, 'Fetching mutual direct connections')
         self._vprint(f'\nBuilding the mutual direct-connection network among '
                      f'{len(node_ids)} queried neurons...', level='always')
 
@@ -7587,6 +7623,7 @@ class FindNeuronConnection:
         conn_df['bodyId_pre'] = conn_df['bodyId_pre'].astype(str)
         conn_df['bodyId_post'] = conn_df['bodyId_post'].astype(str)
         self._vprint(f'Found {len(conn_df)} direct connections within the queried set', level='full')
+        self._progress(3, 5, 'Enriching and filtering network edges')
 
         # --- Enrich (FindAllPath-style: global incoming denominators) ---
         neurons_df_pd = self._fetch_neurons_local_or_api(node_ids, columns=['bodyId', 'type', 'post'])
@@ -7639,6 +7676,7 @@ class FindNeuronConnection:
             self._vprint(f'  ✓ Saved hemisphere_unconserved_edges.csv ({len(unconserved_types)} edges)', level='full')
 
         # --- Save connection tables (no path files, no matrices) ---
+        self._progress(4, 5, 'Saving network data')
         self._save_df_to_csv_polars(conn_type, os.path.join(details_folder, 'connection_type.csv'))
         if not self.skip_bodyId:
             self._save_df_to_csv_polars(conn_df, os.path.join(details_folder, 'connection_info_bodyId.csv'))
@@ -7649,6 +7687,7 @@ class FindNeuronConnection:
         self._write_user_warning_notes(network_folder)
 
         # --- Visualization: network + heatmap only (NO Sankey) ---
+        self._progress(5, 5, 'Building network visualizations')
         try:
             conn_type_pd = conn_type.to_pandas() if isinstance(conn_type, pl.DataFrame) else conn_type
             if conn_type_pd is not None and len(conn_type_pd) > 0:
@@ -9299,6 +9338,11 @@ class FindNeuronConnection:
             all_connections_filtered = None  # Will be set in Phase 1
         
         # PHASE 1: Fetch all connections in the network up to the search depth
+        self._progress(
+            2, 5,
+            'Discovering connections until targets are found' if path_mode == 'shortest'
+            else 'Discovering connections layer by layer',
+        )
         if not use_cached_graph:
             if self.verbose_mode == 'simple':
                 self._vprint(f'\nPhase 1: Fetching all network layers...', level='simple')
@@ -9488,6 +9532,7 @@ class FindNeuronConnection:
         
         if targetNum_checked == 0:
             self._vprint('\033[33mNo target neurons found in the searched network. Cannot construct paths.\033[0m', level='always')
+            self._progress(5, 5, 'Finishing (no targets found in the network)')
             return
         
         # Print target distribution by layer (same target can appear in multiple layers)
@@ -9523,6 +9568,11 @@ class FindNeuronConnection:
                 print(f'      Some targets appear in multiple layers')
         
         # PHASE 3: Extract all paths from sources to targets (path length ≤ max_interlayer)
+        self._progress(
+            3, 5,
+            'Enumerating shortest paths' if path_mode == 'shortest'
+            else 'Enumerating complete paths',
+        )
         if self.verbose_mode == 'simple':
             self._vprint(f'Phase 3: Building Graph and Finding Paths...', level='simple')
         elif self.verbose_mode == 'full':
@@ -10196,6 +10246,7 @@ class FindNeuronConnection:
         
         # Handle the case where no paths were found
         if conn_inpath.is_empty():
+            self._progress(4, 5, 'Saving minimal output data (no paths found)')
             self._vprint('\n⚠️  No paths found - saving minimal output data', level='full')
             
             # Create data_details folder
@@ -10225,6 +10276,8 @@ class FindNeuronConnection:
             self._vprint(f'  ✓ Saved to: {csv_folder}/', level='full')
             return
         
+        self._progress(4, 5, 'Enriching and saving path results')
+
         # Update types for source and target neurons in conn_inpath using self.source_df and self.target_df
         # This ensures that even if enrichment failed (e.g. FAFB), we at least have types for start/end of paths
         
@@ -11297,6 +11350,7 @@ class FindNeuronConnection:
         # ============================================================================
         # VISUALIZATION: Using VisualizePath only (PHASE 4)
         # ============================================================================
+        self._progress(5, 5, 'Rendering visualizations')
 
         # Note: Hemisphere symmetry analysis was already run BEFORE filtering
         # to analyze the original unfiltered connectivity structure.

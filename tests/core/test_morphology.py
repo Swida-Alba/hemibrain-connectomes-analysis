@@ -1618,13 +1618,15 @@ class TestStepProgress:
         assert "Profile-first:" in out and "pool neurons" in out
         events = [ln.strip() for ln in out.splitlines()
                   if "[DROCAT][progress]" in ln]
+        # visualize_top_n defaults to 0 here, so the final label reflects
+        # the visualization-free save phase.
         assert events == [
             "[DROCAT][progress] 1/6 Resolving query neuron",
             "[DROCAT][progress] 2/6 Discovering candidates (connection cache)",
             "[DROCAT][progress] 3/6 Expanding 2 candidate types to the scoring pool",
             "[DROCAT][progress] 4/6 Loading & vectorizing skeletons",
             "[DROCAT][progress] 5/6 Scoring similarity (vector)",
-            "[DROCAT][progress] 6/6 Saving results & visualization",
+            "[DROCAT][progress] 6/6 Saving results",
         ]
 
         # The 'Results saved to:' marker must carry the path ONLY (the UI

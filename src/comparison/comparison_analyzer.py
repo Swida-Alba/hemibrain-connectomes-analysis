@@ -220,6 +220,19 @@ class ComparisonAnalyzer:
         prefix = "⚠️ " if level == 'warn' else ""
         # Use tqdm.write to avoid interfering with progress bars
         tqdm.write(f"[Comparison] {prefix}{message}")
+
+    def _progress(self, step: int, total: int, label: str = ""):
+        """Emit a structured step-progress event consumed by the web UI.
+
+        The line ``[DROCAT][progress] <step>/<total> <label>`` drives the
+        determinate progress bar + step label in the results panel; it is a
+        control event, never shown in the execution log.  Uses ``tqdm.write``
+        like :meth:`_log` so it never interleaves with an active bar.
+        """
+        if self.verbose:
+            tqdm.write(
+                f"[DROCAT][progress] {int(step)}/{int(total)} {label}".rstrip()
+            )
     
     def _log_file(self, filepath: str, description: str = "Saved"):
         """Log file save with relative path (prints base dir only once).
@@ -1853,10 +1866,16 @@ class ComparisonAnalyzer:
         """
         if self.parameters and self.parameters.full_output_path:
             self._log(f"📁 Output folder: {self.parameters.full_output_path}")
+        self._progress(1, 5, "Resolving datasets and thresholds")
         # Run path analyses
+        mode_label = ("Running edge analyses"
+                      if getattr(self.parameters, "comparison_mode", "path") == 'edge'
+                      else "Running path analyses")
+        self._progress(2, 5, mode_label)
         self.run_all_analyses(skip_existing=skip_existing)
         
         # Compute comparison metrics
+        self._progress(3, 5, "Computing cross-dataset metrics")
         return self.run_comparison_analysis()
 
     def run_comparison_analysis(self) -> Dict[str, Any]:
@@ -2448,6 +2467,7 @@ class ComparisonAnalyzer:
             raise ValueError("No output directory specified")
         
         self._log("Exporting results...")
+        self._progress(4, 5, "Exporting reports and result tables")
         self._log("  Step 1: Saving parameters and report...")
         
         # Ensure data loader is initialized
@@ -2509,6 +2529,7 @@ class ComparisonAnalyzer:
         self._export_intra_dataset_comparisons(comparison_results_dir)
 
         self._log("  Step 3: Generating visualizations...")
+        self._progress(5, 5, "Generating comparison visualizations and HTML report")
         
         # Generate matplotlib visualizations to comparison_visualizations/ at base level
         try:

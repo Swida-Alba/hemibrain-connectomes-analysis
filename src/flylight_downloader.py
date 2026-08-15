@@ -620,6 +620,19 @@ class FlyLightDownloader:
         # 'simple' mode: standard output for now, maybe condensed later
         
         print(message)
+
+    def _progress(self, step: int, total: int, label: str = ""):
+        """Emit a structured step-progress event consumed by the web UI.
+
+        The line ``[DROCAT][progress] <step>/<total> <label>`` drives the
+        determinate progress bar + step label in the results panel; it is a
+        control event, never shown in the execution log.  Printed in both
+        'pbar' and full-verbose modes (the UI runs with ``verbose='pbar'``).
+        """
+        if not self.verbose or self.verbose == 'False':
+            return
+        msg = f"[DROCAT][progress] {int(step)}/{int(total)} {label}".rstrip()
+        print(msg, flush=True)
     
     def _is_vt_line(self, line_name: str) -> bool:
         """Check if a line name is a VT line (served from HTTP CDN)."""
@@ -1636,8 +1649,14 @@ class FlyLightDownloader:
         else:
             combined_name = '_'.join(line_names[:3]) + f'_etc{len(line_names)}'
         
+        # Step protocol: the summary phase is optional (driven by
+        # generate_summary), so the total varies between 3 and 4 steps.
+        total_steps = 4 if generate_summary else 3
+        self._progress(1, total_steps, "Resolving collections and image filters")
+        
         if files is None:
             # Pass max_files as per-line limit
+            self._progress(2, total_steps, "Listing and filtering FlyLight files")
             files = self.get_filtered_files(line_name, max_files_per_line=max_files)
         
         if not files:
@@ -1665,6 +1684,7 @@ class FlyLightDownloader:
         
         output_path.mkdir(parents=True, exist_ok=True)
         downloaded = []
+        self._progress(3, total_steps, "Downloading selected images")
         
         if self.max_workers > 1 and len(files) > 1:
             # Parallel download
@@ -1701,6 +1721,7 @@ class FlyLightDownloader:
         
         # Generate summary if requested
         if generate_summary and downloaded:
+            self._progress(4, 4, "Generating summaries and saving metadata")
             self._generate_image_summary(
                 downloaded_files=downloaded,
                 output_dir=output_path,

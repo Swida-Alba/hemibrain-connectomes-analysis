@@ -518,6 +518,18 @@ class ScriptRunner:
             return self._generate_plot3d_script(constructor_params, method_params)
 
         # Standard script generation
+        if tool_name == "plot_path":
+            # The standalone Net-Viz run owns its 4-step protocol; nested
+            # VisualizePath calls inside other pipelines omit progress_total
+            # and stay silent so the outer tool's protocol owns the bar.
+            constructor_params = dict(constructor_params)
+            constructor_params["progress_total"] = 4
+        if tool_name in {"find_path", "find_shortest", "find_network"}:
+            # coana step events are opt-in (progress_events defaults False)
+            # so nested FindNeuronConnection runs inside other pipelines stay
+            # silent; the tab's own run owns the 5-step protocol.
+            constructor_params = dict(constructor_params)
+            constructor_params["progress_events"] = True
         params_str = _format_params(constructor_params)
 
         init_call = ""
@@ -565,13 +577,27 @@ print("[DROCAT] Done.")
         self, constructor_params: dict, method_params: Optional[dict]
     ) -> str:
         """Generate script for the 3D skeleton tool, including optional
-        individual-profile PDF/PPTX export and rotating-video export."""
+        individual-profile PDF/PPTX export and rotating-video export.
+
+        The optional export phases extend the run's [DROCAT][progress]
+        protocol: ``plot_neurons`` reports its three phases against the
+        combined total (passed as ``progress_total``), and the script emits
+        one step event per enabled export phase before calling it.
+        """
         params_str = _format_params(constructor_params)
         mp = method_params or {}
 
+        export_individuals = bool(mp.get("export_individual_profiles"))
+        export_video = bool(mp.get("export_video"))
+        total_steps = 3 + int(export_individuals) + int(export_video)
+        # _format_params already comma-terminates its last line.
+        params_str += f"\n    progress_total={total_steps},"
+
         extra_calls = ""
-        if mp.get("export_individual_profiles"):
+        if export_individuals:
+            step = 4
             extra_calls += f"""
+print(f"[DROCAT][progress] {step}/{total_steps} Exporting individual profiles", flush=True)
 # Export individual profiles (PDF/PPTX)
 vs.plot_individuals(
     pdf_images_per_page={_format_value(mp.get('pdf_images_per_page', (3, 2)))},
@@ -579,8 +605,10 @@ vs.plot_individuals(
     summary_format={_format_value(mp.get('summary_format', ['pdf']))},
 )
 """
-        if mp.get("export_video"):
+        if export_video:
+            step = 4 + int(export_individuals)
             extra_calls += f"""
+print(f"[DROCAT][progress] {step}/{total_steps} Exporting rotating video", flush=True)
 # Export rotating video / GIF
 vs.export_video(
     fps={_format_value(mp.get('fps', 30))},

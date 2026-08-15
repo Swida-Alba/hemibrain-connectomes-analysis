@@ -2397,6 +2397,14 @@ class VisualizeSkeleton:
     Note: Default 'auto' uses slightly different hue from brain_mesh_color to distinguish.
     '''
 
+    progress_total: int | None = None
+    '''
+    Total number of [DROCAT][progress] step events for the combined run
+    (plot_neurons + optional plot_individuals / export_video), set by the
+    web UI's generated script.  When None, plot_neurons emits no structured
+    step events (script/API callers keep the previous quiet behavior).
+    '''
+
     def _get_effective_mesh_color(self, mesh_type='brain'):
         """
         Get the effective mesh color, resolving 'auto' based on background.
@@ -2474,6 +2482,23 @@ class VisualizeSkeleton:
         
         return rois
     
+    def _progress(self, step: int, total: int, label: str = ''):
+        """Emit a structured step-progress event consumed by the web UI.
+
+        The line ``[DROCAT][progress] <step>/<total> <label>`` drives the
+        determinate progress bar + step label in the results panel; it is a
+        control event, never shown in the execution log.  Uses ``tqdm.write``
+        so it never interleaves with an active bar.
+        """
+        if not self.verbose:
+            return
+        msg = f"[DROCAT][progress] {int(step)}/{int(total)} {label}".rstrip()
+        try:
+            from tqdm import tqdm
+            tqdm.write(msg)
+        except Exception:
+            print(msg, flush=True)
+
     def _vprint(self, msg, level='simple', use_tqdm=False, **kwargs):
         """
         Print message based on verbosity level.
@@ -10833,10 +10858,24 @@ class VisualizeSkeleton:
         self._vprint('\n' + '='*60)
         self._vprint(f'🧠 VisualizeSkeleton: Plotting {self.dataset}')
         self._vprint('='*60)
-        
+
+        # Structured step events (web UI only): the total covers this method's
+        # three phases plus the optional export phases that follow it in the
+        # generated script.  progress_total is None for direct callers, which
+        # keeps the previous quiet behavior.
+        total = self.progress_total
+        if total:
+            self._progress(1, total, 'Loading skeletons')
         self.plot_skeleton()
+        if total:
+            self._progress(
+                2, total,
+                'Loading meshes' if self.skip_synapse else 'Loading synapses and meshes',
+            )
         self.plot_synapses()
         self.plot_mesh()
+        if total:
+            self._progress(3, total, 'Rendering and saving the 3D scene')
         self.save_figure()
         
         elapsed = time.time() - start_time

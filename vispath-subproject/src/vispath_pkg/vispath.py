@@ -295,6 +295,7 @@ class VisualizePath:
         hemisphere_desaturate_side='R',  # NEW: Hemisphere to desaturate ('L' or 'R')
         hemisphere_desaturate_factor=0.4,  # NEW: Desaturation blend factor (0-1)
         hemisphere_mirror_default=None,  # None = auto-enable with separate_hemispheres
+        progress_total=None,  # Optional [DROCAT][progress] step total (web UI runs only)
     ):
         """
         Initialize VisualizePath with pathway data and visualization settings.
@@ -497,6 +498,10 @@ class VisualizePath:
         self.sheet_name = sheet_name
         self.output_folder = output_folder
         self.verbose = verbose  # Store verbose flag for controlling print output
+        # Step events are opt-in: nested VisualizePath calls inside coana /
+        # comparer pipelines must stay silent so the outer tool's protocol
+        # owns the bar.  Only the standalone Net-Viz run passes a total.
+        self.progress_total = progress_total
         
         self.edgeN_limit = edgeN_limit
         # Set True once any plot (network/heatmap/Sankey) actually trims
@@ -673,6 +678,19 @@ class VisualizePath:
         """
         if self.verbose:
             print(*args, **kwargs)
+
+    def _progress(self, step: int, total: int, label: str = ''):
+        """Emit a structured step-progress event consumed by the web UI.
+
+        The line ``[DROCAT][progress] <step>/<total> <label>`` drives the
+        determinate progress bar + step label in the results panel; it is a
+        control event, never shown in the execution log.  Emitted only when
+        the caller opted in via ``progress_total`` (nested pipeline calls
+        keep the previous quiet behavior).
+        """
+        if self.verbose and self.progress_total:
+            print(f"[DROCAT][progress] {int(step)}/{int(total)} {label}".rstrip(),
+                  flush=True)
         
     def _normalize_column_names(self):
         """
@@ -9638,6 +9656,7 @@ class VisualizePath:
         """
         # Handle empty network generation
         if self.generate_empty_network:
+            self._progress(1, 4, "Creating empty network template")
             self._vprint("=" * 80)
             self._vprint("VisualizePath - Generating empty network template")
             self._vprint("=" * 80)
@@ -9647,16 +9666,29 @@ class VisualizePath:
             self._vprint("=" * 80)
             return None, None
         
+        self._progress(1, 4, "Loading and normalizing path data")
         self._vprint("=" * 80)
         self._vprint("VisualizePath - Creating pathway visualizations")
         self._vprint("=" * 80)
         
         # Build network
+        self._progress(2, 4, "Building the pathway graph")
         self.build_network()
         
         # Create and show visualizations one by one
         # Order: heatmap → sankey → network
         import time
+        
+        # The view label reflects which views this run actually generates.
+        enabled_views = []
+        if plot_heatmap:
+            enabled_views.append("heatmap")
+        if plot_Sankey:
+            enabled_views.append("Sankey")
+        if plot_network:
+            enabled_views.append("network")
+        if enabled_views:
+            self._progress(3, 4, f"Creating {' and '.join(enabled_views)} views")
         
         # 1. Create heatmap and show immediately
         if plot_heatmap:
@@ -9681,6 +9713,7 @@ class VisualizePath:
             # ``showfig`` is enabled. Do not open it again here.
         
         # Save data
+        self._progress(4, 4, "Saving visualization data and files")
         self.save_data()
         
         self._vprint("\n" + "=" * 80)

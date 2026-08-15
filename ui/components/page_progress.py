@@ -41,8 +41,8 @@ TOOL_PROGRESS_STEPS: Dict[str, Sequence[str]] = {
         "Initialize queried neurons",
         "Fetch mutual direct connections",
         "Enrich and filter network edges",
+        "Save network data",
         "Build network visualizations",
-        "Save network data and notes",
     ),
     "connectivity_profiling": (
         "Resolve queried neurons and datasets",
@@ -74,27 +74,27 @@ TOOL_PROGRESS_STEPS: Dict[str, Sequence[str]] = {
         "Resolve datasets and thresholds",
         "Run path or edge analyses",
         "Compute cross-dataset metrics",
-        "Generate comparison visualizations",
         "Export reports and result tables",
+        "Generate comparison visualizations and HTML report",
     ),
     "nb_find_lines": (
         "Resolve EM neuron queries",
         "Fetch matching driver-line records",
         "Aggregate and rank line matches",
-        "Download optional images and save outputs",
+        "Download images and save outputs",
     ),
     "nb_find_neuron": (
         "Resolve driver-line queries",
         "Fetch matching EM neuron records",
-        "Aggregate, rank, and visualize neurons",
-        "Save neuron tables and summaries",
+        "Aggregate, rank, and save neurons",
+        "Visualize top neurons",
     ),
     "nb_colabel": (
         "Resolve driver lines and datasets",
-        "Fetch and filter NeuronBridge matches",
-        "Build co-labeling and expression matrices",
-        "Generate statistics, visualizations, and reports",
-        "Save analysis outputs",
+        "Fetch matches and build expression matrix",
+        "Build co-labeling matrices",
+        "Compute line statistics and save summaries",
+        "Generate visualizations and reports",
     ),
     "flylight_download": (
         "Resolve collections and image filters",
@@ -103,8 +103,8 @@ TOOL_PROGRESS_STEPS: Dict[str, Sequence[str]] = {
         "Generate summaries and save metadata",
     ),
     "plot3d_skeleton": (
-        "Resolve neuron selection and output folder",
-        "Load skeletons, synapses, and meshes",
+        "Load skeletons",
+        "Load synapses and meshes",
         "Render and save the 3D scene",
         "Export individual profiles and video",
     ),
@@ -182,7 +182,12 @@ def progress_steps_for(
     method_name: Optional[str] = None,
     context: Optional[dict] = None,
 ) -> List[str]:
-    """Return a mutable, backend-specific checklist for a tool run."""
+    """Return a mutable, backend-specific checklist for a tool run.
+
+    The step list must mirror the backend's per-branch totals: optional
+    pipeline phases (image downloads, visualizations, reports, exports) are
+    only included when the matching run parameter enables them.
+    """
     context = context or {}
     if tool_name == "find_similar_morphology":
         source = str(context.get("candidate_source", "auto") or "auto").lower()
@@ -192,6 +197,41 @@ def progress_steps_for(
         key = (tool_name, source)
         if key in METHOD_PROGRESS_STEPS:
             return list(METHOD_PROGRESS_STEPS[key])
+    if tool_name == "nb_find_lines":
+        steps = list(TOOL_PROGRESS_STEPS["nb_find_lines"])
+        if not (context.get("download_images") and context.get("output_dir")):
+            steps.pop()  # image download + summary phase is optional
+        return steps
+    if tool_name == "nb_find_neuron":
+        steps = list(TOOL_PROGRESS_STEPS["nb_find_neuron"])
+        if not (int(context.get("visualize_top_n") or 0) > 0
+                and context.get("output_dir")):
+            steps.pop()  # 3D visualization phase is optional
+        return steps
+    if tool_name == "nb_colabel":
+        steps = list(TOOL_PROGRESS_STEPS["nb_colabel"])
+        wants_visuals = bool(context.get("generate_report")) or (
+            int(context.get("visualize_top_n") or 0) > 0
+        )
+        if not (wants_visuals and context.get("output_dir")):
+            steps.pop()  # report + 3D visualization phase is optional
+        return steps
+    if tool_name == "flylight_download":
+        steps = list(TOOL_PROGRESS_STEPS["flylight_download"])
+        if not context.get("generate_summary"):
+            steps.pop()  # summary generation phase is optional
+        return steps
+    if tool_name == "plot3d_skeleton":
+        steps = [
+            "Load skeletons",
+            "Load synapses and meshes",
+            "Render and save the 3D scene",
+        ]
+        if context.get("export_individual_profiles"):
+            steps.append("Export individual profiles")
+        if context.get("export_video"):
+            steps.append("Export rotating video")
+        return steps
     if method_name:
         key = (tool_name or "", method_name)
         if key in METHOD_PROGRESS_STEPS:
@@ -448,11 +488,18 @@ class PageProgress:
         current = f"Step {step}/{total}:"
         if label:
             current += f" {label}"
+        # The bar reflects COMPLETED steps only: a backend event marks the
+        # START of step ``step``, so its fraction is (step - 1) / total.
+        # Starting the final step shows (total - 1) / total — never 100%;
+        # the bar reaches 100% only when the run reports completion.  The
+        # monotonic guard also absorbs branch switches (e.g. the similarity
+        # pipeline falling back from a 6-step to a 4-step protocol).
+        value = max(self._value, (step - 1) / total)
         self._set_progress(
-            step / total,
+            value,
             current,
-            active_index=None if step == total else step - 1,
-            completed=step == total,
+            active_index=step - 1,
+            completed=False,
         )
 
     def update_fraction(self, current: int, total: int, label: str = "") -> None:
