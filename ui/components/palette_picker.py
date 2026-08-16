@@ -187,21 +187,20 @@ class _PaletteSelection(list):
         self.is_continuous_palette = continuous
 
 
-# Option-slot template for palette dropdowns: renders the palette strip
-# beside the name so the palette is visible before it is selected.
+# Option-slot template for palette dropdowns: renders the name on the left
+# and the palette strip on the right, filling the expanded dropdown width,
+# so the palette is visible before it is selected.
 # NiceGUI compiles slot templates as an inline component exposing the slot
 # props under the variable ``props``; ``props.itemProps`` carries the
 # option's click handler (toggleOption), so the item stays selectable.
 _PALETTE_OPTION_SLOT = """
 <q-item v-bind="props.itemProps">
-    <q-item-section avatar class="q-pr-sm">
-        <div class="drocat-select-palette-strip"
-             :style="'background: linear-gradient(90deg, ' + (props.opt.colors || ['#94a3b8']).join(',') + ');'">
-        </div>
-    </q-item-section>
     <q-item-section>
         <q-item-label>{{ props.opt.label }}</q-item-label>
     </q-item-section>
+    <div class="drocat-select-palette-strip"
+         :style="'background: linear-gradient(90deg, ' + (props.opt.colors || ['#94a3b8']).join(',') + ');'">
+    </div>
 </q-item>
 """
 
@@ -440,11 +439,10 @@ def palette_editor(
     Palette editor with ONE interactive preview row.
 
     Features:
-    - Preset palettes from bokeh.palettes, picked from a name dropdown
-      with the full-palette preview strip beside it (the same name +
-      preview selector layout as the custom palette picker). Every
-      dropdown option embeds a mini palette strip beside its name, so
-      palettes are visible before selection.
+    - Preset palettes from bokeh.palettes, picked from a full-width name
+      dropdown. Every option shows the name with a strip preview filling
+      the row to its right, so palettes are visible before selection; the
+      selected palette is shown in the reorderable preview row.
     - The preview row shows the current state only: drag swatches to
       reorder discrete palettes, use the range slider to select part of
       the palette live, and hit reset (beside the preview) to restore the
@@ -602,23 +600,17 @@ def palette_editor(
 
         # ---------------- Preset panel ----------------
         with ui.column().classes("w-full gap-1") as preset_panel:
-            # Same name + preview selector as the custom panel's Bokeh
-            # palette picker: the palette dropdown sits left of the live
-            # full-palette preview strip.
-            with ui.row().classes("w-full items-center gap-2"):
-                preset_select = ui.select(
-                    options=names, value=state["palette"], label="Palette"
-                ).props("dense outlined").classes("w-56").tooltip(
-                    "Pick a preset palette from the Bokeh catalog; the strip "
-                    "beside it previews the full palette."
-                )
-                _embed_palette_strips(preset_select, names, dict(catalog))
-                preset_preview = ui.element("div").classes("flex-grow")
-
-            def render_preset_preview():
-                preset_preview.clear()
-                with preset_preview:
-                    _render_color_strip(palette_colors(), height=20)
+            # Full-width palette dropdown: every option shows the name with a
+            # strip preview filling the row to its right. The selected
+            # palette itself is always visible in the reorderable preview
+            # row above, so no preview strip sits beside the selection box.
+            preset_select = ui.select(
+                options=names, value=state["palette"], label="Palette"
+            ).props("dense outlined").classes("w-full").tooltip(
+                "Pick a preset palette from the Bokeh catalog; every option "
+                "previews the palette as a strip beside its name."
+            )
+            _embed_palette_strips(preset_select, names, dict(catalog))
 
             def on_preset_select_change(event):
                 if state["syncing_preset_select"]:
@@ -626,7 +618,6 @@ def palette_editor(
                 apply_palette(event.value or state["palette"], notify=True)
 
             preset_select.on_value_change(on_preset_select_change)
-            render_preset_preview()
 
             with ui.row().classes("w-full items-center gap-2"):
                 ui.label("Palette range").classes("text-caption drocat-muted")
@@ -719,15 +710,14 @@ def palette_editor(
             # palette. Clicking a swatch selects it (highlighted) and syncs
             # the Color format input; the Add button commits it.
             ui.label("From Bokeh palette").classes("drocat-mini-label")
-            with ui.row().classes("w-full items-center gap-2"):
-                palette_select = ui.select(
-                    options=names, value=state["picker_palette"], label="Bokeh palette"
-                ).props("dense outlined").classes("w-56").tooltip(
-                    "Pick individual colors from any Bokeh palette in the "
-                    "catalog: click a swatch to select it, then press Add."
-                )
-                _embed_palette_strips(palette_select, names, dict(catalog))
-                swatch_grid = ui.element("div").classes("flex-grow")
+            palette_select = ui.select(
+                options=names, value=state["picker_palette"], label="Bokeh palette"
+            ).props("dense outlined").classes("w-full").tooltip(
+                "Pick individual colors from any Bokeh palette in the "
+                "catalog: click a swatch below to select it, then press Add."
+            )
+            _embed_palette_strips(palette_select, names, dict(catalog))
+            swatch_grid = ui.element("div").classes("w-full")
 
             def render_picker_grid():
                 swatch_grid.clear()
@@ -873,7 +863,6 @@ def palette_editor(
             state["syncing_preset_select"] = True
             preset_select.value = name
             state["syncing_preset_select"] = False
-            render_preset_preview()
             range_slider.value = {"min": state["start"], "max": state["end"]}
             range_start_label.text = str(state["start"])
             range_end_label.text = str(state["end"])

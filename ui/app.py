@@ -1472,11 +1472,13 @@ html, body {
     box-shadow: inset 0 0 0 2px var(--drocat-cobalt);
 }
 .drocat-select-palette-strip {
-    width: 56px;
     height: 12px;
     border-radius: 4px;
     border: 1px solid var(--drocat-line);
-    flex: none;
+    /* Inside a dropdown option row: fill the width right of the name. */
+    flex: 1 1 55%;
+    margin-left: 12px;
+    min-width: 24px;
 }
 .drocat-custom-color-row {
     padding: 4px 8px;

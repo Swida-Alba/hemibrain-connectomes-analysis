@@ -1102,10 +1102,10 @@ class TestRunner:
         assert editor.get_value() == "Dark2"
         assert changes == ["manual"]
 
-    def test_palette_editor_preset_selector_uses_dropdown_with_preview(self):
-        """The preset palette picker is the same name + preview selector as
-        the custom panel: a palette dropdown with the full-palette preview
-        strip beside it (the card grid is gone)."""
+    def test_palette_editor_preset_selector_uses_full_width_dropdown(self):
+        """The preset palette picker is a full-width name dropdown (the card
+        grid and the side preview strip are gone; the reorderable preview
+        row shows the selected palette)."""
         from nicegui import Client
         from nicegui.page import page
         from ui.components.palette_picker import palette_editor
@@ -1124,9 +1124,10 @@ class TestRunner:
             if getattr(el, "_props", {}).get("label") == "Palette"
         )
         assert palette_select.value == "Category10"
+        assert "w-full" in getattr(palette_select, "_classes", [])
 
-        # Picking another palette updates the state and the preview strip
-        # beside the dropdown.
+        # Picking another palette updates the state; the reorderable preview
+        # row above shows the selected palette.
         palette_select.value = "Dark2"
         assert editor.get_value() == "Dark2"
         assert editor.get_colors() == editor.get_palette_order()
@@ -1163,7 +1164,16 @@ class TestRunner:
                 for opt in options
             )
             assert "option" in select.slots
-            assert "drocat-select-palette-strip" in select.slots["option"].template
+            template = select.slots["option"].template
+            assert "drocat-select-palette-strip" in template
+            # NiceGUI compiles slot templates with the slot props under the
+            # variable ``props``; a template using ``scope`` throws at
+            # popup-open time and the dropdown can never expand.
+            assert "props.itemProps" in template
+            # The name sits left of the strip preview inside each option row.
+            assert template.index("props.opt.label") < template.index(
+                "drocat-select-palette-strip"
+            )
             dark2 = next(opt for opt in options if opt["label"] == "Dark2")
             assert dark2["colors"] == sample_palette(
                 catalog["Dark2"], len(catalog["Dark2"])
