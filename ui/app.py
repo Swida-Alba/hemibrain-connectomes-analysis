@@ -58,18 +58,52 @@ def _silence_timer_teardown_noise() -> None:
 _silence_timer_teardown_noise()
 
 
-def _saved_dark_mode() -> bool:
-    """Return the persisted dark-mode preference from a plain cookie.
+def _migrate_legacy_neuron_indexes() -> None:
+    """One-time upgrade: move legacy cache/ neuron indexes to neuron_indexes/.
 
-    The toggle stores the preference in a non-sensitive cookie so a page
-    reload restores the chosen mode without a light flash. Falls back to
-    light when no request context exists (script mode, UI tests).
+    The index is a persistent "system file" now (auto-suggestions and the
+    available-neurons viewer read it from ``neuron_indexes/``), so existing
+    installations keep their pull state without re-downloading metadata.
+    Runs once at startup; every failure is non-fatal.
+    """
+    try:
+        from src.neuron_index_builder import migrate_legacy_neuron_indexes
+        migrated = migrate_legacy_neuron_indexes(
+            PROJECT_ROOT / "cache",
+            PROJECT_ROOT / "neuron_indexes",
+        )
+        if migrated:
+            print(
+                "Migrated legacy neuron indexes to neuron_indexes/: "
+                + ", ".join(migrated),
+                flush=True,
+            )
+    except Exception:
+        pass
+
+
+_migrate_legacy_neuron_indexes()
+
+
+def _saved_dark_mode() -> bool | None:
+    """Return the persisted theme preference from a plain cookie.
+
+    Values: ``True`` = dark, ``False`` = light, ``None`` = follow the
+    system preference. The cookie stores 'dark', 'light' or 'auto' (older
+    versions stored '1'/'0') so a reload restores the chosen mode without
+    a flash. Falls back to light when no request context exists (script
+    mode, UI tests).
     """
     try:
         request = ui.context.client.request
     except Exception:
         return False
-    return request.cookies.get("drocat_dark") == "1"
+    saved = request.cookies.get("drocat_dark")
+    if saved in ("1", "dark"):
+        return True
+    if saved == "auto":
+        return None
+    return False
 
 
 from ui.tabs import (

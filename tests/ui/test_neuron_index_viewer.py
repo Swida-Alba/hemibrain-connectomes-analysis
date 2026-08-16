@@ -8,7 +8,7 @@ import pytest
 
 def _write_index(tmp_path, dataset="test:v1.0"):
     folder = dataset.replace(":", "_").replace(".", "_")
-    cache_dir = tmp_path / "cache" / folder
+    cache_dir = tmp_path / "neuron_indexes" / folder
     cache_dir.mkdir(parents=True)
     index_path = cache_dir / "neuron_index.parquet"
     pl.DataFrame(
@@ -25,7 +25,7 @@ def _write_index(tmp_path, dataset="test:v1.0"):
 
 def _write_priority_index(tmp_path, dataset="priority:v1.0"):
     folder = dataset.replace(":", "_").replace(".", "_")
-    cache_dir = tmp_path / "cache" / folder
+    cache_dir = tmp_path / "neuron_indexes" / folder
     cache_dir.mkdir(parents=True)
     index_path = cache_dir / "neuron_index.parquet"
     pl.DataFrame(
@@ -43,7 +43,7 @@ def _write_priority_index(tmp_path, dataset="priority:v1.0"):
 
 def _write_paged_index(tmp_path, dataset="paged:v1.0", row_count=60):
     folder = dataset.replace(":", "_").replace(".", "_")
-    cache_dir = tmp_path / "cache" / folder
+    cache_dir = tmp_path / "neuron_indexes" / folder
     cache_dir.mkdir(parents=True)
     index_path = cache_dir / "neuron_index.parquet"
     pl.DataFrame(
@@ -185,7 +185,7 @@ class TestNeuronIndexData:
 
         dataset = "prefix-and-substring:v1.0"
         folder = dataset.replace(":", "_").replace(".", "_")
-        cache_dir = isolated_index_root / "cache" / folder
+        cache_dir = isolated_index_root / "neuron_indexes" / folder
         cache_dir.mkdir(parents=True)
         pl.DataFrame(
             {
@@ -399,7 +399,7 @@ class TestNeuronIndexData:
 
         dataset = "grouped:v1.0"
         folder = dataset.replace(":", "_").replace(".", "_")
-        cache_dir = isolated_index_root / "cache" / folder
+        cache_dir = isolated_index_root / "neuron_indexes" / folder
         cache_dir.mkdir(parents=True)
         pl.DataFrame(
             {
@@ -428,7 +428,7 @@ class TestNeuronIndexData:
 
         dataset = "broad:v1.0"
         folder = dataset.replace(":", "_").replace(".", "_")
-        cache_dir = isolated_index_root / "cache" / folder
+        cache_dir = isolated_index_root / "neuron_indexes" / folder
         cache_dir.mkdir(parents=True)
         row_count = 2000
         pl.DataFrame(
@@ -459,7 +459,7 @@ class TestNeuronIndexData:
 
         dataset = "shared:v1.0"
         folder = dataset.replace(":", "_").replace(".", "_")
-        cache_dir = isolated_index_root / "cache" / folder
+        cache_dir = isolated_index_root / "neuron_indexes" / folder
         cache_dir.mkdir(parents=True)
         pl.DataFrame(
             {
@@ -513,7 +513,7 @@ class TestNeuronIndexData:
 
         dataset = "cross-fields:v1.0"
         folder = dataset.replace(":", "_").replace(".", "_")
-        cache_dir = isolated_index_root / "cache" / folder
+        cache_dir = isolated_index_root / "neuron_indexes" / folder
         cache_dir.mkdir(parents=True)
         frame = pl.DataFrame(
             {
@@ -570,7 +570,7 @@ class TestNeuronIndexData:
 
         dataset = "authoritative:v1.0"
         folder = dataset.replace(":", "_").replace(".", "_")
-        cache_dir = isolated_index_root / "cache" / folder
+        cache_dir = isolated_index_root / "neuron_indexes" / folder
         cache_dir.mkdir(parents=True)
         source = pd.DataFrame(
             {
@@ -641,6 +641,9 @@ class TestNeuronIndexData:
         state_path = neuron_index_state_path(
             dataset, isolated_index_root / "cache"
         )
+        # The state sidecar lives in the cache boundary while the index
+        # lives in neuron_indexes/; create the cache folder explicitly.
+        state_path.parent.mkdir(parents=True, exist_ok=True)
         pl.DataFrame(
             {
                 "bodyId": ["100"],
@@ -664,7 +667,7 @@ class TestNeuronIndexData:
 
         dataset = _write_priority_index(isolated_index_root)
         folder = dataset.replace(":", "_").replace(".", "_")
-        index_path = isolated_index_root / "cache" / folder / "neuron_index.parquet"
+        index_path = isolated_index_root / "neuron_indexes" / folder / "neuron_index.parquet"
         source = pl.read_parquet(index_path)
         build_search_cache_frame(source).write_parquet(search_cache_path(index_path))
 
@@ -1114,7 +1117,7 @@ class TestNeuronIndexViewer:
 
         dataset = "overlapping-groups:v1.0"
         folder = dataset.replace(":", "_").replace(".", "_")
-        cache_dir = isolated_index_root / "cache" / folder
+        cache_dir = isolated_index_root / "neuron_indexes" / folder
         cache_dir.mkdir(parents=True)
         pl.DataFrame(
             {
@@ -1208,7 +1211,7 @@ class TestNeuronIndexViewer:
 
         dataset = "independent-groups:v1.0"
         folder = dataset.replace(":", "_").replace(".", "_")
-        cache_dir = isolated_index_root / "cache" / folder
+        cache_dir = isolated_index_root / "neuron_indexes" / folder
         cache_dir.mkdir(parents=True)
         pl.DataFrame(
             {

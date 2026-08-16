@@ -9,7 +9,7 @@ def _write_search_cache(tmp_path):
 
     dataset = "cache-test:v1.0"
     folder = dataset.replace(":", "_").replace(".", "_")
-    cache_dir = tmp_path / "cache" / folder
+    cache_dir = tmp_path / "neuron_indexes" / folder
     cache_dir.mkdir(parents=True)
     index_path = cache_dir / "neuron_index.parquet"
     frame = pl.DataFrame(
@@ -31,7 +31,7 @@ def test_cached_resolver_preserves_priority_and_explicit_prefix_short_circuit(tm
     from src.statvis import _process_single_neuron
 
     dataset, frame = _write_search_cache(tmp_path)
-    cache = get_cached_neuron_search(dataset, cache_root=tmp_path / "cache")
+    cache = get_cached_neuron_search(dataset, index_root=tmp_path / "neuron_indexes")
     assert cache is not None
 
     # Bare names are strict and priority ordered.
@@ -95,7 +95,7 @@ def test_get_neurons_uses_cache_resolver_before_dataframe_scan(tmp_path, monkeyp
     from src.neuron_search import get_cached_neuron_search
 
     dataset, frame = _write_search_cache(tmp_path)
-    cache = get_cached_neuron_search(dataset, cache_root=tmp_path / "cache")
+    cache = get_cached_neuron_search(dataset, index_root=tmp_path / "neuron_indexes")
     assert cache is not None
     pandas_frame = frame.to_pandas()
     roi_frame = pd.DataFrame({"bodyId": pandas_frame["bodyId"]})
@@ -131,7 +131,7 @@ def test_stale_sidecar_rebuilds_for_new_priority_fields(tmp_path):
 
     dataset = "stale-sidecar:v1.0"
     folder = dataset.replace(":", "_").replace(".", "_")
-    cache_dir = tmp_path / "cache" / folder
+    cache_dir = tmp_path / "neuron_indexes" / folder
     cache_dir.mkdir(parents=True)
     index_path = cache_dir / "neuron_index.parquet"
     frame = pl.DataFrame({
@@ -148,7 +148,7 @@ def test_stale_sidecar_rebuilds_for_new_priority_fields(tmp_path):
         frame, ["bodyId", "type", "instance", "flywireType"]
     ).write_parquet(search_cache_path(index_path))
 
-    cache = get_cached_neuron_search(dataset, cache_root=tmp_path / "cache")
+    cache = get_cached_neuron_search(dataset, index_root=tmp_path / "neuron_indexes")
     assert cache is not None
     assert cache.search_path is None
     ids, info = resolve_neuron_query(cache, "new-location-type")
@@ -166,9 +166,9 @@ def test_missing_cache_falls_back_to_authoritative_dataframe(tmp_path):
 
     dataset = "metadata-only:v1.0"
     frame = _write_search_cache(tmp_path)[1].to_pandas()
-    cache_root = tmp_path / "empty-cache"
+    index_root = tmp_path / "empty-indexes"
 
-    assert get_cached_neuron_search(dataset, cache_root=cache_root) is None
+    assert get_cached_neuron_search(dataset, index_root=index_root) is None
     ids, info = resolve_cached_or_dataframe_query(
         None, frame, "MTe07"
     )
@@ -179,7 +179,7 @@ def test_missing_cache_falls_back_to_authoritative_dataframe(tmp_path):
     }
     assert info["cache"] is False
     assert info["matched_column"] == expected_info["matched_column"]
-    assert not cache_root.exists()
+    assert not index_root.exists()
 
 
 def test_legacy_cache_missing_metadata_columns_falls_back(tmp_path):
@@ -192,7 +192,7 @@ def test_legacy_cache_missing_metadata_columns_falls_back(tmp_path):
 
     dataset = "legacy-schema:v1.0"
     folder = dataset.replace(":", "_").replace(".", "_")
-    cache_dir = tmp_path / "cache" / folder
+    cache_dir = tmp_path / "neuron_indexes" / folder
     cache_dir.mkdir(parents=True)
     index_path = cache_dir / "neuron_index.parquet"
     legacy = pl.DataFrame({
@@ -211,7 +211,7 @@ def test_legacy_cache_missing_metadata_columns_falls_back(tmp_path):
         "instance": [""],
         "flywireType": ["MTe07"],
     })
-    cache = get_cached_neuron_search(dataset, cache_root=tmp_path / "cache")
+    cache = get_cached_neuron_search(dataset, index_root=tmp_path / "neuron_indexes")
     assert cache is not None
 
     ids, info = resolve_cached_or_dataframe_query(cache, source, "MTe07")

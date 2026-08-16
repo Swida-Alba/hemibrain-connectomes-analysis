@@ -733,17 +733,19 @@ def clear_cached_neuron_search() -> None:
 def get_cached_neuron_search(
     dataset: str,
     *,
-    cache_root: Optional[Path] = None,
+    index_root: Optional[Path] = None,
 ) -> Optional[CachedNeuronSearch]:
     """Load the cached search projection for *dataset*, if it exists.
 
-    A missing sidecar is built in memory from the cached index.  It is not
-    written here: cache construction remains an explicit pipeline operation,
-    so an analysis lookup never creates an unexpected file.
+    The index lives in the app-owned ``neuron_indexes/`` directory (a
+    persistent "system files" location that survives ``cache/`` cleanups).  A
+    missing sidecar is built in memory from the index.  It is not written
+    here: index construction remains an explicit pipeline operation, so an
+    analysis lookup never creates an unexpected file.
     """
     import polars as pl
 
-    root = Path(cache_root) if cache_root is not None else _REPO_ROOT / "cache"
+    root = Path(index_root) if index_root is not None else _REPO_ROOT / "neuron_indexes"
     folder = root / dataset_folder(dataset)
     index_path = folder / "neuron_index.parquet"
     if not index_path.is_file():

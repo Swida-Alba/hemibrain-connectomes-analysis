@@ -71,10 +71,12 @@ try:
         is_search_cache_compatible,
         metadata_columns,
         metadata_path,
+        migrate_legacy_neuron_index,
         OPERATIONAL_COLUMNS,
         ordered_projection_columns,
         read_metadata_projection,
         search_cache_path,
+        system_neuron_index_path,
     )
 except ImportError:
     from neuron_index_builder import (
@@ -82,10 +84,12 @@ except ImportError:
         is_search_cache_compatible,
         metadata_columns,
         metadata_path,
+        migrate_legacy_neuron_index,
         OPERATIONAL_COLUMNS,
         ordered_projection_columns,
         read_metadata_projection,
         search_cache_path,
+        system_neuron_index_path,
     )
 
 
@@ -1317,7 +1321,9 @@ class FindNeuronConnection:
         # Check if cache already exists and is complete
         # If so, we don't need the source files
         cache_conn_path = os.path.join(cache_dir, 'connections.parquet')
-        cache_index_path = os.path.join(cache_dir, 'neuron_index.parquet')
+        cache_index_path = os.path.join(
+            self.script_path, 'neuron_indexes', dataset_safe, 'neuron_index.parquet'
+        )
         
         if os.path.exists(cache_conn_path) and os.path.exists(cache_index_path):
             try:
@@ -2172,10 +2178,11 @@ class FindNeuronConnection:
         '''
         dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
         cache_folder = os.path.join(self.script_path, 'cache', dataset_safe)
+        index_folder = os.path.join(self.script_path, 'neuron_indexes', dataset_safe)
         datasets_folder = os.path.join(self.script_path, 'datasets', dataset_safe)
         
         conn_path = os.path.join(cache_folder, 'connections.parquet')
-        index_path = os.path.join(cache_folder, 'neuron_index.parquet')
+        index_path = os.path.join(index_folder, 'neuron_index.parquet')
         neuron_csv = os.path.join(datasets_folder, f"{dataset_safe}_allneurons_neuron_df.csv")
         
         has_connections = os.path.exists(conn_path)
@@ -2222,8 +2229,11 @@ class FindNeuronConnection:
         return os.path.join(self.cache_folder, 'connections.parquet')
     
     def _get_neuron_index_path(self):
-        '''Get path to neuron index (tracks cached neurons)'''
-        return os.path.join(self.cache_folder, 'neuron_index.parquet')
+        '''Get path to the app-owned neuron index (persists across cache clears)'''
+        return str(system_neuron_index_path(
+            self.dataset,
+            Path(self.script_path) / 'neuron_indexes',
+        ))
 
     def _get_neuron_search_cache_path(self):
         '''Get the compact, presorted viewer-search sidecar.'''
@@ -2257,11 +2267,31 @@ class FindNeuronConnection:
                     pass
 
     def _get_neuron_index_state_path(self):
-        '''Get the small, frequently updated cache-progress sidecar.'''
-        return os.path.join(
-            os.path.dirname(self._get_neuron_index_path()),
-            'neuron_index_state.parquet',
-        )
+        '''Get the small, frequently updated cache-progress sidecar.
+
+        Progress describes the connection data, so it stays in ``cache/``
+        while the index itself lives in the app-owned ``neuron_indexes/``.
+        '''
+        return os.path.join(self.cache_folder, 'neuron_index_state.parquet')
+
+    def _migrate_legacy_index(self):
+        '''One-time move of a legacy cache/ index into the app-owned directory.
+
+        Existing installations keep their pull state (completion flags) when
+        upgrading to the persistent ``neuron_indexes/`` layout; the move is
+        skipped when that location is already populated.
+        '''
+        cache_folder = getattr(self, 'cache_folder', None)
+        if not cache_folder:
+            return
+        try:
+            migrate_legacy_neuron_index(
+                self.dataset,
+                cache_dir=Path(cache_folder),
+                index_dir=Path(self.script_path) / 'neuron_indexes',
+            )
+        except OSError:
+            pass
 
     @staticmethod
     def _neuron_index_state_columns():
@@ -2388,6 +2418,8 @@ class FindNeuronConnection:
         """
         if not self.use_cache or not self.cache_folder:
             return False
+
+        self._migrate_legacy_index()
 
         datasets_dir = os.path.join(self.script_path, 'datasets')
         source = metadata_path(self.dataset, Path(datasets_dir))
@@ -2577,6 +2609,48 @@ class FindNeuronConnection:
         self._neuron_index_cache = frame
         self._build_neuron_index_dict()
         return True
+
+    def _reset_index_progress(self):
+        """Zero the pull-progress flags after connection data is cleared.
+
+        The app-owned index must survive a cache clear (auto-suggestions and
+        the available-neurons viewer depend on it), but its
+        ``downstream_complete`` / ``last_fetched`` / ``connection_count``
+        values described the deleted connection data.  Rewrite the same rows
+        with zeroed flags, atomically; the search sidecar is metadata-derived
+        and stays untouched.
+        """
+        index_path = self._get_neuron_index_path()
+        if not os.path.exists(index_path):
+            return
+        try:
+            frame = pl.read_parquet(index_path)
+            expressions = []
+            if 'downstream_complete' in frame.columns:
+                expressions.append(pl.lit(False).alias('downstream_complete'))
+            if 'last_fetched' in frame.columns:
+                expressions.append(pl.lit('').alias('last_fetched'))
+            if 'connection_count' in frame.columns:
+                expressions.append(pl.lit(0).alias('connection_count'))
+            if not expressions:
+                return
+            frame = frame.with_columns(expressions)
+            temporary = f'{index_path}.tmp-{os.getpid()}-{threading.get_ident()}'
+            try:
+                os.makedirs(os.path.dirname(index_path), exist_ok=True)
+                frame.write_parquet(temporary, compression='zstd')
+                os.replace(temporary, index_path)
+            finally:
+                if os.path.exists(temporary):
+                    try:
+                        os.remove(temporary)
+                    except OSError:
+                        pass
+        except Exception as exc:
+            self._vprint(
+                f'  ⚠️ Could not reset neuron index progress flags: {exc}',
+                level='full',
+            )
 
     def _load_connection_db(self, force_reload=False):
         '''
@@ -3046,6 +3120,7 @@ class FindNeuronConnection:
         if self._neuron_index_cache is not None and not force_reload:
             return self._neuron_index_cache
         
+        self._migrate_legacy_index()
         index_path = self._get_neuron_index_path()
         
         # Special handling for FlyWire: Import from enriched CSV if cache missing
@@ -4746,7 +4821,7 @@ class FindNeuronConnection:
         underlying cache is rebuilt or reloaded.
         """
         db_path = self._get_connection_db_path()
-        index_path = os.path.join(os.path.dirname(db_path), 'neuron_index.parquet')
+        index_path = self._get_neuron_index_path()
         if self._conn_df_cache is not None and not self._is_empty_df(self._conn_df_cache):
             return ('mem', id(self._conn_df_cache))
         try:
@@ -4768,10 +4843,7 @@ class FindNeuronConnection:
         if cm is None or cm.source_signature != signature:
             cm = ThresholdedConnectionMap(
                 db_path=self._get_connection_db_path(),
-                neuron_index_path=os.path.join(
-                    os.path.dirname(self._get_connection_db_path()),
-                    'neuron_index.parquet',
-                ),
+                neuron_index_path=self._get_neuron_index_path(),
                 min_weight=min_weight,
                 conn_frame=(
                     None if self._conn_df_cache is None
@@ -5000,7 +5072,7 @@ class FindNeuronConnection:
         
         # Check if we have a cached connection database
         db_path = self._get_connection_db_path()
-        neuron_index_path = os.path.join(os.path.dirname(db_path), 'neuron_index.parquet')
+        neuron_index_path = self._get_neuron_index_path()
         
         # If cache doesn't exist and auto_build_cache is enabled, build it first
         if (not os.path.exists(db_path) or not os.path.exists(neuron_index_path)) and auto_build_cache:
@@ -5279,7 +5351,7 @@ class FindNeuronConnection:
         Cache Hierarchy:
         ---------------
         Level 0: datasets/{dataset}/*_neuron_df.parquet - Authoritative neuron info
-        Level 1: cache/{dataset}/neuron_index.parquet - Which neurons are cached
+        Level 1: neuron_indexes/{dataset}/neuron_index.parquet - Neuron metadata index
         Level 2: cache/{dataset}/connections.parquet - Connection data
         Level 3: Connectivity profiles (built by ConnectivityProfiler)
         
@@ -5337,7 +5409,7 @@ class FindNeuronConnection:
         
         Returns information about all cache levels:
         - Level 0: datasets/{dataset}/ neuron_df files (authoritative neuron list)
-        - Level 1: cache/{dataset}/neuron_index.parquet (which neurons are cached)
+        - Level 1: neuron_indexes/{dataset}/neuron_index.parquet (neuron metadata index)
         - Level 2: cache/{dataset}/connections.parquet (connection data)
         
         Returns:
@@ -5444,7 +5516,7 @@ class FindNeuronConnection:
         Cache Hierarchy:
         ---------------
         Level 0: datasets/{dataset}/*_neuron_df.parquet - Authoritative neuron list
-        Level 1: cache/{dataset}/neuron_index.parquet - Tracks cached neurons
+        Level 1: neuron_indexes/{dataset}/neuron_index.parquet - Neuron metadata index
         Level 2: cache/{dataset}/connections.parquet - Actual connection data
         
         Parameters:
@@ -5511,21 +5583,19 @@ class FindNeuronConnection:
         if force_rebuild:
             _print("Force rebuild - clearing existing cache...")
             conn_path = self._get_connection_db_path()
-            index_path = self._get_neuron_index_path()
             state_path = self._get_neuron_index_state_path()
-            search_path = self._get_neuron_search_cache_path()
             batch_dir = os.path.join(os.path.dirname(conn_path), '_batch_files')
             if os.path.exists(conn_path):
                 os.remove(conn_path)
-            if os.path.exists(index_path):
-                os.remove(index_path)
             if os.path.exists(state_path):
                 os.remove(state_path)
-            if os.path.exists(search_path):
-                os.remove(search_path)
             if os.path.exists(batch_dir):
                 import shutil
                 shutil.rmtree(batch_dir)
+            # The app-owned neuron index deliberately survives a cache clear
+            # (suggestions and the viewer depend on it); reset only the
+            # progress flags that described the deleted connection data.
+            self._reset_index_progress()
             # Clear in-memory caches
             self._conn_df_cache = None
             self._conn_index = {}

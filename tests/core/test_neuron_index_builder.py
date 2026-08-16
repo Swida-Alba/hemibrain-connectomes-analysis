@@ -207,7 +207,7 @@ def test_metadata_pull_materializes_index_and_search_cache(tmp_path):
         "roiInfo": ["large", "large"],
     }).write_csv(metadata)
 
-    index_path = tmp_path / "cache" / folder / "neuron_index.parquet"
+    index_path = tmp_path / "neuron_indexes" / folder / "neuron_index.parquet"
     search_path = search_cache_path(index_path)
     finder = object.__new__(FindNeuronConnection)
     finder.use_cache = True
@@ -231,3 +231,91 @@ def test_metadata_pull_materializes_index_and_search_cache(tmp_path):
     assert index.columns[:4] == ["bodyId", "type", "instance", "flywireType"]
     assert "roiInfo" not in index.columns
     assert is_search_cache_compatible(search, index.columns)
+
+
+def test_legacy_index_migration_moves_index_and_sidecar(tmp_path):
+    """A legacy cache/ index + sidecar move into the app-owned directory once."""
+    from src.neuron_index_builder import (
+        build_search_cache_frame,
+        migrate_legacy_neuron_index,
+        search_cache_path,
+        system_neuron_index_path,
+    )
+
+    dataset = "legacy:v1.0"
+    cache_dir = tmp_path / "cache"
+    index_dir = tmp_path / "neuron_indexes"
+    legacy = cache_dir / "legacy_v1_0" / "neuron_index.parquet"
+    legacy.parent.mkdir(parents=True)
+    frame = pl.DataFrame({
+        "bodyId": ["1", "2"],
+        "type": ["aMe12", "APL"],
+        "instance": ["aMe12_L", "APL_1"],
+        "downstream_complete": [True, False],
+        "last_fetched": ["2026-08-12", ""],
+        "connection_count": [17, 0],
+    })
+    frame.write_parquet(legacy)
+    build_search_cache_frame(frame).write_parquet(search_cache_path(legacy))
+
+    assert migrate_legacy_neuron_index(dataset, cache_dir=cache_dir, index_dir=index_dir) is True
+    target = system_neuron_index_path(dataset, index_dir)
+    assert target.is_file()
+    assert search_cache_path(target).is_file()
+    # The legacy location is emptied and the move keeps the progress flags.
+    assert not legacy.exists()
+    assert pl.read_parquet(target)["connection_count"].to_list() == [17, 0]
+    # Idempotent: a second call is a no-op.
+    assert migrate_legacy_neuron_index(dataset, cache_dir=cache_dir, index_dir=index_dir) is False
+
+
+def test_legacy_index_migration_never_overwrites_existing_target(tmp_path):
+    """An existing app-owned index wins over a legacy cache/ index."""
+    from src.neuron_index_builder import (
+        migrate_legacy_neuron_index,
+        system_neuron_index_path,
+    )
+
+    dataset = "existing:v1.0"
+    cache_dir = tmp_path / "cache"
+    index_dir = tmp_path / "neuron_indexes"
+    target = system_neuron_index_path(dataset, index_dir)
+    target.parent.mkdir(parents=True)
+    pl.DataFrame({"bodyId": ["new"], "type": ["new-type"]}).write_parquet(target)
+    legacy = cache_dir / "existing_v1_0" / "neuron_index.parquet"
+    legacy.parent.mkdir(parents=True)
+    pl.DataFrame({"bodyId": ["old"], "type": ["old-type"]}).write_parquet(legacy)
+
+    assert migrate_legacy_neuron_index(dataset, cache_dir=cache_dir, index_dir=index_dir) is False
+    assert pl.read_parquet(target)["type"].to_list() == ["new-type"]
+    assert legacy.is_file()  # untouched for a later manual recovery
+
+
+def test_reset_index_progress_zeroes_flags_after_cache_clear(tmp_path):
+    """Force-rebuild keeps the index but resets the progress it described."""
+    from src.coana import FindNeuronConnection
+
+    index_path = tmp_path / "neuron_indexes" / "reset_v1_0" / "neuron_index.parquet"
+    index_path.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "bodyId": ["1", "2"],
+        "type": ["aMe12", "APL"],
+        "instance": ["aMe12_L", "APL_1"],
+        "post": [10, 3],
+        "downstream_complete": [True, False],
+        "last_fetched": ["2026-08-12T16:00:00", ""],
+        "connection_count": [17, 0],
+    }).write_parquet(index_path)
+
+    finder = object.__new__(FindNeuronConnection)
+    finder._get_neuron_index_path = lambda: str(index_path)
+    finder._vprint = lambda *args, **kwargs: None
+
+    FindNeuronConnection._reset_index_progress(finder)
+
+    reset = pl.read_parquet(index_path)
+    assert reset["downstream_complete"].to_list() == [False, False]
+    assert reset["last_fetched"].to_list() == ["", ""]
+    assert reset["connection_count"].to_list() == [0, 0]
+    # Metadata columns are untouched.
+    assert reset["type"].to_list() == ["aMe12", "APL"]

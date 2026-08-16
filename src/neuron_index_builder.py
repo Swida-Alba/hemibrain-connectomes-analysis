@@ -16,6 +16,7 @@ search projection so the UI and backend use the same scope.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Iterable, List, Optional
@@ -60,6 +61,14 @@ OPERATIONAL_COLUMNS = (
 
 # Compact sidecar used by the viewer's prefix/substring search path.
 SEARCH_CACHE_FILENAME = "neuron_index_search.parquet"
+
+# App-owned directory that holds the neuron index and its search sidecar for
+# every dataset.  These are persistent "system files": the bundled datasets'
+# seeds are committed here, and the pull pipeline builds every other dataset's
+# index into the same directory - so clearing ``cache/`` never removes the
+# metadata behind auto-suggestions and the available-neurons viewer.
+NEURON_INDEX_DIR_NAME = "neuron_indexes"
+NEURON_INDEX_FILENAME = "neuron_index.parquet"
 
 # Search priority after the three identity columns.  Keep this explicit rather
 # than relying on lexical column order: the same order is consumed by the
@@ -200,6 +209,64 @@ def search_cache_path(index_path: Path) -> Path:
     """Return the compact searchable sidecar next to a neuron index."""
     index_path = Path(index_path)
     return index_path.with_name(SEARCH_CACHE_FILENAME)
+
+
+def system_neuron_index_path(dataset: str, index_dir: Path) -> Path:
+    """Return the app-owned neuron-index path for *dataset*.
+
+    The index lives outside ``cache/`` so an intentional cache cleanup never
+    removes the metadata behind auto-suggestions and the viewer.
+    """
+    return Path(index_dir) / dataset_folder(dataset) / NEURON_INDEX_FILENAME
+
+
+def migrate_legacy_neuron_index(dataset, *, cache_dir, index_dir) -> bool:
+    """Move a legacy ``cache/`` index into the app-owned directory once.
+
+    Older releases stored ``neuron_index.parquet`` and its search sidecar
+    inside ``cache/<dataset>/``.  When the app-owned location is still empty,
+    move both files over so existing pull state (completion flags) survives
+    the layout change without a re-pull.  Returns True when a migration
+    happened; move failures surface as OSError to the caller.
+    """
+    target = system_neuron_index_path(dataset, index_dir)
+    if target.is_file():
+        return False
+    legacy = Path(cache_dir) / dataset_folder(dataset) / NEURON_INDEX_FILENAME
+    if not legacy.is_file():
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(legacy, target)
+    sidecar = search_cache_path(legacy)
+    if sidecar.is_file():
+        os.replace(sidecar, search_cache_path(target))
+    return True
+
+
+def migrate_legacy_neuron_indexes(cache_dir: Path, index_dir: Path) -> List[str]:
+    """Migrate every legacy cache/ index into the app-owned directory.
+
+    Returns the dataset folders that were moved.  Used once at UI startup so
+    existing installations upgrade in place without a re-pull; each failed
+    move is skipped and left for the pull pipeline to rebuild.
+    """
+    migrated: List[str] = []
+    cache_root = Path(cache_dir)
+    if not cache_root.is_dir():
+        return migrated
+    for folder in sorted(
+        path.name for path in cache_root.iterdir() if path.is_dir()
+    ):
+        if not (cache_root / folder / NEURON_INDEX_FILENAME).is_file():
+            continue
+        try:
+            if migrate_legacy_neuron_index(
+                folder, cache_dir=cache_root, index_dir=index_dir
+            ):
+                migrated.append(folder)
+        except OSError:
+            continue
+    return migrated
 
 
 def is_search_cache_compatible(search_frame, source_columns: Iterable[str]) -> bool:

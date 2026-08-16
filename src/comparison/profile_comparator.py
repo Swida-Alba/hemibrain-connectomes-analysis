@@ -2991,7 +2991,7 @@ class HomologFinder:
         type_lookup = {}
         
         # Try neuron_index.parquet first (smallest file)
-        index_path = project_root / 'cache' / safe_name / 'neuron_index.parquet'
+        index_path = project_root / 'neuron_indexes' / safe_name / 'neuron_index.parquet'
         if index_path.exists():
             try:
                 if use_polars:
@@ -3953,12 +3953,12 @@ class HomologFinder:
         return project_root / 'cache' / safe_name / 'connections.parquet'
     
     def _get_neuron_index_path(self, dataset: str) -> 'Path':
-        """Get path to neuron index for type mapping."""
+        """Get path to the app-owned neuron index for type mapping."""
         from pathlib import Path
         safe_name = dataset.replace(':', '_').replace('.', '_')
         src_dir = Path(__file__).parent.parent
         project_root = src_dir.parent
-        return project_root / 'cache' / safe_name / 'neuron_index.parquet'
+        return project_root / 'neuron_indexes' / safe_name / 'neuron_index.parquet'
     
     def _load_connection_cache(self, dataset: str, auto_build: bool = True) -> Optional[pd.DataFrame]:
         """
@@ -3974,7 +3974,7 @@ class HomologFinder:
         
         Type mapping priority:
         1. datasets/{dataset}/neuron_df.parquet (authoritative source)
-        2. cache/{dataset}/neuron_index.parquet (fallback)
+        2. neuron_indexes/{dataset}/neuron_index.parquet (fallback)
         
         Args:
             dataset: Dataset identifier
@@ -4136,7 +4136,7 @@ class HomologFinder:
                     type_map = neuron_df.set_index('bodyId')['type'].to_dict()
                     self._log(f"Loaded type mapping from {datasets_neuron_csv.name}")
         
-        # Priority 3: cache/{dataset}/neuron_index.parquet
+        # Priority 3: neuron_indexes/{dataset}/neuron_index.parquet
         if type_map is None and index_path.exists():
             neuron_df = pd.read_parquet(index_path)
             if 'type' in neuron_df.columns:
@@ -4153,13 +4153,14 @@ class HomologFinder:
         This method uses FindNeuronConnection.build_connection_cache() which:
         - Handles both NeuPrint datasets and local datasets
         - Builds cache incrementally (only fetches missing neurons)
-        - Builds both connections.parquet AND neuron_index.parquet
+        - Builds cache/{dataset}/connections.parquet AND
+          neuron_indexes/{dataset}/neuron_index.parquet
         - Uses O(1) indexed lookups for fast cache queries
         
         Cache Hierarchy:
         ---------------
         Level 0: datasets/{dataset}/*_neuron_df - Authoritative neuron list
-        Level 1: cache/{dataset}/neuron_index.parquet - Tracks cached neurons
+        Level 1: neuron_indexes/{dataset}/neuron_index.parquet - Neuron metadata index
         Level 2: cache/{dataset}/connections.parquet - Connection data
         
         Returns:
@@ -4224,7 +4225,7 @@ class HomologFinder:
         Cache Hierarchy (must be built in order):
         -----------------------------------------
         Level 0: datasets/{dataset}/*_neuron_df - Authoritative neuron list  
-        Level 1: cache/{dataset}/neuron_index.parquet - Tracks cached neurons
+        Level 1: neuron_indexes/{dataset}/neuron_index.parquet - Neuron metadata index
         Level 2: cache/{dataset}/connections.parquet - Connection data
         Level 3: Connectivity profiles (built after this check)
         
@@ -8273,7 +8274,7 @@ class ConnectivityProfileComparer:
         Cache Hierarchy (must be built in order):
         -----------------------------------------
         Level 0: datasets/{dataset}/*_neuron_df - Authoritative neuron list  
-        Level 1: cache/{dataset}/neuron_index.parquet - Tracks cached neurons
+        Level 1: neuron_indexes/{dataset}/neuron_index.parquet - Neuron metadata index
         Level 2: cache/{dataset}/connections.parquet - Connection data
         Level 3: Connectivity profiles (built after this check)
         

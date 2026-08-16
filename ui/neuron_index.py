@@ -1,12 +1,14 @@
 """Cached neuron-index loading and querying for the UI viewer.
 
 The auto-suggestion backend and the available-neurons viewer intentionally
-share the same local cache boundary: a viewer is available only when
-``cache/<dataset>/neuron_index.parquet`` exists.  The viewer never serves the
-raw dataset file to the browser.  The cache index is built from the
-materialized projection of the prepared local neuron table; an older/partial
-cache can still be enriched from that table to fill blank ``type``/``instance``
-values.
+share the same local index boundary: a viewer is available only when
+``neuron_indexes/<dataset>/neuron_index.parquet`` exists.  That app-owned
+"system files" directory persists across ``cache/`` cleanups - bundled
+datasets ship committed seeds there and the pull pipeline builds every other
+dataset's index into the same place.  The viewer never serves the raw dataset
+file to the browser.  The index is built from the materialized projection of
+the prepared local neuron table; an older/partial index can still be enriched
+from that table to fill blank ``type``/``instance`` values.
 """
 
 from __future__ import annotations
@@ -97,8 +99,13 @@ def clear_neuron_index_cache() -> None:
 
 
 def neuron_index_path(dataset: str, cache_dir: Optional[Path] = None) -> Path:
-    """Return the cached neuron-index path for *dataset*."""
-    root = Path(cache_dir) if cache_dir is not None else PROJECT_ROOT / "cache"
+    """Return the app-owned neuron-index path for *dataset*.
+
+    The index is a persistent "system file" outside ``cache/``: shipped seeds
+    and pull-built indexes share this location, so clearing the cache never
+    removes the metadata behind auto-suggestions and the viewer.
+    """
+    root = Path(cache_dir) if cache_dir is not None else PROJECT_ROOT / "neuron_indexes"
     return root / dataset_to_folder(str(dataset).strip()) / "neuron_index.parquet"
 
 

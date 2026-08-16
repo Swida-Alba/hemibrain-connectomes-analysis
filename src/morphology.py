@@ -420,7 +420,7 @@ def _load_neuron_type_map(dataset: str, project_root: Optional[str] = None
         except Exception:
             pass
 
-    index_path = root / "cache" / folder / "neuron_index.parquet"
+    index_path = root / "neuron_indexes" / folder / "neuron_index.parquet"
     if index_path.exists():
         try:
             idx_df = pd.read_parquet(index_path, columns=["bodyId", "type", "instance"])
@@ -667,7 +667,7 @@ class SkeletonVectorCache:
         # below so those rows are not dropped by the merge.
         fetched_new = 0
         if fetch_missing and fetch_missing > 0:
-            index_path = self.project_root / "cache" / _dataset_folder(self.dataset) / "neuron_index.parquet"
+            index_path = self.project_root / "neuron_indexes" / _dataset_folder(self.dataset) / "neuron_index.parquet"
             index: List[int] = []
             if index_path.exists():
                 try:
@@ -1373,7 +1373,7 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
         except Exception:
             index = []
     if not index:
-        index_path = root / "cache" / folder / "neuron_index.parquet"
+        index_path = root / "neuron_indexes" / folder / "neuron_index.parquet"
         if index_path.exists():
             try:
                 index = pd.read_parquet(index_path, columns=["bodyId"])["bodyId"] \

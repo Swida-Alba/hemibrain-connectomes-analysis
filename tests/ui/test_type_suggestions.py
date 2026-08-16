@@ -34,14 +34,14 @@ def _clear_pool_cache():
 
 @pytest.fixture
 def local_dirs(tmp_path, monkeypatch):
-    """Point the pool sources at a temporary cache/datasets pair."""
-    cache = tmp_path / "cache"
+    """Point the pool sources at a temporary indexes/datasets pair."""
+    indexes = tmp_path / "neuron_indexes"
     datasets = tmp_path / "datasets"
-    cache.mkdir(parents=True)
+    indexes.mkdir(parents=True)
     datasets.mkdir(parents=True)
-    monkeypatch.setattr("ui.type_suggestions._CACHE_DIR", cache)
+    monkeypatch.setattr("ui.type_suggestions._INDEX_DIR", indexes)
     monkeypatch.setattr("ui.type_suggestions._DATASETS_DIR", datasets)
-    return cache, datasets
+    return indexes, datasets
 
 
 class TestMatchSuggestions:
@@ -225,11 +225,12 @@ class TestEntryHint:
 
 class TestPoolSources:
     def test_index_parquet_pools(self, local_dirs):
-        """cache/<folder>/neuron_index.parquet builds type/instance/bodyId
-        pools (bodyId hints = the corresponding instance)."""
-        cache, _ = local_dirs
+        """neuron_indexes/<folder>/neuron_index.parquet builds
+        type/instance/bodyId pools (bodyId hints = the corresponding
+        instance)."""
+        indexes, _ = local_dirs
         folder = "test_v1"
-        (cache / folder).mkdir()
+        (indexes / folder).mkdir()
         pl.DataFrame({
             "bodyId": [5813012345, 5813012346],
             "type": ["APL", "MBON01"],
@@ -238,7 +239,7 @@ class TestPoolSources:
             "hemilineage": ["AL", "MB"],
             "last_fetched": ["2026-08-12", "2026-08-12"],
             "roiInfo": ["large payload", "large payload"],
-        }).write_parquet(cache / folder / "neuron_index.parquet")
+        }).write_parquet(indexes / folder / "neuron_index.parquet")
 
         pools = _folder_pools(folder)
         assert pools["type"] == [("APL", "type"), ("MBON01", "type")]
@@ -253,9 +254,9 @@ class TestPoolSources:
         assert "roiInfo" not in pools
 
     def test_table_fallback_pools(self, local_dirs):
-        """datasets/<folder> neuron tables (no cache index) build pools
+        """datasets/<folder> neuron tables (no index file) build pools
         for type/class taxonomy columns, not arbitrary metadata."""
-        cache, datasets = local_dirs
+        _, datasets = local_dirs
         folder = "test_v1"
         ds_dir = datasets / folder
         ds_dir.mkdir()
@@ -288,31 +289,31 @@ class TestPoolSources:
         ]
 
     def test_cache_index_preferred_over_table(self, local_dirs):
-        cache, datasets = local_dirs
+        indexes, datasets = local_dirs
         folder = "test_v1"
-        (cache / folder).mkdir()
+        (indexes / folder).mkdir()
         pl.DataFrame({
             "bodyId": [1], "type": ["APL"], "instance": ["APL_1"],
-        }).write_parquet(cache / folder / "neuron_index.parquet")
+        }).write_parquet(indexes / folder / "neuron_index.parquet")
         ds_dir = datasets / folder
         ds_dir.mkdir()
         (ds_dir / "x_neuron_df.csv").write_text(
             "bodyId,type,instance\n1,MBON01,MBON01_1\n"
         )
 
-        # Cache values stay first, while the table fills missing names.
+        # Index values stay first, while the table fills missing names.
         assert _folder_pools(folder)["type"] == [
             ("APL", "type"), ("MBON01", "type"),
         ]
 
     def test_sparse_cache_index_falls_back_to_table_names(self, local_dirs):
-        """A metadata-empty cache must not hide the dataset's type table."""
-        cache, datasets = local_dirs
+        """A metadata-empty index must not hide the dataset's type table."""
+        indexes, datasets = local_dirs
         folder = "test_v1"
-        (cache / folder).mkdir()
+        (indexes / folder).mkdir()
         pl.DataFrame({
             "bodyId": [1, 2], "type": ["", ""], "instance": ["", ""],
-        }).write_parquet(cache / folder / "neuron_index.parquet")
+        }).write_parquet(indexes / folder / "neuron_index.parquet")
         ds_dir = datasets / folder
         ds_dir.mkdir()
         (ds_dir / "x_neuron_df.csv").write_text(
@@ -328,14 +329,14 @@ class TestPoolSources:
         ]
 
     def test_newer_metadata_replaces_stale_rich_index(self, local_dirs):
-        """A refreshed source table must remove stale cached suggestions."""
+        """A refreshed source table must remove stale indexed suggestions."""
         import os
 
-        cache, datasets = local_dirs
+        indexes, datasets = local_dirs
         folder = "test_v1"
-        cache_dir = cache / folder
-        cache_dir.mkdir()
-        index = cache_dir / "neuron_index.parquet"
+        index_dir = indexes / folder
+        index_dir.mkdir()
+        index = index_dir / "neuron_index.parquet"
         pl.DataFrame({
             "bodyId": ["1"],
             "type": ["old-type"],
@@ -358,13 +359,13 @@ class TestPoolSources:
         assert pools["flywireType"] == [("new-flywire", "flywireType")]
 
     def test_partial_cache_index_is_augmented_for_aMe_prefix(self, local_dirs):
-        """A cache with unrelated names still exposes table-only aMe types."""
-        cache, datasets = local_dirs
+        """An index with unrelated names still exposes table-only aMe types."""
+        indexes, datasets = local_dirs
         folder = "test_v1"
-        (cache / folder).mkdir()
+        (indexes / folder).mkdir()
         pl.DataFrame({
             "bodyId": [1], "type": ["hDeltaM"], "instance": ["hDeltaM_C1"],
-        }).write_parquet(cache / folder / "neuron_index.parquet")
+        }).write_parquet(indexes / folder / "neuron_index.parquet")
         ds_dir = datasets / folder
         ds_dir.mkdir()
         (ds_dir / "x_neuron_df.csv").write_text(
@@ -390,10 +391,10 @@ class TestPoolSources:
 
     def test_pool_cache_invalidates_on_file_change(self, local_dirs):
         """Rewriting the index file (new mtime) refreshes the cached pools."""
-        cache, _ = local_dirs
+        indexes, _ = local_dirs
         folder = "test_v1"
-        (cache / folder).mkdir()
-        index = cache / folder / "neuron_index.parquet"
+        (indexes / folder).mkdir()
+        index = indexes / folder / "neuron_index.parquet"
         pl.DataFrame({
             "bodyId": [1], "type": ["APL"], "instance": ["APL_1"],
         }).write_parquet(index)

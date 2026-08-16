@@ -55,7 +55,8 @@ def create_settings_tab():
             section_header("Dataset Cache", "download")
             ui.label(
                 "Pull a full dataset to local and build the indexed connection cache "
-                "(cache/<dataset>/connections.parquet + neuron_index.parquet). Re-running "
+                "(cache/<dataset>/connections.parquet + neuron_indexes/<dataset>/"
+                "neuron_index.parquet). Re-running "
                 "resumes interrupted builds from their checkpoint; 'Force rebuild' clears "
                 "a broken cache first and rebuilds it completely."
             ).classes("text-caption drocat-muted")
@@ -85,8 +86,10 @@ def create_settings_tab():
                 force_rebuild = ui.checkbox(
                     "Force rebuild (clear broken cache first)"
                 ).tooltip(
-                    "Deletes the existing connections.parquet / neuron_index.parquet "
-                    "before fetching, rebuilding the cache from scratch. Unchecked, the "
+                    "Deletes the existing cache/<dataset>/connections.parquet "
+                    "before fetching, rebuilding the connection cache from scratch. "
+                    "The neuron index in neuron_indexes/ survives with reset progress "
+                    "flags. Unchecked, the "
                     "pull only fetches the neurons missing from the cache (resume)."
                 )
                 batch_input = ui.number(

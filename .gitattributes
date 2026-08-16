@@ -1,0 +1,2 @@
+# Bundled neuron indexes: binary parquet seeds, no textual diffs.
+neuron_indexes/**/*.parquet binary

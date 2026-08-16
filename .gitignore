@@ -18,6 +18,21 @@ dev/
 scripts_local/
 local_data/
 
+# App-owned neuron indexes ("system files"). The bundled seed indexes for
+# male-cns v1.0, FAFB v783, and BANC v888 are tracked; pull-built indexes for
+# every other dataset land here too and stay untracked.
+neuron_indexes/*
+!neuron_indexes/manifest.json
+!neuron_indexes/male-cns_v1_0/
+!neuron_indexes/male-cns_v1_0/neuron_index.parquet
+!neuron_indexes/male-cns_v1_0/neuron_index_search.parquet
+!neuron_indexes/flywire_FAFB_v783/
+!neuron_indexes/flywire_FAFB_v783/neuron_index.parquet
+!neuron_indexes/flywire_FAFB_v783/neuron_index_search.parquet
+!neuron_indexes/flywire_BANC_v888/
+!neuron_indexes/flywire_BANC_v888/neuron_index.parquet
+!neuron_indexes/flywire_BANC_v888/neuron_index_search.parquet
+
 # Raw ROI-sensitive segmentation downloads and generated visualizations.
 # Keep the reproducibility plan under version control while ignoring the
 # potentially large API artifacts.

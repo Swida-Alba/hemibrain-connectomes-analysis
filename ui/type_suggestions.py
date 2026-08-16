@@ -3,10 +3,11 @@
 Suggestion entries are ``(value, hint)`` pairs so the dropdown can render the
 matched name with a gray hint of the searched column (for bodyId matches the
 hint is the corresponding instance). Pools are read from LOCAL dataset files
-only — ``cache/<dataset>/neuron_index.parquet`` first, supplemented by the
-``datasets/<dataset>`` neuron tables when the cache is incomplete — and cached
-per (dataset, file mtime); the server is never contacted, so a dataset that
-has not been pulled yet simply yields no suggestions.
+only — ``neuron_indexes/<dataset>/neuron_index.parquet`` first, supplemented
+by the ``datasets/<dataset>`` neuron tables when the index is incomplete —
+and cached per (dataset, file mtime); the server is never contacted, so a
+dataset that has not been pulled yet simply yields no suggestions (except the
+bundled datasets whose indexes ship with the repository).
 """
 
 from __future__ import annotations
@@ -43,8 +44,8 @@ except ImportError:
 # matches where it is the corresponding instance.
 Entry = Tuple[str, str]
 
-_CACHE_DIR = PROJECT_ROOT / "cache"
 _DATASETS_DIR = PROJECT_ROOT / "datasets"
+_INDEX_DIR = PROJECT_ROOT / "neuron_indexes"
 
 _POOL_CACHE: Dict[tuple, Dict[str, List[Entry]]] = {}
 
@@ -99,8 +100,8 @@ def _clean(values) -> List[str]:
 
 
 def _index_pools(folder: str) -> Optional[Dict[str, List[Entry]]]:
-    """Pools from cache/<folder>/neuron_index.parquet (None when absent)."""
-    index = _CACHE_DIR / folder / "neuron_index.parquet"
+    """Pools from neuron_indexes/<folder>/neuron_index.parquet (None when absent)."""
+    index = _INDEX_DIR / folder / "neuron_index.parquet"
     if not index.exists():
         return None
     try:
@@ -149,8 +150,8 @@ def _index_pools(folder: str) -> Optional[Dict[str, List[Entry]]]:
 
 
 def _index_has_search_projection(folder: str) -> bool:
-    """Whether the cache index already contains the pulled metadata fields."""
-    index = _CACHE_DIR / folder / "neuron_index.parquet"
+    """Whether the index already contains the pulled metadata fields."""
+    index = _INDEX_DIR / folder / "neuron_index.parquet"
     if not index.exists():
         return False
     try:
@@ -269,7 +270,7 @@ def _folder_pools(folder: str) -> Dict[str, List[Entry]]:
     # Cache key covers every local source file's mtime so a rebuilt index
     # or an updated dataset table invalidates the pools.
     sources = []
-    index = _CACHE_DIR / folder / "neuron_index.parquet"
+    index = _INDEX_DIR / folder / "neuron_index.parquet"
     if index.exists():
         sources.append((str(index), index.stat().st_mtime_ns))
     tables = _metadata_tables(folder)

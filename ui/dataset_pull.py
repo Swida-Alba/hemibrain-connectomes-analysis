@@ -6,12 +6,14 @@ with a ``ui.timer`` and renders progress.
 
 Supported workflows:
 - **Full pull** - fetches every neuron's downstream connections and builds
-  ``cache/<dataset>/connections.parquet`` + ``neuron_index.parquet``.
+  ``cache/<dataset>/connections.parquet`` +
+  ``neuron_indexes/<dataset>/neuron_index.parquet``.
 - **Resume / finish** - already-cached neurons are skipped and interrupted
   runs (crashes, network errors, manual cancel) are consolidated from their
   checkpoint batch files, so re-running simply continues where it stopped.
-- **Force rebuild** - clears the existing cache first (use when the cache is
-  broken and needs to be rebuilt completely).
+- **Force rebuild** - clears the connection cache first (use when the cache is
+  broken and needs to be rebuilt completely); the neuron index survives with
+  reset progress flags.
 - **Cancel** - stops after the current batch; fetched batches are consolidated
   first so the next run resumes cleanly.
 """

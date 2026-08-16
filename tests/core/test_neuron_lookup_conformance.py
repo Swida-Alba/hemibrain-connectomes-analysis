@@ -39,7 +39,7 @@ def _write_cache(tmp_path: Path, frame: pd.DataFrame):
 
     dataset = "conformance:v1.0"
     folder = dataset.replace(":", "_").replace(".", "_")
-    cache_dir = tmp_path / "cache" / folder
+    cache_dir = tmp_path / "neuron_indexes" / folder
     cache_dir.mkdir(parents=True)
     index_path = cache_dir / "neuron_index.parquet"
     polars_frame = pl.from_pandas(frame)
@@ -76,7 +76,7 @@ def test_strict_analysis_surfaces_agree_on_priority_and_case(tmp_path):
 
     frame = _metadata()
     dataset, _index_path = _write_cache(tmp_path, frame)
-    cache = get_cached_neuron_search(dataset, cache_root=tmp_path / "cache")
+    cache = get_cached_neuron_search(dataset, index_root=tmp_path / "neuron_indexes")
     assert cache is not None
 
     # Bare input is exact/case-sensitive.  Explicit starts-with syntax is
@@ -263,7 +263,7 @@ def test_stale_cache_falls_back_without_changing_lookup_semantics(tmp_path):
 
     frame = _metadata()
     dataset, _index_path = _write_cache(tmp_path, frame)
-    cache = get_cached_neuron_search(dataset, cache_root=tmp_path / "cache")
+    cache = get_cached_neuron_search(dataset, index_root=tmp_path / "neuron_indexes")
     assert cache is not None
 
     changed = pd.concat([

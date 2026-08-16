@@ -76,7 +76,7 @@ def write_skeleton(tmp_path, dataset, body_id, neuron):
 
 def write_neuron_index(tmp_path, dataset, rows):
     """Persist a bodyId->type/instance index to the tmp cache."""
-    folder = tmp_path / "cache" / morph._dataset_folder(dataset)
+    folder = tmp_path / "neuron_indexes" / morph._dataset_folder(dataset)
     folder.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows, columns=["bodyId", "type", "instance"])
     df["bodyId"] = df["bodyId"].astype(np.int64)

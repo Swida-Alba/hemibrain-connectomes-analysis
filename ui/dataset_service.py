@@ -125,6 +125,7 @@ class DatasetService:
         self._lock = threading.Lock()
         self._datasets_dir = PROJECT_ROOT / "datasets"
         self._cache_dir = PROJECT_ROOT / "cache"
+        self._index_dir = PROJECT_ROOT / "neuron_indexes"
         self._available_neuprint: Optional[List[str]] = None
         self._server_datasets: Dict[str, dict] = {}  # Full server response from /api/dbmeta/datasets
         self._last_fetch_time: float = 0
@@ -601,8 +602,8 @@ class DatasetService:
         if cache_path.exists():
             if (cache_path / "connections.parquet").exists():
                 return True
-            if (cache_path / "neuron_index.parquet").exists():
-                return True
+            # The neuron index is an app-owned "system file" now
+            # (neuron_indexes/), not part of the cache.
 
         return False
 
@@ -760,15 +761,15 @@ class DatasetService:
 
     def _load_cache_neuron_counts(self, dataset: str) -> tuple:
         """
-        Total / typed neuron counts from the local pull-cache index.
+        Total / typed neuron counts from the app-owned neuron index.
 
-        ``cache/<dataset>/neuron_index.parquet`` is written by the
-        DatasetPuller with one row per cached neuron.  The count may be
-        partial (only what has been pulled so far), so it is used only as a
-        last resort behind the dataset tables and the server query.
+        ``neuron_indexes/<dataset>/neuron_index.parquet`` is written by the
+        DatasetPuller with one row per cached neuron (or shipped as a bundled
+        seed).  The count may be partial (only what has been pulled so far),
+        so it is used only as a last resort behind the dataset tables and the
+        server query.
         """
-        cache_path = self._cache_dir / dataset_to_folder(dataset)
-        index = cache_path / "neuron_index.parquet"
+        index = self._index_dir / dataset_to_folder(dataset) / "neuron_index.parquet"
         if not index.exists():
             return 0, 0
 

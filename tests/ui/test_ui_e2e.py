@@ -2260,8 +2260,8 @@ class TestDatasetService:
         assert info.neuron_count == service.CODEX_DATASETS["flywire_FAFB_v783"]["neurons"]
 
     def test_cache_index_fallback_count(self, tmp_path):
-        """A dataset that only exists in the pull cache reports the number
-        of cached neurons from cache/<dataset>/neuron_index.parquet."""
+        """A dataset that only has a neuron index reports the number
+        of indexed neurons from neuron_indexes/<dataset>/neuron_index.parquet."""
         pytest.importorskip("polars")
         import polars as pl
 
@@ -2270,10 +2270,11 @@ class TestDatasetService:
         service = DatasetService()
         service._datasets_dir = tmp_path / "datasets"
         service._cache_dir = tmp_path / "cache"
-        cache_path = service._cache_dir / "hemibrain_v1_2_1"
-        cache_path.mkdir(parents=True)
+        service._index_dir = tmp_path / "neuron_indexes"
+        index_path = service._index_dir / "hemibrain_v1_2_1"
+        index_path.mkdir(parents=True)
         pl.DataFrame({"bodyId": [1, 2, 3]}).write_parquet(
-            cache_path / "neuron_index.parquet"
+            index_path / "neuron_index.parquet"
         )
 
         total, typed = service._load_cache_neuron_counts("hemibrain:v1.2.1")
