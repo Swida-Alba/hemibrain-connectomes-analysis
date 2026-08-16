@@ -1049,7 +1049,7 @@ def _datasets_share_population(dataset: str, other: str,
     older release's population stats are a valid baseline for the newer.
     """
     def _ids(ds: str):
-        p = root / "cache" / _dataset_folder(ds) / "neuron_index.parquet"
+        p = root / "neuron_indexes" / _dataset_folder(ds) / "neuron_index.parquet"
         if not p.exists():
             return None
         try:

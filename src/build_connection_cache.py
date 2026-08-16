@@ -139,7 +139,7 @@ def show_stats(dataset: str) -> None:
     print("=" * 60)
     
     conn_file = cache_dir / 'connections.parquet'
-    index_file = cache_dir / 'neuron_index.parquet'
+    index_file = project_root / 'neuron_indexes' / safe_name / 'neuron_index.parquet'
     
     if not conn_file.exists():
         print(f"\n[ERROR] Connection cache not found: {conn_file}")
