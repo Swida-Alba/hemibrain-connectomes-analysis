@@ -1135,6 +1135,49 @@ class TestRunner:
             for el in client.elements.values()
         )
 
+    def test_palette_dropdowns_embed_strip_previews_in_options(self):
+        """Both palette dropdowns embed a color strip beside each option name
+        so the palette is visible before it is selected."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.palette_picker import (
+            get_palette_catalog,
+            palette_editor,
+            sample_palette,
+        )
+
+        client = Client(page("/palette-editor-option-strips"))
+        with client:
+            palette_editor("Neuron Colors", value="Category10")
+
+        catalog = dict(get_palette_catalog())
+        selects = [
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") in {"Palette", "Bokeh palette"}
+        ]
+        assert len(selects) == 2
+        for select in selects:
+            options = select._props.get("options") or []
+            assert options and all(
+                isinstance(opt.get("label"), str) and "colors" in opt
+                for opt in options
+            )
+            assert "option" in select.slots
+            assert "drocat-select-palette-strip" in select.slots["option"].template
+            dark2 = next(opt for opt in options if opt["label"] == "Dark2")
+            assert dark2["colors"] == sample_palette(
+                catalog["Dark2"], len(catalog["Dark2"])
+            )
+            blues = next(opt for opt in options if opt["label"] == "Blues")
+            assert len(blues["colors"]) == 12  # long palettes are sampled
+
+        # Value semantics are unchanged: the option round-trips the name,
+        # and the enriched options survive the programmatic value update.
+        preset = next(s for s in selects if s._props.get("label") == "Palette")
+        preset.value = "Dark2"
+        assert preset.value == "Dark2"
+        assert "colors" in preset._props["options"][0]
+
     def test_palette_editor_drag_reorder_reset_and_range(self):
         """palette_editor exposes ONE interactive preview row: drag & drop
         reorders discrete colors, the range slider slices the palette live,
@@ -1316,7 +1359,7 @@ class TestRunner:
         )
         alpha_input = next(
             el for el in client.elements.values()
-            if getattr(el, "_props", {}).get("label") == "Alpha (0–1)"
+            if getattr(el, "_props", {}).get("label") == "Opacity (0–1)"
         )
         alpha_toggle = next(
             el for el in client.elements.values()
@@ -1408,7 +1451,7 @@ class TestRunner:
         )
         alpha_input = next(
             el for el in client.elements.values()
-            if getattr(el, "_props", {}).get("label") == "Alpha (0–1)"
+            if getattr(el, "_props", {}).get("label") == "Opacity (0–1)"
         )
         add_button = next(
             el for el in client.elements.values()
@@ -1433,7 +1476,7 @@ class TestRunner:
 
     def test_palette_editor_custom_color_preview_applies_alpha(self):
         """A square preview beside the custom color input shows the current
-        color live, with the Alpha override applied when enabled."""
+        color live, with the Opacity override applied when enabled."""
         from nicegui import Client
         from nicegui.page import page
         from ui.components.palette_picker import palette_editor
@@ -1458,7 +1501,7 @@ class TestRunner:
         )
         alpha_input = next(
             el for el in client.elements.values()
-            if getattr(el, "_props", {}).get("label") == "Alpha (0–1)"
+            if getattr(el, "_props", {}).get("label") == "Opacity (0–1)"
         )
         preview_square = next(
             el for el in client.elements.values()

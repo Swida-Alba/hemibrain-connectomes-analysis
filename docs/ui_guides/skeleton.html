@@ -85,7 +85,6 @@
         <li><b>Skeleton Mode</b>: tube (detailed) or line (fast).</li>
         <li><b>Neuron Legend Mode</b>: layer, type, or single. ROI meshes
           always keep independent legend entries.</li>
-        <li><b>Neuron Opacity</b>.</li>
         <li><b>Background</b>: white or black. The default neuron palette
           follows it — <b>Category10</b> on white, <b>Set3</b> on black —
           until you pick a palette manually.</li>
@@ -96,9 +95,13 @@
     <div class="card">
       <h3>Neuron Colors</h3>
       <ul>
+        <li><b>Neuron Opacity</b>: global fallback opacity for skeletons
+          (0=invisible, 1=solid).</li>
         <li>Full bokeh palette catalog with custom editing. Preset palettes
           are picked from a name dropdown with the full-palette preview
-          strip beside it (the same selector layout as the custom palette
+          strip beside it; every option in the dropdown list shows a mini
+          palette strip beside its name so palettes are visible before
+          selection (the same selector layout as the custom palette
           picker). One interactive preview row shows the current state:
           drag swatches to reorder discrete palettes, a live range slider
           selects part of the palette, and reset restores the original
@@ -107,9 +110,9 @@
           color formats, or individual swatches of any Bokeh palette (choose
           the palette in the dropdown, click a swatch to select it, then
           press <b>Add color</b>). A live square preview beside the color
-          value shows the result with the <b>Alpha override</b> applied; the
-          per-entry alpha wins over the global Neuron Opacity, while colors
-          without alpha inherit it.</li>
+          value shows the result with the <b>Opacity override</b> applied; the
+          per-entry opacity wins over the global Neuron Opacity, while colors
+          without an explicit opacity channel inherit it.</li>
         <li>Default follows the background (Category10 / Set3) until a palette
           is picked manually.</li>
       </ul>

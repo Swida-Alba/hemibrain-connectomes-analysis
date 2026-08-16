@@ -163,19 +163,6 @@ def skeleton_visualization_settings(
                 "white",
                 hint="Background color for the interactive scene and exported views.",
             )
-            fields["neuron_alpha"] = number_input(
-                "Neuron Opacity",
-                default_neuron_alpha,
-                0,
-                1,
-                0.1,
-                hint=(
-                    "Global fallback opacity for skeletons (0=invisible, 1=solid). "
-                    "A color with explicit alpha (#RGBA/#RRGGBBAA, rgba(), or an "
-                    "RGBA tuple) overrides this value for that layer; colors "
-                    "without alpha inherit it."
-                ),
-            )
             fields["brain_mesh"] = select_input(
                 "Brain Mesh",
                 BRAIN_MESH_OPTIONS,
@@ -191,12 +178,26 @@ def skeleton_visualization_settings(
                 hint="Show the ventral nerve cord mesh when the dataset supports it.",
             )
 
-        with ui.row().classes("w-full items-center gap-4"):
-            fields["neuron_colors"] = palette_editor(
-                "Neuron Colors",
-                value="Category10",
-                include_auto=False,
-            ).classes("flex-grow")
+        with ui.row().classes("w-full items-start gap-4"):
+            with ui.column().classes("flex-grow"):
+                fields["neuron_colors"] = palette_editor(
+                    "Neuron Colors",
+                    value="Category10",
+                    include_auto=False,
+                )
+                fields["neuron_alpha"] = number_input(
+                    "Neuron Opacity",
+                    default_neuron_alpha,
+                    0,
+                    1,
+                    0.1,
+                    hint=(
+                        "Global fallback opacity for skeletons (0=invisible, 1=solid). "
+                        "A color with an explicit opacity channel (#RGBA/#RRGGBBAA, "
+                        "rgba(), or an RGBA tuple) overrides this value for that "
+                        "layer; colors without opacity inherit it."
+                    ),
+                ).classes("w-48")
             fields["brain_mesh_color"] = color_swatch_picker(
                 "Brain Mesh Color",
                 value="auto",
@@ -239,9 +240,9 @@ def skeleton_visualization_settings(
                 1,
                 0.1,
                 hint=(
-                    "Global fallback opacity for synapse markers. Explicit alpha "
-                    "on each synapse color overrides this value; colors without "
-                    "alpha inherit it."
+                    "Global fallback opacity for synapse markers. A color with an "
+                    "explicit opacity channel overrides this value; colors "
+                    "without opacity inherit it."
                 ),
             )
             fields["mesh_alpha"] = number_input(
@@ -251,8 +252,9 @@ def skeleton_visualization_settings(
                 1,
                 0.05,
                 hint=(
-                    "Global fallback opacity for ROI meshes. Explicit per-ROI "
-                    "alpha overrides this value; colors without alpha inherit it."
+                    "Global fallback opacity for ROI meshes. A color with an "
+                    "explicit opacity channel overrides this value; colors "
+                    "without opacity inherit it."
                 ),
             )
         fields["synapse_colors"] = palette_editor(

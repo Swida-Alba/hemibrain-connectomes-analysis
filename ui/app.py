@@ -236,12 +236,36 @@ body.body--dark .drocat-tint-settings .drocat-group-tab.drocat-active { color: #
 /* The results mark keeps its white icon on a dark navy chip in both themes. */
 body.body--dark .drocat-results-mark { background: #1d2a42; }
 
-/* Dark-mode toggle in the header. */
+/* Theme picker in the header (System / Light / Dark). The button shows a
+   persistent sun | moon pair in every mode; the menu highlights the mode. */
 .drocat-dark-toggle {
     color: var(--drocat-muted) !important;
     font-size: 20px;
 }
 .drocat-dark-toggle:hover { color: var(--drocat-cobalt) !important; }
+.drocat-theme-icon-pair {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    line-height: 1;
+    /* 2/3 of the button's previous 20px icon size */
+    font-size: 13px;
+}
+.drocat-theme-sep {
+    width: 2.5px;
+    height: 12px;
+    border-radius: 999px;
+    background: var(--drocat-line-strong);
+}
+.drocat-theme-menu { min-width: 152px; }
+.drocat-theme-item { color: var(--drocat-muted); border-radius: 8px; }
+.drocat-theme-item .drocat-theme-icon { color: var(--drocat-muted); }
+.drocat-theme-item .drocat-theme-check { color: transparent; }
+.drocat-theme-item.drocat-theme-item-active,
+.drocat-theme-item.drocat-theme-item-active .drocat-theme-icon,
+.drocat-theme-item.drocat-theme-item-active .drocat-theme-check {
+    color: var(--drocat-cobalt) !important;
+}
 
 /* Token reminder box (Settings tab) follows the theme. */
 .drocat-token-reminder {
@@ -1443,6 +1467,13 @@ html, body {
 .drocat-palette-pick-swatch.selected {
     box-shadow: inset 0 0 0 2px var(--drocat-cobalt);
 }
+.drocat-select-palette-strip {
+    width: 56px;
+    height: 12px;
+    border-radius: 4px;
+    border: 1px solid var(--drocat-line);
+    flex: none;
+}
 .drocat-custom-color-row {
     padding: 4px 8px;
     border: 1px solid var(--drocat-line);
@@ -1611,10 +1642,19 @@ def main_page():
         "</script>"
     )
 
-    # Dark mode: NiceGUI's dark_mode element drives Quasar's body--dark class
-    # (all components, popups and menus re-theme with it). The persisted
-    # preference is restored here so the first paint already uses it.
+    # Theme: NiceGUI's dark_mode element drives Quasar's body--dark class
+    # (all components, popups and menus re-theme with it). The value None
+    # follows the OS preference live (Quasar auto mode listens to
+    # prefers-color-scheme on macOS and Windows); True/False force
+    # dark/light. The persisted preference is restored here so the first
+    # paint already uses it.
     dark = ui.dark_mode(value=_saved_dark_mode())
+
+    THEME_OPTIONS = [
+        ("System", "brightness_auto", None),
+        ("Light", "light_mode", False),
+        ("Dark", "dark_mode", True),
+    ]
 
     # Header
     with ui.header(elevated=False).classes("drocat-header items-center justify-between"):
@@ -1627,24 +1667,48 @@ def main_page():
         with ui.row().classes("items-center gap-4"):
             ui.label(f"v{APP_VERSION}").classes("drocat-version-pill")
             ui.link("Documentation", "docs/ui_guides/README.html").classes("drocat-header-link")
-            dark_toggle = ui.button(
-                icon="light_mode" if dark.value else "dark_mode"
-            ).props("flat round").classes("drocat-dark-toggle").tooltip(
-                "Toggle dark mode"
-            )
+            theme_button = ui.button().props("flat").classes(
+                "drocat-dark-toggle"
+            ).tooltip("Theme")
+            with theme_button:
+                with ui.element("div").classes("drocat-theme-icon-pair"):
+                    ui.icon("light_mode").classes("drocat-theme-sun")
+                    ui.element("div").classes("drocat-theme-sep")
+                    ui.icon("dark_mode").classes("drocat-theme-moon")
+                theme_menu = ui.menu().classes("drocat-theme-menu")
+            theme_items = {}
+            with theme_menu:
+                for label, icon, mode in THEME_OPTIONS:
+                    item = ui.item().props("clickable").classes(
+                        "drocat-theme-item"
+                    )
+                    with item:
+                        ui.icon(icon).classes("drocat-theme-icon")
+                        ui.label(label)
+                        ui.space()
+                        ui.icon("check").classes("drocat-theme-check")
+                    theme_items[mode] = item
+                    item.on_click(lambda _event=None, m=mode: _apply_theme(m, persist=True))
 
-            def _toggle_dark() -> None:
-                dark.toggle()
-                dark_toggle.props(
-                    f"icon={'light_mode' if dark.value else 'dark_mode'}"
-                )
-                ui.run_javascript(
-                    "document.cookie = 'drocat_dark="
-                    + ("1" if dark.value else "0")
-                    + "; max-age=31536000; path=/; SameSite=Lax'"
-                )
+            def _apply_theme(mode: bool | None, *, persist: bool) -> None:
+                dark.value = mode
+                for item_mode, item in theme_items.items():
+                    if item_mode is mode:
+                        item.classes(add="drocat-theme-item-active")
+                    else:
+                        item.classes(remove="drocat-theme-item-active")
+                # Persist only on user clicks; the initial restore already
+                # came from the cookie (writing during build would need the
+                # client loop, which UI tests do not run).
+                if persist:
+                    ui.run_javascript(
+                        "document.cookie = 'drocat_dark="
+                        + ("dark" if mode is True else "light" if mode is False else "auto")
+                        + "; max-age=31536000; path=/; SameSite=Lax'"
+                    )
 
-            dark_toggle.on_click(_toggle_dark)
+            # Highlight the active choice without touching the browser.
+            _apply_theme(dark.value, persist=False)
 
     # Main content
     with ui.column().classes("w-full drocat-shell gap-3"):

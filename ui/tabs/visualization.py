@@ -154,14 +154,6 @@ def create_skeleton_tab():
                              "'type': per neuron type. 'single': every neuron. "
                              "ROI meshes always remain separate.",
                     )
-                    neuron_alpha = number_input(
-                        "Neuron Opacity", 0.2, 0, 1, 0.1,
-                        hint=(
-                            "Global fallback opacity for skeletons (0=invisible, 1=solid). "
-                            "Explicit alpha in a layer color overrides it; colors without "
-                            "alpha inherit this value."
-                        ),
-                    )
                     bg_color = select_input(
                         "Background", ["white", "black"], "white",
                         hint="Background color for the 3D scene and exports. "
@@ -202,10 +194,19 @@ def create_skeleton_tab():
                     include_auto=False,
                     on_change=lambda: palette_locked.__setitem__("locked", True),
                 )
+                neuron_alpha = number_input(
+                    "Neuron Opacity", 0.2, 0, 1, 0.1,
+                    hint=(
+                        "Global fallback opacity for skeletons (0=invisible, 1=solid). "
+                        "A color with an explicit opacity channel overrides it; colors "
+                        "without opacity inherit this value."
+                    ),
+                ).classes("w-48")
                 ui.label(
                     "The default follows the background (Category10 on white, "
                     "Set3 on black) until a palette is picked manually. Custom colors "
-                    "may include per-layer alpha; colors without alpha use Neuron Opacity."
+                    "may include per-layer opacity; colors without an explicit "
+                    "opacity channel use Neuron Opacity."
                 ).classes("text-caption drocat-muted")
 
             # ------------------------------------------------------------------
@@ -220,7 +221,7 @@ def create_skeleton_tab():
                 )
                 ui.label(
                     "Colors are assigned per connection between consecutive layers "
-                    "(one fewer than the number of neuron layers). Custom alpha "
+                    "(one fewer than the number of neuron layers). Custom opacity "
                     "overrides Synapse Opacity per connection layer."
                 ).classes("text-caption drocat-muted")
                 ui.label("Synapse options").classes("drocat-mini-label")
@@ -240,8 +241,9 @@ def create_skeleton_tab():
                     synapse_alpha = number_input(
                         "Synapse Opacity", 0.6, 0, 1, 0.1,
                         hint=(
-                            "Global fallback opacity for synapse markers. Explicit alpha "
-                            "in a synapse color overrides it; colors without alpha inherit it."
+                            "Global fallback opacity for synapse markers. A color with "
+                            "an explicit opacity channel overrides it; colors without "
+                            "opacity inherit it."
                         ),
                     )
                     synapse_mode = select_input(
@@ -265,8 +267,9 @@ def create_skeleton_tab():
                     mesh_alpha = number_input(
                         "ROI Mesh Opacity", 0.1, 0, 1, 0.05,
                         hint=(
-                            "Global fallback opacity for ROI meshes. Explicit alpha in each "
-                            "ROI color overrides it; colors without alpha inherit it."
+                            "Global fallback opacity for ROI meshes. A color with an "
+                            "explicit opacity channel overrides it; colors without "
+                            "opacity inherit it."
                         ),
                     )
                 roi_select = multi_select_input(
@@ -290,7 +293,7 @@ def create_skeleton_tab():
                 )
                 ui.label(
                     "Colors are assigned in the displayed order; every resolved ROI mesh "
-                    "has its own legend entry. Use Custom colors for per-ROI alpha overrides."
+                    "has its own legend entry. Use Custom colors for per-ROI opacity overrides."
                 ).classes("text-caption drocat-muted")
                 brain_mesh_picker = color_swatch_picker("Brain Mesh Color", value="auto")
 

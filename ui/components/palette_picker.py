@@ -10,7 +10,7 @@ Visual color palette tools for DROCAT.
   Bokeh palette picker. Custom colors (mode toggle) are added via the
   native color picker, a Bokeh-palette swatch picker (choose any catalog
   palette and click a swatch), or a free-form color string, with an
-  optional per-entry alpha override, and reordered by dragging the list
+  optional per-entry opacity override, and reordered by dragging the list
   rows.
 - ``color_swatch_picker``: single-color swatches with a custom color input.
 """
@@ -30,17 +30,18 @@ COLOR_FORMAT_HINT = (
     "#RGB/#RGBA/#RRGGBB/#RRGGBBAA, RGB(A) tuples/lists with 0-255 "
     "channels or normalized 0-1 floats, CSS rgb()/rgba() (comma or "
     "space/slash syntax), and hsl()/hsla(). RGB channels may be percentages; "
-    "alpha may be 0-1, a percentage, or 0-255. Explicit alpha overrides "
-    "the global opacity for that entry; omit alpha to inherit it."
+    "the opacity channel may be 0-1, a percentage, or 0-255. An explicit "
+    "opacity channel overrides the global opacity for that entry; omit it "
+    "to inherit the default."
 )
 
 
 def _prepare_custom_color(
     value: str,
-    alpha_override: bool = False,
-    alpha_value: float = 1.0,
+    opacity_override: bool = False,
+    opacity_value: float = 1.0,
 ) -> str:
-    """Validate a custom color and optionally attach an explicit alpha."""
+    """Validate a custom color and optionally attach an explicit opacity."""
     raw = str(value or "").strip()
     if not raw:
         raise ValueError("Enter a color value first")
@@ -48,8 +49,8 @@ def _prepare_custom_color(
         raise ValueError("Use a concrete color for custom entries; 'auto' is a preset")
     # Parse once for an actionable error before storing the user's spelling.
     standardize_color(raw)
-    if alpha_override:
-        return color_to_rgba_string(raw, alpha=float(alpha_value))
+    if opacity_override:
+        return color_to_rgba_string(raw, alpha=float(opacity_value))
     return raw
 
 
@@ -184,6 +185,59 @@ class _PaletteSelection(list):
     def __init__(self, colors=(), *, continuous: bool = False):
         super().__init__(colors)
         self.is_continuous_palette = continuous
+
+
+# Option-slot template for palette dropdowns: renders the palette strip
+# beside the name so the palette is visible before it is selected.
+# NiceGUI compiles slot templates as an inline component exposing the slot
+# props under the variable ``props``; ``props.itemProps`` carries the
+# option's click handler (toggleOption), so the item stays selectable.
+_PALETTE_OPTION_SLOT = """
+<q-item v-bind="props.itemProps">
+    <q-item-section avatar class="q-pr-sm">
+        <div class="drocat-select-palette-strip"
+             :style="'background: linear-gradient(90deg, ' + (props.opt.colors || ['#94a3b8']).join(',') + ');'">
+        </div>
+    </q-item-section>
+    <q-item-section>
+        <q-item-label>{{ props.opt.label }}</q-item-label>
+    </q-item-section>
+</q-item>
+"""
+
+_SELECT_PALETTE_STRIP_SIZE = 12
+
+
+def _embed_palette_strips(select, names: List[str], color_lookup: dict) -> None:
+    """Embed a palette strip beside each name in a dropdown's options.
+
+    NiceGUI rebuilds ``_props['options']`` from the plain string options on
+    every update (e.g. when the value is set programmatically), so the
+    enriched options are re-applied inside an update hook. The ``option``
+    slot renders the strip next to the name; option labels stay plain
+    strings so the selected display and the value round-trip are unchanged.
+    """
+    strips = [
+        {
+            "value": index,
+            "label": name,
+            "colors": sample_palette(
+                color_lookup[name],
+                min(len(color_lookup[name]), _SELECT_PALETTE_STRIP_SIZE),
+            ),
+        }
+        for index, name in enumerate(names)
+    ]
+    original_update = select.update
+
+    def update_with_strips():
+        original_update()
+        with select._props.suspend_updates():
+            select._props["options"] = strips
+
+    select.update = update_with_strips
+    select.add_slot("option", _PALETTE_OPTION_SLOT)
+    update_with_strips()
 
 
 def normalize_palette_range(start_pct: int, end_pct: int) -> Tuple[int, int]:
@@ -388,16 +442,18 @@ def palette_editor(
     Features:
     - Preset palettes from bokeh.palettes, picked from a name dropdown
       with the full-palette preview strip beside it (the same name +
-      preview selector layout as the custom palette picker).
+      preview selector layout as the custom palette picker). Every
+      dropdown option embeds a mini palette strip beside its name, so
+      palettes are visible before selection.
     - The preview row shows the current state only: drag swatches to
       reorder discrete palettes, use the range slider to select part of
       the palette live, and hit reset (beside the preview) to restore the
       original order and the full range.
     - Custom colors: add single colors via the native picker, a Bokeh
       palette swatch grid (choose any catalog palette and click a swatch),
-      or a free-form color string; an optional alpha override is stored per
-      entry. Entries without an explicit alpha inherit the renderer's
-      global opacity.
+      or a free-form color string; an optional opacity override is stored
+      per entry. Entries without an explicit opacity channel inherit the
+      renderer's global opacity.
 
     ``on_change`` fires when the user manually edits the palette state
     (picking a palette in the dropdown, drag-reordering, adjusting the
@@ -556,6 +612,7 @@ def palette_editor(
                     "Pick a preset palette from the Bokeh catalog; the strip "
                     "beside it previews the full palette."
                 )
+                _embed_palette_strips(preset_select, names, dict(catalog))
                 preset_preview = ui.element("div").classes("flex-grow")
 
             def render_preset_preview():
@@ -629,24 +686,24 @@ def palette_editor(
                     "width:24px; height:24px; border-radius:6px; "
                     "border:1px solid rgba(11,31,58,.15); flex:none;"
                 ).tooltip(
-                    "Live preview of the current color with the Alpha "
+                    "Live preview of the current color with the Opacity "
                     "override applied."
                 )
-                alpha_override = ui.checkbox(
-                    "Alpha override", value=False
+                opacity_override = ui.checkbox(
+                    "Opacity override", value=False
                 ).tooltip(
-                    "When enabled, the Alpha value is embedded in this color and overrides the global opacity."
+                    "When enabled, the Opacity value is embedded in this color and overrides the global opacity."
                 )
-                alpha_value = ui.number(
-                    label="Alpha (0–1)",
+                opacity_value = ui.number(
+                    label="Opacity (0–1)",
                     value=1.0,
                     min=0,
                     max=1,
                     step=0.05,
                 ).classes("w-28").tooltip(
-                    "Per-entry alpha override. Leave the checkbox off to inherit the global opacity."
+                    "Per-entry opacity override. Leave the checkbox off to inherit the global opacity."
                 )
-                alpha_value.disable()
+                opacity_value.disable()
                 ui.button(
                     "Add color", icon="add", on_click=lambda: add_custom_color()
                 ).props("flat dense color=primary")
@@ -654,8 +711,8 @@ def palette_editor(
                 "Pick a color, click a Bokeh-palette swatch, or type a format and "
                 "press Add. Supported: named colors; #RGB/#RGBA/#RRGGBB/#RRGGBBAA; "
                 "RGB(A) 0–255 or normalized 0–1; rgb()/rgba(); hsl()/hsla(). "
-                "Explicit alpha overrides the global opacity, while colors without "
-                "alpha inherit it. Drag rows to reorder."
+                "An explicit opacity channel overrides the global opacity, while "
+                "colors without opacity inherit it. Drag rows to reorder."
             ).classes("text-caption drocat-muted")
 
             # Bokeh-palette source: pick individual colors from any catalog
@@ -669,6 +726,7 @@ def palette_editor(
                     "Pick individual colors from any Bokeh palette in the "
                     "catalog: click a swatch to select it, then press Add."
                 )
+                _embed_palette_strips(palette_select, names, dict(catalog))
                 swatch_grid = ui.element("div").classes("flex-grow")
 
             def render_picker_grid():
@@ -711,13 +769,13 @@ def palette_editor(
 
             def render_color_preview():
                 """Show the current color in the square preview, with the
-                Alpha override applied when enabled."""
+                Opacity override applied when enabled."""
                 raw = current_raw_color()
                 display = "transparent"
                 try:
-                    if bool(alpha_override.value):
+                    if bool(opacity_override.value):
                         display = color_to_rgba_string(
-                            raw, alpha=float(alpha_value.value or 1.0)
+                            raw, alpha=float(opacity_value.value or 1.0)
                         )
                     else:
                         standardize_color(raw)
@@ -738,14 +796,14 @@ def palette_editor(
                     state["custom_input_source"] = "text"
                 render_color_preview()
 
-            def on_alpha_override_change(event):
-                alpha_value.set_enabled(bool(event.value))
+            def on_opacity_override_change(event):
+                opacity_value.set_enabled(bool(event.value))
                 render_color_preview()
 
             color_input.on_value_change(on_picker_change)
             format_input.on_value_change(on_format_change)
-            alpha_override.on_value_change(on_alpha_override_change)
-            alpha_value.on_value_change(lambda _e: render_color_preview())
+            opacity_override.on_value_change(on_opacity_override_change)
+            opacity_value.on_value_change(lambda _e: render_color_preview())
             render_color_preview()
 
             # Draggable custom-color rows: same drag-and-drop mechanism as
@@ -794,8 +852,8 @@ def palette_editor(
                 try:
                     color = _prepare_custom_color(
                         raw,
-                        alpha_override=bool(alpha_override.value),
-                        alpha_value=float(alpha_value.value or 1.0),
+                        opacity_override=bool(opacity_override.value),
+                        opacity_value=float(opacity_value.value or 1.0),
                     )
                 except (TypeError, ValueError) as exc:
                     ui.notify(str(exc), type="warning")
@@ -865,7 +923,7 @@ def color_swatch_picker(
     value: str = "auto",
     options: Optional[List[Tuple[str, str]]] = None,
 ) -> ui.element:
-    """Single-color swatches with free-form color and alpha support."""
+    """Single-color swatches with free-form color and opacity support."""
     options = options or [
         ("auto", "Auto"),
         ("#94a3b8", "Gray"),
@@ -902,7 +960,7 @@ def color_swatch_picker(
 
         with ui.row().classes("w-full items-center gap-2"):
             custom_input = ui.color_input(value="#3b82f6").props("dense").tooltip(
-                "Quick opaque color picker; use Color format for alpha or other syntax."
+                "Quick opaque color picker; use Color format for opacity or other syntax."
             )
             format_input = ui.input(
                 label="Color format",
@@ -911,29 +969,30 @@ def color_swatch_picker(
             ).props("dense outlined").classes("flex-grow").tooltip(
                 COLOR_FORMAT_HINT
             )
-            alpha_override = ui.checkbox(
-                "Alpha override", value=False
+            opacity_override = ui.checkbox(
+                "Opacity override", value=False
             ).tooltip(
-                "Embed a per-mesh alpha that overrides any global opacity."
+                "Embed a per-mesh opacity that overrides any global opacity."
             )
-            alpha_value = ui.number(
-                label="Alpha (0–1)",
+            opacity_value = ui.number(
+                label="Opacity (0–1)",
                 value=1.0,
                 min=0,
                 max=1,
                 step=0.05,
             ).classes("w-28").tooltip(
-                "Per-color alpha override. Leave it off to inherit the global opacity."
+                "Per-color opacity override. Leave it off to inherit the global opacity."
             )
-            alpha_value.disable()
+            opacity_value.disable()
             ui.button(
                 "Use custom color", on_click=lambda: select_custom_color()
             ).props("flat dense color=primary")
 
         ui.label(
             "Accepted: named colors; #RGB/#RGBA/#RRGGBB/#RRGGBBAA; RGB(A) "
-            "0–255 or normalized 0–1; rgb()/rgba(); hsl()/hsla(). Explicit "
-            "alpha wins for this mesh; omit it to inherit the global opacity."
+            "0–255 or normalized 0–1; rgb()/rgba(); hsl()/hsla(). An explicit "
+            "opacity channel wins for this mesh; omit it to inherit the "
+            "global opacity."
         ).classes("text-caption drocat-muted")
 
         def on_picker_change(event):
@@ -948,8 +1007,8 @@ def color_swatch_picker(
 
         custom_input.on_value_change(on_picker_change)
         format_input.on_value_change(on_format_change)
-        alpha_override.on_value_change(
-            lambda event: alpha_value.set_enabled(bool(event.value))
+        opacity_override.on_value_change(
+            lambda event: opacity_value.set_enabled(bool(event.value))
         )
 
         def select(option_value: str):
@@ -970,8 +1029,8 @@ def color_swatch_picker(
             try:
                 color = _prepare_custom_color(
                     raw,
-                    alpha_override=bool(alpha_override.value),
-                    alpha_value=float(alpha_value.value or 1.0),
+                    opacity_override=bool(opacity_override.value),
+                    opacity_value=float(opacity_value.value or 1.0),
                 )
             except (TypeError, ValueError) as exc:
                 ui.notify(str(exc), type="warning")
