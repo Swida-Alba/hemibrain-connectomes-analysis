@@ -91,19 +91,20 @@ def _saved_dark_mode() -> bool | None:
     Values: ``True`` = dark, ``False`` = light, ``None`` = follow the
     system preference. The cookie stores 'dark', 'light' or 'auto' (older
     versions stored '1'/'0') so a reload restores the chosen mode without
-    a flash. Falls back to light when no request context exists (script
-    mode, UI tests).
+    a flash. Falls back to system mode when no preference is saved yet or
+    no request context exists (script mode, UI tests).
     """
     try:
         request = ui.context.client.request
     except Exception:
-        return False
+        return None
     saved = request.cookies.get("drocat_dark")
     if saved in ("1", "dark"):
         return True
-    if saved == "auto":
-        return None
-    return False
+    if saved in ("0", "light"):
+        return False
+    # 'auto', missing, or unrecognized -> follow the OS preference.
+    return None
 
 
 from ui.tabs import (
@@ -248,12 +249,15 @@ body.body--dark .drocat-results-mark { background: #1d2a42; }
     align-items: center;
     gap: 5px;
     line-height: 1;
-    /* 2/3 of the button's previous 20px icon size */
-    font-size: 13px;
+}
+.drocat-theme-icon-pair .q-icon {
+    /* NiceGUI renders q-icon at 1.715em (the button was 20px -> 34.3px);
+       pin the icons to exactly 2/3 of that previous size. */
+    font-size: 22.9px;
 }
 .drocat-theme-sep {
     width: 2.5px;
-    height: 12px;
+    height: 14px;
     border-radius: 999px;
     background: var(--drocat-line-strong);
 }

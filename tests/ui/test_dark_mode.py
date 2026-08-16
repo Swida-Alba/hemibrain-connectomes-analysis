@@ -96,13 +96,13 @@ def test_button_shows_sun_moon_pair_in_every_mode(monkeypatch):
         assert moon._props.get("name") == "dark_mode"
 
 
-def test_default_theme_is_light_with_active_highlight():
-    """Without a saved preference the UI starts light, Light highlighted."""
+def test_default_theme_is_system_with_active_highlight():
+    """Without a saved preference the UI follows the OS, System highlighted."""
     client = _build_page()
     items = _theme_items(client)
-    assert _dark(client).value is False
-    assert "drocat-theme-item-active" in items[1]._classes
-    assert "drocat-theme-item-active" not in items[0]._classes
+    assert _dark(client).value is None
+    assert "drocat-theme-item-active" in items[0]._classes
+    assert "drocat-theme-item-active" not in items[1]._classes
     assert "drocat-theme-item-active" not in items[2]._classes
 
 
@@ -158,16 +158,16 @@ def test_saved_dark_mode_reads_cookie_values(monkeypatch):
         ({"drocat_dark": "light"}, False),
         ({"drocat_dark": "0"}, False),  # legacy value
         ({"drocat_dark": "auto"}, None),
-        ({}, False),                    # no cookie -> light
+        ({}, None),                     # no cookie -> system
     ]:
         monkeypatch.setattr(app_module.ui, "context",
                             SimpleNamespace(client=_Client(cookies)))
         assert app_module._saved_dark_mode() is expected
 
 
-def test_saved_dark_mode_falls_back_without_request_context():
-    """Outside a request context (script mode, UI tests) return light."""
-    assert app_module._saved_dark_mode() is False
+def test_saved_dark_mode_defaults_to_system_without_request_context():
+    """Outside a request context (script mode, UI tests) default to system."""
+    assert app_module._saved_dark_mode() is None
 
 
 def test_theme_css_contains_picker_rules():
@@ -180,5 +180,6 @@ def test_theme_css_contains_picker_rules():
     # The separator is a thick vertical line, not a text glyph.
     assert "width: 2.5px;" in app_module.DROCAT_CSS
     assert "border-radius: 999px;" in app_module.DROCAT_CSS
-    # Icons render at 2/3 of the previous 20px size.
-    assert "font-size: 13px;" in app_module.DROCAT_CSS
+    # Icons render at exactly 2/3 of the previous 34.3px size.
+    assert ".drocat-theme-icon-pair .q-icon" in app_module.DROCAT_CSS
+    assert "font-size: 22.9px;" in app_module.DROCAT_CSS
