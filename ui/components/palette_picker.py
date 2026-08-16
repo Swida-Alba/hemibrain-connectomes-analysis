@@ -5,10 +5,13 @@ Visual color palette tools for DROCAT.
 - ``palette_editor``: palette editor with ONE interactive preview row -
   drag-and-drop reordering of discrete colors, a live range slider, and a
   reset button beside the preview (the current state is the only preview).
-  Custom colors (mode toggle) are added via the native color picker, a
-  Bokeh-palette swatch picker (choose any catalog palette and click a
-  swatch), or a free-form color string, with an optional per-entry alpha
-  override, and reordered by dragging the list rows.
+  Preset palettes are picked from a name dropdown with the full-palette
+  preview strip beside it - the same selector layout as the custom mode's
+  Bokeh palette picker. Custom colors (mode toggle) are added via the
+  native color picker, a Bokeh-palette swatch picker (choose any catalog
+  palette and click a swatch), or a free-form color string, with an
+  optional per-entry alpha override, and reordered by dragging the list
+  rows.
 - ``color_swatch_picker``: single-color swatches with a custom color input.
 """
 
@@ -377,14 +380,15 @@ def palette_editor(
     label: str,
     value: Optional[str] = None,
     include_auto: bool = False,
-    max_height: int = 220,
     on_change: Optional[Callable] = None,
 ) -> ui.element:
     """
     Palette editor with ONE interactive preview row.
 
     Features:
-    - Preset palettes from bokeh.palettes with full-gradient previews
+    - Preset palettes from bokeh.palettes, picked from a name dropdown
+      with the full-palette preview strip beside it (the same name +
+      preview selector layout as the custom palette picker).
     - The preview row shows the current state only: drag swatches to
       reorder discrete palettes, use the range slider to select part of
       the palette live, and hit reset (beside the preview) to restore the
@@ -396,10 +400,11 @@ def palette_editor(
       global opacity.
 
     ``on_change`` fires when the user manually edits the palette state
-    (picking a preset card, drag-reordering, adjusting the range, resetting);
-    callers use it to stop auto-following e.g. the background color. The
-    returned container also gains ``set_palette(name)`` for programmatic
-    palette switching, which does NOT fire ``on_change``.
+    (picking a palette in the dropdown, drag-reordering, adjusting the
+    range, resetting); callers use it to stop auto-following e.g. the
+    background color. The returned container also gains
+    ``set_palette(name)`` for programmatic palette switching, which does
+    NOT fire ``on_change``.
     """
     catalog = list(get_palette_catalog())
     if include_auto:
@@ -417,10 +422,10 @@ def palette_editor(
         "preset_orders": {},
         "custom_input_source": "picker",
         "syncing_custom_input": False,
+        "syncing_preset_select": False,
         "picked_color": None,
         "picker_palette": "Category10",
     }
-    cards: List[Tuple[ui.element, str]] = []
 
     def palette_colors(name: Optional[str] = None) -> List[str]:
         palette_name = name or state["palette"]
@@ -541,21 +546,30 @@ def palette_editor(
 
         # ---------------- Preset panel ----------------
         with ui.column().classes("w-full gap-1") as preset_panel:
-            with ui.expansion("Choose palette", icon="palette").classes(
-                "w-full drocat-palette-expansion"
-            ):
-                with ui.element("div").classes("drocat-palette-grid").style(
-                    f"max-height:{max_height}px"
-                ):
-                    for name, colors in catalog:
-                        card = ui.element("div").classes(
-                            "drocat-palette-card"
-                            + (" selected" if name == state["palette"] else "")
-                        ).on("click", lambda n=name: select_preset(n))
-                        with card:
-                            _render_color_strip(colors, height=18)
-                            ui.label(name).classes("drocat-palette-name")
-                            cards.append((card, name))
+            # Same name + preview selector as the custom panel's Bokeh
+            # palette picker: the palette dropdown sits left of the live
+            # full-palette preview strip.
+            with ui.row().classes("w-full items-center gap-2"):
+                preset_select = ui.select(
+                    options=names, value=state["palette"], label="Palette"
+                ).props("dense outlined").classes("w-56").tooltip(
+                    "Pick a preset palette from the Bokeh catalog; the strip "
+                    "beside it previews the full palette."
+                )
+                preset_preview = ui.element("div").classes("flex-grow")
+
+            def render_preset_preview():
+                preset_preview.clear()
+                with preset_preview:
+                    _render_color_strip(palette_colors(), height=20)
+
+            def on_preset_select_change(event):
+                if state["syncing_preset_select"]:
+                    return
+                apply_palette(event.value or state["palette"], notify=True)
+
+            preset_select.on_value_change(on_preset_select_change)
+            render_preset_preview()
 
             with ui.row().classes("w-full items-center gap-2"):
                 ui.label("Palette range").classes("text-caption drocat-muted")
@@ -798,20 +812,16 @@ def palette_editor(
         def apply_palette(name: str, notify: bool = False):
             state["palette"] = name
             container.value = name
-            for element, card_name in cards:
-                element.classes(
-                    replace="drocat-palette-card"
-                    + (" selected" if card_name == name else "")
-                )
+            state["syncing_preset_select"] = True
+            preset_select.value = name
+            state["syncing_preset_select"] = False
+            render_preset_preview()
             range_slider.value = {"min": state["start"], "max": state["end"]}
             range_start_label.text = str(state["start"])
             range_end_label.text = str(state["end"])
             render_preview()
             if notify and on_change:
                 on_change()
-
-        def select_preset(name: str):
-            apply_palette(name, notify=True)
 
         def reset_all():
             """Restore the original palette order/range (or clear custom colors)."""

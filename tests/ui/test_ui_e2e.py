@@ -1071,7 +1071,8 @@ class TestRunner:
 
     def test_palette_editor_set_palette_and_on_change(self):
         """palette_editor exposes set_palette() (programmatic, no callback)
-        and fires on_change only when the user picks a palette card."""
+        and fires on_change only when the user picks a palette in the
+        dropdown."""
         from nicegui import Client
         from nicegui.page import page
         from ui.components.palette_picker import palette_editor
@@ -1092,16 +1093,47 @@ class TestRunner:
         assert editor.get_colors()[0] == "#8dd3c7"  # Set3 teal
         assert changes == []
 
-        # A user card click fires on_change
-        label = next(
+        # A user dropdown pick fires on_change
+        palette_select = next(
             el for el in client.elements.values()
-            if getattr(el, "text", "") == "Dark2"
+            if getattr(el, "_props", {}).get("label") == "Palette"
         )
-        card = label.parent_slot.parent
-        click_listener = next(iter(card._event_listeners.values()))
-        click_listener.handler()
+        palette_select.value = "Dark2"
         assert editor.get_value() == "Dark2"
         assert changes == ["manual"]
+
+    def test_palette_editor_preset_selector_uses_dropdown_with_preview(self):
+        """The preset palette picker is the same name + preview selector as
+        the custom panel: a palette dropdown with the full-palette preview
+        strip beside it (the card grid is gone)."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.palette_picker import palette_editor
+
+        client = Client(page("/palette-editor-preset-selector"))
+        with client:
+            editor = palette_editor("Neuron Colors", value="Category10")
+
+        # No card grid remains in the preset panel.
+        assert not any(
+            "drocat-palette-card" in getattr(el, "_classes", [])
+            for el in client.elements.values()
+        )
+        palette_select = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Palette"
+        )
+        assert palette_select.value == "Category10"
+
+        # Picking another palette updates the state and the preview strip
+        # beside the dropdown.
+        palette_select.value = "Dark2"
+        assert editor.get_value() == "Dark2"
+        assert editor.get_colors() == editor.get_palette_order()
+        assert any(
+            "#1b9e77" in getattr(el, "_style", {}).get("background", "")
+            for el in client.elements.values()
+        )
 
     def test_palette_editor_drag_reorder_reset_and_range(self):
         """palette_editor exposes ONE interactive preview row: drag & drop
