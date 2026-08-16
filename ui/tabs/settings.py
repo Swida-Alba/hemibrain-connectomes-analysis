@@ -20,6 +20,7 @@ from ..components.common import (
     dataset_multi_selector,
     dataset_status_card,
     dir_input,
+    refresh_dataset_selector_statuses,
     section_header,
     sync_output_dir_fields,
 )
@@ -112,6 +113,7 @@ def create_settings_tab():
             progress = ui.linear_progress(value=0).props("instant-feedback").classes("w-full")
             status_label = ui.label("Idle").classes("text-caption drocat-muted")
             result_label = ui.label("").classes("text-caption")
+            pull_done_synced = {"value": False}
 
             def refresh_pull_state():
                 st = puller.state
@@ -124,6 +126,7 @@ def create_settings_tab():
                 batch_input.set_enabled(not st["running"])
                 parallel_input.set_enabled(not st["running"])
                 if st["running"]:
+                    pull_done_synced["value"] = False
                     total = st["total"] or 1
                     frac = min(st["current"] / total, 1.0)
                     progress.set_value(frac)
@@ -135,6 +138,12 @@ def create_settings_tab():
                     return
                 if not st["done"]:
                     return
+                if not pull_done_synced["value"]:
+                    # A pull creates the local cache files directly. Refresh
+                    # selector labels immediately so they do not wait for a
+                    # full page rebuild (or a separate availability refresh).
+                    refresh_dataset_selector_statuses()
+                    pull_done_synced["value"] = True
                 if st["error"]:
                     status_label.text = "Failed"
                     result_label.text = f"❌ {st['error']}"
@@ -167,6 +176,7 @@ def create_settings_tab():
                     cancel_btn.set_enabled(True)
                     result_label.text = ""
                     progress.set_value(0)
+                    pull_done_synced["value"] = False
                 else:
                     ui.notify("A dataset pull is already running", type="warning")
 

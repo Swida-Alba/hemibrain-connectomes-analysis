@@ -18,6 +18,7 @@ import inspect
 import json
 import platform
 import subprocess
+import weakref
 
 from .. import group_history
 from ..config import (
@@ -242,6 +243,55 @@ def param_grid(columns: int = 2):
 # Dataset Selector
 # =============================================================================
 
+# Dataset selectors are created before the Settings tab's availability card.
+# Keep weak references so a completed availability refresh can update every
+# live selector without keeping closed NiceGUI clients alive.
+_DATASET_SELECTORS = weakref.WeakSet()
+
+
+def _register_dataset_selector(selector, options, service) -> None:
+    """Track a status-aware selector for later availability refreshes."""
+    selector._drocat_dataset_options = tuple(options)
+    selector._drocat_dataset_service = service
+    _DATASET_SELECTORS.add(selector)
+
+
+def refresh_dataset_selector_statuses(service=None) -> int:
+    """Refresh local/server suffixes on all live dataset selectors.
+
+    Select option labels are static after construction.  The Settings
+    availability card therefore calls this after a refresh so a newly pulled
+    dataset is not left displayed as ``☁ server`` until the page is rebuilt.
+
+    Returns the number of selectors updated.  A selector whose client was
+    already torn down is ignored; the weak set drops it on its own.
+    """
+    if service is None:
+        from ..dataset_service import get_dataset_service
+
+        service = get_dataset_service()
+
+    updated = 0
+    for selector in tuple(_DATASET_SELECTORS):
+        if getattr(selector, "_drocat_dataset_service", service) is not service:
+            continue
+        options = getattr(selector, "_drocat_dataset_options", ())
+        if not options:
+            continue
+        try:
+            labels = {
+                dataset: "  ".join(_dataset_label_parts(dataset, service))
+                for dataset in options
+            }
+            selector.set_options(labels, value=selector.value)
+            updated += 1
+        except RuntimeError:
+            # NiceGUI can delete a client between the timer callback and this
+            # update. Its weak reference will disappear after teardown.
+            continue
+    return updated
+
+
 def _dataset_label_parts(ds: str, service) -> List[str]:
     """Build the option label parts with source + local status tags."""
     src_tag = "[FW]" if ds.startswith("flywire_") else "[NP]"
@@ -251,15 +301,16 @@ def _dataset_label_parts(ds: str, service) -> List[str]:
         status_tag = "✓ local"
     elif info and info.local_cache:
         status_tag = "◐ cached"
-    elif info and info.available:
-        status_tag = "☁ server"
     else:
+        # A pull can finish after the selector's DatasetInfo was cached. The
+        # local files are authoritative for this UI label, so check them
+        # before falling back to the cached server flag.
         if service._check_local_prepared(ds):
             status_tag = "✓ local"
         elif service._check_local_cache(ds):
             status_tag = "◐ cached"
-        else:
-            status_tag = ""
+        elif info and info.available:
+            status_tag = "☁ server"
     return [ds, src_tag] + ([status_tag] if status_tag else [])
 
 
@@ -299,6 +350,8 @@ def dataset_selector(
         value=default_val,
         label=label,
     ).props("outlined").classes("w-full drocat-select").tooltip(hint)
+    if show_local_status:
+        _register_dataset_selector(sel, options, service)
     if disable_banc:
         # NiceGUI converts its Python option mapping to QSelect options with
         # ``label`` and an internal index.  Use the rendered label as the
@@ -363,6 +416,8 @@ def dataset_multi_selector(
     ).props("outlined").classes("w-full drocat-select").props(
         "use-chips use-input"
     ).tooltip(hint)
+    if show_local_status:
+        _register_dataset_selector(sel, options, service)
     return sel
 
 
@@ -2313,18 +2368,18 @@ def dataset_status_card() -> ui.card:
                             ui.badge(src_badge_text, color=src_badge_color).props("outline")
                             ui.badge("local", color="green").props("outline")
                             count_badge(info, "green")
-                        elif info.available:
-                            ui.icon("cloud_done", color="blue")
-                            ui.label(info.display_name or name).classes("font-medium flex-grow")
-                            ui.badge(src_badge_text, color=src_badge_color).props("outline")
-                            ui.badge("server", color="blue").props("outline")
-                            count_badge(info, "blue")
                         elif info.local_cache:
                             ui.icon("cached", color="orange")
                             ui.label(info.display_name or name).classes("font-medium flex-grow")
                             ui.badge(src_badge_text, color=src_badge_color).props("outline")
                             ui.badge("cached", color="orange").props("outline")
                             count_badge(info, "orange")
+                        elif info.available:
+                            ui.icon("cloud_done", color="blue")
+                            ui.label(info.display_name or name).classes("font-medium flex-grow")
+                            ui.badge(src_badge_text, color=src_badge_color).props("outline")
+                            ui.badge("server", color="blue").props("outline")
+                            count_badge(info, "blue")
                         else:
                             ui.icon("cloud_off", color="grey")
                             ui.label(info.display_name or name).classes("font-medium flex-grow drocat-muted")
@@ -2336,6 +2391,7 @@ def dataset_status_card() -> ui.card:
         # NeuPrint token or is working offline.  Avoid any network call here.
         if cached_results:
             render_results(cached_results, cached_updated_at)
+            refresh_dataset_selector_statuses(service)
         else:
             # Local status is useful even when the user has not configured a
             # NeuPrint token or is working offline. Avoid any network call on
@@ -2347,6 +2403,7 @@ def dataset_status_card() -> ui.card:
             }
             if local_results:
                 render_results(local_results)
+                refresh_dataset_selector_statuses(service)
 
         def render_error(msg):
             status_container.clear()
@@ -2388,6 +2445,7 @@ def dataset_status_card() -> ui.card:
             state["done"] = False
             if state["results"] is not None:
                 render_results(state["results"], state.get("updated_at"))
+                refresh_dataset_selector_statuses(service)
             elif state["error"] is not None:
                 render_error(state["error"])
             refresh_btn.enable()
