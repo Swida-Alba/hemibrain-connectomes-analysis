@@ -1321,6 +1321,11 @@ class TestProfileFirst:
         write_neuron_index(tmp_path, "np:v1", [
             (101, "T", "T_1"), (201, "T", "T_2"), (202, "Y", "Y_1"),
         ])
+        # The pull marker that makes the index authoritative for skeleton
+        # workflows (a shipped seed alone must not authorize bulk fetches).
+        cache_dir = tmp_path / "cache" / "np_v1"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "connections.parquet").touch()
         fetched = []
 
         def fake_fetch(dataset, bid, project_root=None, persist=True):
@@ -1357,6 +1362,9 @@ class TestProfileFirst:
         write_neuron_index(tmp_path, "np:v1", [
             (101, "T", "T_1"), (201, "T", "T_2"), (202, "Y", "Y_1"),
         ])
+        cache_dir = tmp_path / "cache" / "np_v1"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "connections.parquet").touch()
         monkeypatch.setattr(morph, "fetch_skeleton_on_demand",
                             lambda d, b, project_root=None, persist=True:
                             line_neuron(length=25))
@@ -1921,3 +1929,41 @@ class TestVectorPersistence:
         added = cache.append_vectors([(101, X[0], "skeleton")])
         assert added == 0
         assert len(cache.load()["bodyIds"]) == before
+
+
+def test_seed_index_alone_does_not_authorize_skeleton_downloads(tmp_path):
+    """A shipped seed index with no local data must not drive skeleton fetches.
+
+    The bundled neuron-index seeds only support search surfaces.  On a fresh
+    clone (no prepared tables, no cached connections, no skeletons) the seed
+    must not be treated as the authoritative neuron list for bulk downloads,
+    so the full dataset pull remains the required first step.
+    """
+    import pandas as pd
+
+    folder = tmp_path / "neuron_indexes" / morph._dataset_folder("seed-only:v1.0")
+    folder.mkdir(parents=True)
+    pd.DataFrame(
+        {"bodyId": [1, 2, 3], "type": ["A", "A", "B"], "instance": ["A1", "A2", "B1"]}
+    ).to_parquet(folder / "neuron_index.parquet", index=False)
+
+    result = morph.download_all_skeletons(
+        "seed-only:v1.0", project_root=str(tmp_path), verbose=False
+    )
+    assert result["total"] == 0
+    assert result["fetched"] == 0
+
+
+def test_seed_index_fallback_active_once_dataset_is_local(tmp_path):
+    """With cached skeletons present, the index fallback authorizes fetches again."""
+    import pandas as pd
+
+    write_neuron_index(tmp_path, "np:v1", [(101, "A", "A1"), (102, "B", "B1")])
+    write_skeleton(tmp_path, "np:v1", 101, line_neuron())
+
+    folder = tmp_path / "neuron_indexes" / morph._dataset_folder("np:v1")
+    assert folder.exists()
+    assert morph._has_local_dataset_presence("np:v1", tmp_path) is True
+
+    index = morph._load_neuron_type_map("np:v1", project_root=str(tmp_path))
+    assert index[0] == {101: "A", 102: "B"}

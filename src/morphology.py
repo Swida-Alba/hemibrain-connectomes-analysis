@@ -94,6 +94,29 @@ def _dataset_folder(dataset: str) -> str:
     return dataset.replace(":", "_").replace(".", "_")
 
 
+def _has_local_dataset_presence(dataset: str, root: Path) -> bool:
+    """Whether the dataset has real local data beyond a shipped index seed.
+
+    The bundled neuron-index seeds only support search surfaces (auto-suggest,
+    the available-neurons viewer, name resolution).  Skeleton workflows must
+    not treat a seed as the authoritative neuron list of a pulled dataset:
+    the index fallback is therefore only used when prepared tables, cached
+    connections, or cached skeletons show the dataset is genuinely local, so
+    a fresh clone never triggers bulk fetches from a seed alone.
+    """
+    folder = _dataset_folder(dataset)
+    dataset_dir = root / "datasets" / folder
+    if dataset_dir.is_dir() and any(dataset_dir.glob("*_neuron_df.*")):
+        return True
+    cache_dir = root / "cache" / folder
+    if (cache_dir / "connections.parquet").exists():
+        return True
+    skeletons = cache_dir / "skeletons"
+    if skeletons.is_dir() and any(skeletons.rglob("*.pkl")):
+        return True
+    return False
+
+
 def compute_morphometrics(neuron) -> Dict[str, float]:
     """Compute the curated L-Measure-style morphometric feature set.
 
@@ -421,7 +444,7 @@ def _load_neuron_type_map(dataset: str, project_root: Optional[str] = None
             pass
 
     index_path = root / "neuron_indexes" / folder / "neuron_index.parquet"
-    if index_path.exists():
+    if index_path.exists() and _has_local_dataset_presence(dataset, root):
         try:
             idx_df = pd.read_parquet(index_path, columns=["bodyId", "type", "instance"])
             idx_df["bodyId"] = idx_df["bodyId"].astype(np.int64)
@@ -669,7 +692,9 @@ class SkeletonVectorCache:
         if fetch_missing and fetch_missing > 0:
             index_path = self.project_root / "neuron_indexes" / _dataset_folder(self.dataset) / "neuron_index.parquet"
             index: List[int] = []
-            if index_path.exists():
+            if index_path.exists() and _has_local_dataset_presence(
+                self.dataset, Path(self.project_root)
+            ):
                 try:
                     idx_df = pd.read_parquet(index_path, columns=["bodyId"])
                     index = [int(b) for b in idx_df["bodyId"].tolist()]
@@ -1374,7 +1399,7 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
             index = []
     if not index:
         index_path = root / "neuron_indexes" / folder / "neuron_index.parquet"
-        if index_path.exists():
+        if index_path.exists() and _has_local_dataset_presence(dataset, root):
             try:
                 index = pd.read_parquet(index_path, columns=["bodyId"])["bodyId"] \
                     .astype(np.int64).tolist()
