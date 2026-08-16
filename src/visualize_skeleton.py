@@ -3814,7 +3814,10 @@ class VisualizeSkeleton:
 
         n_nodes_total = 0
         for n in neurons:
-            if hasattr(n, 'n_nodes'):
+            # MeshNeurons report ``n_nodes`` as None (navis does not
+            # implement it for meshes); count vertices instead so the
+            # progress display never crashes on tube meshes.
+            if hasattr(n, 'n_nodes') and n.n_nodes is not None:
                 n_nodes_total += int(n.n_nodes)
             elif hasattr(n, 'vertices') and getattr(n, 'vertices', None) is not None:
                 n_nodes_total += len(n.vertices)
@@ -5765,8 +5768,11 @@ class VisualizeSkeleton:
         import navis
         nn = neuron
         try:
-            nn = navis.smooth_skeleton(
-                nn, window=self.NEUPRINT_PATH_SMOOTH_WINDOW)
+            # navis prints its own per-segment "Smoothing" bar; suppress it
+            # so the shared layer bar stays the single progress row.
+            with self._suppress_output():
+                nn = navis.smooth_skeleton(
+                    nn, window=self.NEUPRINT_PATH_SMOOTH_WINDOW)
         except Exception:
             pass  # keep the raw path if smoothing is unavailable
         edges = self._neuron_edge_lengths(nn)
@@ -5774,7 +5780,8 @@ class VisualizeSkeleton:
             target = max(1.0, float(np.median(edges))
                          / self.NEUPRINT_RESAMPLE_DIVISOR)
             try:
-                nn = navis.resample_skeleton(nn, resample_to=target)
+                with self._suppress_output():
+                    nn = navis.resample_skeleton(nn, resample_to=target)
             except Exception:
                 pass
         return self._fafb_style_radius(nn)
@@ -6792,7 +6799,13 @@ class VisualizeSkeleton:
                         max_retries = 5
                         for attempt in range(max_retries):
                             try:
-                                raw_neuron_vols = self.client_flywire.fetch_skeletons(self.layer_criteria[i], with_synapses=self.show_connectors)
+                                layer_pbar.set_postfix_str(
+                                    f"{layer_name} (fetching {len(fetch_ids)} skeletons...)")
+                                # navis prints its own "Fetching" bar;
+                                # suppress it and keep the shared layer bar
+                                # as the single progress row.
+                                with self._suppress_output():
+                                    raw_neuron_vols = self.client_flywire.fetch_skeletons(self.layer_criteria[i], with_synapses=self.show_connectors)
                                 break  # Success
                             except Exception as e:
                                 error_msg = str(e)
@@ -6829,7 +6842,13 @@ class VisualizeSkeleton:
                             max_retries = 5
                             for attempt in range(max_retries):
                                 try:
-                                    raw_neuron_vols = neu.fetch_skeletons(missing_df, **kwargs)
+                                    layer_pbar.set_postfix_str(
+                                        f"{layer_name} (fetching {len(fetch_ids)} skeletons...)")
+                                    # neu.fetch_skeletons prints its own
+                                    # "Fetching" bar; suppress it and keep the
+                                    # shared layer bar as the single row.
+                                    with self._suppress_output():
+                                        raw_neuron_vols = neu.fetch_skeletons(missing_df, **kwargs)
                                     break  # Success
                                 except Exception as e:
                                     error_msg = str(e)
@@ -6855,9 +6874,16 @@ class VisualizeSkeleton:
                 # line mode) are left untouched.
                 render_neuron_vols = raw_neuron_vols
                 if (not is_fafb and self.skeleton_mode == 'tube'
-                        and self._resolved_skeleton_radius_style() == 'fafb'):
+                        and self._resolved_skeleton_radius_style() == 'fafb'
+                        and raw_neuron_vols is not None):
                     transformed = []
-                    for n in raw_neuron_vols:
+                    total = len(raw_neuron_vols)
+                    for k, n in enumerate(raw_neuron_vols):
+                        # Report per-neuron progress through the shared layer
+                        # bar; navis' internal smoothing bar is suppressed
+                        # inside the helper.
+                        layer_pbar.set_postfix_str(
+                            f"{layer_name} (FAFB-format {k}/{total}...)")
                         try:
                             transformed.append(self._fafb_style_neuprint_skeleton(n))
                         except Exception as e:
@@ -6865,6 +6891,7 @@ class VisualizeSkeleton:
                                 f'  ⚠️ FAFB-format transform failed for '
                                 f'{getattr(n, "id", n)}: {e}', level='full')
                             transformed.append(n)  # keep the raw skeleton
+                    layer_pbar.set_postfix_str(f"{layer_name} (FAFB-format done)")
                     render_neuron_vols = navis.NeuronList(transformed)
 
                 # Apply scaling for MANC datasets (Raw -> NM)
@@ -7370,6 +7397,12 @@ class VisualizeSkeleton:
                     )
                 except Exception as e:
                     tqdm.write(f'  ⚠️  Layer {i} transform failed: {e}')
+                    if self.verbose:
+                        import traceback
+                        frame = traceback.extract_tb(e.__traceback__)[-1]
+                        tqdm.write(
+                            f'  🐞 raised in {frame.filename}:{frame.lineno} '
+                            f'({frame.name})')
                     if self._dataset_needs_transform() and not self._check_and_download_transforms():
                         self.brain_mesh = 'none'
                     else:
@@ -7384,6 +7417,13 @@ class VisualizeSkeleton:
                             )
                         except Exception as retry_e:
                             tqdm.write(f'  ⚠️  Transformation still failed, setting brain_mesh to "none"')
+                            if self.verbose:
+                                import traceback
+                                frame = traceback.extract_tb(
+                                    retry_e.__traceback__)[-1]
+                                tqdm.write(
+                                    f'  🐞 raised in {frame.filename}:'
+                                    f'{frame.lineno} ({frame.name})')
                             self.brain_mesh = 'none'
             
             # Apply FAFB tilt correction if using template mode
