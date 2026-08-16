@@ -139,6 +139,8 @@ def create_find_homologs_tab():
         output_panel.clear()
         output_panel.set_running(True)
         visualization_values = visualization_settings.values()
+        if visualize.value:
+            visualization_settings.warn_empty_custom_palettes()
 
         base_params = {
             "source_dataset": source_dataset.value,

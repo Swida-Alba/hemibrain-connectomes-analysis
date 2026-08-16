@@ -90,6 +90,22 @@ class SkeletonVisualizationSettings:
             values["mesh_color"] = values.pop("roi_colors")
         return values
 
+    def warn_empty_custom_palettes(self) -> None:
+        """Warn when a custom palette is empty (backend default fallback).
+
+        The ROI palette is only consulted when at least one ROI mesh is
+        selected, so it is skipped otherwise.
+        """
+        from .palette_picker import notify_empty_custom_palettes
+
+        palettes = [
+            (self.fields["neuron_colors"], "Neuron Colors"),
+            (self.fields["synapse_colors"], "Synapse Colors"),
+        ]
+        if self.fields["mesh_roi"].value:
+            palettes.append((self.fields["roi_colors"], "ROI Colors"))
+        notify_empty_custom_palettes(*palettes)
+
 
 def skeleton_visualization_settings(
     *,

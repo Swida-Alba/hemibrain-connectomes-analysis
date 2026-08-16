@@ -179,6 +179,31 @@ def assign_palette_colors(
     return [colors[index % len(colors)] for index in range(n)]
 
 
+def empty_custom_palette_names(*palettes: tuple) -> List[str]:
+    """Names of the palettes in custom mode with no colors yet.
+
+    An empty custom palette falls back to the backend's default palette;
+    callers warn about it instead of substituting silently.
+    """
+    return [
+        name
+        for palette, name in palettes
+        if palette.get_mode() == "custom" and not palette.get_custom_colors()
+    ]
+
+
+def notify_empty_custom_palettes(*palettes: tuple) -> None:
+    """Warn when any custom palette is empty (backend default fallback)."""
+    names = empty_custom_palette_names(*palettes)
+    if names:
+        ui.notify(
+            f"{' and '.join(names)} custom palette"
+            f"{'s are' if len(names) > 1 else ' is'} empty; "
+            "the render falls back to the default palette.",
+            type="warning",
+        )
+
+
 class _PaletteSelection(list):
     """List-compatible palette value carrying continuous-preset metadata."""
 

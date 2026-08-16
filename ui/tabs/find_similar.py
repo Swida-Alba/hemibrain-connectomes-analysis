@@ -538,6 +538,8 @@ def create_find_similar_tab():
         output_panel.set_running(True)
 
         visualization_values = visualization_settings.values()
+        if visualize.value:
+            visualization_settings.warn_empty_custom_palettes()
         base_params = {
             "dataset": dataset.value,
             "level": level.value,
@@ -622,6 +624,8 @@ def create_find_similar_tab():
         output_panel.set_running(True)
 
         visualization_values = profile_visualization_settings.values()
+        if profile_visualize.value:
+            profile_visualization_settings.warn_empty_custom_palettes()
         base_params = {
             "source_dataset": source_dataset.value,
             "target_dataset": source_dataset.value,

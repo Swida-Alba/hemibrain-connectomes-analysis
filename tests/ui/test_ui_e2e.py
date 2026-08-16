@@ -1406,6 +1406,67 @@ class TestRunner:
         toggle.value = "Preset palette"
         assert editor.get_colors() == editor.get_palette_order()
 
+    def test_skeleton_run_warns_on_empty_custom_palettes(self):
+        """The shared helpers list the palettes whose empty custom mode would
+        silently fall back to backend defaults, and emit the UI warning."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.palette_picker import (
+            empty_custom_palette_names,
+            notify_empty_custom_palettes,
+            palette_editor,
+        )
+
+        client = Client(page("/skeleton-empty-custom-warning"))
+        with client:
+            neuron = palette_editor("Neuron Colors", value="Category10")
+            synapse = palette_editor("Synapse Colors", value="Dark2")
+            roi = palette_editor("ROI Colors", value="Cool", include_auto=True)
+
+        # Switch the neuron editor to Custom colors (empty); the others stay
+        # preset, so only the neuron palette is reported.
+        toggle = next(
+            el for el in client.elements.values()
+            if getattr(el, "tag", "") == "q-btn-toggle"
+        )
+        toggle.value = "Custom colors"
+
+        palettes = (
+            (neuron, "Neuron Colors"),
+            (synapse, "Synapse Colors"),
+            (roi, "ROI Colors"),
+        )
+        assert empty_custom_palette_names(*palettes) == ["Neuron Colors"]
+
+        # The notify wrapper emits exactly one warning mentioning the empty
+        # palette and the default-palette fallback.
+        with client:
+            notify_empty_custom_palettes(*palettes)
+        notifies = [
+            options
+            for _, kind, options in client.outbox.messages
+            if kind == "notify"
+        ]
+        assert any(
+            options.get("type") == "warning"
+            and "Neuron Colors custom palette is empty" in options["message"]
+            and "falls back to the default palette" in options["message"]
+            for options in notifies
+        )
+
+        # A custom palette with colors is NOT reported as empty.
+        format_input = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Color format"
+        )
+        add_button = next(
+            el for el in client.elements.values()
+            if getattr(el, "text", "") == "Add color"
+        )
+        format_input.value = "#ff0000"
+        next(iter(add_button._event_listeners.values())).handler(None)
+        assert empty_custom_palette_names(*palettes) == []
+
     def test_palette_editor_supports_free_form_alpha_overrides(self):
         """Custom palette entries accept mixed syntax and optional per-entry alpha."""
         from nicegui import Client

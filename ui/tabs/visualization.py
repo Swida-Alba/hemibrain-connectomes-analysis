@@ -32,6 +32,7 @@ from ..components.palette_picker import (
     palette_editor,
     color_swatch_picker,
     assign_palette_colors,
+    notify_empty_custom_palettes,
 )
 from ..components.edge_list_editor import edge_list_editor
 from ..dataset_service import is_banc_dataset
@@ -554,6 +555,18 @@ def create_skeleton_tab():
         mesh_color = _palette_colors_for_count(
             roi_palette, len(rois)
         ) if rois else (100, 100, 100)
+
+        # An empty custom palette renders with the backend's default palette
+        # (which logs a warning internally); surface it in the UI too so the
+        # substitution is not silent. The ROI palette is only consulted when
+        # at least one ROI mesh is selected.
+        palettes = [
+            (neuron_palette, "Neuron Colors"),
+            (synapse_palette, "Synapse Colors"),
+        ]
+        if rois:
+            palettes.append((roi_palette, "ROI Colors"))
+        notify_empty_custom_palettes(*palettes)
 
         custom_names = layer_tree.get_custom_layer_names()
 

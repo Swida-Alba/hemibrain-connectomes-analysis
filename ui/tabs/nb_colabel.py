@@ -123,6 +123,8 @@ def create_nb_colabel_tab():
             return
 
         visualization_values = visualization_settings.values()
+        if visualize_3d.value:
+            visualization_settings.warn_empty_custom_palettes()
         constructor_params = {"verbose": True}
 
         method_params = {
