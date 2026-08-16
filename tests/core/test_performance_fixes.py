@@ -104,7 +104,10 @@ def _reference_type_incoming(db_path, index_path, min_weight, post_types):
 class TestTotalIncomingByType:
     def test_vectorized_matches_reference(self, tmp_path):
         conn_path, index_path = _write_synthetic_cache(tmp_path)
-        obj = _stub_fnc(_get_connection_db_path=lambda: str(conn_path))
+        obj = _stub_fnc(
+            _get_connection_db_path=lambda: str(conn_path),
+            _get_neuron_index_path=lambda: str(index_path),
+        )
 
         all_types = {f"T{i}" for i in range(7)} | {"T_DUP"}
         table = obj._get_total_incoming_by_type_table(min_weight=3)
@@ -128,7 +131,10 @@ class TestTotalIncomingByType:
 
     def test_duplicate_bodyid_last_wins(self, tmp_path):
         conn_path, index_path = _write_synthetic_cache(tmp_path, n_conns=2000)
-        obj = _stub_fnc(_get_connection_db_path=lambda: str(conn_path))
+        obj = _stub_fnc(
+            _get_connection_db_path=lambda: str(conn_path),
+            _get_neuron_index_path=lambda: str(index_path),
+        )
         table = obj._get_total_incoming_by_type_table(min_weight=1)
         # Neuron N3's duplicate entry maps it to T_DUP; the join must use the
         # last mapping (keep='last'), so N3's weight never lands in T3.

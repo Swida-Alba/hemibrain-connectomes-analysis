@@ -163,7 +163,10 @@ class TestConnectionMapInvalidation:
 
     def test_both_tables_come_from_same_map(self, tmp_path):
         conn_path, index_path = _write_cache(tmp_path)
-        obj = _stub_fnc(_get_connection_db_path=lambda: str(conn_path))
+        obj = _stub_fnc(
+            _get_connection_db_path=lambda: str(conn_path),
+            _get_neuron_index_path=lambda: str(index_path),
+        )
         by_type = obj._get_total_incoming_by_type_table(min_weight=3)
         by_bodyid = obj._get_total_incoming_by_bodyid_table(min_weight=3)
         assert len(obj._connection_maps) == 1  # one D_3 map serves both tables
