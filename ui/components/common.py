@@ -935,7 +935,7 @@ def neuron_list_input(
                             ui.label(str(value)).classes("text-body2")
                             if hint:
                                 ui.label(str(hint)).classes(
-                                    "text-caption text-grey-6")
+                                    "text-caption drocat-muted")
             _refresh_menu()
 
         def _show_history(query: str = ""):
@@ -1047,7 +1047,7 @@ def neuron_list_input(
                 with ui.row().classes("items-center gap-2 no-wrap w-full"):
                     ui.label(str(value)).classes("text-body2 flex-grow")
                     if hint:
-                        ui.label(str(hint)).classes("text-caption text-grey-6")
+                        ui.label(str(hint)).classes("text-caption drocat-muted")
                     if is_custom:
                         ui.badge("custom", color="grey-6").props(
                             "outline dense")

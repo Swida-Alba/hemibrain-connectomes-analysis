@@ -57,6 +57,21 @@ def _silence_timer_teardown_noise() -> None:
 
 _silence_timer_teardown_noise()
 
+
+def _saved_dark_mode() -> bool:
+    """Return the persisted dark-mode preference from a plain cookie.
+
+    The toggle stores the preference in a non-sensitive cookie so a page
+    reload restores the chosen mode without a light flash. Falls back to
+    light when no request context exists (script mode, UI tests).
+    """
+    try:
+        request = ui.context.client.request
+    except Exception:
+        return False
+    return request.cookies.get("drocat_dark") == "1"
+
+
 from ui.tabs import (
     create_find_path_tab,
     create_find_shortest_tab,
@@ -101,6 +116,109 @@ DROCAT_CSS = """
     --drocat-tint-nb: #f6f1ff;
     --drocat-tint-flylight: #edf9f0;
     --drocat-tint-settings: #eef1f5;
+    /* Glass and solid surfaces whose light values are baked into the CSS */
+    --drocat-glass: rgba(255, 255, 255, .86);
+    --drocat-panel-glass: rgba(255, 255, 255, .72);
+    --drocat-table-glass: rgba(255, 255, 255, .78);
+    --drocat-toolbar-soft: rgba(247, 249, 252, .92);
+    --drocat-toolbar-grad: linear-gradient(135deg, rgba(234, 240, 255, .78), rgba(255, 255, 255, .96));
+    --drocat-query-preview-grad: linear-gradient(135deg, rgba(232, 241, 255, .78), rgba(255, 255, 255, .92));
+    --drocat-labelmapper-grad: linear-gradient(180deg, rgba(247, 249, 252, .84), #fff);
+    --drocat-tab-hover: rgba(255, 255, 255, .55);
+    --drocat-cell: #ffffff;
+    --drocat-row-even: #f7fbff;
+    --drocat-row-hover: #eaf3ff;
+    --drocat-selected: #dcecff;
+    --drocat-selected-hover: #cfe3ff;
+    --drocat-badge-bg: #fff8d6;
+    --drocat-badge-fg: #946200;
+    --drocat-badge-soft-bg: #fffbe8;
+    --drocat-badge-soft-fg: #a07a2c;
+    --drocat-mark-bg: #fff1b8;
+    --drocat-err-border: #fecaca;
+}
+
+/* ---------- Dark mode ----------
+   NiceGUI/Quasar dark mode toggles the body--dark class on <body>. These
+   overrides flip every drocat token; the html:has() arm keeps the page
+   canvas dark behind the body as well. */
+body.body--dark,
+html:has(> body.body--dark) {
+    --drocat-canvas: #0c1322;
+    --drocat-surface: #131c2e;
+    --drocat-soft: #1d2b45;
+    --drocat-navy: #e7eef8;
+    --drocat-muted: #9aa9c0;
+    --drocat-faint: #6b7a93;
+    --drocat-line: #25334d;
+    --drocat-line-strong: #374a6b;
+    --drocat-cobalt: #5b8cff;
+    --drocat-cobalt-soft: #1a2c52;
+    --drocat-ok: #22c55e;
+    --drocat-warn: #f59e0b;
+    --drocat-err: #f87171;
+    --drocat-shadow: 0 16px 40px rgba(0, 0, 0, .5);
+    --drocat-tint-connection: #18233c;
+    --drocat-tint-visualization: #132a2c;
+    --drocat-tint-similarity: #2c2313;
+    --drocat-tint-nb: #251a3d;
+    --drocat-tint-flylight: #152a1d;
+    --drocat-tint-settings: #1c2637;
+    --drocat-glass: rgba(19, 28, 46, .86);
+    --drocat-panel-glass: rgba(19, 28, 46, .72);
+    --drocat-table-glass: rgba(19, 28, 46, .78);
+    --drocat-toolbar-soft: rgba(23, 33, 52, .92);
+    --drocat-toolbar-grad: linear-gradient(135deg, rgba(26, 44, 82, .72), rgba(19, 28, 46, .96));
+    --drocat-query-preview-grad: linear-gradient(135deg, rgba(26, 44, 82, .6), rgba(19, 28, 46, .92));
+    --drocat-labelmapper-grad: linear-gradient(180deg, rgba(28, 42, 63, .84), #131c2e);
+    --drocat-tab-hover: rgba(255, 255, 255, .07);
+    --drocat-cell: #131c2e;
+    --drocat-row-even: #17233a;
+    --drocat-row-hover: #1e3050;
+    --drocat-selected: #1d3a5f;
+    --drocat-selected-hover: #25486f;
+    --drocat-badge-bg: #3d3113;
+    --drocat-badge-fg: #e5b74d;
+    --drocat-badge-soft-bg: #332b16;
+    --drocat-badge-soft-fg: #c9a44d;
+    --drocat-mark-bg: #3d3612;
+    --drocat-err-border: #5c2c2c;
+}
+
+/* A slightly stronger canvas glow keeps the dark theme from going flat. */
+body.body--dark {
+    background:
+        radial-gradient(circle at 16% 0%, rgba(91, 140, 255, .08), transparent 32%),
+        var(--drocat-canvas) !important;
+}
+
+/* Active group-tab accents need brighter hues on the dark tints. */
+body.body--dark .drocat-tint-visualization .drocat-group-tab.drocat-active { color: #2dd4bf !important; }
+body.body--dark .drocat-tint-similarity .drocat-group-tab.drocat-active { color: #f59e0b !important; }
+body.body--dark .drocat-tint-nb .drocat-group-tab.drocat-active { color: #a78bfa !important; }
+body.body--dark .drocat-tint-flylight .drocat-group-tab.drocat-active { color: #4ade80 !important; }
+body.body--dark .drocat-tint-settings .drocat-group-tab.drocat-active { color: #94a3b8 !important; }
+
+/* The results mark keeps its white icon on a dark navy chip in both themes. */
+body.body--dark .drocat-results-mark { background: #1d2a42; }
+
+/* Dark-mode toggle in the header. */
+.drocat-dark-toggle {
+    color: var(--drocat-muted) !important;
+    font-size: 20px;
+}
+.drocat-dark-toggle:hover { color: var(--drocat-cobalt) !important; }
+
+/* Token reminder box (Settings tab) follows the theme. */
+.drocat-token-reminder {
+    border: 1px solid #e6a23c;
+    background: #fdf6ec;
+    border-radius: 8px;
+    padding: 10px 12px;
+}
+body.body--dark .drocat-token-reminder {
+    border-color: #8a6a1f;
+    background: #2f2514;
 }
 
 html, body {
@@ -115,7 +233,7 @@ html, body {
 
 /* ---------- Header ---------- */
 .drocat-header {
-    background: rgba(255, 255, 255, .86) !important;
+    background: var(--drocat-glass) !important;
     backdrop-filter: blur(14px);
     border-bottom: 1px solid var(--drocat-line);
     box-shadow: none !important;
@@ -161,11 +279,11 @@ html, body {
     padding: 10px 12px 8px;
     border: 1px solid var(--drocat-line-strong);
     border-radius: 14px;
-    background: linear-gradient(135deg, rgba(234, 240, 255, .78), rgba(255, 255, 255, .96));
+    background: var(--drocat-toolbar-grad);
     box-shadow: 0 4px 14px rgba(11, 31, 58, .06);
 }
 .drocat-neuron-search-toolbar .drocat-neuron-search-field {
-    background: rgba(255, 255, 255, .96);
+    background: var(--drocat-table-glass);
     border-radius: 10px;
 }
 .drocat-neuron-search-toolbar .q-field--outlined .q-field__control {
@@ -209,7 +327,7 @@ html, body {
     padding: 10px 12px;
     border: 1px solid var(--drocat-line-strong);
     border-radius: 10px;
-    background: linear-gradient(135deg, rgba(232, 241, 255, .78), rgba(255, 255, 255, .92));
+    background: var(--drocat-query-preview-grad);
 }
 .drocat-neuron-query-preview-list {
     max-height: 118px;
@@ -238,7 +356,7 @@ html, body {
     padding: 3px 9px;
     border: 1px solid rgba(69, 126, 191, .38);
     border-radius: 999px;
-    background: #fff;
+    background: var(--drocat-cell);
     color: var(--drocat-navy);
     font-size: 12px;
     font-weight: 650;
@@ -252,7 +370,7 @@ html, body {
     padding: 3px 5px 3px 9px;
     border: 1px solid rgba(69, 126, 191, .38);
     border-radius: 999px;
-    background: #fff;
+    background: var(--drocat-cell);
     color: var(--drocat-navy);
 }
 .drocat-neuron-query-chip-wrap .drocat-neuron-query-chip {
@@ -345,7 +463,7 @@ html, body {
     background: rgba(69, 126, 191, .10);
 }
 .drocat-neuron-full-panel {
-    background: rgba(255, 255, 255, .72);
+    background: var(--drocat-panel-glass);
 }
 .drocat-neuron-viewer-card {
     max-height: 94vh;
@@ -411,7 +529,7 @@ html, body {
     padding: 4px 6px;
     border: 1px solid var(--drocat-line);
     border-radius: 8px;
-    background: rgba(247, 249, 252, .92);
+    background: var(--drocat-toolbar-soft);
 }
 .drocat-neuron-match-table .q-table__middle {
     max-height: min(58vh, 680px);
@@ -422,7 +540,7 @@ html, body {
     margin-top: 8px;
     border: 1px solid var(--drocat-line);
     border-radius: 8px;
-    background: rgba(255, 255, 255, .78);
+    background: var(--drocat-table-glass);
 }
 .drocat-neuron-match-table table {
     width: 100%;
@@ -490,8 +608,8 @@ html, body {
     padding: 1px 5px;
     border: 1px solid rgba(234, 179, 8, .68);
     border-radius: 999px;
-    background: #fff8d6;
-    color: #946200;
+    background: var(--drocat-badge-bg);
+    color: var(--drocat-badge-fg);
     font-size: 10px;
     font-weight: 750;
     letter-spacing: .02em;
@@ -548,8 +666,8 @@ html, body {
     padding: 0 4px;
     margin-right: 2px;
     border-color: rgba(234, 179, 8, .42);
-    background: #fffbe8;
-    color: #a07a2c;
+    background: var(--drocat-badge-soft-bg);
+    color: var(--drocat-badge-soft-fg);
     font-size: 9px;
     font-weight: 650;
 }
@@ -586,9 +704,9 @@ html, body {
 .drocat-data-viewer-table tbody tr > td {
     /* A QTable selection can otherwise leave its default gray row fill in
        place while the viewer updates its persistent selection sets. The
-       viewer owns the two intentional states below: white for ordinary
-       cells and blue for selected rows. */
-    background: #fff !important;
+       viewer owns the two intentional states below: theme surface for
+       ordinary cells and blue for selected rows. */
+    background: var(--drocat-cell) !important;
     color: var(--drocat-navy) !important;
 }
 .drocat-data-viewer-table.q-table__container,
@@ -596,24 +714,24 @@ html, body {
 .drocat-data-viewer-table .q-table,
 .drocat-data-viewer-table tbody,
 .drocat-data-viewer-table tbody tr:not(.drocat-neuron-selected-row) {
-    background: #fff !important;
+    background: var(--drocat-cell) !important;
 }
 .drocat-data-viewer-table tbody tr.q-tr--selected:not(.drocat-neuron-selected-row) > td,
 .drocat-data-viewer-table tbody tr[aria-selected="true"]:not(.drocat-neuron-selected-row) > td {
-    background: #fff !important;
+    background: var(--drocat-cell) !important;
 }
 .drocat-data-viewer-table tbody tr:hover > td {
-    background: #fff !important;
+    background: var(--drocat-cell) !important;
 }
 .drocat-data-viewer-table tr.drocat-neuron-selected-row > td {
     /* Direct body-ID selections and matched-group selections share the same
        Quasar row-selection state. Keep that state visibly distinct from the
        yellow cell used for the query match. */
-    background: #dcecff !important;
+    background: var(--drocat-selected) !important;
     color: var(--drocat-navy) !important;
 }
 .drocat-data-viewer-table tr.drocat-neuron-selected-row:hover > td {
-    background: #cfe3ff !important;
+    background: var(--drocat-selected-hover) !important;
 }
 .drocat-data-viewer-table tr.drocat-neuron-selected-row > td:first-child {
     box-shadow: inset 3px 0 0 var(--drocat-cobalt);
@@ -629,7 +747,7 @@ html, body {
     z-index: 4;
     /* Keep the cell's normal row background; only the nested mark below is
        yellow. The outline still identifies every matched cell. */
-    background: #fff !important;
+    background: var(--drocat-cell) !important;
     color: var(--drocat-navy) !important;
     font-weight: 600;
     box-shadow: inset 0 0 0 2px #eab308;
@@ -637,20 +755,20 @@ html, body {
 .drocat-data-viewer-table td.drocat-neuron-secondary-hit-cell {
     position: static;
     z-index: 1;
-    background: #fff !important;
+    background: var(--drocat-cell) !important;
     color: var(--drocat-navy) !important;
     font-weight: 600;
     box-shadow: inset 0 0 0 2px #eab308;
 }
 .drocat-data-viewer-table tr.drocat-neuron-selected-row > td.drocat-neuron-hit-cell,
 .drocat-data-viewer-table tr.drocat-neuron-selected-row > td.drocat-neuron-secondary-hit-cell {
-    background: #dcecff !important;
+    background: var(--drocat-selected) !important;
     color: var(--drocat-navy) !important;
 }
 .drocat-data-viewer-table mark.drocat-neuron-match-text {
     padding: 0 .08em;
     border-radius: 3px;
-    background: #fff1b8;
+    background: var(--drocat-mark-bg);
     color: var(--drocat-navy);
     font-weight: 750;
 }
@@ -775,7 +893,7 @@ html, body {
     white-space: pre-line;
     line-height: 1.15;
 }
-.drocat-group-tab:hover { background: rgba(255, 255, 255, .55); }
+.drocat-group-tab:hover { background: var(--drocat-tab-hover); }
 .drocat-group-tab.drocat-active {
     background: var(--drocat-surface) !important;
     box-shadow: 0 2px 6px rgba(11, 31, 58, .10);
@@ -823,7 +941,7 @@ html, body {
 .drocat-page-progress {
     padding: 10px 0 12px !important;
     border-color: var(--drocat-line-strong) !important;
-    background: linear-gradient(135deg, rgba(234, 240, 255, .72), var(--drocat-surface)) !important;
+    background: linear-gradient(135deg, var(--drocat-cobalt-soft), var(--drocat-surface)) !important;
 }
 .drocat-page-progress-compact {
     margin: 0 0 12px;
@@ -973,14 +1091,14 @@ html, body {
     font-size: 13px;
 }
 .drocat-edge-row-even > td {
-    background: #f7fbff !important;
+    background: var(--drocat-row-even) !important;
 }
 .drocat-edge-row-odd > td {
     background: var(--drocat-surface) !important;
 }
 .drocat-edge-row-even:hover > td,
 .drocat-edge-row-odd:hover > td {
-    background: #eaf3ff !important;
+    background: var(--drocat-row-hover) !important;
 }
 .drocat-empty-canvas-btn {
     min-height: 40px;
@@ -1045,7 +1163,7 @@ html, body {
     padding: 12px 14px 14px;
     border: 1px solid var(--drocat-line-strong);
     border-radius: 14px;
-    background: linear-gradient(180deg, rgba(247, 249, 252, .84), #fff);
+    background: var(--drocat-labelmapper-grad);
     box-shadow: 0 2px 8px rgba(11, 31, 58, .04);
 }
 .drocat-labelmapper-group-name {
@@ -1099,7 +1217,7 @@ html, body {
     align-items: start;
     min-width: 0;
     padding: 8px 0 10px;
-    border-bottom: 1px solid rgba(207, 215, 227, .72);
+    border-bottom: 1px solid var(--drocat-line-strong);
 }
 .drocat-labelmapper-dataset-row:last-child {
     padding-bottom: 0;
@@ -1169,7 +1287,7 @@ html, body {
 .q-btn--flat { color: var(--drocat-muted); }
 .q-btn--flat:hover { background: var(--drocat-soft) !important; }
 .q-btn--unelevated.bg-primary { background: var(--drocat-cobalt) !important; box-shadow: 0 6px 14px rgba(20, 92, 255, .20); }
-.q-btn--unelevated.bg-negative { background: #fff !important; color: var(--drocat-err) !important; border: 1px solid #fecaca; }
+.q-btn--unelevated.bg-negative { background: var(--drocat-surface) !important; color: var(--drocat-err) !important; border: 1px solid var(--drocat-err-border); }
 /* Segmented toggles: white pill container whose inner segments nest
    concentrically (inner radius = outer radius - padding - border), so the
    selected segment's corners snap to the container's corners with a uniform
@@ -1244,7 +1362,7 @@ html, body {
 .drocat-palette-swatches {
     overflow: hidden;
     border-radius: 6px;
-    border: 1px solid rgba(11, 31, 58, .08);
+    border: 1px solid var(--drocat-line);
 }
 .drocat-palette-name {
     font-size: 10.5px;
@@ -1277,7 +1395,7 @@ html, body {
 .drocat-swatch.selected { border-color: var(--drocat-cobalt); }
 .drocat-palette-strip {
     border-radius: 6px;
-    border: 1px solid rgba(11, 31, 58, .10);
+    border: 1px solid var(--drocat-line);
     min-height: 18px;
     cursor: pointer;
 }
@@ -1407,7 +1525,7 @@ html, body {
 
 /* ---------- Footer ---------- */
 .drocat-footer {
-    background: rgba(255, 255, 255, .86) !important;
+    background: var(--drocat-glass) !important;
     backdrop-filter: blur(10px);
     border-top: 1px solid var(--drocat-line);
     min-height: 44px !important;
@@ -1424,11 +1542,20 @@ html, body {
 /* Auto-suggest inputs (pathfinding tabs) replace the native QSelect popup
    with a custom suggestion/history menu; hide the empty native one. */
 .drocat-native-popup-hidden { display: none !important; }
+/* Arrow-key highlight of the active row in the suggestion/history dropdown. */
+.drocat-suggest-menu .q-item.drocat-suggest-active {
+    background: var(--drocat-row-hover) !important;
+}
+/* Dataset provenance tags on history rows. */
+.drocat-suggest-menu .drocat-history-dataset-badge {
+    font-size: 10px;
+    letter-spacing: .02em;
+}
 """
 
 @ui.page("/")
 def main_page():
-    """Main application page with light Photo-Selector-inspired layout."""
+    """Main application page with light/dark Photo-Selector-inspired layout."""
 
     # Global theme
     ui.add_head_html(f"<style>{DROCAT_CSS}</style>")
@@ -1450,6 +1577,11 @@ def main_page():
         "</script>"
     )
 
+    # Dark mode: NiceGUI's dark_mode element drives Quasar's body--dark class
+    # (all components, popups and menus re-theme with it). The persisted
+    # preference is restored here so the first paint already uses it.
+    dark = ui.dark_mode(value=_saved_dark_mode())
+
     # Header
     with ui.header(elevated=False).classes("drocat-header items-center justify-between"):
         with ui.row().classes("items-center gap-3"):
@@ -1461,6 +1593,24 @@ def main_page():
         with ui.row().classes("items-center gap-4"):
             ui.label(f"v{APP_VERSION}").classes("drocat-version-pill")
             ui.link("Documentation", "docs/ui_guides/README.html").classes("drocat-header-link")
+            dark_toggle = ui.button(
+                icon="light_mode" if dark.value else "dark_mode"
+            ).props("flat round").classes("drocat-dark-toggle").tooltip(
+                "Toggle dark mode"
+            )
+
+            def _toggle_dark() -> None:
+                dark.toggle()
+                dark_toggle.props(
+                    f"icon={'light_mode' if dark.value else 'dark_mode'}"
+                )
+                ui.run_javascript(
+                    "document.cookie = 'drocat_dark="
+                    + ("1" if dark.value else "0")
+                    + "; max-age=31536000; path=/; SameSite=Lax'"
+                )
+
+            dark_toggle.on_click(_toggle_dark)
 
     # Main content
     with ui.column().classes("w-full drocat-shell gap-3"):

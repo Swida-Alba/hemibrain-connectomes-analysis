@@ -161,7 +161,7 @@ def create_find_path_tab():
                         edge_limit_bodyid_hint = ui.label(
                             "Unavailable for shallow searches (max intermediate layers 0–2); "
                             "set Max Intermediate Layers to 3+ to enable BodyId edge trimming."
-                        ).classes("text-caption text-grey-7").set_visibility(
+                        ).classes("text-caption drocat-muted").set_visibility(
                             (max_interlayer.value or 0) < 3
                         )
                     # enabled only for deep searches (max_interlayer >= 3)

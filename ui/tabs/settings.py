@@ -189,8 +189,8 @@ def create_settings_tab():
             # required for NeuPrint datasets; the CAVE token is optional and
             # only needed for FlyWire FAFB online fetching. Refreshed
             # whenever the saved tokens change.
-            token_reminder = ui.element("div").props('id="drocat-token-reminder"').classes("w-full").style(
-                "border: 1px solid #e6a23c; background: #fdf6ec; border-radius: 8px; padding: 10px 12px;"
+            token_reminder = ui.element("div").props('id="drocat-token-reminder"').classes(
+                "w-full drocat-token-reminder"
             )
             with token_reminder:
                 token_reminder_text = ui.label("").classes("text-sm drocat-warn")
