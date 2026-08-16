@@ -10,7 +10,7 @@ from ..components.common import (
 from ..components.mapping_editor import custom_grouping_block
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
-from ..type_suggestions import datasets_suggestions
+from ..type_suggestions import dataset_aware_suggestions
 
 
 def create_inter_dataset_tab():
@@ -20,14 +20,16 @@ def create_inter_dataset_tab():
     search_columns = None
 
     def _type_suggest(text):
-        """Auto-suggest across all selected datasets' type names. Type matches
-        come first for string input; the range expands to instance/bodyId only
-        when no type matched and the search scope is 'auto'."""
+        """Auto-suggest across all selected datasets' type names, with a
+        dataset-aware gray hint (``type · male-cns:v1.0``) so cross-dataset
+        entries stay traceable. Type matches come first for string input;
+        the range expands to instance/bodyId only when no type matched and
+        the search scope is 'auto'."""
         ds = datasets_select.value if datasets_select is not None else []
         scope = search_columns.value if search_columns is not None else "auto"
         # Keep the complete candidate pool for local continuation filtering;
         # the input menu, not the backend matcher, limits visible rows.
-        return datasets_suggestions(text, ds, scope, limit=None)
+        return dataset_aware_suggestions(text, ds, scope, limit=None)
 
     form_col, results_col = tool_page(
         "Cross-Dataset Comparison",

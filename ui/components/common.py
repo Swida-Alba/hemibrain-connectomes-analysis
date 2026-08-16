@@ -44,14 +44,14 @@ _SUGGEST_TOKEN = itertools.count(1)
 # The menu never takes focus (no-focus), so keystrokes land in the QSelect
 # editor; this document-level capture handler moves a highlight between the
 # menu rows: ArrowDown enters the list from the input box, ArrowUp leaves it
-# from the first row, and Enter picks the highlighted row.
+# from the first row, and Enter or Tab picks the highlighted row.
 _SUGGEST_KEYNAV_SCRIPT = """
 <script>
 (function () {
   if (window.__drocatSuggestNav) return;
   window.__drocatSuggestNav = true;
   document.addEventListener('keydown', function (event) {
-    if (!['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key)) return;
+    if (!['ArrowDown', 'ArrowUp', 'Enter', 'Tab'].includes(event.key)) return;
     var active = document.activeElement;
     if (!active || typeof active.closest !== 'function') return;
     var shell = active.closest('.drocat-chip-input-shell');
@@ -112,7 +112,10 @@ _SUGGEST_KEYNAV_SCRIPT = """
         event.preventDefault();
         highlight(current - 1);
       }
-    } else if (event.key === 'Enter') {
+    } else if (event.key === 'Enter' || event.key === 'Tab') {
+      // With a highlighted row, both keys pick it instead of their native
+      // behavior (commit typed text / move focus to the next control).
+      // Without a highlight the native behavior is left untouched.
       if (current === -1) return;
       event.preventDefault();
       event.stopPropagation();
@@ -491,9 +494,9 @@ def neuron_list_input(
       restricted to the datasets currently selected in the tab's dataset
       input. Arrow keys navigate the open dropdown: ArrowDown enters the list
       from the editor, ArrowUp returns to the editor from the first row, and
-      Enter picks the highlighted row. At most ``suggestion_limit`` entries
-      are shown. With a provider, the native QSelect popup is replaced by the
-      custom suggestion menu.
+      Enter or Tab picks the highlighted row. At most ``suggestion_limit``
+      entries are shown. With a provider, the native QSelect popup is
+      replaced by the custom suggestion menu.
     - ``available_neurons``: optional zero-argument dataset getter. When
       supplied, a ``See available neurons`` link opens the rendered,
       searchable cached neuron-index viewer for the current dataset.

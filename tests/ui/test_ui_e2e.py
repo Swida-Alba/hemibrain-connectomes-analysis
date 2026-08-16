@@ -1820,6 +1820,49 @@ class TestRunner:
                 hasattr(link, "neuron_index_dialog") for link in viewer_links
             )
 
+    def test_inter_dataset_suggestions_are_dataset_aware(self, monkeypatch):
+        """The cross-dataset tab's suggestion provider receives the datasets
+        selected in the tab and renders dataset-aware gray hints
+        (``type · male-cns:v1.0``) in the dropdown rows."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.inter_dataset import create_inter_dataset_tab
+
+        calls = []
+
+        def fake_suggest(text, datasets, search_columns="auto", *, limit=None):
+            calls.append((text, list(datasets), search_columns))
+            return [("aMe12", "type · male-cns:v1.0 · hemibrain:v1.2.1")]
+
+        monkeypatch.setattr(
+            "ui.tabs.inter_dataset.dataset_aware_suggestions", fake_suggest
+        )
+        client = Client(page("/inter-dataset-aware-suggest"))
+        with client:
+            create_inter_dataset_tab()
+
+        source = next(
+            el for el in client.elements.values()
+            if getattr(el, "chip_input", None) is not None
+            and el.chip_input._props.get("label") == "Source Neurons"
+        )
+        suggest_input = next(
+            listener for listener in
+            source.chip_input._event_listeners.values()
+            if listener.type == "input"
+        )
+        source.chip_input._handle_event(
+            {"listener_id": suggest_input.id, "args": "a"}
+        )
+
+        # The provider got the typed text plus the tab's selected datasets.
+        assert calls and calls[-1][0] == "a"
+        assert calls[-1][1] == ["male-cns:v1.0"]  # the tab's default selection
+        assert calls[-1][2] == "auto"
+        texts = [el.text for el in client.elements.values()
+                 if getattr(el, "text", "")]
+        assert "type · male-cns:v1.0 · hemibrain:v1.2.1" in texts
+
 
 # =============================================================================
 # Test Dataset Service
@@ -3977,6 +4020,11 @@ class TestComponents:
         assert client._head_html.count(_SUGGEST_KEYNAV_SCRIPT) == 1
         assert "drocat-suggest-active" in client._head_html
         assert "drocat-suggest-header" in client._head_html
+        # Enter and Tab both pick the highlighted row; Tab falls back to its
+        # native focus move when no row is highlighted.
+        assert "'Enter', 'Tab'" in _SUGGEST_KEYNAV_SCRIPT
+        assert "event.key === 'Enter' || event.key === 'Tab'" in \
+            _SUGGEST_KEYNAV_SCRIPT
 
     def test_history_body_id_has_instance_hint_and_removable_entry(self, tmp_path, monkeypatch):
         """Blank-input history rows expose the cached body-ID instance and a

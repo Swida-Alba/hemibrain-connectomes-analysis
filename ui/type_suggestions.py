@@ -365,6 +365,51 @@ def datasets_suggestions(
     )
 
 
+def dataset_aware_suggestions(
+    text: str,
+    datasets: Sequence[str],
+    search_columns: str = "auto",
+    *,
+    limit: Optional[int] = None,
+) -> List[Entry]:
+    """Dataset-aware suggestions for the cross-dataset tab.
+
+    Same staged matching semantics as :func:`datasets_suggestions`, but the
+    gray hint carries both the matched column and the dataset it came from
+    (``type · male-cns:v1.0``), restricted to the given (selected) datasets
+    — the suggestion-list counterpart of the history list's dataset tags. A
+    value matched in several datasets lists every matching dataset, keeping
+    per-dataset categories when they differ
+    (``type · male-cns:v1.0 · instance · hemibrain:v1.2.1``).
+    """
+    merged: Dict[str, List[Tuple[str, str]]] = {}
+    for dataset in datasets:
+        if not dataset:
+            continue
+        for value, hint in match_suggestions(
+            text, get_dataset_pools(dataset), search_columns, limit=None
+        ):
+            merged.setdefault(value, []).append(
+                (str(hint), str(dataset))
+            )
+
+    entries: List[Entry] = []
+    for value, pairs in merged.items():
+        # Group identical hints into one segment ("type · ds1, ds2") while
+        # preserving the dataset order of first appearance.
+        grouped: Dict[str, List[str]] = {}
+        for hint, dataset in pairs:
+            grouped.setdefault(hint, []).append(dataset)
+        hint = " · ".join(
+            f"{hint} · {', '.join(ds_list)}"
+            for hint, ds_list in grouped.items()
+        )
+        entries.append((value, hint))
+    if limit is not None:
+        entries = entries[:limit]
+    return entries
+
+
 def filter_candidate_entries(
     text: str,
     candidates: Sequence[Entry],

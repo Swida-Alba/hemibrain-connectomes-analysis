@@ -10,8 +10,9 @@ import polars as pl
 import pytest
 
 from ui.type_suggestions import (
-    _POOL_CACHE, _folder_pools, entry_hint, filter_candidate_entries,
-    get_dataset_pools, match_suggestions, suggestion_pool,
+    _POOL_CACHE, _folder_pools, dataset_aware_suggestions, entry_hint,
+    filter_candidate_entries, get_dataset_pools, match_suggestions,
+    suggestion_pool,
 )
 
 # Synthetic pools mirroring a cache neuron_index (type/instance/bodyId).
@@ -421,3 +422,69 @@ class TestSuggestionPool:
             "type": [("APL", "type"), ("MBON01", "type"), ("KC", "type")],
             "instance": [("KC_1", "instance")],
         }
+
+
+class TestDatasetAwareSuggestions:
+    """The cross-dataset tab's suggestions carry the matched column AND the
+    dataset(s) it came from in the gray hint."""
+
+    POOLS_A = {
+        "type": [("APL", "type"), ("aMe12", "type")],
+        "instance": [("APL_1", "instance")],
+        "bodyId": [("5813012345", "aMe12_1")],
+    }
+    POOLS_B = {
+        "type": [("APL", "type"), ("KC", "type")],
+        "instance": [("KC_1", "instance")],
+        "bodyId": [("5813012345", "aMe12_2")],
+    }
+
+    @pytest.fixture
+    def pools(self, monkeypatch):
+        monkeypatch.setattr(
+            "ui.type_suggestions.get_dataset_pools",
+            lambda ds: self.POOLS_A if ds == "A" else self.POOLS_B,
+        )
+
+    def test_hint_groups_shared_category_with_all_datasets(self, pools):
+        assert dataset_aware_suggestions("AP", ["A", "B"]) == [
+            ("APL", "type · A, B"),
+        ]
+        # The type-prefix stage already matched, so the instance pool is not
+        # consulted (same staged semantics as the plain merged suggestions).
+        assert dataset_aware_suggestions("KC", ["A", "B"]) == [
+            ("KC", "type · B"),
+        ]
+
+    def test_mixed_categories_keep_per_dataset_segments(self, pools, monkeypatch):
+        # A value that is a type in one dataset and an instance in another
+        # lists both categories, each tagged with its dataset.
+        mixed = {
+            "type": [],
+            "instance": [("aMe12", "instance")],
+            "bodyId": [],
+        }
+        monkeypatch.setattr(
+            "ui.type_suggestions.get_dataset_pools",
+            lambda ds: self.POOLS_A if ds == "A" else mixed,
+        )
+        assert dataset_aware_suggestions("aMe", ["A", "B"]) == [
+            ("aMe12", "type · A · instance · B"),
+        ]
+
+    def test_only_selected_datasets_contribute(self, pools):
+        assert dataset_aware_suggestions("KC", ["A"]) == []
+        assert dataset_aware_suggestions("AP", ["A"]) == [
+            ("APL", "type · A"),
+        ]
+
+    def test_bodyid_hints_carry_each_dataset_instance(self, pools):
+        assert dataset_aware_suggestions("5813012345", ["A", "B"]) == [
+            ("5813012345", "aMe12_1 · A · aMe12_2 · B"),
+        ]
+
+    def test_empty_input_and_limit(self, pools):
+        assert dataset_aware_suggestions("", ["A", "B"]) == []
+        assert dataset_aware_suggestions("AP", ["A", "B"], limit=1) == [
+            ("APL", "type · A, B"),
+        ]
