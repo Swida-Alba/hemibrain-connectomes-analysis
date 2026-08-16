@@ -41,7 +41,8 @@ Cache enabled: neuprint_cache/optic-lobe_v1.1
 📥 Complete dataset not found, downloading ALL neurons (including type=None)...
    This is a one-time download for cache enrichment.
 Pulled 53847 neurons from optic-lobe:v1.1  ← Includes type=None neurons!
-Writing to datasets/optic-lobe_v1_1_allneurons_neuron_df.csv...Done!
+Writing to datasets/optic-lobe_v1_1_allneurons_neuron_df.csv...
+Done! (metadata saved to datasets/optic-lobe_v1_1_allneurons_metadata.json)
 ✅ Complete dataset saved to: datasets/optic-lobe_v1_1_allneurons_*.csv
 ```
 

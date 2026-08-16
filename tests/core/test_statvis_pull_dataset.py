@@ -10,6 +10,7 @@ then fetches neuron info in chunks under api_call_with_retry (timeout + 5
 reconnect attempts) with a live progress bar.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -127,6 +128,85 @@ class TestPullDatasetChunked:
         assert bar.updates == [2000, 2000, 500]
         assert (tmp_path / 'ds_neuron_df.csv').exists()
         assert (tmp_path / 'ds_roi_count_df.csv').exists()
+        # Per-neuron ROI columns are dropped before saving: the data lives
+        # long-form in ds_roi_count_df.csv.
+        saved = pd.read_csv(tmp_path / 'ds_neuron_df.csv', index_col=0)
+        assert not {'roiInfo', 'inputRois', 'outputRois'} & set(saved.columns)
+        # Metadata sidecar is written next to the CSVs.
+        meta = json.load(open(tmp_path / 'ds_metadata.json'))
+        assert meta['neuron_counts']['total'] == 4500
+        assert meta['dataset'] == 'fake:v1'
+
+    def test_metadata_sidecar_computed_from_pulled_frames(self, tmp_path, monkeypatch):
+        """pull_dataset writes <dataset>_metadata.json computed from the
+        pulled neuron/roi frames (counts, synapse totals, per-ROI neurons)."""
+        import time as _time
+        monkeypatch.setattr(_time, 'sleep', lambda s: None)
+        monkeypatch.setattr(statvis, 'tqdm', lambda *a, **k: type('T', (), {
+            'update': lambda self, n: None, 'close': lambda self: None})())
+        self._patch_retry(monkeypatch)
+
+        def fake_fetch(criteria, client=None):
+            ids = criteria.bodyId if isinstance(criteria.bodyId, list) else [criteria.bodyId]
+            ndf = pd.DataFrame({
+                'bodyId': ids,
+                'type': ['T' if i % 2 == 0 else None for i in ids],
+                'pre': [10] * len(ids),
+                'post': [20] * len(ids),
+            })
+            rows = [
+                {'bodyId': b, 'roi': r, 'pre': 1, 'post': 2,
+                 'downstream': 0, 'upstream': 2}
+                for b in ids for r in ('AL(L)', 'AL(R)')
+            ]
+            return ndf, pd.DataFrame(rows)
+
+        out = tmp_path / 'ds_meta'
+        statvis.pull_dataset(
+            'fake:v1', save_path=str(out),
+            client=_FakeClient(n_ids=600),
+            fetch_fn=fake_fetch,
+        )
+        meta = json.load(open(tmp_path / 'ds_meta_metadata.json'))
+        assert meta['source'] == 'neuprint'
+        assert meta['neuron_counts']['total'] == 600
+        assert meta['neuron_counts']['typed'] == 300
+        assert meta['neuron_counts']['untyped'] == 300
+        assert meta['synapse_counts'] == {
+            'total_presynaptic': 6000, 'total_postsynaptic': 12000,
+            'total': 18000}
+        # No client primary_rois on the fake -> roi list falls back to the
+        # long-form roi-count table.
+        assert meta['roi_coverage']['roi_list'] == ['AL(L)', 'AL(R)']
+        assert meta['roi_coverage']['neuron_counts_per_roi'] == {
+            'AL(L)': 600, 'AL(R)': 600}
+
+    def test_drop_roi_cols_false_keeps_roi_columns(self, tmp_path, monkeypatch):
+        """drop_roi_cols=False keeps roiInfo/inputRois/outputRois in the
+        saved neuron CSV; the default (True) drops them."""
+        import time as _time
+        monkeypatch.setattr(_time, 'sleep', lambda s: None)
+        monkeypatch.setattr(statvis, 'tqdm', lambda *a, **k: type('T', (), {
+            'update': lambda self, n: None, 'close': lambda self: None})())
+        self._patch_retry(monkeypatch)
+
+        def fake_fetch(criteria, client=None):
+            ids = criteria.bodyId if isinstance(criteria.bodyId, list) else [criteria.bodyId]
+            ndf = _make_chunk_df(ids)
+            ndf['roiInfo'] = '{}'
+            ndf['inputRois'] = '[]'
+            ndf['outputRois'] = '[]'
+            return ndf, _make_chunk_df(ids)
+
+        out = tmp_path / 'ds_keep'
+        statvis.pull_dataset(
+            'fake:v1', save_path=str(out),
+            client=_FakeClient(n_ids=500),
+            fetch_fn=fake_fetch,
+            drop_roi_cols=False,
+        )
+        saved = pd.read_csv(tmp_path / 'ds_keep_neuron_df.csv', index_col=0)
+        assert {'roiInfo', 'inputRois', 'outputRois'} <= set(saved.columns)
 
     def test_failed_chunks_retried_then_skipped(self, tmp_path, monkeypatch):
         """A batch that keeps failing after 5 retries is reported and SKIPPED;

@@ -33,13 +33,14 @@ SEARCH_EXCLUDED_COLUMNS = frozenset({
     "",
 })
 
-# ROI annotations are serialized lists/maps rather than compact metadata. In
-# the local releases they are the only fields that grow into multi-kilobyte or
-# multi-hundred-kilobyte strings (especially male-cns ``roiInfo`` and
-# ``outputRois``). Keep the source CSV untouched, but omit every ROI-named
-# field from the index used by suggestions and the rendered viewer. Matching
-# and display remain fast while ordinary numeric and string metadata stays
-# available in its source order.
+# ROI annotations are serialized lists/maps rather than compact metadata.
+# The pull pipeline drops them from the local ``*_neuron_df.csv`` releases
+# (``roiInfo``/``inputRois``/``outputRois``, all preserved long-form in
+# ``*_roi_count_df.csv``), but legacy files may still carry them, and they
+# grow into multi-hundred-kilobyte strings. Keep the source CSV untouched,
+# but omit every ROI-named field from the index used by suggestions and the
+# rendered viewer. Matching and display remain fast while ordinary numeric
+# and string metadata stays available in its source order.
 LARGE_SERIALIZED_COLUMN_MARKERS = ("roi",)
 
 # FlyWire releases have historically used several spellings for their stable

@@ -1156,7 +1156,93 @@ def getCriteriaAndName(requiredNeurons):
         fname += '_etc'
     return criteria, fname
 
-def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch_size=2000, fetch_fn=None):
+def _get_coverage_notes(dataset_name):
+    '''Known dataset coverage notes (mirrors ComparisonAnalyzer._get_coverage_notes).'''
+    notes = {
+        'hemibrain': "Central brain only. Missing: optic lobe, ventral nerve cord, subesophageal zone.",
+        'male-cns': "Full male CNS including central brain, optic lobes, VNC. Mostly bilateral symmetric.",
+        'manc': "Male adult nerve cord (VNC) connectome.",
+        'flywire': "Full adult female brain (FAFB). Complete brain coverage with optic lobes.",
+        'fafb': "Full adult female brain. Complete brain coverage with optic lobes.",
+        'optic-lobe': "Optic lobe only. Missing: central brain, VNC.",
+        'banc': "Full brain and VNC connectome.",
+    }
+    dataset_lower = dataset_name.lower()
+    for key, note in notes.items():
+        if key in dataset_lower:
+            return note
+    return "Coverage information not available."
+
+def _build_dataset_metadata(dataset, neuron_df, roi_count_df, client=None):
+    '''Build the ``<dataset>_metadata.json`` sidecar from freshly pulled frames.
+
+    Computes the statistics directly from the in-memory tables instead of
+    re-querying the server, so every pulled dataset carries identical
+    metadata regardless of whether a cross-dataset comparison has ever run
+    (previously only ComparisonAnalyzer wrote this file, and only for the
+    datasets it compared).
+    '''
+    import datetime
+
+    total = len(neuron_df)
+    if 'type' in neuron_df.columns:
+        type_vals = neuron_df['type']
+        typed = int(type_vals.notna().sum() - (type_vals == '').sum())
+    else:
+        typed = 0
+
+    def _sum(col):
+        return int(neuron_df[col].fillna(0).sum()) if col in neuron_df.columns else 0
+
+    total_pre = _sum('pre')
+    total_post = _sum('post')
+
+    # Prefer the server's primary ROI list when the client exposes it; fall
+    # back to every ROI present in the long-form roi-count table.
+    primary_rois = getattr(client, 'primary_rois', None)
+    has_roi_col = 'roi' in roi_count_df.columns
+    if primary_rois:
+        roi_list = list(primary_rois)
+    elif has_roi_col and not roi_count_df.empty:
+        roi_list = sorted(set(roi_count_df['roi'].dropna()) - {'NotPrimary'})
+    else:
+        roi_list = []
+
+    neuron_counts_per_roi = {}
+    if roi_list and has_roi_col and not roi_count_df.empty \
+            and 'bodyId' in roi_count_df.columns:
+        rc = roi_count_df[roi_count_df['roi'].isin(roi_list)]
+        if 'pre' in rc.columns and 'post' in rc.columns:
+            # A neuron counts toward an ROI when it has any synapse there.
+            rc = rc[(rc['pre'].fillna(0) + rc['post'].fillna(0)) > 0]
+        counts = rc.groupby('roi')['bodyId'].nunique()
+        neuron_counts_per_roi = {roi: int(counts.get(roi, 0)) for roi in roi_list}
+
+    return {
+        'dataset': dataset,
+        'source': 'neuprint',
+        'fetched_at': datetime.datetime.now().isoformat(),
+        'neuron_counts': {
+            'total': total,
+            'typed': typed,
+            'untyped': total - typed,
+            'type_coverage': typed / total if total else 0,
+        },
+        'synapse_counts': {
+            'total_presynaptic': total_pre,
+            'total_postsynaptic': total_post,
+            'total': total_pre + total_post,
+        },
+        'roi_coverage': {
+            'roi_list': roi_list,
+            'roi_count': len(roi_list),
+            'neuron_counts_per_roi': neuron_counts_per_roi,
+        },
+        'coverage_notes': _get_coverage_notes(dataset),
+    }
+
+
+def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch_size=2000, fetch_fn=None, drop_roi_cols=True):
     '''
     Download the complete neuron table of a NeuPrint dataset (including
     neurons with type=None) and save it as CSV.
@@ -1175,7 +1261,10 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch
         NeuPrint dataset identifier, e.g. 'male-cns:v1.0'.
     save_path : str, optional
         Output path prefix; ``_neuron_df.csv`` and ``_roi_count_df.csv``
-        are written next to it.
+        are written next to it.  By default the per-neuron ROI columns
+        ``roiInfo``, ``inputRois`` and ``outputRois`` are dropped from
+        ``_neuron_df.csv`` before saving (see ``drop_roi_cols``); the same
+        data is always kept long-form in ``_roi_count_df.csv``.
     omitNoneType : bool
         Drop rows without a type before saving (default False = keep).
     client : object, optional
@@ -1186,6 +1275,17 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch
         Fetch function with the neuprint signature ``(criteria, client)``
         returning ``(neuron_df, roi_count_df)``. Defaults to the module-level
         ``fetch_neurons``; injectable for tests/adapters.
+    drop_roi_cols : bool
+        Drop the per-neuron ROI columns ``roiInfo``, ``inputRois`` and
+        ``outputRois`` from ``_neuron_df.csv`` before saving (default True).
+        These columns are fully derivable from the long-form
+        ``_roi_count_df.csv`` and can account for ~90% of the CSV size
+        (male-cns); set False only when the raw per-neuron columns must be
+        stored locally.
+
+    A ``<dataset>_metadata.json`` sidecar (neuron/synapse counts, ROI
+    coverage) is always written next to the CSVs, computed from the pulled
+    frames.
     '''
     # requires login to hemibrain dataset
     if save_path is None:
@@ -1322,6 +1422,16 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch
     neuron_df = pd.concat(neuron_frames, ignore_index=True)
     roi_count_df = pd.concat(roi_frames, ignore_index=True) if roi_frames else pd.DataFrame()
 
+    # Drop the per-neuron ROI detail columns before saving: roiInfo is a
+    # dict per neuron and inputRois/outputRois are lists derivable from it
+    # (inputRois = ROIs with post > 0, outputRois = ROIs with pre > 0).
+    # Every value is preserved in roi_count_df (long-form), so keeping them
+    # would only bloat the local CSV (male-cns: ~90% of the file).
+    if drop_roi_cols:
+        for col in ('roiInfo', 'inputRois', 'outputRois'):
+            if col in neuron_df.columns:
+                neuron_df = neuron_df.drop(columns=col)
+
     if omitNoneType:
         # delete rows with type is empty
         neuron_df = neuron_df[neuron_df['type'].notna()]
@@ -1330,7 +1440,18 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch
     # write to csv
     neuron_df.to_csv(save_path + '_neuron_df.csv',index=True)
     roi_count_df.to_csv(save_path + '_roi_count_df.csv',index=True)
-    print('Done!')
+
+    # Metadata sidecar: computed from the frames just saved, so every pulled
+    # dataset gets its statistics without waiting for a cross-dataset
+    # comparison run to touch it.
+    metadata = _build_dataset_metadata(dataset, neuron_df, roi_count_df, client)
+    meta_path = save_path
+    if meta_path.endswith('_allneurons'):
+        meta_path = meta_path[:-len('_allneurons')]
+    meta_file = meta_path + '_metadata.json'
+    with open(meta_file, 'w', encoding='utf-8') as mf:
+        json.dump(metadata, mf, indent=2, default=str)
+    print('Done! (metadata saved to', meta_file + ')')
 
 def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=None, client=None, verbose=True, search_columns='auto', search_info_sink=None):
     '''get neurons locally from a given dataset

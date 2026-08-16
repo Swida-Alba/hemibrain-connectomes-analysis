@@ -1657,10 +1657,11 @@ class ComparisonAnalyzer:
         notes = {
             'hemibrain': "Central brain only. Missing: optic lobe, ventral nerve cord, subesophageal zone.",
             'male-cns': "Full male CNS including central brain, optic lobes, VNC. Mostly bilateral symmetric.",
+            'manc': "Male adult nerve cord (VNC) connectome.",
             'flywire': "Full adult female brain (FAFB). Complete brain coverage with optic lobes.",
             'fafb': "Full adult female brain. Complete brain coverage with optic lobes.",
             'optic-lobe': "Optic lobe only. Missing: central brain, VNC.",
-            'banc': "Full brain and VNC connectome."
+            'banc': "Full brain and VNC connectome.",
         }
         
         dataset_lower = dataset_name.lower()
