@@ -82,7 +82,10 @@ def _migrate_legacy_neuron_indexes() -> None:
         pass
 
 
-_migrate_legacy_neuron_indexes()
+# One-time startup migration, skipped under pytest so importing the app
+# (as the UI test suite does) never mutates the real repo directory.
+if "PYTEST_CURRENT_TEST" not in os.environ:
+    _migrate_legacy_neuron_indexes()
 
 
 def _saved_dark_mode() -> bool | None:
