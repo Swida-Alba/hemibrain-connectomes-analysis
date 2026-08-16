@@ -307,6 +307,20 @@ def create_find_similar_tab():
                               / dataset.value.replace(":", "_").replace(".", "_"))
                     # recursive: FlyWire bulk caches live in nested folders
                     n_skel = len(list((folder / "skeletons").rglob("*.pkl")))
+                    # FAFB v783: the healed bundle is the real skeleton source
+                    # (the pickle cache holds meshes).
+                    bundle = (Path(PROJECT_ROOT) / "datasets"
+                              / dataset.value.replace(":", "_").replace(".", "_")
+                              / "sk_lod1_783_healed.zip")
+                    if bundle.exists():
+                        import zipfile
+                        try:
+                            with zipfile.ZipFile(bundle, "r") as z:
+                                n_skel = sum(
+                                    1 for n in z.namelist()
+                                    if n.endswith(".swc"))
+                        except Exception:
+                            pass
                     n_vec = 0
                     vec_file = folder / "morphology" / "skeleton_vectors.parquet"
                     if vec_file.exists():

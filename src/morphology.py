@@ -48,14 +48,14 @@ except ImportError:
     )
 
 try:
+    from .utils.flywire_readiness import is_fafb_dataset, require_flywire_skeleton_access
+except ImportError:
+    from utils.flywire_readiness import is_fafb_dataset, require_flywire_skeleton_access
+
+try:
     from .visualization_options import default_analysis_skeleton_mesh_simplification
 except ImportError:
     from visualization_options import default_analysis_skeleton_mesh_simplification
-
-try:
-    from .utils.flywire_readiness import require_flywire_skeleton_access
-except ImportError:
-    from utils.flywire_readiness import require_flywire_skeleton_access
 
 # Feature columns (morphometrics part of the vector). The full per-neuron
 # vector is these 24 features + 100 persistence dimensions.
@@ -431,6 +431,43 @@ def _vectorize_one_file(path: str) -> Optional[Tuple[int, List[float], List[floa
             vector[len(MORPHOMETRIC_FEATURES):].tolist(), rep)
 
 
+# ---------------------------------------------------------------------------
+# Healed-bundle workers (FAFB full-dataset vectorization)
+# ---------------------------------------------------------------------------
+# The FAFB healed bundle ({bodyId}.swc entries) is the full skeleton source
+# for FAFB v783: the local pickle cache holds meshes, which is the wrong
+# representation for the vector cache. Workers open the ZIP once per process
+# (the central directory read is the expensive part; per-entry reads are
+# cheap).
+
+_FAFB_WORKER_ZIP = None
+
+
+def _init_fafb_zip_worker(zip_path: str):
+    """Per-worker initializer: open the healed bundle once per process."""
+    global _FAFB_WORKER_ZIP
+    import zipfile
+
+    _FAFB_WORKER_ZIP = zipfile.ZipFile(zip_path, "r")
+
+
+def _vectorize_one_swc(body_id: int
+                       ) -> Optional[Tuple[int, List[float], List[float], str]]:
+    """Module-level worker: vectorize one healed-bundle skeleton."""
+    global _FAFB_WORKER_ZIP
+    import io
+
+    try:
+        content = _FAFB_WORKER_ZIP.read(f"{int(body_id)}.swc").decode("utf-8")
+        neuron = navis.read_swc(io.StringIO(content))
+        neuron.units = "nm"
+        morph, vector = vectorize_neuron(neuron)
+    except Exception:
+        return None
+    return (int(body_id), [morph[f] for f in MORPHOMETRIC_FEATURES],
+            vector[len(MORPHOMETRIC_FEATURES):].tolist(), "skeleton")
+
+
 def _import_visualizer():
     """Lazily import the VisualizeSkeleton class (heavy module; never loaded
     unless a run actually renders). Returns None when unavailable."""
@@ -731,16 +768,47 @@ class SkeletonVectorCache:
         """Vectorize all cached skeletons (incremental) and persist.
 
         Reuses existing rows; optionally fetches up to ``fetch_missing``
-        additional neurons (persisted to the skeleton cache first).
+        additional neurons (persisted to the skeleton cache first). For
+        FAFB v783 the full-dataset source is the healed skeleton bundle
+        (``{bodyId}.swc`` entries — the local pickle cache holds meshes,
+        which is the wrong representation for the vector cache).
         """
         self.morph_dir.mkdir(parents=True, exist_ok=True)
         self.skeleton_dir.mkdir(parents=True, exist_ok=True)
+
+        # FAFB v783: the healed bundle is the full skeleton source.
+        use_bundle = False
+        bundle_zip: Optional[str] = None
+        bundle_ids: List[int] = []
+        if is_fafb_dataset(self.dataset):
+            bundle_zip = _fafb_skeleton_zip_path(
+                self.dataset, str(self.project_root))
+            if bundle_zip is not None:
+                import zipfile
+                with zipfile.ZipFile(bundle_zip, "r") as z:
+                    bundle_ids = sorted(
+                        {int(n[:-4]) for n in z.namelist() if n.endswith(".swc")})
+                use_bundle = True
 
         existing: Dict[int, dict] = {}
         if self.parquet_path.exists():
             try:
                 df_old = pd.read_parquet(self.parquet_path)
-                existing = {int(r["bodyId"]): r for r in df_old.to_dict("records")}
+                if use_bundle:
+                    # The bundle produces skeleton vectors; a mesh-based
+                    # (or legacy, rep-less) cache is incompatible and must
+                    # be rebuilt from scratch.
+                    reps = (set(df_old["rep"].fillna("").astype(str))
+                            if "rep" in df_old.columns else {"legacy"})
+                    if not reps <= {"skeleton", ""}:
+                        self._log(
+                            "[SkeletonVectorCache] Existing FAFB vector cache "
+                            "is mesh-based; rebuilding it from the healed "
+                            "skeleton bundle.")
+                        df_old = None
+                if df_old is not None:
+                    existing = {int(r["bodyId"]): r
+                                for r in df_old.to_dict("records")}
             except Exception:
                 existing = {}
 
@@ -752,10 +820,14 @@ class SkeletonVectorCache:
         basis = (self._load_meta() or {}).get("vector_basis") or VECTOR_BASIS_RAW
         folder_level = _skeleton_folder_level(self.dataset, str(self.project_root))
 
-        # Candidate skeleton files not yet vectorized.
-        files = self._discover_skeleton_files()
-        files = [f for f in files if folder_level == basis]
-        pending = [f for f in files if int(Path(f).stem) not in existing]
+        # Candidate skeletons not yet vectorized.
+        if use_bundle:
+            files: List[str] = []
+            pending = [int(b) for b in bundle_ids if int(b) not in existing]
+        else:
+            files = self._discover_skeleton_files()
+            files = [f for f in files if folder_level == basis]
+            pending = [f for f in files if int(Path(f).stem) not in existing]
 
         # Optional on-demand fetch to extend coverage (cap applies).
         # fetch_skeleton_on_demand already vectorizes at fetch time (raw
@@ -774,7 +846,11 @@ class SkeletonVectorCache:
                 except Exception:
                     index = []
             if index:
-                have = {int(b) for b in (list(existing) + [int(Path(f).stem) for f in files])}
+                have = {int(b) for b in list(existing)}
+                if use_bundle:
+                    have |= set(bundle_ids)
+                else:
+                    have |= {int(Path(f).stem) for f in files}
                 missing = [b for b in index if b not in have]
                 for bid in missing[:fetch_missing]:
                     nrn = fetch_skeleton_on_demand(self.dataset, bid, project_root=str(self.project_root))
@@ -791,18 +867,32 @@ class SkeletonVectorCache:
                     existing = {int(r["bodyId"]): r for r in df_old.to_dict("records")}
                 except Exception:
                     pass
-                files = self._discover_skeleton_files()
-                files = [f for f in files if folder_level == basis]
-                pending = [f for f in files if int(Path(f).stem) not in existing]
+                if use_bundle:
+                    pending = [int(b) for b in bundle_ids
+                               if int(b) not in existing]
+                else:
+                    files = self._discover_skeleton_files()
+                    files = [f for f in files if folder_level == basis]
+                    pending = [f for f in files if int(Path(f).stem) not in existing]
 
         rows = []
         if pending:
             started = time.time()
+            source_label = ("healed bundle skeletons" if use_bundle
+                            else "skeletons")
             self._log(
-                f"[SkeletonVectorCache] Vectorizing {len(pending)} skeletons "
+                f"[SkeletonVectorCache] Vectorizing {len(pending)} {source_label} "
                 f"({self.dataset})..."
             )
-            if self.n_workers > 1:
+            if use_bundle:
+                if self.n_workers > 1:
+                    try:
+                        rows = self._vectorize_parallel_swc(bundle_zip, pending)
+                    except Exception:
+                        rows = self._vectorize_swc_serial(bundle_zip, pending)
+                else:
+                    rows = self._vectorize_swc_serial(bundle_zip, pending)
+            elif self.n_workers > 1:
                 try:
                     rows = self._vectorize_parallel(pending)
                 except Exception:
@@ -892,6 +982,28 @@ class SkeletonVectorCache:
         with ProcessPoolExecutor(max_workers=self.n_workers, mp_context=ctx) as ex:
             return list(ex.map(_vectorize_one_file, files, chunksize=16))
 
+    def _vectorize_parallel_swc(self, zip_path: str, bids: List[int]
+                                ) -> List[Tuple[int, List[float], List[float]]]:
+        """Vectorize healed-bundle skeletons in a worker pool; each worker
+        opens the ZIP once via the initializer."""
+        ctx = mp.get_context("fork") if hasattr(mp, "get_context") and "fork" in mp.get_all_start_methods() else mp.get_context()
+        with ProcessPoolExecutor(max_workers=self.n_workers, mp_context=ctx,
+                                 initializer=_init_fafb_zip_worker,
+                                 initargs=(zip_path,)) as ex:
+            return list(ex.map(_vectorize_one_swc, bids, chunksize=16))
+
+    def _vectorize_swc_serial(self, zip_path: str, bids: List[int]
+                              ) -> List[Tuple[int, List[float], List[float]]]:
+        """Serial healed-bundle vectorization (single-worker or fallback)."""
+        global _FAFB_WORKER_ZIP
+        _init_fafb_zip_worker(zip_path)
+        try:
+            return [_vectorize_one_swc(b) for b in bids]
+        finally:
+            if _FAFB_WORKER_ZIP is not None:
+                _FAFB_WORKER_ZIP.close()
+                _FAFB_WORKER_ZIP = None
+
     # ------------------------------------------------------------ load
     @staticmethod
     def _raw_matrix(df: pd.DataFrame) -> np.ndarray:
@@ -943,8 +1055,23 @@ class SkeletonVectorCache:
                 "new": 0, "fetched": 0}
 
     def coverage(self) -> Dict[str, int]:
-        """Skeleton and vector counts for the dataset."""
+        """Skeleton and vector counts for the dataset.
+
+        For FAFB v783 the local skeleton count is the healed bundle's entry
+        count (the pickle cache holds meshes, not skeletons).
+        """
         n_skeletons = len(self._discover_skeleton_files())
+        if is_fafb_dataset(self.dataset):
+            zip_path = _fafb_skeleton_zip_path(
+                self.dataset, str(self.project_root))
+            if zip_path is not None:
+                try:
+                    import zipfile
+                    with zipfile.ZipFile(zip_path, "r") as z:
+                        n_skeletons = sum(
+                            1 for n in z.namelist() if n.endswith(".swc"))
+                except Exception:
+                    pass
         n_vectors = 0
         if self.parquet_path.exists():
             try:
@@ -1480,15 +1607,36 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
                 index = []
 
     existing = {int(p.stem) for p in skeleton_dir.rglob("*.pkl")}
-    missing = [int(b) for b in index if int(b) not in existing]
+
+    # FAFB v783 only: the healed bundle already provides most skeletons
+    # locally — count its entries as available instead of re-fetching them
+    # through the CAVE API. Only the genuinely missing ids are downloaded.
+    local_bundle_ids: set = set()
+    if is_fafb_dataset(dataset):
+        zip_path = _fafb_skeleton_zip_path(dataset, str(root))
+        if zip_path is not None:
+            try:
+                import zipfile
+                with zipfile.ZipFile(zip_path, "r") as z:
+                    local_bundle_ids = {
+                        int(n[:-4]) for n in z.namelist() if n.endswith(".swc")
+                    }
+            except Exception:
+                local_bundle_ids = set()
+
+    missing = [int(b) for b in index
+               if int(b) not in existing and int(b) not in local_bundle_ids]
     if limit is not None:
         missing = missing[: int(limit)]
     total = len(missing)
+    skipped_existing = len(existing) + len(local_bundle_ids)
     if total == 0:
         if verbose:
             print(f"[morphology] download_all_skeletons: "
-                  f"{len(existing)} skeletons already cached; nothing to fetch.")
-        return {"total": 0, "fetched": 0, "skipped_existing": len(existing),
+                  f"{skipped_existing} skeletons already available locally "
+                  f"({len(existing)} cached, {len(local_bundle_ids)} from the "
+                  f"healed bundle); nothing to fetch.")
+        return {"total": 0, "fetched": 0, "skipped_existing": skipped_existing,
                 "cancelled": False, "errors": 0}
 
     if verbose:
@@ -1542,7 +1690,7 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
     summary = {
         "total": total,
         "fetched": fetched,
-        "skipped_existing": len(existing),
+        "skipped_existing": skipped_existing,
         "cancelled": cancelled,
         "errors": errors,
     }

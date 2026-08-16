@@ -326,6 +326,16 @@ class RoiProfileStore:
 
         csv = roi_count_csv_path(self.dataset, str(self.root))
         if not csv.exists():
+            if any(k in self.dataset.lower() for k in ("flywire", "fafb", "banc")):
+                # FlyWire datasets have no per-ROI synapse count table at
+                # all (the ROI screen is NeuPrint-only); "pull/prepare" can
+                # never produce one, so the guidance must say so.
+                raise RoiScreeningUnavailable(
+                    f"ROI screening is not available for {self.dataset}: "
+                    "FlyWire datasets have no per-ROI synapse count table. "
+                    "Use Candidate Source 'profile' (shared connectivity "
+                    "partners) or 'cache' (full vector-cache search) instead."
+                )
             raise RoiScreeningUnavailable(
                 f"No ROI-count table for {self.dataset} (expected {csv}). "
                 "Pull/prepare the dataset first, or use Candidate Source "

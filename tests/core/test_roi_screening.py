@@ -182,6 +182,14 @@ class TestRoiProfileStore:
         with pytest.raises(rois.RoiScreeningUnavailable, match="ROI-count"):
             store.ensure()
 
+    def test_flywire_roi_screening_unavailable_with_clear_guidance(self, tmp_path):
+        """FlyWire datasets have no per-ROI synapse table anywhere; the
+        error must not suggest pulling/preparing one."""
+        store = rois.RoiProfileStore("flywire_FAFB_v783",
+                                     project_root=str(tmp_path))
+        with pytest.raises(rois.RoiScreeningUnavailable, match="not available"):
+            store.ensure()
+
     def test_hierarchical_sidecar_rejected_without_backfill(self, tmp_path,
                                                             monkeypatch):
         hierarchical_fixture(tmp_path)

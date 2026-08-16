@@ -1433,6 +1433,95 @@ class TestExtrusionCheck:
             verbose=False, n_workers=1)) == [2]
 
 
+class TestFafbBundleLocalSources:
+    """FAFB v783 local-first behavior: the healed bundle feeds both the
+    full skeleton download (skip already-available ids) and the full
+    vector-cache build (skeleton vectors instead of mesh pickles)."""
+
+    def _swc(self, n=30):
+        t = np.arange(n) * 2.0
+        coords = np.column_stack(
+            [t, 5 * np.sin(t / 5), 5 * np.cos(t / 5)])
+        lines = ["# SWC skeleton"]
+        for i in range(n):
+            parent = -1 if i == 0 else i
+            lines.append(
+                f"{i + 1} 1 {coords[i, 0]} {coords[i, 1]} "
+                f"{coords[i, 2]} 0.25 {parent}"
+            )
+        return "\n".join(lines)
+
+    def _write_bundle(self, tmp_path, entries):
+        import zipfile
+        zip_path = (tmp_path / "datasets" / "flywire_FAFB_v783"
+                    / "sk_lod1_783_healed.zip")
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "w") as z:
+            for bid in entries:
+                z.writestr(f"{bid}.swc", self._swc())
+        return zip_path
+
+    def test_download_all_skeletons_skips_bundle_entries(self, tmp_path,
+                                                         monkeypatch):
+        """Download All Skeletons on FAFB counts healed-bundle entries as
+        locally available and fetches only the genuinely missing ids."""
+        self._write_bundle(tmp_path, [2, 3])
+        write_neuron_index(tmp_path, "flywire_FAFB_v783", [
+            (1, "T", "T_1"), (2, "T", "T_2"), (3, "T", "T_3"),
+        ])
+        cache_dir = tmp_path / "cache" / "flywire_FAFB_v783"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "connections.parquet").touch()
+        fetched = []
+
+        def fake_fetch(dataset, bid, project_root=None, persist=True):
+            assert persist is True
+            fetched.append(bid)
+            return line_neuron(length=25)
+
+        monkeypatch.setattr(morph, "fetch_skeleton_on_demand", fake_fetch)
+        summary = morph.download_all_skeletons(
+            "flywire_FAFB_v783", project_root=str(tmp_path),
+            max_workers=2, verbose=False,
+        )
+        assert summary["fetched"] == 1 and fetched == [1]
+        assert summary["skipped_existing"] == 2  # healed-bundle entries
+        assert summary["errors"] == 0
+
+    def test_build_uses_healed_bundle_for_fafb(self, tmp_path):
+        """Full vector-cache build on FAFB vectorizes the healed bundle
+        skeletons (rep=skeleton), not the mesh pickle cache."""
+        self._write_bundle(tmp_path, [1, 2, 3])
+        cache = morph.SkeletonVectorCache(
+            "flywire_FAFB_v783", project_root=str(tmp_path),
+            n_workers=1, verbose=False,
+        )
+        stats = cache.build()
+        assert stats["new"] == 3 and stats["rows"] == 3
+        data = cache.load()
+        assert set(data["bodyIds"].tolist()) == {1, 2, 3}
+        assert data["dataset_rep"] == "skeleton"
+        assert (cache._load_meta() or {}).get("rep") == "skeleton"
+        assert cache.coverage() == {"skeletons": 3, "vectors": 3}
+
+    def test_build_replaces_legacy_mesh_cache_for_fafb(self, tmp_path):
+        """A mesh-based (legacy, rep-less) FAFB vector cache is rebuilt
+        from the healed bundle instead of being extended."""
+        self._write_bundle(tmp_path, [1, 2])
+        cache = morph.SkeletonVectorCache(
+            "flywire_FAFB_v783", project_root=str(tmp_path),
+            n_workers=1, verbose=False,
+        )
+        cache.morph_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"bodyId": [999], "cable_length": [1.0]}) \
+            .to_parquet(cache.parquet_path, index=False)
+        stats = cache.build()
+        assert stats["rows"] == 2
+        data = cache.load()
+        assert set(data["bodyIds"].tolist()) == {1, 2}
+        assert data["dataset_rep"] == "skeleton"
+
+
 class TestProfileFirst:
     """Connection-profile pipeline: connection-cache candidates ->
     top candidate_cap rows -> morphology."""
