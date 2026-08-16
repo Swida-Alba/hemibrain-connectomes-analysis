@@ -198,6 +198,27 @@ def record(values: List[str], now: Optional[str] = None,
         _save(data)
 
 
+def datasets_of(value: str) -> List[str]:
+    """Recorded dataset names for one history value, sorted and deduplicated.
+
+    Entries recorded before dataset provenance was introduced return ``[]``;
+    the dropdown renders no dataset tags for them.
+    """
+    value = str(value or "").strip()
+    if not value:
+        return []
+    with _LOCK:
+        data = _load()
+        entry = data.get(value)
+        if not isinstance(entry, dict):
+            return []
+        return sorted({
+            str(dataset).strip()
+            for dataset in (entry.get("datasets") or [])
+            if str(dataset).strip()
+        })
+
+
 def mark_custom(values: Iterable[str]) -> None:
     """Mark already-recorded query values as custom-group entries."""
     keys = {str(value).strip() for value in values if str(value).strip()}

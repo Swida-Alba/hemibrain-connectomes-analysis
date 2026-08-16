@@ -6,6 +6,7 @@ a focus-panel + contact-sheet workspace layout.
 """
 
 import asyncio
+import itertools
 import os
 import re
 import shutil
@@ -32,6 +33,106 @@ from ..config import (
 # Registered output-directory fields let the Settings tab update inherited
 # values without overwriting a tab-specific override.
 _OUTPUT_DIR_INPUTS = []
+
+# Per-input token linking a suggestion menu to its chip-input anchor in the
+# browser. The keyboard-navigation script resolves the open menu for the
+# focused input through the matching ``drocat-suggest-anchor-<n>`` /
+# ``drocat-suggest-menu-<n>`` class pair.
+_SUGGEST_TOKEN = itertools.count(1)
+
+# Client-side arrow-key navigation for the suggestion/history dropdown.
+# The menu never takes focus (no-focus), so keystrokes land in the QSelect
+# editor; this document-level capture handler moves a highlight between the
+# menu rows: ArrowDown enters the list from the input box, ArrowUp leaves it
+# from the first row, and Enter picks the highlighted row.
+_SUGGEST_KEYNAV_SCRIPT = """
+<script>
+(function () {
+  if (window.__drocatSuggestNav) return;
+  window.__drocatSuggestNav = true;
+  document.addEventListener('keydown', function (event) {
+    if (!['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key)) return;
+    var active = document.activeElement;
+    if (!active || typeof active.closest !== 'function') return;
+    var shell = active.closest('.drocat-chip-input-shell');
+    if (!shell) return;
+    var menuClass = null;
+    shell.classList.forEach(function (cls) {
+      if (cls.indexOf('drocat-suggest-anchor-') === 0) {
+        menuClass = cls.replace('drocat-suggest-anchor-', 'drocat-suggest-menu-');
+      }
+    });
+    if (!menuClass) return;
+    var menu = document.querySelector('.' + menuClass);
+    if (!menu || menu.style.display === 'none') return;
+    var rows = [];
+    menu.querySelectorAll('.q-item').forEach(function (row) {
+      if (row.classList.contains('drocat-suggest-header')) return;
+      if (row.offsetParent === null) return;
+      rows.push(row);
+    });
+    if (!rows.length) return;
+    var current = -1;
+    rows.forEach(function (row, i) {
+      if (row.classList.contains('drocat-suggest-active')) current = i;
+    });
+    function highlight(index) {
+      rows.forEach(function (row) {
+        row.classList.remove('drocat-suggest-active');
+      });
+      if (index >= 0 && index < rows.length) {
+        rows[index].classList.add('drocat-suggest-active');
+        rows[index].scrollIntoView({ block: 'nearest' });
+      }
+    }
+    function clearEditor() {
+      // Wipe the pending editor text so Quasar cannot also commit it as a
+      // chip on Enter. The native setter + input event keep Vue's model in
+      // sync (a plain ``value = ''`` would leave ``inputValue`` unchanged).
+      var input = shell.querySelector('input');
+      if (!input) return;
+      var setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, 'value'
+      ).set;
+      setter.call(input, '');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    if (event.key === 'ArrowDown') {
+      // Enter the list from the input box, or move down one row.
+      if (current < rows.length - 1) {
+        event.preventDefault();
+        highlight(current + 1);
+      }
+    } else if (event.key === 'ArrowUp') {
+      if (current === 0) {
+        // First row -> back to the input box (highlight removed).
+        event.preventDefault();
+        highlight(-1);
+      } else if (current > 0) {
+        event.preventDefault();
+        highlight(current - 1);
+      }
+    } else if (event.key === 'Enter') {
+      if (current === -1) return;
+      event.preventDefault();
+      event.stopPropagation();
+      clearEditor();
+      window.__drocatSuggestEnterPick = true;
+      rows[current].click();
+      highlight(-1);
+    }
+  }, true);
+  // Quasar also commits the editor text on the Enter keyup; suppress it for
+  // the pick above so only the highlighted row lands in the chip list.
+  document.addEventListener('keyup', function (event) {
+    if (event.key !== 'Enter' || !window.__drocatSuggestEnterPick) return;
+    event.preventDefault();
+    event.stopPropagation();
+    window.__drocatSuggestEnterPick = false;
+  }, true);
+})();
+</script>
+"""
 
 
 # =============================================================================
@@ -357,6 +458,7 @@ def neuron_list_input(
     suggestions: Optional[Callable[[str], List[Tuple[str, str]]]] = None,
     available_neurons: Optional[Callable[[], object]] = None,
     history_datasets: Optional[Callable[[], object]] = None,
+    show_history_datasets: bool = False,
     suggestion_min_chars: int = 1,
     suggestion_limit: int = 50,
 ) -> ui.element:
@@ -379,12 +481,19 @@ def neuron_list_input(
       with the searched column as a gray hint). The provider is prefiltered
       from the first character and suggestions are shown from the first
       character by default (``suggestion_min_chars=1``). A blank focused field
-      opens the persistent query history (last 10 + most frequent); history
-      is not mixed into a nonblank dataset search. When ``history_datasets``
-      is omitted, the dataset getter from ``available_neurons`` is reused for
-      history filtering. At most ``suggestion_limit`` entries are shown. With
-      a provider, the native QSelect popup is replaced by the custom suggestion
-      menu.
+      opens the persistent query history (last 10 + most frequent), filtered
+      to the dataset(s) selected in the current tab (via ``history_datasets``
+      or ``available_neurons``); history is not mixed into a nonblank dataset
+      search. History rows carry the same gray category hint as suggestion
+      rows (the searched column, or the cached instance for bodyIds). With
+      ``show_history_datasets=True`` (the cross-dataset tab), history rows
+      additionally show a gray tag per dataset the value was recorded for —
+      restricted to the datasets currently selected in the tab's dataset
+      input. Arrow keys navigate the open dropdown: ArrowDown enters the list
+      from the editor, ArrowUp returns to the editor from the first row, and
+      Enter picks the highlighted row. At most ``suggestion_limit`` entries
+      are shown. With a provider, the native QSelect popup is replaced by the
+      custom suggestion menu.
     - ``available_neurons``: optional zero-argument dataset getter. When
       supplied, a ``See available neurons`` link opens the rendered,
       searchable cached neuron-index viewer for the current dataset.
@@ -799,6 +908,19 @@ def neuron_list_input(
             with ui.menu() as suggest_menu:
                 pass
         suggest_menu.classes("drocat-suggest-menu")
+        # Unique token pair ties THIS input's anchor to THIS menu in the
+        # browser (class-scoped: NiceGUI 3.15 renders no DOM ids). The
+        # keyboard-navigation script uses the pair to resolve the open menu
+        # of the focused editor.
+        suggest_token = next(_SUGGEST_TOKEN)
+        chip_input_anchor.classes(f"drocat-suggest-anchor-{suggest_token}")
+        suggest_menu.classes(f"drocat-suggest-menu-{suggest_token}")
+        # The arrow-key navigation script is page-global; register it once
+        # per client connection.
+        if not getattr(suggest_menu.client,
+                       "_drocat_suggest_keynav_added", False):
+            ui.add_head_html(_SUGGEST_KEYNAV_SCRIPT)
+            suggest_menu.client._drocat_suggest_keynav_added = True
         # Anchor the popup to THIS input's wrapper explicitly. Parent-component
         # anchoring alone can detach (menu renders at the page origin) when the
         # input is rebuilt inside nested containers (e.g. the inline grouper's
@@ -940,6 +1062,7 @@ def neuron_list_input(
 
         def _show_history(query: str = ""):
             from ..history_store import (
+                datasets_of as _datasets_of,
                 frequent as _frequent,
                 prune_orphaned_custom as _prune_orphaned_custom,
                 recent as _recent,
@@ -1000,54 +1123,127 @@ def neuron_list_input(
                 _show_history(query)
 
             def _history_hint(value: str) -> str | None:
-                """Return the cached instance hint for a body-ID history row."""
-                if not re.fullmatch(r"\d+(?:\.0+)?", str(value).strip()):
+                """Category hint for a history row, mirroring suggestion rows.
+
+                Body-ID rows use the cached instance as their hint; other
+                values resolve their searched column (type/instance/bodyId)
+                from the active dataset pools, so history rows read like
+                auto-suggestion rows.
+                """
+                text = str(value).strip()
+                if not text:
                     return None
-                if suggestions is None:
+                if re.fullmatch(r"\d+(?:\.0+)?", text):
+                    if suggestions is None:
+                        return None
+                    try:
+                        for candidate, hint in suggestions(text) or []:
+                            if str(candidate) == text and hint:
+                                # Body-ID pools use the corresponding
+                                # instance as their hint; do not display the
+                                # generic fallback.
+                                if str(hint).casefold() != "bodyid":
+                                    return str(hint)
+                    except Exception:
+                        # History must remain usable when a dataset is not
+                        # local.
+                        return None
                     return None
+                # Non-bodyId values: resolve the searched column from the
+                # selected dataset pools (lookup built lazily, once per menu
+                # render, only when a non-bodyId row needs a hint).
+                if dataset_scope is None:
+                    return None
+                lookup = _column_lookup()
+                return lookup.get(text) if lookup is not None else None
+
+            def _history_datasets(value: str) -> List[str]:
+                """Dataset tags for one row, restricted to the datasets
+                currently selected in the tab's dataset input."""
+                if not show_history_datasets or dataset_scope is None:
+                    return []
+                scope = set(dataset_scope)
+                return [
+                    dataset for dataset in _datasets_of(value)
+                    if dataset in scope
+                ]
+
+            _column_lookup_state = {"built": False, "lookup": None}
+
+            def _column_lookup():
+                """Value -> searched column over the selected datasets'
+                pools, for history category hints. Built lazily so menus
+                without non-bodyId rows never pay for the pool scan."""
+                if _column_lookup_state["built"]:
+                    return _column_lookup_state["lookup"]
+                _column_lookup_state["built"] = True
                 try:
-                    for candidate, hint in suggestions(str(value)) or []:
-                        if str(candidate) == str(value) and hint:
-                            # Body-ID pools use the corresponding instance as
-                            # their hint; do not display the generic fallback.
-                            if str(hint).casefold() != "bodyid":
-                                return str(hint)
+                    from ..type_suggestions import (
+                        get_dataset_pools,
+                        suggestion_pool,
+                    )
+
+                    if len(dataset_scope) == 1:
+                        pools = get_dataset_pools(dataset_scope[0])
+                    else:
+                        pools = suggestion_pool(dataset_scope)
+                    lookup = {}
+                    # bodyId is intentionally skipped: numeric history rows
+                    # resolve through the instance-hint path above, and the
+                    # bodyId pool is by far the largest column.
+                    for column in ("type", "instance"):
+                        for candidate, _ in pools.get(column, []):
+                            # First matching column wins (type priority).
+                            lookup.setdefault(str(candidate), column)
+                    _column_lookup_state["lookup"] = lookup
                 except Exception:
-                    # History must remain usable when a dataset is not local.
-                    return None
-                return None
+                    # History must remain usable without local pools.
+                    _column_lookup_state["lookup"] = None
+                return _column_lookup_state["lookup"]
 
             suggest_menu.clear()
             with suggest_menu:
                 if recents:
                     ui.item("Recent").props("dense disabled").classes(
-                        "text-caption drocat-muted")
+                        "text-caption drocat-muted drocat-suggest-header")
                     for v in recents:
                         _history_item(
                             v,
                             v in valid_custom_labels,
                             _history_hint(v),
                             _remove_history_value,
+                            _history_datasets(v),
                         )
                 if freqs:
                     ui.item("Frequent").props("dense disabled").classes(
-                        "text-caption drocat-muted")
+                        "text-caption drocat-muted drocat-suggest-header")
                     for v in freqs:
                         _history_item(
                             v,
                             v in valid_custom_labels,
                             _history_hint(v),
                             _remove_history_value,
+                            _history_datasets(v),
                         )
             _refresh_menu()
 
-        def _history_item(value, is_custom=False, hint=None, remove_handler=None):
+        def _history_item(value, is_custom=False, hint=None, remove_handler=None,
+                          datasets=None):
             with ui.item().props("dense").on_click(
                     lambda v=value: _commit_suggestion(v)):
                 with ui.row().classes("items-center gap-2 no-wrap w-full"):
                     ui.label(str(value)).classes("text-body2 flex-grow")
                     if hint:
                         ui.label(str(hint)).classes("text-caption drocat-muted")
+                    # Dataset provenance tags (cross-dataset tab): one gray
+                    # tag per SELECTED dataset the value was recorded for.
+                    # Entries recorded outside the current selection show no
+                    # tags here.
+                    for dataset_name in datasets or []:
+                        ui.badge(str(dataset_name)).props(
+                            "outline dense").classes(
+                            "text-caption drocat-muted "
+                            "drocat-history-dataset-badge")
                     if is_custom:
                         ui.badge("custom", color="grey-6").props(
                             "outline dense")

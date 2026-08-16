@@ -106,6 +106,13 @@ def create_nb_find_neuron_tab():
                                         method_params=method_params,
                                         output_dir=output_dir.value)
 
+        # A completed search means the driver lines matched EM neurons; keep
+        # them in the query history without dataset provenance (NeuronBridge
+        # searches every dataset).
+        if result["returncode"] == 0:
+            from ..history_store import record as _record_history
+            _record_history([str(v) for v in lines])
+
         output_panel.set_running(False)
         output_panel.set_status("Completed" if result["returncode"] == 0 else "Failed",
                                 "green" if result["returncode"] == 0 else "red")

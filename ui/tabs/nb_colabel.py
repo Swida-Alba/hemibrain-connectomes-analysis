@@ -150,6 +150,13 @@ def create_nb_colabel_tab():
                                         method_params=method_params,
                                         output_dir=output_dir.value)
 
+        # Co-labeling always searches every NeuronBridge dataset, so the
+        # driver lines enter the query history without dataset provenance
+        # (visible in every tab's history list).
+        if result["returncode"] == 0:
+            from ..history_store import record as _record_history
+            _record_history([str(v) for v in lines])
+
         output_panel.set_running(False)
         output_panel.set_status("Completed" if result["returncode"] == 0 else "Failed",
                                 "green" if result["returncode"] == 0 else "red")

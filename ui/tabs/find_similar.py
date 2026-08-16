@@ -525,6 +525,7 @@ def create_find_similar_tab():
             )
             return
         mode, neurons = query_input.get_value()
+        raw_queries = _unique_queries(neurons)
         queries = _unique_queries(apply_filter_mode(neurons, mode))
         if not queries:
             ui.notify("Please enter at least one query neuron", type="warning")
@@ -576,6 +577,15 @@ def create_find_similar_tab():
                     "find_similar", output_dir=morph_output_dir.value,
                 )
                 results.append(result)
+                # A completed per-query run means the query resolved in the
+                # dataset; keep the raw chip (pre-pattern) in the history.
+                if result.get("returncode") == 0:
+                    from ..history_store import record as _record_history
+                    raw = raw_queries[index] if index < len(raw_queries) else query
+                    _record_history(
+                        [str(raw)],
+                        datasets=[dataset.value] if dataset.value else [],
+                    )
                 last_output_folder = result.get("output_folder") or last_output_folder
                 if result.get("cancelled"):
                     break
@@ -657,6 +667,15 @@ def create_find_similar_tab():
                     method_name, output_dir=profile_output_dir.value,
                 )
                 results.append(result)
+                # A completed per-query run means the source resolved in the
+                # dataset; keep the raw chip in the query history.
+                if result.get("returncode") == 0:
+                    from ..history_store import record as _record_history
+                    _record_history(
+                        [str(source)],
+                        datasets=[source_dataset.value]
+                        if source_dataset.value else [],
+                    )
                 last_output_folder = result.get("output_folder") or last_output_folder
                 if result.get("cancelled"):
                     break

@@ -291,6 +291,13 @@ def create_flylight_tab():
             output_dir=output_dir.value,
         )
 
+        # A completed download means the driver lines existed on FlyLight;
+        # keep them in the query history (no dataset scope: imagery is not
+        # tied to a connectome dataset).
+        if result["returncode"] == 0:
+            from ..history_store import record as _record_history
+            _record_history([str(v) for v in line_names])
+
         output_panel.set_running(False)
         output_panel.set_status(
             "Completed" if result["returncode"] == 0 else "Failed",

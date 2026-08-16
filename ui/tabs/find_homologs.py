@@ -194,6 +194,16 @@ def create_find_homologs_tab():
                     output_dir=output_dir.value,
                 )
                 results.append(result)
+                # A completed per-query run means the source resolved in the
+                # source dataset; keep it in the query history (raw chip,
+                # pre-pattern) like the pathfinding tabs do.
+                if result.get("returncode") == 0:
+                    from ..history_store import record as _record_history
+                    _record_history(
+                        [str(source)],
+                        datasets=[source_dataset.value]
+                        if source_dataset.value else [],
+                    )
                 last_output_folder = result.get("output_folder") or last_output_folder
                 for file_info in result.get("files", []):
                     path = file_info.get("path")

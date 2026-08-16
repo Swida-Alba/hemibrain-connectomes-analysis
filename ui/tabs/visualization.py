@@ -499,6 +499,7 @@ def create_skeleton_tab():
             result["files"],
             result.get("output_folder") or output_dir_for_scan,
         )
+        return result
 
     async def run_skeleton():
         if is_banc_dataset(dataset.value):
@@ -514,6 +515,10 @@ def create_skeleton_tab():
         if not neuron_layers:
             ui.notify("Add at least one neuron to a layer", type="warning")
             return
+        # Raw chips (pre-pattern) for the query history: the filter-mode
+        # conversion below rewrites them into regex patterns, which are not
+        # useful history entries.
+        raw_neurons = _flatten_neuron_layers(neuron_layers)
         # Same search semantics as pathfinding: the filter mode converts
         # every neuron into the regex pattern resolved by statvis.getNeurons.
         mode = filter_mode.value
@@ -602,7 +607,7 @@ def create_skeleton_tab():
             "export_gif": export_gif.value,
             "gif_scale": float(gif_scale.value),
         }
-        await run_panel(
+        result = await run_panel(
             skeleton_output,
             skeleton_runner,
             "plot3d_skeleton",
@@ -610,6 +615,14 @@ def create_skeleton_tab():
             output_dir.value,
             method_params,
         )
+        # A completed render means the layer neurons resolved in the dataset;
+        # keep the raw chips in the query history like the pathfinding tabs.
+        if result["returncode"] == 0:
+            from ..history_store import record as _record_history
+            _record_history(
+                [str(n) for n in dict.fromkeys(raw_neurons)],
+                datasets=[dataset.value] if dataset.value else [],
+            )
 
     skeleton_output.run_button.on_click(run_skeleton)
     skeleton_output.cancel_button.on_click(skeleton_runner.cancel)

@@ -192,6 +192,16 @@ def create_nb_find_lines_tab():
                                         method_params=method_params,
                                         output_dir=output_dir.value)
 
+        # A completed search means the queried EM identifiers resolved. A
+        # single-dataset restriction records that dataset; '(all)' leaves the
+        # entries unscoped so they appear in every dataset's history list.
+        if result["returncode"] == 0:
+            from ..history_store import record as _record_history
+            _record_history(
+                [str(v) for v in query],
+                datasets=[ds] if ds else None,
+            )
+
         output_panel.set_running(False)
         output_panel.set_status("Completed" if result["returncode"] == 0 else "Failed",
                                 "green" if result["returncode"] == 0 else "red")

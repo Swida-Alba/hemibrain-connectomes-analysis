@@ -3788,6 +3788,163 @@ class TestComponents:
         assert "ordinary_b" in texts
         assert "ordinary_a" not in texts and "custom_a" not in texts
 
+    def test_history_rows_show_dataset_provenance_badges(self, tmp_path, monkeypatch):
+        """With ``show_history_datasets`` (cross-dataset tab), history rows
+        carry a gray tag only for datasets currently SELECTED in the tab's
+        dataset input; the default dropdown shows no dataset tags at all."""
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.history_store as hs
+        from ui.components.common import neuron_list_input
+
+        dataset_a = "male-cns:v1.0"
+        dataset_b = "hemibrain:v1.2.1"
+        monkeypatch.setattr(hs, "_HISTORY_PATH", tmp_path / "neuron_history.json")
+        hs.record(["aMe12"], now="2026-08-11T10:00:00",
+                  datasets=[dataset_a, dataset_b])
+        selected = {"value": [dataset_a]}
+
+        client = Client(page("/neuron-history-dataset-badges"))
+        with client:
+            plain = neuron_list_input(
+                label="Source Neurons", suggestions=lambda _text: []
+            )
+            cross = neuron_list_input(
+                label="Target Neurons",
+                suggestions=lambda _text: [],
+                available_neurons=lambda: selected["value"],
+                show_history_datasets=True,
+            )
+
+        def subtree_texts(el):
+            out = [getattr(el, "text", "")]
+            for child in el.default_slot.children:
+                out.extend(subtree_texts(child))
+            return out
+
+        def focus_and_read(box):
+            focus = next(
+                listener for listener in box.chip_input._event_listeners.values()
+                if listener.type == "focus"
+            )
+            box.chip_input._handle_event({"listener_id": focus.id, "args": None})
+            for child in box.suggest_menu.default_slot.children:
+                texts = subtree_texts(child)
+                if "aMe12" in texts:
+                    return texts
+            raise AssertionError("aMe12 history row not found")
+
+        # Default dropdown: entries are shown without dataset tags.
+        assert "male-cns:v1.0" not in focus_and_read(plain)
+
+        # Cross-dataset dropdown: only the SELECTED dataset is tagged, even
+        # though the entry was also recorded for hemibrain.
+        cross_texts = focus_and_read(cross)
+        assert "male-cns:v1.0" in cross_texts
+        assert "hemibrain:v1.2.1" not in cross_texts
+
+        # Selecting the other dataset swaps the visible tag.
+        cross.suggest_menu.close()
+        selected["value"] = [dataset_b]
+        cross_texts = focus_and_read(cross)
+        assert "hemibrain:v1.2.1" in cross_texts
+        assert "male-cns:v1.0" not in cross_texts
+
+    def test_history_rows_show_category_hint_like_suggestions(self, tmp_path, monkeypatch):
+        """History rows resolve their searched column (type/instance/bodyId)
+        from the selected dataset pools, mirroring the auto-suggestion list."""
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.history_store as hs
+        import ui.type_suggestions as ts
+        from ui.components.common import neuron_list_input
+
+        monkeypatch.setattr(hs, "_HISTORY_PATH", tmp_path / "neuron_history.json")
+        monkeypatch.setattr(ts, "get_dataset_pools", lambda dataset: {
+            "type": [("aMe12", "type"), ("DN1p", "type")],
+            "instance": [("aMe12_L", "instance")],
+            "bodyId": [],
+        })
+        hs.record(["aMe12", "aMe12_L"], now="2026-08-11T10:00:00",
+                  datasets=["male-cns:v1.0"])
+
+        client = Client(page("/neuron-history-category-hints"))
+        with client:
+            box = neuron_list_input(
+                label="Source Neurons",
+                suggestions=lambda _text: [],
+                available_neurons=lambda: "male-cns:v1.0",
+            )
+
+        focus = next(
+            listener for listener in box.chip_input._event_listeners.values()
+            if listener.type == "focus"
+        )
+        box.chip_input._handle_event({"listener_id": focus.id, "args": None})
+
+        def subtree_texts(el):
+            out = [getattr(el, "text", "")]
+            for child in el.default_slot.children:
+                out.extend(subtree_texts(child))
+            return out
+
+        item = next(
+            subtree_texts(el)
+            for el in client.elements.values()
+            if type(el).__name__ == "Item" and "aMe12" in subtree_texts(el)
+        )
+        assert "type" in item  # the searched column, like suggestion rows
+        instance_item = next(
+            subtree_texts(el)
+            for el in client.elements.values()
+            if type(el).__name__ == "Item" and "aMe12_L" in subtree_texts(el)
+        )
+        assert "instance" in instance_item
+
+    def test_suggestion_menu_arrow_key_navigation_wiring(self):
+        """Each suggestion input pairs its anchor with its menu through a
+        unique class token, and the shared arrow-key navigation script is
+        registered exactly once per client."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.common import neuron_list_input
+
+        client = Client(page("/neuron-input-keynav"))
+        with client:
+            first = neuron_list_input(
+                label="Source Neurons", suggestions=lambda _text: []
+            )
+            second = neuron_list_input(
+                label="Target Neurons", suggestions=lambda _text: []
+            )
+
+        def anchor_tokens(box):
+            return [
+                cls for cls in box.chip_input_anchor._classes
+                if cls.startswith("drocat-suggest-anchor-")
+            ]
+
+        first_tokens = anchor_tokens(first)
+        second_tokens = anchor_tokens(second)
+        assert len(first_tokens) == 1 and len(second_tokens) == 1
+        assert first_tokens != second_tokens
+        menu_token_classes = {
+            cls
+            for classes in (first.suggest_menu._classes,
+                            second.suggest_menu._classes)
+            for cls in classes
+            if cls.startswith("drocat-suggest-menu-")
+        }
+        assert f"drocat-suggest-menu-{first_tokens[0].rsplit('-', 1)[-1]}" \
+            in menu_token_classes
+        assert f"drocat-suggest-menu-{second_tokens[0].rsplit('-', 1)[-1]}" \
+            in menu_token_classes
+        # The document-level handler is shared: registered once per client.
+        from ui.components.common import _SUGGEST_KEYNAV_SCRIPT
+        assert client._head_html.count(_SUGGEST_KEYNAV_SCRIPT) == 1
+        assert "drocat-suggest-active" in client._head_html
+        assert "drocat-suggest-header" in client._head_html
+
     def test_history_body_id_has_instance_hint_and_removable_entry(self, tmp_path, monkeypatch):
         """Blank-input history rows expose the cached body-ID instance and a
         close action that removes only that history value."""

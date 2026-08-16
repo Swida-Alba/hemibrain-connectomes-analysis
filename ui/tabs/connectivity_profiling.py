@@ -235,6 +235,16 @@ def create_connectivity_profiling_tab():
             output_dir=profiling_output_dir,
         )
 
+        # The profiling pipeline resolves the query before comparing
+        # profiles, so a completed run means the queried chips are useful
+        # history entries for the selected datasets.
+        if result["returncode"] == 0:
+            from ..history_store import record as _record_history
+            _record_history(
+                [str(v) for v in query],
+                datasets=list(selected_datasets),
+            )
+
         output_panel.set_running(False)
         output_panel.set_status("Completed" if result["returncode"] == 0 else "Failed",
                                 "green" if result["returncode"] == 0 else "red")

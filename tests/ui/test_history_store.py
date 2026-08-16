@@ -102,6 +102,22 @@ class TestRecord:
                      datasets=["dataset-b"])
         assert store.recent(datasets=["dataset-b"])[0] == "only_a"
 
+    def test_datasets_of_exposes_recorded_provenance(self, store):
+        store.record(["only_a"], now="2026-08-11T10:00:00",
+                     datasets=["dataset-b", "dataset-a"])
+        store.record(["both"], now="2026-08-11T10:01:00",
+                     datasets=["dataset-a"])
+        store.record(["both"], now="2026-08-11T10:02:00",
+                     datasets=["dataset-b"])
+        store.record(["legacy"], now="2026-08-11T10:03:00")
+
+        assert store.datasets_of("only_a") == ["dataset-a", "dataset-b"]
+        assert store.datasets_of("both") == ["dataset-a", "dataset-b"]
+        # Values written before provenance tracking show no dataset tags.
+        assert store.datasets_of("legacy") == []
+        assert store.datasets_of("missing") == []
+        assert store.datasets_of("") == []
+
     def test_custom_group_and_saved_map_follow_their_member_datasets(
         self, store, tmp_path, monkeypatch
     ):

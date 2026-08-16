@@ -53,6 +53,9 @@ def create_inter_dataset_tab():
                 hint="Source neurons for pathfinding. Type one query per chip or upload a CSV/TSV/Excel file (first column).",
                 suggestions=_type_suggest,
                 available_neurons=lambda: datasets_select.value if datasets_select is not None else [],
+                # History rows tag the selected datasets they were recorded
+                # for, so cross-dataset entries stay traceable.
+                show_history_datasets=True,
             ).classes("drocat-fixed-neuron-input")
             target_input = neuron_list_input(
                 label="Target Neurons",
@@ -60,6 +63,7 @@ def create_inter_dataset_tab():
                 hint="Target neurons for pathfinding. Type one query per chip or upload a CSV/TSV/Excel file (first column).",
                 suggestions=_type_suggest,
                 available_neurons=lambda: datasets_select.value if datasets_select is not None else [],
+                show_history_datasets=True,
             ).classes("drocat-fixed-neuron-input")
             mapping_select, _grouper_card, resolve_grouping = custom_grouping_block(
                 label="Custom Mapping",
