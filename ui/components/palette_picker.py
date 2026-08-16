@@ -5,8 +5,10 @@ Visual color palette tools for DROCAT.
 - ``palette_editor``: palette editor with ONE interactive preview row -
   drag-and-drop reordering of discrete colors, a live range slider, and a
   reset button beside the preview (the current state is the only preview).
-  Custom colors (mode toggle) are added via an input with color picker and
-  reordered by dragging the list rows.
+  Custom colors (mode toggle) are added via the native color picker, a
+  Bokeh-palette swatch picker (choose any catalog palette and click a
+  swatch), or a free-form color string, with an optional per-entry alpha
+  override, and reordered by dragging the list rows.
 - ``color_swatch_picker``: single-color swatches with a custom color input.
 """
 
@@ -224,8 +226,14 @@ def _render_color_strip(
     height: int = 18,
     click=None,
     classes: str = "",
+    selected: Optional[str] = None,
 ) -> None:
-    """Render a color strip in the current context (gradient for long palettes)."""
+    """Render a color strip in the current context (gradient for long palettes).
+
+    With a ``click`` callback the swatches become individually selectable
+    (long palettes are sampled to 20); ``selected`` highlights the swatch
+    whose color matches.
+    """
     if len(colors) > 20 and click is None:
         strip = ui.element("div").classes(f"drocat-palette-strip {classes}").style(
             _gradient_style(colors, height)
@@ -238,7 +246,12 @@ def _render_color_strip(
                 f"background:{color}; flex:1; min-width:5px; height:{height}px;"
             )
             if click is not None:
-                sw.on("click", lambda c=color: click(c))
+                sw.classes("drocat-palette-pick-swatch")
+                if selected is not None and color == selected:
+                    sw.classes("selected")
+                # The event object is the first positional argument; the
+                # captured color rides as the default of the second.
+                sw.on("click", lambda _e, c=color: click(c))
 
 
 # Drag-and-drop reordering of discrete palette swatches. The drop handler
@@ -376,9 +389,11 @@ def palette_editor(
       reorder discrete palettes, use the range slider to select part of
       the palette live, and hit reset (beside the preview) to restore the
       original order and the full range.
-    - Custom colors: add single colors via the native picker or a free-form
-      color string; an optional alpha override is stored per entry. Entries
-      without an explicit alpha inherit the renderer's global opacity.
+    - Custom colors: add single colors via the native picker, a Bokeh
+      palette swatch grid (choose any catalog palette and click a swatch),
+      or a free-form color string; an optional alpha override is stored per
+      entry. Entries without an explicit alpha inherit the renderer's
+      global opacity.
 
     ``on_change`` fires when the user manually edits the palette state
     (picking a preset card, drag-reordering, adjusting the range, resetting);
@@ -402,6 +417,8 @@ def palette_editor(
         "preset_orders": {},
         "custom_input_source": "picker",
         "syncing_custom_input": False,
+        "picked_color": None,
+        "picker_palette": "Category10",
     }
     cards: List[Tuple[ui.element, str]] = []
 
@@ -592,6 +609,15 @@ def palette_editor(
                 ).props("dense outlined").classes("flex-grow").tooltip(
                     COLOR_FORMAT_HINT
                 )
+                color_preview = ui.element("div").classes(
+                    "drocat-custom-color-preview"
+                ).style(
+                    "width:24px; height:24px; border-radius:6px; "
+                    "border:1px solid rgba(11,31,58,.15); flex:none;"
+                ).tooltip(
+                    "Live preview of the current color with the Alpha "
+                    "override applied."
+                )
                 alpha_override = ui.checkbox(
                     "Alpha override", value=False
                 ).tooltip(
@@ -611,27 +637,102 @@ def palette_editor(
                     "Add color", icon="add", on_click=lambda: add_custom_color()
                 ).props("flat dense color=primary")
             ui.label(
-                "Pick a color or type a format and press Add. Supported: named colors; "
-                "#RGB/#RGBA/#RRGGBB/#RRGGBBAA; RGB(A) 0–255 or normalized 0–1; "
-                "rgb()/rgba(); hsl()/hsla(). Explicit alpha overrides the global "
-                "opacity, while colors without alpha inherit it. Drag rows to reorder."
+                "Pick a color, click a Bokeh-palette swatch, or type a format and "
+                "press Add. Supported: named colors; #RGB/#RGBA/#RRGGBB/#RRGGBBAA; "
+                "RGB(A) 0–255 or normalized 0–1; rgb()/rgba(); hsl()/hsla(). "
+                "Explicit alpha overrides the global opacity, while colors without "
+                "alpha inherit it. Drag rows to reorder."
             ).classes("text-caption drocat-muted")
+
+            # Bokeh-palette source: pick individual colors from any catalog
+            # palette. Clicking a swatch selects it (highlighted) and syncs
+            # the Color format input; the Add button commits it.
+            ui.label("From Bokeh palette").classes("drocat-mini-label")
+            with ui.row().classes("w-full items-center gap-2"):
+                palette_select = ui.select(
+                    options=names, value=state["picker_palette"], label="Bokeh palette"
+                ).props("dense outlined").classes("w-56").tooltip(
+                    "Pick individual colors from any Bokeh palette in the "
+                    "catalog: click a swatch to select it, then press Add."
+                )
+                swatch_grid = ui.element("div").classes("flex-grow")
+
+            def render_picker_grid():
+                swatch_grid.clear()
+                with swatch_grid:
+                    _render_color_strip(
+                        list(dict(catalog)[state["picker_palette"]]),
+                        height=20,
+                        click=on_swatch_click,
+                        selected=state["picked_color"],
+                    )
+
+            def on_swatch_click(color: str):
+                state["custom_input_source"] = "palette"
+                state["picked_color"] = color
+                state["syncing_custom_input"] = True
+                format_input.set_value(color)
+                state["syncing_custom_input"] = False
+                render_picker_grid()
+                render_color_preview()
+
+            def on_palette_select_change(event):
+                state["picker_palette"] = event.value or state["picker_palette"]
+                state["picked_color"] = None
+                render_picker_grid()
+
+            palette_select.on_value_change(on_palette_select_change)
+            render_picker_grid()
+
+            def current_raw_color():
+                """The color value of the active input source."""
+                source = state["custom_input_source"]
+                if source == "palette":
+                    return state["picked_color"] or format_input.value or "#145cff"
+                return (
+                    format_input.value
+                    if source == "text"
+                    else color_input.value
+                ) or "#145cff"
+
+            def render_color_preview():
+                """Show the current color in the square preview, with the
+                Alpha override applied when enabled."""
+                raw = current_raw_color()
+                display = "transparent"
+                try:
+                    if bool(alpha_override.value):
+                        display = color_to_rgba_string(
+                            raw, alpha=float(alpha_value.value or 1.0)
+                        )
+                    else:
+                        standardize_color(raw)
+                        display = raw
+                except (TypeError, ValueError):
+                    pass
+                color_preview.style(f"background:{display}")
 
             def on_picker_change(event):
                 state["custom_input_source"] = "picker"
                 state["syncing_custom_input"] = True
                 format_input.set_value(event.value or color_input.value)
                 state["syncing_custom_input"] = False
+                render_color_preview()
 
             def on_format_change(_event):
                 if not state["syncing_custom_input"]:
                     state["custom_input_source"] = "text"
+                render_color_preview()
+
+            def on_alpha_override_change(event):
+                alpha_value.set_enabled(bool(event.value))
+                render_color_preview()
 
             color_input.on_value_change(on_picker_change)
             format_input.on_value_change(on_format_change)
-            alpha_override.on_value_change(
-                lambda event: alpha_value.set_enabled(bool(event.value))
-            )
+            alpha_override.on_value_change(on_alpha_override_change)
+            alpha_value.on_value_change(lambda _e: render_color_preview())
+            render_color_preview()
 
             # Draggable custom-color rows: same drag-and-drop mechanism as
             # the preset preview row, but along the vertical list axis.
@@ -675,11 +776,7 @@ def palette_editor(
                     render_preview()
 
             def add_custom_color():
-                raw = (
-                    format_input.value
-                    if state["custom_input_source"] == "text"
-                    else color_input.value
-                ) or "#145cff"
+                raw = current_raw_color()
                 try:
                     color = _prepare_custom_color(
                         raw,

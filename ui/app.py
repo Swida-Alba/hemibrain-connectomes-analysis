@@ -1281,6 +1281,16 @@ html, body {
     min-height: 18px;
     cursor: pointer;
 }
+.drocat-palette-pick-swatch {
+    cursor: pointer;
+    transition: box-shadow .15s ease;
+}
+.drocat-palette-pick-swatch:hover {
+    box-shadow: inset 0 0 0 2px var(--drocat-line-strong);
+}
+.drocat-palette-pick-swatch.selected {
+    box-shadow: inset 0 0 0 2px var(--drocat-cobalt);
+}
 .drocat-custom-color-row {
     padding: 4px 8px;
     border: 1px solid var(--drocat-line);

@@ -1319,6 +1319,195 @@ class TestRunner:
             "rgba(255, 0, 0, 0.35)",
         ]
 
+    def test_palette_editor_bokeh_palette_picker_adds_with_alpha(self):
+        """Custom mode picks individual colors from a Bokeh palette via the
+        dropdown + swatch grid; the per-entry alpha override still applies."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.palette_picker import palette_editor
+
+        client = Client(page("/palette-editor-bokeh-pick"))
+        with client:
+            editor = palette_editor("Neuron Colors", value="Category10")
+
+        toggle = next(
+            el for el in client.elements.values()
+            if getattr(el, "tag", "") == "q-btn-toggle"
+        )
+        toggle.value = "Custom colors"
+
+        palette_select = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Bokeh palette"
+        )
+        palette_select.value = "Dark2"
+
+        # The swatch grid re-renders with the Dark2 colors; the first swatch
+        # carries a click listener whose captured color is the palette's
+        # first entry.
+        swatches = [
+            el for el in client.elements.values()
+            if "drocat-palette-pick-swatch" in getattr(el, "_classes", [])
+        ]
+        assert len(swatches) == 8  # Dark2 is discrete with 8 colors
+        first_swatch = swatches[0]
+        assert "#1b9e77" in getattr(first_swatch, "_style", {}).get("background", "")
+        next(iter(first_swatch._event_listeners.values())).handler(None)
+
+        # Clicking selects (does not add yet) and syncs the format input.
+        assert editor.get_custom_colors() == []
+        format_input = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Color format"
+        )
+        assert format_input.value == "#1b9e77"
+        highlighted = [
+            el for el in client.elements.values()
+            if "drocat-palette-pick-swatch" in getattr(el, "_classes", [])
+            and "selected" in getattr(el, "_classes", [])
+        ]
+        assert len(highlighted) == 1
+        assert "#1b9e77" in getattr(highlighted[0], "_style", {}).get("background", "")
+
+        # The per-entry alpha override applies to the picked color on Add.
+        alpha_toggle = next(
+            el for el in client.elements.values()
+            if getattr(el, "tag", "") == "q-checkbox"
+        )
+        alpha_input = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Alpha (0–1)"
+        )
+        add_button = next(
+            el for el in client.elements.values()
+            if getattr(el, "text", "") == "Add color"
+        )
+        alpha_toggle.value = True
+        alpha_input.value = 0.5
+        next(iter(add_button._event_listeners.values())).handler(None)
+
+        assert editor.get_custom_colors() == ["rgba(27, 158, 119, 0.5)"]
+        assert editor.get_colors() == editor.get_custom_colors()  # preview = current state
+
+        # The square preview beside the color value reflects the picked
+        # color with the alpha override applied.
+        preview_square = next(
+            el for el in client.elements.values()
+            if "drocat-custom-color-preview" in getattr(el, "_classes", [])
+        )
+        assert "rgba(27, 158, 119, 0.5)" in preview_square._style.get(
+            "background", ""
+        )
+
+    def test_palette_editor_custom_color_preview_applies_alpha(self):
+        """A square preview beside the custom color input shows the current
+        color live, with the Alpha override applied when enabled."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.palette_picker import palette_editor
+
+        client = Client(page("/palette-editor-color-preview"))
+        with client:
+            palette_editor("Neuron Colors", value="Category10")
+
+        toggle = next(
+            el for el in client.elements.values()
+            if getattr(el, "tag", "") == "q-btn-toggle"
+        )
+        toggle.value = "Custom colors"
+
+        format_input = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Color format"
+        )
+        alpha_toggle = next(
+            el for el in client.elements.values()
+            if getattr(el, "tag", "") == "q-checkbox"
+        )
+        alpha_input = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Alpha (0–1)"
+        )
+        preview_square = next(
+            el for el in client.elements.values()
+            if "drocat-custom-color-preview" in getattr(el, "_classes", [])
+        )
+
+        # The preview follows the typed color without any alpha override.
+        format_input.value = "#ff0000"
+        assert "#ff0000" in preview_square._style.get("background", "")
+
+        # Enabling the override embeds the alpha value into the preview.
+        alpha_toggle.value = True
+        alpha_input.value = 0.5
+        assert "rgba(255, 0, 0, 0.5)" in preview_square._style.get("background", "")
+
+        # Changing the alpha value updates the preview live.
+        alpha_input.value = 0.25
+        assert "rgba(255, 0, 0, 0.25)" in preview_square._style.get("background", "")
+
+        # Disabling the override restores the raw color.
+        alpha_toggle.value = False
+        assert "#ff0000" in preview_square._style.get("background", "")
+
+        # An unparseable value leaves the preview transparent (border only).
+        format_input.value = "not-a-color"
+        assert preview_square._style.get("background", "") == "transparent"
+
+    def test_palette_editor_bokeh_palette_picker_swatch_grid(self):
+        """The Bokeh swatch grid follows the selected palette: continuous
+        palettes are sampled to 20 swatches and switching palettes clears
+        the selected highlight."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.palette_picker import get_palette_catalog, palette_editor
+
+        client = Client(page("/palette-editor-bokeh-grid"))
+        with client:
+            palette_editor("Neuron Colors", value="Category10")
+
+        toggle = next(
+            el for el in client.elements.values()
+            if getattr(el, "tag", "") == "q-btn-toggle"
+        )
+        toggle.value = "Custom colors"
+
+        palette_select = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Bokeh palette"
+        )
+
+        def pick_swatches():
+            return [
+                el for el in client.elements.values()
+                if "drocat-palette-pick-swatch" in getattr(el, "_classes", [])
+            ]
+
+        # Default grid renders the discrete Category10 palette in full.
+        assert len(pick_swatches()) == 10
+
+        # A continuous 256-color palette is sampled to 20 selectable
+        # swatches spanning the full gradient (both ends present).
+        palette_select.value = "Blues"
+        swatches = pick_swatches()
+        assert len(swatches) == 20
+        blues = dict(get_palette_catalog())["Blues"]
+        assert blues[0] in getattr(swatches[0], "_style", {}).get("background", "")
+        assert blues[-1] in getattr(swatches[-1], "_style", {}).get("background", "")
+
+        # Selecting a swatch highlights it; switching the palette clears it.
+        next(iter(swatches[5]._event_listeners.values())).handler(None)
+        highlighted = [
+            el for el in pick_swatches()
+            if "selected" in getattr(el, "_classes", [])
+        ]
+        assert len(highlighted) == 1
+        palette_select.value = "Dark2"
+        assert not any(
+            "selected" in getattr(el, "_classes", []) for el in pick_swatches()
+        )
+        assert len(pick_swatches()) == 8
+
     def test_palette_editor_long_palette_uses_gradient_preview(self):
         """Long (sequential) palettes render as a gradient strip without
         drag targets; the range slider still slices them."""
