@@ -4707,6 +4707,7 @@ class VisualizeSkeleton:
             tuple(self.synapse_colors),
             n_synapse_needed,
             target_label='synapse layers',
+            warn=not self.skip_synapse,
             continuous=self._synapse_colors_continuous,
         )
         
