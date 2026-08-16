@@ -1,10 +1,13 @@
 #!/usr/bin/env python
 import polars as pl
 import os
+from pathlib import Path
 
 # Check FAFB connections parquet
-db_path = '/Users/apple/Documents/GitHub/hemibrain-connectomes-analysis-v3.1/cache/flywire_FAFB_v783/connections.parquet'
-neuron_path = '/Users/apple/Documents/GitHub/hemibrain-connectomes-analysis-v3.1/cache/flywire_FAFB_v783/neuron_index.parquet'
+# Paths are resolved relative to this script so the check stays portable.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+db_path = str(PROJECT_ROOT / 'cache' / 'flywire_FAFB_v783' / 'connections.parquet')
+neuron_path = str(PROJECT_ROOT / 'cache' / 'flywire_FAFB_v783' / 'neuron_index.parquet')
 
 print('=== FAFB Connection Cache Analysis ===')
 print(f'Connection file: {os.path.getsize(db_path) / 1024 / 1024:.1f} MB')

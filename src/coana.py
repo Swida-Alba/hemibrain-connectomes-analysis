@@ -1368,10 +1368,10 @@ class FindNeuronConnection:
     script_path: str = os.path.dirname(source_path)
     '''absolute path to the project root directory (parent of src/)'''
     
-    output_dir: str = os.path.join(os.path.expanduser('~'), 'connectome_analysis')
+    output_dir: str = os.path.join(script_path, 'local_data', 'connectome_analysis')
     '''
     folder to save all data (subfolders auto-generated based on query)
-    Default: ~/connectome_analysis/
+    Default: <project root>/local_data/connectome_analysis/
     '''
     
     save_folder: str = '' # initialized in InitializeNeuronInfo()

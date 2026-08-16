@@ -1644,10 +1644,10 @@ class VisualizeSkeleton:
     script_path: str = os.path.dirname(source_path)
     '''absolute path to the project root directory (parent of src/)'''
 
-    data_folder: str = os.path.join(os.path.expanduser('~'), 'connectome_analysis')
+    data_folder: str = os.path.join(script_path, 'local_data', 'connectome_analysis')
     '''
     folder to save all data (subfolders auto-generated based on neuron_layers)
-    Default: ~/connectome_analysis/
+    Default: <project root>/local_data/connectome_analysis/
     '''
 
     output_dir: str = None

@@ -103,7 +103,7 @@ def run_comprehensive_comparison():
     #   "intermediate_mapping": { ... }
     # }
     # label_map = LabelMapper(
-    #   overall_mapping_json='/Users/apple/Local/connection_data/dataset_comparison/comparison_results_20251227_213819_Fdg-LPLC2-5hops/label_map.json'
+    #   overall_mapping_json='../local_data/dataset_comparison/comparison_results_20251227_213819_Fdg-LPLC2-5hops/label_map.json'
     # )
     
     params = ComparisonParameters(

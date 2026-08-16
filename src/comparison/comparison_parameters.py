@@ -1442,11 +1442,11 @@ class ComparisonParameters:
         import os
         
         # Determine workspace path
-        # Try to find from common paths
+        # Candidates are derived from the file location and the current
+        # working directory only, so the lookup stays portable across machines.
         workspace_candidates = [
             os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),  # From this file
             os.getcwd(),
-            os.path.expanduser('~/Documents/GitHub/hemibrain-connectomes-analysis-v3.1'),
         ]
         
         workspace_path = None

@@ -95,8 +95,7 @@ if __name__ == '__main__':
     # path_file = 'my_paths.csv'  # Load CSV directly (sheet_name ignored)
     # path_file = 'my_paths.xlsx'  # Load Excel, auto-select sheet if not specified
     
-    # path_file = '/Users/apple/Local/connection_data/aMe12_R_to_PPL103_R/allpaths_L3w10r0_01p0_20251027_213354/aMe12_R_to_PPL103_R_allpaths_info.xlsx'
-    # path_file = '/Users/apple/Desktop/_kuntest/test.xlsx'
+    # path_file = '../local_data/connection_data/aMe12_R_to_PPL103_R/allpaths_L3w10r0_01p0_20251027_213354/aMe12_R_to_PPL103_R_allpaths_info.xlsx'
     path_file = 'load_custom_data.xlsx'
     
     # Create visualizations with custom colors

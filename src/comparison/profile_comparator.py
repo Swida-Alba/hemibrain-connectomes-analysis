@@ -2470,12 +2470,12 @@ class HomologFinder:
         self.top_n = top_n
         
         # Output directory - use default if not specified
-        # Default: ~/connectome_analysis/homolog_finding/
+        # Default: <project root>/local_data/homolog_finding/
         if output_dir is None:
-            self.output_dir = os.path.join(
-                os.path.expanduser('~'),
-                'connectome_analysis',
-                'homolog_finding'
+            self.output_dir = str(
+                Path(__file__).resolve().parents[2]
+                / 'local_data'
+                / 'homolog_finding'
             )
         else:
             self.output_dir = output_dir
@@ -8611,7 +8611,12 @@ class ConnectivityProfileComparer:
         if self.output_dir:
             return Path(self.output_dir) / folder_name
         else:
-            return Path.home() / 'connectome_analysis' / 'connectivity_profiling' / folder_name
+            # Default to the project-local data folder so the layout stays
+            # portable across machines.
+            return (
+                Path(__file__).resolve().parents[2]
+                / 'local_data' / 'connectivity_profiling' / folder_name
+            )
     
     def _map_query_item(self, item: Any, dataset: str) -> Any:
         """Map one query item (type / bodyId / pattern) into a dataset's naming.
