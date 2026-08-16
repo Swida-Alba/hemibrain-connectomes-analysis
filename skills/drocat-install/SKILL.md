@@ -105,6 +105,13 @@ Required checks: Python 3.10-3.11, project layout, every installed version again
 - Token file: `token_info_local.txt` at the repo root.
 - The UI runner adds `vispath-subproject/src` to `sys.path`; no separate pip install is needed for PlotPath.
 - Chrome + WebDriver are only needed for PNG/video exports in the 3D skeleton tool.
+- Neuron indexes are persistent "system files" in `neuron_indexes/` (not in
+  `cache/`): `male-cns:v1.0`, `flywire_FAFB_v783`, and `flywire_BANC_v888`
+  ship committed seed indexes so auto-suggestions and the "See available
+  neurons" panel work right after install; other datasets get their index on
+  the first pull. Clearing `cache/` never removes the indexes. Refresh the
+  bundled seeds with `python src/build_seed_indexes.py` after a dataset
+  release changes.
 
 ## After installation: direct script mode
 
