@@ -389,16 +389,17 @@ def layer_tree_editor(
             "layers are auto-named."
         ).classes("text-caption drocat-muted")
 
-        with ui.row().classes("items-end gap-2 w-full"):
-            ui.button("Add Layer", icon="add").props("dense").on_click(
-                lambda: handle.add_layer()
-            )
-
         handle.board = ui.column().classes("w-full gap-1 drocat-layer-board")
         handle.board.on("dragover", None, js_handler=_DRAG_OVER_JS)
         handle.board.on("drop", handle._on_layer_drop, js_handler=_drop_js(
             '[data-kind="layer"]', "y"
         ))
+
+        with ui.row().classes("items-end gap-2 w-full"):
+            ui.button("Add Layer", icon="add").props("dense").on_click(
+                lambda: handle.add_layer()
+            )
+
         handle.status_label = ui.label("0 layers · 0 neurons").classes(
             "text-caption drocat-muted"
         )
