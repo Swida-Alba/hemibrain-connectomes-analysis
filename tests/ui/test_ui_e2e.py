@@ -1144,7 +1144,6 @@ class TestRunner:
         from ui.components.palette_picker import (
             get_palette_catalog,
             palette_editor,
-            sample_palette,
         )
 
         client = Client(page("/palette-editor-option-strips"))
@@ -1160,7 +1159,9 @@ class TestRunner:
         for select in selects:
             options = select._props.get("options") or []
             assert options and all(
-                isinstance(opt.get("label"), str) and "colors" in opt
+                isinstance(opt.get("label"), str)
+                and "colors" in opt
+                and "strip" in opt
                 for opt in options
             )
             assert "option" in select.slots
@@ -1170,16 +1171,19 @@ class TestRunner:
             # variable ``props``; a template using ``scope`` throws at
             # popup-open time and the dropdown can never expand.
             assert "props.itemProps" in template
+            assert "props.opt.strip" in template
             # The name sits left of the strip preview inside each option row.
             assert template.index("props.opt.label") < template.index(
                 "drocat-select-palette-strip"
             )
             dark2 = next(opt for opt in options if opt["label"] == "Dark2")
-            assert dark2["colors"] == sample_palette(
-                catalog["Dark2"], len(catalog["Dark2"])
-            )
+            assert dark2["colors"] == list(catalog["Dark2"])
+            # Discrete palettes keep every color as distinct hard-stop
+            # segments (no blurred gradient).
+            assert "#1b9e77 0.0% 12.5%" in dark2["strip"]
             blues = next(opt for opt in options if opt["label"] == "Blues")
             assert len(blues["colors"]) == 12  # long palettes are sampled
+            assert "%" not in blues["strip"]  # continuous: smooth gradient
 
         # Value semantics are unchanged: the option round-trips the name,
         # and the enriched options survive the programmatic value update.
@@ -1346,6 +1350,61 @@ class TestRunner:
             getattr(el, "_props", {}).get("aria-label") == "Remove custom color"
             for el in client.elements.values()
         )
+
+    def test_palette_editor_custom_mode_starts_with_empty_palette(self):
+        """Custom mode shows no preset fallback: the custom palette stays
+        empty until colors are added."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.palette_picker import palette_editor
+
+        client = Client(page("/palette-editor-custom-empty"))
+        with client:
+            editor = palette_editor("Neuron Colors", value="Category10")
+
+        # Preset mode starts with the full preset palette.
+        assert editor.get_colors() == editor.get_palette_order()
+
+        toggle = next(
+            el for el in client.elements.values()
+            if getattr(el, "tag", "") == "q-btn-toggle"
+        )
+        toggle.value = "Custom colors"
+
+        # No preset fallback: the custom palette is empty until colors are
+        # added, and the preview shows a placeholder instead of the preset.
+        assert editor.get_mode() == "custom"
+        assert editor.get_custom_colors() == []
+        assert editor.get_colors() == []
+        assert editor.get_colors_for_count(3) == []
+        texts = [
+            getattr(el, "text", "")
+            for el in client.elements.values()
+            if getattr(el, "text", "")
+        ]
+        assert any(
+            "No custom colors yet — add colors below." in text
+            for text in texts
+        )
+
+        # Adding the first color fills the palette and the preview follows.
+        format_input = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Color format"
+        )
+        add_button = next(
+            el for el in client.elements.values()
+            if getattr(el, "text", "") == "Add color"
+        )
+        format_input.value = "#ff0000"
+        next(iter(add_button._event_listeners.values())).handler(None)
+        assert editor.get_custom_colors() == ["#ff0000"]
+        assert editor.get_colors() == ["#ff0000"]
+        assert editor.get_colors_for_count(2) == ["#ff0000", "#ff0000"]
+
+        # Switching back to the preset mode restores the preset palette.
+        toggle.value = "Preset palette"
+        assert editor.get_colors() == editor.get_palette_order()
 
     def test_palette_editor_supports_free_form_alpha_overrides(self):
         """Custom palette entries accept mixed syntax and optional per-entry alpha."""

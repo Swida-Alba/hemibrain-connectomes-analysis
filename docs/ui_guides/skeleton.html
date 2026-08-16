@@ -100,18 +100,21 @@
         <li>Full bokeh palette catalog with custom editing. Preset palettes
           are picked from a full-width name dropdown; every option in the
           dropdown list shows the palette name with a strip preview filling
-          the row to its right, so palettes are visible before selection.
-          The selected palette shows in the interactive preview row, where
-          swatches can be dragged to reorder discrete palettes, a live
-          range slider selects part of the palette, and reset restores the
-          original order and full range.</li>
-        <li><b>Custom colors</b>: add colors from the native picker, free-form
-          color formats, or individual swatches of any Bokeh palette (choose
-          the palette in the dropdown, click a swatch to select it, then
-          press <b>Add color</b>). A live square preview beside the color
-          value shows the result with the <b>Opacity override</b> applied; the
-          per-entry opacity wins over the global Neuron Opacity, while colors
-          without an explicit opacity channel inherit it.</li>
+          the row to its right (discrete palettes as distinct color blocks,
+          continuous palettes as a smooth gradient), so palettes are visible
+          before selection. The selected palette shows in the interactive
+          preview row, where swatches can be dragged to reorder discrete
+          palettes, a live range slider selects part of the palette, and
+          reset restores the original order and full range.</li>
+        <li><b>Custom colors</b>: starts empty — no preset palette is shown
+          until colors are added. Add colors from the native picker,
+          free-form color formats, or individual swatches of any Bokeh
+          palette (choose the palette in the dropdown, click a swatch to
+          select it, then press <b>Add color</b>). A live square preview
+          beside the color value shows the result with the <b>Opacity
+          override</b> applied; the per-entry opacity wins over the global
+          Neuron Opacity, while colors without an explicit opacity channel
+          inherit it.</li>
         <li>Default follows the background (Category10 / Set3) until a palette
           is picked manually.</li>
       </ul>

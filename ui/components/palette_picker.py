@@ -189,7 +189,8 @@ class _PaletteSelection(list):
 
 # Option-slot template for palette dropdowns: renders the name on the left
 # and the palette strip on the right, filling the expanded dropdown width,
-# so the palette is visible before it is selected.
+# so the palette is visible before it is selected. Discrete palettes use a
+# precomputed hard-stop gradient (distinct segments, no blurring).
 # NiceGUI compiles slot templates as an inline component exposing the slot
 # props under the variable ``props``; ``props.itemProps`` carries the
 # option's click handler (toggleOption), so the item stays selectable.
@@ -199,12 +200,29 @@ _PALETTE_OPTION_SLOT = """
         <q-item-label>{{ props.opt.label }}</q-item-label>
     </q-item-section>
     <div class="drocat-select-palette-strip"
-         :style="'background: linear-gradient(90deg, ' + (props.opt.colors || ['#94a3b8']).join(',') + ');'">
+         :style="'background: ' + (props.opt.strip || '#94a3b8')">
     </div>
 </q-item>
 """
 
 _SELECT_PALETTE_STRIP_SIZE = 12
+
+
+def _option_strip_background(colors: List[str], discrete: bool) -> str:
+    """CSS background for one dropdown strip preview.
+
+    Discrete palettes render their colors as distinct hard-stop segments
+    (the palette as it is, no blurring); continuous palettes render as a
+    smooth gradient over their sampled colors.
+    """
+    if discrete:
+        count = len(colors)
+        stops = ", ".join(
+            f"{color} {index * 100 / count}% {(index + 1) * 100 / count}%"
+            for index, color in enumerate(colors)
+        )
+        return f"linear-gradient(90deg, {stops})"
+    return f"linear-gradient(90deg, {', '.join(colors)})"
 
 
 def _embed_palette_strips(select, names: List[str], color_lookup: dict) -> None:
@@ -216,17 +234,25 @@ def _embed_palette_strips(select, names: List[str], color_lookup: dict) -> None:
     slot renders the strip next to the name; option labels stay plain
     strings so the selected display and the value round-trip are unchanged.
     """
-    strips = [
-        {
-            "value": index,
-            "label": name,
-            "colors": sample_palette(
-                color_lookup[name],
-                min(len(color_lookup[name]), _SELECT_PALETTE_STRIP_SIZE),
-            ),
-        }
-        for index, name in enumerate(names)
-    ]
+    strips = []
+    for index, name in enumerate(names):
+        source = color_lookup[name]
+        # Discrete palettes keep every color (segmented strip); continuous
+        # palettes are sampled for a smooth gradient.
+        discrete = len(source) <= 20
+        display = (
+            list(source)
+            if discrete
+            else sample_palette(source, _SELECT_PALETTE_STRIP_SIZE)
+        )
+        strips.append(
+            {
+                "value": index,
+                "label": name,
+                "colors": display,
+                "strip": _option_strip_background(display, discrete=discrete),
+            }
+        )
     original_update = select.update
 
     def update_with_strips():
@@ -447,10 +473,11 @@ def palette_editor(
       reorder discrete palettes, use the range slider to select part of
       the palette live, and hit reset (beside the preview) to restore the
       original order and the full range.
-    - Custom colors: add single colors via the native picker, a Bokeh
-      palette swatch grid (choose any catalog palette and click a swatch),
-      or a free-form color string; an optional opacity override is stored
-      per entry. Entries without an explicit opacity channel inherit the
+    - Custom colors: the palette starts empty (no preset fallback) and
+      gains single colors via the native picker, a Bokeh palette swatch
+      grid (choose any catalog palette and click a swatch), or a
+      free-form color string; an optional opacity override is stored per
+      entry. Entries without an explicit opacity channel inherit the
       renderer's global opacity.
 
     ``on_change`` fires when the user manually edits the palette state
@@ -495,8 +522,10 @@ def palette_editor(
         )
 
     def effective_colors() -> List[str]:
-        if state["mode"] == "custom" and state["custom"]:
-            return state["custom"]
+        if state["mode"] == "custom":
+            # No preset fallback: the custom palette stays empty until the
+            # user adds colors.
+            return list(state["custom"])
         return _PaletteSelection(
             effective_slice(),
             continuous=(state["mode"] == "preset" and not is_discrete()),
@@ -553,12 +582,20 @@ def palette_editor(
                     _render_draggable_swatches(
                         colors, height=20, on_drop=handle_drop
                     )
-                else:
+                elif colors:
                     _render_color_strip(
                         colors, height=20, classes="w-full"
                     )
+                else:
+                    # Custom mode starts empty: show a placeholder instead
+                    # of the preset palette until colors are added.
+                    ui.label("No custom colors yet — add colors below.").classes(
+                        "text-caption drocat-muted"
+                    )
             if state["mode"] == "custom" and state["custom"]:
                 status = "custom colors"
+            elif state["mode"] == "custom":
+                status = "no custom colors yet"
             else:
                 status = f"{state['palette']}  {state['start']}–{state['end']}%"
             if draggable:
