@@ -4068,6 +4068,15 @@ class TestComponents:
         assert "'Enter', 'Tab'" in _SUGGEST_KEYNAV_SCRIPT
         assert "event.key === 'Enter' || event.key === 'Tab'" in \
             _SUGGEST_KEYNAV_SCRIPT
+        # After a pick the highlight stays on the list: the handler advances
+        # it locally and a MutationObserver re-applies it once the server
+        # rebuilds the rows.
+        assert "MutationObserver" in _SUGGEST_KEYNAV_SCRIPT
+        assert "pending = current + 1" in _SUGGEST_KEYNAV_SCRIPT
+        # The editor is wiped WITHOUT dispatching input events: an early
+        # empty-input event would rebuild the suggestion list before the
+        # pick's click lands and drop the pick.
+        assert "dispatchEvent" not in _SUGGEST_KEYNAV_SCRIPT
 
     def test_history_body_id_has_instance_hint_and_removable_entry(self, tmp_path, monkeypatch):
         """Blank-input history rows expose the cached body-ID instance and a

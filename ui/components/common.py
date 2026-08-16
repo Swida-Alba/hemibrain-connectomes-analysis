@@ -44,12 +44,62 @@ _SUGGEST_TOKEN = itertools.count(1)
 # The menu never takes focus (no-focus), so keystrokes land in the QSelect
 # editor; this document-level capture handler moves a highlight between the
 # menu rows: ArrowDown enters the list from the input box, ArrowUp leaves it
-# from the first row, and Enter or Tab picks the highlighted row.
+# from the first row, and Enter or Tab picks the highlighted row. After a
+# pick the highlight stays ON the list (it advances to the next row and is
+# re-applied after the server rebuilds the menu), so repeated Enter/Tab
+# presses keep selecting entries.
 _SUGGEST_KEYNAV_SCRIPT = """
 <script>
 (function () {
   if (window.__drocatSuggestNav) return;
   window.__drocatSuggestNav = true;
+
+  function selectableRows(menu) {
+    var rows = [];
+    menu.querySelectorAll('.q-item').forEach(function (row) {
+      if (row.classList.contains('drocat-suggest-header')) return;
+      if (row.offsetParent === null) return;
+      rows.push(row);
+    });
+    return rows;
+  }
+
+  function setHighlight(rows, index) {
+    rows.forEach(function (row) {
+      row.classList.remove('drocat-suggest-active');
+    });
+    if (index >= 0 && index < rows.length) {
+      rows[index].classList.add('drocat-suggest-active');
+      rows[index].scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  function observeMenu(menu) {
+    // After a keyboard pick the server rebuilds the list (the picked value
+    // moves to the top of Recent). Re-apply the pending highlight to the
+    // rebuilt rows so the cursor stays on the list; closing the menu drops
+    // any pending highlight.
+    if (menu.__drocatNav) return;
+    var state = { pending: -1 };
+    menu.__drocatNav = state;
+    var observer = new MutationObserver(function () {
+      if (menu.style.display === 'none') {
+        state.pending = -1;
+        return;
+      }
+      if (state.pending < 0) return;
+      var rows = selectableRows(menu);
+      if (!rows.length) return;
+      setHighlight(rows, Math.min(state.pending, rows.length - 1));
+      state.pending = -1;
+    });
+    observer.observe(menu, {
+      childList: true,
+      attributes: true,
+      attributeFilter: ['style'],
+    });
+  }
+
   document.addEventListener('keydown', function (event) {
     if (!['ArrowDown', 'ArrowUp', 'Enter', 'Tab'].includes(event.key)) return;
     var active = document.activeElement;
@@ -65,52 +115,40 @@ _SUGGEST_KEYNAV_SCRIPT = """
     if (!menuClass) return;
     var menu = document.querySelector('.' + menuClass);
     if (!menu || menu.style.display === 'none') return;
-    var rows = [];
-    menu.querySelectorAll('.q-item').forEach(function (row) {
-      if (row.classList.contains('drocat-suggest-header')) return;
-      if (row.offsetParent === null) return;
-      rows.push(row);
-    });
+    observeMenu(menu);
+    var rows = selectableRows(menu);
     if (!rows.length) return;
     var current = -1;
     rows.forEach(function (row, i) {
       if (row.classList.contains('drocat-suggest-active')) current = i;
     });
-    function highlight(index) {
-      rows.forEach(function (row) {
-        row.classList.remove('drocat-suggest-active');
-      });
-      if (index >= 0 && index < rows.length) {
-        rows[index].classList.add('drocat-suggest-active');
-        rows[index].scrollIntoView({ block: 'nearest' });
-      }
-    }
     function clearEditor() {
-      // Wipe the pending editor text so Quasar cannot also commit it as a
-      // chip on Enter. The native setter + input event keep Vue's model in
-      // sync (a plain ``value = ''`` would leave ``inputValue`` unchanged).
+      // Wipe the pending editor text WITHOUT dispatching input events: the
+      // pick below makes the server rebuild the menu, and an early
+      // empty-input event would replace the suggestion rows before the
+      // pick's click message arrives — dropping the pick. The server clears
+      // Quasar's inputValue itself after the pick lands.
       var input = shell.querySelector('input');
       if (!input) return;
       var setter = Object.getOwnPropertyDescriptor(
         window.HTMLInputElement.prototype, 'value'
       ).set;
       setter.call(input, '');
-      input.dispatchEvent(new Event('input', { bubbles: true }));
     }
     if (event.key === 'ArrowDown') {
       // Enter the list from the input box, or move down one row.
       if (current < rows.length - 1) {
         event.preventDefault();
-        highlight(current + 1);
+        setHighlight(rows, current + 1);
       }
     } else if (event.key === 'ArrowUp') {
       if (current === 0) {
         // First row -> back to the input box (highlight removed).
         event.preventDefault();
-        highlight(-1);
+        setHighlight(rows, -1);
       } else if (current > 0) {
         event.preventDefault();
-        highlight(current - 1);
+        setHighlight(rows, current - 1);
       }
     } else if (event.key === 'Enter' || event.key === 'Tab') {
       // With a highlighted row, both keys pick it instead of their native
@@ -121,8 +159,12 @@ _SUGGEST_KEYNAV_SCRIPT = """
       event.stopPropagation();
       clearEditor();
       window.__drocatSuggestEnterPick = true;
+      // Keep the cursor ON the list: advance the highlight locally and let
+      // the mutation observer re-apply it once the server rebuilds the
+      // rows, so further Enter/Tab presses keep selecting entries.
+      menu.__drocatNav.pending = current + 1;
       rows[current].click();
-      highlight(-1);
+      setHighlight(rows, Math.min(current + 1, rows.length - 1));
     }
   }, true);
   // Quasar also commits the editor text on the Enter keyup; suppress it for
@@ -494,9 +536,11 @@ def neuron_list_input(
       restricted to the datasets currently selected in the tab's dataset
       input. Arrow keys navigate the open dropdown: ArrowDown enters the list
       from the editor, ArrowUp returns to the editor from the first row, and
-      Enter or Tab picks the highlighted row. At most ``suggestion_limit``
-      entries are shown. With a provider, the native QSelect popup is
-      replaced by the custom suggestion menu.
+      Enter or Tab picks the highlighted row — the highlight then advances
+      to the next entry and stays on the list, so repeated presses keep
+      selecting. At most ``suggestion_limit`` entries are shown. With a
+      provider, the native QSelect popup is replaced by the custom
+      suggestion menu.
     - ``available_neurons``: optional zero-argument dataset getter. When
       supplied, a ``See available neurons`` link opens the rendered,
       searchable cached neuron-index viewer for the current dataset.
@@ -1034,7 +1078,11 @@ def neuron_list_input(
                     merged = merged[:max_items]
                 # Quasar's new-value-mode re-adds the leftover editor text as
                 # a chip when the model changes externally; wipe it first so
-                # only the picked value lands in the list.
+                # only the picked value lands in the list. Pre-empt the
+                # resulting empty input-value event: without this it would
+                # rebuild the menu a second time and drop the keyboard
+                # highlight the client just re-applied after the pick.
+                _last_suggest_text["value"] = ""
                 chip_input.run_method("updateInputValue", "")
                 sync_options(merged)
                 chip_input.set_value(merged)
