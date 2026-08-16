@@ -126,10 +126,10 @@ def off_diag_mean(d, type_name, metric="cosine"):
     return float((m.sum() - n) / (n * (n - 1)))
 
 
-def run_query(query, level, output_dir, method="vector", top_n=30, **kw):
+def run_query(query, level, output_dir, method="vector", **kw):
     return morph.MorphologyComparer(
         query=query, dataset=DATASET, level=level, method=method,
-        metric="cosine", top_n=top_n, output_dir=str(output_dir),
+        metric="cosine", output_dir=str(output_dir),
         project_root=str(PROJECT_ROOT), candidate_source="cache",
         verbose=False, **kw,
     ).find_similar()
@@ -143,7 +143,7 @@ class TestTypeLevelIntraReference:
     @pytest.mark.parametrize("type_name", AME_TYPES)
     def test_intra_reference_row_rank1(self, data, tmp_path_factory, type_name):
         out = tmp_path_factory.mktemp("e2e_out")
-        res = run_query(type_name, "type", top_n=30, output_dir=out)
+        res = run_query(type_name, "type", output_dir=out)
         assert not res.empty
         assert {"is_intra_type", "intra_type_similarity"}.issubset(res.columns)
         intra = res[res["is_intra_type"] == True]  # noqa: E712
@@ -163,7 +163,7 @@ class TestTypeLevelIntraReference:
         all three types; the aMe5/SMP581 single-cell exception only breaks
         the strict max comparison, not the mean one)."""
         out = tmp_path_factory.mktemp("e2e_out")
-        res = run_query(type_name, "type", top_n=30, output_dir=out)
+        res = run_query(type_name, "type", output_dir=out)
         intra_sim = res.loc[res["is_intra_type"] == True, "similarity"].iloc[0]  # noqa: E712
         inter = res[res["is_intra_type"] == False]  # noqa: E712
         assert not inter.empty
@@ -174,7 +174,7 @@ class TestTypeLevelIntraReference:
         (0.975 vs 0.880); aMe10/aMe5 are not asserted here (see module
         docstring: SMP581 ties/beats their cohesion)."""
         out = tmp_path_factory.mktemp("e2e_out")
-        res = run_query("aMe12", "type", top_n=30, output_dir=out)
+        res = run_query("aMe12", "type", output_dir=out)
         intra_sim = res.loc[res["is_intra_type"] == True, "similarity"].iloc[0]  # noqa: E712
         assert intra_sim > res.loc[res["is_intra_type"] == False, "similarity"].max()  # noqa: E712
 
@@ -212,7 +212,7 @@ class TestNamedPairRelationships:
         """The type-level result rows must rank the closer type above the
         farther one, and both below the intra reference row."""
         out = tmp_path_factory.mktemp("e2e_out")
-        res = run_query(query_type, "type", top_n=30, output_dir=out)
+        res = run_query(query_type, "type", output_dir=out)
         intra_sim = res.loc[res["is_intra_type"] == True, "similarity"].iloc[0]  # noqa: E712
         close_sim = float(res.loc[res["target_type"] == closer, "similarity"].iloc[0])
         far_sim = float(res.loc[res["target_type"] == farther, "similarity"].iloc[0])
@@ -240,7 +240,7 @@ class TestBodyIdSameType:
     def test_same_type_rows_present_and_columns(self, data, tmp_path_factory,
                                                 body_id, type_name):
         out = tmp_path_factory.mktemp("e2e_out")
-        res = run_query(body_id, "bodyid", top_n=30, output_dir=out)
+        res = run_query(body_id, "bodyid", output_dir=out)
         assert not res.empty
         assert {"is_same_type", "intra_type_similarity"}.issubset(res.columns)
         same = res[res["is_same_type"] == True]  # noqa: E712
@@ -259,7 +259,7 @@ class TestBodyIdSameType:
         """aMe12's two members are each other's top hit (0.902 = the
         intra-type similarity)."""
         out = tmp_path_factory.mktemp("e2e_out")
-        res = run_query(911332304, "bodyid", top_n=30, output_dir=out)
+        res = run_query(911332304, "bodyid", output_dir=out)
         row = res.iloc[0]
         assert row["target_type"] == "aMe12"
         assert row["target_bodyId"] == 5813058431
@@ -268,7 +268,7 @@ class TestBodyIdSameType:
 
     def test_ame5_member_same_type_mean_exceeds_inter(self, data, tmp_path_factory):
         out = tmp_path_factory.mktemp("e2e_out")
-        res = run_query(1158631810, "bodyid", top_n=30, output_dir=out)
+        res = run_query(1158631810, "bodyid", output_dir=out)
         same = res[res["is_same_type"] == True]  # noqa: E712
         inter = res[res["is_same_type"] == False]  # noqa: E712
         # The vector cache grows with every query (freshly-computed vectors
@@ -290,8 +290,8 @@ class TestNblastPath:
         stays 1: navis's process pool cannot re-import the test module under
         spawn on macOS."""
         out = tmp_path_factory.mktemp("e2e_out")
-        res = run_query("aMe12", "type", method="nblast", top_n=12,
-                        output_dir=out, nblast_prefilter=40, n_workers=1)
+        res = run_query("aMe12", "type", method="nblast",
+                        output_dir=out, candidate_cap=40, n_workers=1)
         assert not res.empty
         intra = res[res["is_intra_type"] == True]  # noqa: E712
         assert len(intra) == 1
@@ -312,9 +312,9 @@ class TestProfileFirstPath:
         out = tmp_path_factory.mktemp("e2e_out")
         comparer = morph.MorphologyComparer(
             query=911332304, dataset=DATASET, level="bodyid", method="vector",
-            metric="cosine", top_n=30, output_dir=str(out),
+            metric="cosine", output_dir=str(out),
             project_root=str(PROJECT_ROOT), candidate_source="auto",
-            fetch_top_n=20, verbose=False,
+            verbose=False,
         )
         try:
             res = comparer.find_similar()
@@ -339,7 +339,7 @@ class TestOutputsAndAutoLevel:
         out = tmp_path_factory.mktemp("e2e_out")
         c_type = morph.MorphologyComparer(
             query="aMe12", dataset=DATASET, level="auto", method="vector",
-            metric="cosine", top_n=12, output_dir=str(out),
+            metric="cosine", output_dir=str(out),
             project_root=str(PROJECT_ROOT), candidate_source="cache",
             verbose=False,
         )
@@ -357,7 +357,7 @@ class TestOutputsAndAutoLevel:
         out2 = tmp_path_factory.mktemp("e2e_out")
         c_bid = morph.MorphologyComparer(
             query=911332304, dataset=DATASET, level="auto", method="vector",
-            metric="cosine", top_n=10, output_dir=str(out2),
+            metric="cosine", output_dir=str(out2),
             project_root=str(PROJECT_ROOT), candidate_source="cache",
             verbose=False,
         )
@@ -371,15 +371,15 @@ class TestOutputsAndAutoLevel:
     def test_type_search_ranks_top_types_over_expanded_connectivity_types(
         self, tmp_path_factory
     ):
-        """A type search ranks the top-N types from the connection cache:
-        candidates -> top-(N x 3) connectivity-similar types -> all members;
-        every returned type must be within that expanded candidate set."""
+        """A type search ranks the types of the connection cache's top
+        candidate_cap shared-partner neurons; every returned type must be
+        within that screened candidate set."""
         out = tmp_path_factory.mktemp("e2e_out")
         comparer = morph.MorphologyComparer(
             query="aMe12", dataset=DATASET, level="type", method="vector",
-            metric="cosine", top_n=10, output_dir=str(out),
+            metric="cosine", output_dir=str(out),
             project_root=str(PROJECT_ROOT), candidate_source="profile",
-            candidate_expansion=3, verbose=False,
+            verbose=False,
         )
         res = comparer.find_similar()
         assert not res.empty
@@ -387,7 +387,7 @@ class TestOutputsAndAutoLevel:
         # the intra reference row is rank 1
         assert res.iloc[0]["target_type"] == "aMe12"
         assert res.iloc[0]["is_intra_type"] == True  # noqa: E712
-        # every inter type is within the top-(N x 3) connectivity candidate
+        # every inter type is within the screened connectivity candidate
         # types (direct cross-check of the discovery step)
         qdf = comparer._resolve_query()
         cand = comparer._connection_cache_candidates(qdf)
@@ -403,7 +403,7 @@ class TestOutputsAndAutoLevel:
         out = tmp_path_factory.mktemp("e2e_out")
         comparer = morph.MorphologyComparer(
             query=5813058431, dataset=DATASET, level="bodyid", method="vector",
-            metric="cosine", top_n=30, output_dir=str(out),
+            metric="cosine", output_dir=str(out),
             project_root=str(PROJECT_ROOT), candidate_source="cache",
             verbose=False,
         )
@@ -428,7 +428,7 @@ class TestVisualization:
         out = tmp_path_factory.mktemp("e2e_out")
         comparer = morph.MorphologyComparer(
             query="aMe12", dataset=DATASET, level="type", method="vector",
-            metric="cosine", top_n=12, output_dir=str(out),
+            metric="cosine", output_dir=str(out),
             project_root=str(PROJECT_ROOT), candidate_source="cache",
             visualize_top_n=3, visualize_by="type", verbose=False,
         )
@@ -445,7 +445,7 @@ class TestVisualization:
         out = tmp_path_factory.mktemp("e2e_out")
         comparer = morph.MorphologyComparer(
             query=911332304, dataset=DATASET, level="bodyid", method="vector",
-            metric="cosine", top_n=8, output_dir=str(out),
+            metric="cosine", output_dir=str(out),
             project_root=str(PROJECT_ROOT), candidate_source="cache",
             visualize_top_n=2, visualize_by="bodyId", verbose=False,
         )

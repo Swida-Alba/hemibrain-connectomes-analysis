@@ -59,7 +59,7 @@ TOOL_PROGRESS_STEPS: Dict[str, Sequence[str]] = {
     "find_similar_morphology": (
         "Resolve query neuron",
         "Discover candidates from connectivity",
-        "Expand candidate types to the scoring pool",
+        "Select top candidates for the scoring pool",
         "Load and vectorize skeletons",
         "Score morphological similarity",
         "Save results and visualization",
@@ -158,7 +158,23 @@ METHOD_PROGRESS_STEPS: Dict[Tuple[str, str], Sequence[str]] = {
     ("find_similar_morphology", "profile"): (
         "Resolve query neuron",
         "Discover candidates from connectivity",
-        "Expand candidate types to the scoring pool",
+        "Select top candidates for the scoring pool",
+        "Load and vectorize skeletons",
+        "Score morphological similarity",
+        "Save results and visualization",
+    ),
+    ("find_similar_morphology", "roi"): (
+        "Resolve query neuron",
+        "Screen candidates by ROI distributions",
+        "Select top candidates for the scoring pool",
+        "Load and vectorize skeletons",
+        "Score morphological similarity",
+        "Save results and visualization",
+    ),
+    ("find_similar_morphology", "combined"): (
+        "Resolve query neuron",
+        "Screen candidates by ROI + connectivity",
+        "Select top candidates for the scoring pool",
         "Load and vectorize skeletons",
         "Score morphological similarity",
         "Save results and visualization",
@@ -193,7 +209,11 @@ def progress_steps_for(
         source = str(context.get("candidate_source", "auto") or "auto").lower()
         if source == "auto":
             dataset = str(context.get("dataset", "") or "").lower()
-            source = "cache" if dataset.startswith("flywire_") else "profile"
+            # Mirrors the backend's auto resolution: NeuPrint datasets screen
+            # by ROI distributions, FlyWire searches the vector cache. A
+            # server-side fallback from roi to profile keeps the same 6-step
+            # protocol, so the checklist stays valid either way.
+            source = "cache" if dataset.startswith("flywire_") else "roi"
         key = (tool_name, source)
         if key in METHOD_PROGRESS_STEPS:
             return list(METHOD_PROGRESS_STEPS[key])

@@ -3789,6 +3789,12 @@ class VisualizeSkeleton:
             pass
 
         neurons = list(neuron_vols) if isinstance(neuron_vols, navis.NeuronList) else [neuron_vols]
+        if len(neurons) == 1 and isinstance(neurons[0], (list, tuple)):
+            # A plain Python list of neurons is a valid layer shape; unwrap it
+            # so navis.xform is called per neuron (a whole-list call would
+            # spawn navis' own per-neuron progress bar that prints on
+            # alternate rows instead of refreshing this shared bar).
+            neurons = list(neurons[0])
         total = len(neurons)
 
         n_nodes_total = 0
@@ -5289,144 +5295,31 @@ class VisualizeSkeleton:
 
     def _detect_extrusions_in_skeletons(self, skeletons_dict, simplification=0.95):
         """Detect extrusion artifacts in a batch of skeletons.
-        
-        Converts each skeleton to a simplified mesh and checks for extrusion
-        artifacts using edge length analysis. Returns list of body IDs that
-        have moderate or severe extrusions and should be replaced via API.
-        
-        Results are cached in cache/{dataset}/extrusion_check_results.parquet to
-        avoid repeated analysis. Previously checked neurons are skipped.
-        
-        Parameters
-        ----------
-        skeletons_dict : dict
-            Dictionary of bodyId -> TreeNeuron
-        simplification : float
-            Simplification level to apply for testing (default 0.95)
-            
-        Returns
-        -------
-        list
-            List of body IDs with extrusion issues that need API replacement
+
+        Delegates to the shared ``fafb_utils.flag_extrusions`` pipeline
+        (cached per-neuron results, vectorized edge analysis, parallel
+        batch with a serial fallback) so every FAFB consumer runs the same
+        check. Returns the body IDs that have moderate or severe extrusions
+        and should be replaced via API.
         """
-        from tqdm import tqdm
-        import sys
-        import numpy as np
-        
-        # Load cached results to skip already-checked neurons
-        cached_results = self._load_extrusion_check_cache()
-        
-        # Filter to only check neurons not in cache
-        to_check = {bid: skel for bid, skel in skeletons_dict.items() 
-                    if bid not in cached_results and str(bid) not in cached_results}
-        
-        # Return cached extrusion IDs for neurons we already know about
-        extrusion_ids = [bid for bid in skeletons_dict.keys() 
-                        if cached_results.get(bid, False) or cached_results.get(str(bid), False)]
-        
-        if not to_check:
-            if extrusion_ids:
-                self._vprint(f'  ℹ️  Using cached extrusion results: {len(extrusion_ids)} known issues', level='simple')
-            return extrusion_ids
-        
-        self._vprint(f'  🔍 Checking {len(to_check)} skeletons for extrusions (skipping {len(skeletons_dict) - len(to_check)} cached)...', level='simple')
-        
-        new_results = {}  # bodyId -> bool (True if has extrusion)
-        
-        # Progress bar for extrusion checking
-        pbar = tqdm(to_check.items(), desc="  Checking extrusions", 
-                   disable=not self.verbose, leave=False, file=sys.stdout)
-        
-        for body_id, skeleton in pbar:
-            has_extrusion = False
-            try:
-                # Get soma position if available
-                soma_pos = None
-                if hasattr(skeleton, 'soma') and skeleton.soma is not None:
-                    soma_idx = skeleton.soma
-                    if isinstance(soma_idx, (list, np.ndarray)) and len(soma_idx) > 0:
-                        soma_idx = soma_idx[0]
-                    if soma_idx is not None and hasattr(skeleton, 'nodes'):
-                        soma_node = skeleton.nodes[skeleton.nodes['node_id'] == soma_idx]
-                        if len(soma_node) > 0:
-                            soma_pos = soma_node[['x', 'y', 'z']].values[0]
-                
-                # Convert to mesh with simplification
-                if hasattr(skeleton, 'nodes') and 'radius' in skeleton.nodes.columns:
-                    invalid_mask = (skeleton.nodes['radius'] <= 0) | (skeleton.nodes['radius'].isna())
-                    if invalid_mask.any():
-                        skeleton.nodes.loc[invalid_mask, 'radius'] = 1
-                elif hasattr(skeleton, 'nodes'):
-                    skeleton.nodes['radius'] = 1
-                
-                mesh_neuron = navis.conversion.tree2meshneuron(
-                    skeleton,
-                    tube_points=VisualizeSkeleton.SKELETON_TUBE_POINTS,
-                    use_normals=True
-                )
-                
-                if not hasattr(mesh_neuron, 'trimesh'):
-                    new_results[body_id] = False
-                    continue
-                    
-                # Apply simplification
-                original_faces = len(mesh_neuron.trimesh.faces)
-                target_faces = max(100, int(original_faces * (1 - simplification)))
-                
-                try:
-                    import open3d as o3d
-                    o3d_mesh = o3d.geometry.TriangleMesh()
-                    o3d_mesh.vertices = o3d.utility.Vector3dVector(mesh_neuron.trimesh.vertices)
-                    o3d_mesh.triangles = o3d.utility.Vector3iVector(mesh_neuron.trimesh.faces)
-                    simplified = o3d_mesh.simplify_quadric_decimation(target_number_of_triangles=target_faces)
-                    
-                    import trimesh
-                    simplified_trimesh = trimesh.Trimesh(
-                        vertices=np.asarray(simplified.vertices),
-                        faces=np.asarray(simplified.triangles)
-                    )
-                except ImportError:
-                    simplified_trimesh = mesh_neuron.trimesh.simplify_quadric_decimation(target_faces)
-                
-                # Analyze for extrusions using edge length analysis
-                vertices = simplified_trimesh.vertices
-                faces = simplified_trimesh.faces
-                
-                edges = set()
-                for face in faces:
-                    for j in range(3):
-                        v1, v2 = face[j], face[(j + 1) % 3]
-                        edges.add((min(v1, v2), max(v1, v2)))
-                
-                edge_lengths = [np.linalg.norm(vertices[e[0]] - vertices[e[1]]) for e in edges]
-                edge_lengths = np.array(edge_lengths)
-                
-                if len(edge_lengths) == 0:
-                    new_results[body_id] = False
-                    continue
-                
-                median_edge = np.median(edge_lengths)
-                max_edge = np.max(edge_lengths)
-                edge_ratio = max_edge / median_edge if median_edge > 0 else 0
-                
-                # Check if edge ratio indicates extrusions (threshold=10)
-                # Also check if max edge is unreasonably long (>50000nm indicates extrusion spike)
-                if edge_ratio > 10 or max_edge > 50000:
-                    has_extrusion = True
-                    extrusion_ids.append(body_id)
-                    
-            except Exception:
-                pass  # Skip errors silently
-            
-            new_results[body_id] = has_extrusion
-        
-        # Save new results to cache
-        if new_results:
-            self._save_extrusion_check_cache(new_results)
-            n_new_extrusions = sum(1 for v in new_results.values() if v)
-            self._vprint(f'  💾 Cached extrusion results for {len(new_results)} neurons ({n_new_extrusions} with issues)', level='full')
-        
-        return extrusion_ids
+        from fafb_utils import flag_extrusions
+
+        project_root = os.path.dirname(os.path.dirname(__file__))
+        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+
+        def _vprint_simple(msg):
+            self._vprint(msg, level='simple')
+
+        self._vprint(
+            f'  🔍 Checking {len(skeletons_dict)} skeletons for extrusions...',
+            level='simple',
+        )
+        return flag_extrusions(
+            project_root, dataset_safe, skeletons_dict,
+            verbose=bool(self.verbose),
+            log=_vprint_simple,
+            simplification=simplification,
+        )
     
     def _skeleton_cache_is_simplified(self) -> bool:
         """True when the skeleton cache holds the fixed simplified level.
@@ -7090,7 +6983,14 @@ class VisualizeSkeleton:
             # Apply FAFB tilt correction if using template mode
             # This corrects the left-right tilt in the FLYWIRE template mesh
             if is_fafb and self.brain_mesh == 'template' and neuron_vols is not None:
-                neuron_vols = self._apply_fafb_tilt_correction(neuron_vols)
+                # Per-neuron correction reports through the shared layer bar;
+                # a whole-list navis.xform would spawn navis' own "Xforming"
+                # bar that prints on alternate rows instead of refreshing this one.
+                neuron_vols = self._apply_fafb_tilt_correction(
+                    neuron_vols,
+                    progress_bar=layer_pbar,
+                    layer_label=f"Layer {i} ({layer_name})",
+                )
             
             # Ensure iterable after potential transforms (navis may return TreeNeuron)
             if neuron_vols is not None and not isinstance(neuron_vols, (list, navis.NeuronList)):
@@ -7110,7 +7010,11 @@ class VisualizeSkeleton:
                              template = 'JRCFIB2022M'
                     
                     if template:
-                        mirrored = navis.mirror_brain(neuron_vols, template, mirror_axis='x')
+                        layer_pbar.set_postfix_str(f"{layer_name} (mirroring...)")
+                        # navis.mirror_brain prints its own progress bar; keep
+                        # the shared layer bar as the single progress row.
+                        with self._suppress_output():
+                            mirrored = navis.mirror_brain(neuron_vols, template, mirror_axis='x')
                         if isinstance(neuron_vols, navis.NeuronList):
                             neuron_vols = neuron_vols + mirrored
                         else:
@@ -7978,8 +7882,11 @@ class VisualizeSkeleton:
                 if self._needs_skeleton_transform():
                     template_info = self._get_template_info()
                     self._vprint(f'Transforming synapses of layer {i} -> {i+1}...', end='', level='full')
-                    pre_coords = navis.xform_brain(pre_coords, source=template_info['source'], target=template_info['target'])
-                    post_coords = navis.xform_brain(post_coords, source=template_info['source'], target=template_info['target'])
+                    # Keep synapse transforms off the progress row: navis may
+                    # print its own internal bars otherwise.
+                    with self._suppress_output():
+                        pre_coords = navis.xform_brain(pre_coords, source=template_info['source'], target=template_info['target'])
+                        post_coords = navis.xform_brain(post_coords, source=template_info['source'], target=template_info['target'])
                 
                 # Apply FAFB tilt correction if using template mode
                 # This corrects the left-right tilt in the FLYWIRE template mesh
@@ -9458,13 +9365,19 @@ class VisualizeSkeleton:
         
         return rotation_matrix
     
-    def _apply_fafb_tilt_correction(self, obj):
+    def _apply_fafb_tilt_correction(self, obj, progress_bar=None, layer_label='layer'):
         """Apply FAFB tilt correction to navis objects or DataFrames with xyz coordinates.
         
         Parameters
         ----------
         obj : TreeNeuron, MeshNeuron, Volume, NeuronList, or pd.DataFrame
             Object to transform. DataFrames must have 'x', 'y', 'z' columns.
+        progress_bar : tqdm, optional
+            Shared layer progress bar; a NeuronList is transformed per neuron
+            with progress reported through its postfix instead of navis
+            spawning its own "Xforming" bar on a separate row.
+        layer_label : str
+            Label used in the shared bar's postfix while transforming.
             
         Returns
         -------
@@ -9513,6 +9426,28 @@ class VisualizeSkeleton:
             # navis.xform requires an AffineTransform object, not a raw numpy array
             from navis.transforms import AffineTransform
             affine_transform = AffineTransform(rotation_matrix)
+
+            # Xforming a whole NeuronList in one call makes navis spawn its
+            # own "Xforming" progress bar on a separate row. Loop per neuron
+            # instead and report through the shared layer bar so the layer's
+            # transform + plot progress refreshes on a single row.
+            if isinstance(obj, navis.NeuronList) and len(obj) > 1:
+                def set_status(status):
+                    if progress_bar is not None and hasattr(progress_bar, 'set_postfix_str'):
+                        progress_bar.set_postfix_str(status)
+
+                xf = []
+                total = len(obj)
+                for idx, n in enumerate(obj):
+                    label = getattr(n, 'name', None) or str(getattr(n, 'id', idx))
+                    set_status(f'{layer_label}: tilt correction {idx}/{total} | current={label}')
+                    try:
+                        xf.append(navis.xform(n, affine_transform))
+                    except Exception:
+                        xf.append(n)  # Keep original on per-neuron failure
+                set_status(f'{layer_label}: tilt correction {total}/{total}')
+                return obj.__class__(xf)
+
             transformed = navis.xform(obj, affine_transform)
             return transformed
         except Exception as e:

@@ -18,7 +18,7 @@ from ..skeleton_pull import SkeletonPuller
 from ..type_suggestions import dataset_suggestions
 from ..dataset_service import is_banc_dataset
 
-MORPH_METHODS = ["vector", "nblast"]
+MORPH_METHODS = {"vector": "Vector", "nblast": "NBLAST"}
 MORPH_METRICS = ["cosine", "pearson"]
 MORPH_LEVELS = ["auto", "bodyid", "type"]
 
@@ -101,49 +101,50 @@ def create_find_similar_tab():
                     )
                     method = select_input(
                         "Method", MORPH_METHODS, DEFAULTS["morph_method"],
-                        hint="'vector': fast morphometrics + persistence vectors "
-                             "(recommended). 'nblast': canonical NBLAST (slower; "
+                        hint="'Vector': fast morphometrics + persistence vectors "
+                             "(recommended). 'NBLAST': canonical NBLAST (slower; "
                              "runs on vector-prefiltered candidates).",
                     )
                     metric = select_input(
                         "Metric", MORPH_METRICS, DEFAULTS["morph_metric"],
-                        hint="Similarity on standardized vectors: cosine or Pearson.",
+                        hint="Similarity on standardized vectors: cosine or "
+                             "Pearson. Applies to the 'Vector' method only.",
                     )
-                with param_grid(3):
-                    morph_top_n = number_input(
-                        "Top N Results", DEFAULTS["morph_top_n"], 5, 200,
-                        hint="Number of ranked results to return.",
-                    )
-                    nblast_prefilter = number_input(
-                        "NBLAST Prefilter", DEFAULTS["nblast_prefilter"], 10, 5000,
-                        hint="Vector-prefiltered candidate count before NBLAST "
-                             "scoring (higher = slower but more thorough).",
-                    )
-                    n_per_type = number_input(
-                        "BodyIds / Type", DEFAULTS["n_per_type"], 1, 50,
-                        hint="Per-type bodyId cap for NBLAST type-level means.",
-                    )
+
+                    def sync_metric_state():
+                        # NBLAST has its own scoring, so the vector metric is
+                        # irrelevant (and ignored) when method=NBLAST.
+                        metric.set_enabled(method.value != "nblast")
+
+                    method.on_value_change(lambda _e: sync_metric_state())
+                    sync_metric_state()
                 with param_grid(2):
                     candidate_source = select_input(
-                        "Candidate Source", ["auto", "cache", "profile"],
+                        "Candidate Source", ["auto", "roi", "combined",
+                                             "profile", "cache"],
                         DEFAULTS["candidate_source"],
-                        hint="'auto': NeuPrint datasets use the connectivity-"
-                             "expanded search (candidates from the connection "
-                             "cache, top-N×3 similar types expanded to all "
-                             "their members, then morphology); FlyWire uses "
-                             "the full-morphology vector-cache search. "
-                             "'profile': always connectivity-expanded. "
-                             "'cache': full-morphology over the local skeleton "
-                             "population (download skeletons first).",
+                        hint="'auto' (recommended): NeuPrint datasets screen "
+                             "candidates by primary-ROI distribution "
+                             "similarity (every neuron reachable; a one-time "
+                             "matrix is cached), FlyWire searches the vector "
+                             "cache directly. 'roi': ROI-distribution screen "
+                             "only. 'combined': union of the ROI screen and "
+                             "the connectivity (shared-partner) screen — "
+                             "widest pool, most skeleton fetches. 'profile': "
+                             "connectivity screen only (misses neurons "
+                             "without shared partners). 'cache': full-"
+                             "morphology over the local skeleton population "
+                             "(download skeletons first).",
                     )
-                    candidate_expansion = number_input(
-                        "Candidate Expansion (×)", DEFAULTS["morph_candidate_expansion"], 1, 20,
-                        hint="Connectivity-expanded search: keep the top-N × "
-                             "expansion connectivity-similar TYPES from the "
-                             "connection cache, then expand to ALL their member "
-                             "bodyIds. Skeletons are fetched transiently "
-                             "(never written to the cache); cached skeletons "
-                             "are reused.",
+                    candidate_cap = number_input(
+                        "Candidate Cap", DEFAULTS["candidate_cap"], 10, 5000,
+                        hint="Maximum number of candidates entering the "
+                             "morphological comparison: the sorted candidate "
+                             "list is truncated to this many neurons (all "
+                             "source modes; also the NBLAST prefilter in "
+                             "cache mode). ALL compared candidates are "
+                             "returned and written; the visualize Top N "
+                             "controls rendering only.",
                     )
                 roi_filter = select_input(
                     "ROI Filter", ["All ROIs"], "All ROIs",
@@ -205,12 +206,13 @@ def create_find_similar_tab():
                     ).classes("text-caption drocat-muted")
                 with ui.row().classes("items-center gap-2"):
                     cache_fetched = checkbox_input(
-                        "Cache Fetched Skeletons", False,
+                        "Cache Fetched Skeletons", True,
                         hint="Save skeletons fetched transiently during a search "
                              "(profile-first candidate fetches / NBLAST) to the "
                              "local skeleton cache so later runs reuse them. "
-                             "Off by default: fetched skeletons stay in memory "
-                             "only (their VECTORS are always cached regardless).",
+                             "On by default: fetched skeletons (and their "
+                             "vectors, which are always cached) are persisted "
+                             "for reuse.",
                     )
                     ui.label(
                         "For a persistent full-morphology pool, prefer 'Download All Skeletons'."
@@ -545,11 +547,8 @@ def create_find_similar_tab():
             "level": level.value,
             "method": method.value,
             "metric": metric.value,
-            "top_n": int(morph_top_n.value),
-            "nblast_prefilter": int(nblast_prefilter.value),
-            "n_per_type": int(n_per_type.value),
+            "candidate_cap": int(candidate_cap.value),
             "candidate_source": candidate_source.value,
-            "candidate_expansion": int(candidate_expansion.value),
             "roi_filter": None if roi_filter.value == "All ROIs" else [roi_filter.value],
             "visualize_top_n": (
                 visualization_values["visualize_top_n"] if visualize.value else 0

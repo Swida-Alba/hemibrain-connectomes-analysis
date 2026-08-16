@@ -539,7 +539,7 @@ class TestRunner:
         ]
         # morphological mode controls
         for label in ("Query Neuron(s)", "Level", "Method", "Metric",
-                      "NBLAST Prefilter", "Candidate Source", "Candidate Expansion (×)",
+                      "Candidate Cap", "Candidate Source",
                       "ROI Filter", "Visualize Top N Types / Neurons", "Visualize By",
                       "Download All Skeletons"):
             assert label in labels, f"missing morphological control: {label}"
@@ -557,12 +557,11 @@ class TestRunner:
             for el in client.elements.values()
             if getattr(el, "_props", {}).get("label")
         }
-        assert by_label["Top N Results"].value == DEFAULTS["morph_top_n"]
         assert by_label["Top N Candidates"].value == DEFAULTS["top_n"]
         # level auto-follows the query kind (type -> type, bodyId -> bodyId)
         assert by_label["Level"].value == DEFAULTS["morph_level"] == "auto"
-        # connectivity-expanded candidates: top-N x 3 types by default
-        assert by_label["Candidate Expansion (×)"].value == DEFAULTS["morph_candidate_expansion"] == 3
+        # the two size knobs: candidate cap for the pool, top-N for rendering
+        assert by_label["Candidate Cap"].value == DEFAULTS["candidate_cap"] == 500
         # 3D visualization defaults: enabled with 6 top types, grouped by type
         assert by_label["Visualize Top N Types / Neurons"].value == DEFAULTS["morph_visualize_top_n"]
         assert by_label["Visualize Top N Candidates"].value == 5
@@ -654,14 +653,14 @@ class TestRunner:
         morph_script = sr._generate_script(
             "find_similar_morphology",
             {"query": "aMe12", "dataset": "male-cns:v1.0", "method": "vector",
-             "candidate_expansion": 3, "visualize_top_n": 6, "visualize_by": "type"},
+             "candidate_cap": 500, "visualize_top_n": 6, "visualize_by": "type"},
             "find_similar",
             None,
         )
         assert "from morphology import MorphologyComparer" in morph_script
         assert "comparer.find_similar()" in morph_script
         assert "method='vector'" in morph_script
-        assert "candidate_expansion=3" in morph_script
+        assert "candidate_cap=500" in morph_script
         assert "visualize_top_n=6" in morph_script
         assert "visualize_by='type'" in morph_script
 
@@ -4889,8 +4888,8 @@ class TestComponents:
         panel.page_progress.start("find_similar_morphology")
         assert panel.page_progress.step_labels == [
             "Resolve query neuron",
-            "Discover candidates from connectivity",
-            "Expand candidate types to the scoring pool",
+            "Screen candidates by ROI distributions",
+            "Select top candidates for the scoring pool",
             "Load and vectorize skeletons",
             "Score morphological similarity",
             "Save results and visualization",

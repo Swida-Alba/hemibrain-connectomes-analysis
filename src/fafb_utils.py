@@ -149,3 +149,231 @@ def get_fafb_skeleton_parquet(data_dir):
     if std_pq.exists():
         return str(std_pq)
     return None
+
+
+# =============================================================================
+# FAFB skeleton quality pipeline (shared with the visualization pipeline)
+# =============================================================================
+# The visualization pipeline checks FAFB skeletons in this order:
+#   1. local first  - extrusion-fixed skeletons cached under
+#                     ``cache/{dataset}/API_cache/skeletons/``, then the
+#                     healed skeleton bundle (``{bodyId}.swc``),
+#   2. extrusion test - edge-length analysis on the local skeletons, with
+#                     per-neuron results cached in
+#                     ``cache/{dataset}/extrusion_check_results.parquet``,
+#   3. online fallback - extrusion-affected or missing neurons are fetched
+#                     through the CAVE API (token-gated).
+# These helpers expose that pipeline so every consumer (e.g. NBLAST
+# dotprops building) follows the same behavior.
+
+EXTRUSION_CHECK_FILENAME = "extrusion_check_results.parquet"
+
+
+def extrusion_check_cache_path(project_root, dataset_folder):
+    """Path of the cached extrusion check results for a dataset folder."""
+    return Path(project_root) / "cache" / dataset_folder / EXTRUSION_CHECK_FILENAME
+
+
+def load_extrusion_check_cache(project_root, dataset_folder):
+    """Cached extrusion results: {bodyId(str): has_extrusion(bool)}."""
+    path = extrusion_check_cache_path(project_root, dataset_folder)
+    if not path.exists():
+        return {}
+    try:
+        import pandas as pd
+
+        df = pd.read_parquet(path)
+        return dict(zip(df["bodyId"].astype(str), df["has_extrusion"]))
+    except Exception:
+        return {}
+
+
+def save_extrusion_check_cache(project_root, dataset_folder, results):
+    """Persist new extrusion check results (best-effort)."""
+    if not results:
+        return
+    try:
+        import pandas as pd
+
+        path = extrusion_check_cache_path(project_root, dataset_folder)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame({
+            "bodyId": [str(b) for b in results.keys()],
+            "has_extrusion": [bool(v) for v in results.values()],
+        })
+        df.to_parquet(path, index=False)
+    except Exception:
+        pass
+
+
+def detect_extrusion(neuron, simplification=0.95, tube_points=6):
+    """Whether a skeleton carries extrusion artifacts (edge-length analysis).
+
+    Mirrors ``VisualizeSkeleton._detect_extrusions_in_skeletons``: convert
+    the skeleton to a simplified tube mesh and flag neurons whose edge
+    lengths spike (ratio > 10 or a single edge > 50,000 nm).
+
+    The analysis is vectorized over the mesh's unique edges (``trimesh``
+    edge index) instead of a Python loop over faces — identical statistics,
+    ~20x faster; the open3d quadric decimation (the dominant phase) is
+    skipped when the tube mesh is already at or below the target face count.
+    """
+    import numpy as np
+    import navis
+
+    try:
+        if hasattr(neuron, "nodes") and "radius" in neuron.nodes.columns:
+            invalid = (neuron.nodes["radius"] <= 0) | neuron.nodes["radius"].isna()
+            if invalid.any():
+                neuron.nodes.loc[invalid, "radius"] = 1
+        elif hasattr(neuron, "nodes"):
+            neuron.nodes["radius"] = 1
+
+        mesh_neuron = navis.conversion.tree2meshneuron(
+            neuron, tube_points=tube_points, use_normals=True
+        )
+        if not hasattr(mesh_neuron, "trimesh"):
+            return False
+
+        n_faces = len(mesh_neuron.trimesh.faces)
+        target_faces = max(100, int(n_faces * (1 - simplification)))
+        if n_faces > target_faces:
+            try:
+                import open3d as o3d
+
+                o3d_mesh = o3d.geometry.TriangleMesh()
+                o3d_mesh.vertices = o3d.utility.Vector3dVector(mesh_neuron.trimesh.vertices)
+                o3d_mesh.triangles = o3d.utility.Vector3iVector(mesh_neuron.trimesh.faces)
+                simplified = o3d_mesh.simplify_quadric_decimation(
+                    target_number_of_triangles=target_faces)
+                import trimesh
+
+                mesh = trimesh.Trimesh(
+                    vertices=np.asarray(simplified.vertices),
+                    faces=np.asarray(simplified.triangles),
+                )
+            except ImportError:
+                mesh = mesh_neuron.trimesh.simplify_quadric_decimation(target_faces)
+        else:
+            # Already small enough: analyzing the tube mesh directly avoids
+            # the (dominant) decimation cost without changing the result.
+            mesh = mesh_neuron.trimesh
+
+        edge_ends = mesh.vertices[mesh.edges_unique]
+        edge_lengths = np.linalg.norm(
+            edge_ends[:, 0, :] - edge_ends[:, 1, :], axis=1
+        )
+        if len(edge_lengths) == 0:
+            return False
+
+        median_edge = np.median(edge_lengths)
+        max_edge = np.max(edge_lengths)
+        edge_ratio = max_edge / median_edge if median_edge > 0 else 0
+        return bool(edge_ratio > 10 or max_edge > 50000)
+    except Exception:
+        return False
+
+
+def _extrusion_worker(task, simplification=0.95):
+    """Module-level worker for the parallel extrusion check (picklable)."""
+    body_id, neuron = task
+    return body_id, bool(detect_extrusion(neuron, simplification=simplification))
+
+
+def flag_extrusions(project_root, dataset_folder, skeletons, verbose=False,
+                    log=None, simplification=0.95, n_workers=0):
+    """Extrusion check with cached results; returns flagged body ids (int).
+
+    ``skeletons`` maps bodyId -> TreeNeuron. Previously checked neurons are
+    served from ``extrusion_check_results.parquet``; new results are
+    persisted so the analysis runs once per neuron.
+
+    Unchecked neurons are analyzed in a parallel batch (process pool,
+    ``n_workers``; 0 = auto up to 8). Platforms/sandboxes where the pool
+    cannot start (e.g. no POSIX semaphores) fall back to a serial pass, so
+    the check always completes.
+    """
+    import functools
+    import os
+    import sys
+    from concurrent.futures import ProcessPoolExecutor
+
+    from tqdm import tqdm
+
+    cache = load_extrusion_check_cache(project_root, dataset_folder)
+    flagged = [int(b) for b in skeletons if cache.get(str(b), False)]
+    to_check = [int(b) for b in skeletons if str(b) not in cache]
+    if not to_check:
+        if flagged and (log or verbose):
+            (log or print)(
+                f"Extrusion check: {len(flagged)} known issue(s) from cache."
+            )
+        return flagged
+
+    def _report(msg):
+        if log is not None:
+            log(msg)
+        elif verbose:
+            print(msg)
+
+    new_results = {}
+    pbar = tqdm(total=len(to_check), desc="Checking extrusions", unit="neuron",
+                disable=not verbose, leave=False, file=sys.stdout)
+    worker = functools.partial(_extrusion_worker, simplification=simplification)
+
+    workers = int(n_workers) if int(n_workers) > 0 else min(
+        8, len(to_check), os.cpu_count() or 1)
+    if workers > 1:
+        try:
+            import multiprocessing as mp
+
+            # fork inherits the parent's navis/open3d imports (no per-worker
+            # startup cost) and is available on macOS/Linux; the serial pass
+            # below covers environments where the pool cannot start.
+            ctx = (mp.get_context("fork")
+                   if hasattr(mp, "get_context")
+                   and "fork" in mp.get_all_start_methods()
+                   else mp.get_context("spawn"))
+            with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
+                for body_id, has_extrusion in ex.map(
+                        worker,
+                        [(bid, skeletons[bid]) for bid in to_check],
+                        chunksize=max(1, len(to_check) // (workers * 4))):
+                    new_results[str(body_id)] = has_extrusion
+                    if has_extrusion:
+                        flagged.append(body_id)
+                    pbar.update(1)
+                    pbar.set_postfix_str(f"{body_id}")
+        except Exception:
+            # The pool could not start (or died mid-run): redo the batch
+            # serially so the check always completes.
+            new_results = {}
+            flagged = [int(b) for b in skeletons if cache.get(str(b), False)]
+            pbar.n = 0
+            pbar.refresh()
+            for bid in to_check:
+                has_extrusion = detect_extrusion(
+                    skeletons[bid], simplification=simplification
+                )
+                new_results[str(bid)] = has_extrusion
+                if has_extrusion:
+                    flagged.append(bid)
+                pbar.update(1)
+                pbar.set_postfix_str(f"{bid}")
+    else:
+        for bid in to_check:
+            has_extrusion = detect_extrusion(
+                skeletons[bid], simplification=simplification
+            )
+            new_results[str(bid)] = has_extrusion
+            if has_extrusion:
+                flagged.append(bid)
+            pbar.update(1)
+            pbar.set_postfix_str(f"{bid}")
+
+    pbar.close()
+    save_extrusion_check_cache(project_root, dataset_folder, new_results)
+    if flagged:
+        _report(f"Extrusion check: {len(flagged)} neuron(s) flagged for "
+                "API replacement.")
+    return flagged

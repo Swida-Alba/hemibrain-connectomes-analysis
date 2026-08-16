@@ -22,6 +22,7 @@ import json
 import multiprocessing as mp
 import os
 import pickle
+import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
@@ -31,8 +32,20 @@ from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 import navis
+from tqdm import tqdm
 
 from statvis import getNeurons
+
+try:
+    from .roi_screening import (
+        RoiProfileStore, RoiScreeningUnavailable, backfill_dataset_metadata,
+        load_primary_rois, roi_count_csv_path,
+    )
+except ImportError:
+    from roi_screening import (
+        RoiProfileStore, RoiScreeningUnavailable, backfill_dataset_metadata,
+        load_primary_rois, roi_count_csv_path,
+    )
 
 try:
     from .visualization_options import default_analysis_skeleton_mesh_simplification
@@ -61,8 +74,18 @@ VECTOR_CACHE_VERSION = 1
 
 # Step-progress totals reported to the web UI during a similarity run
 # (see the [DROCAT][progress] event protocol in ui/components/output_panel.py).
-PROFILE_FIRST_TOTAL_STEPS = 6   # connectivity-first (NeuPrint) pipeline
+PROFILE_FIRST_TOTAL_STEPS = 6   # candidate-screen-first (NeuPrint) pipeline
 CACHE_DIRECT_TOTAL_STEPS = 4    # vector-cache-direct (FlyWire) pipeline
+
+# Candidate sources that discover a bounded pool before morphology scoring:
+# 'profile' (connection-cache shared partners), 'roi' (primary-ROI
+# distribution cosine with bilateral mirroring) and 'combined' (both).
+CANDIDATE_SCREEN_SOURCES = ("profile", "roi", "combined")
+
+# Members per type sampled for NBLAST type-level means and type-level 3D
+# visualizations. A scoring/rendering detail, not a candidate-list knob:
+# pool size is controlled by ``candidate_cap`` alone.
+TYPE_MEMBER_SAMPLE_CAP = 5
 
 # Maximum number of cached skeletons sampled for population standardization
 # statistics when a dataset has no vector cache (see ``population_stats``).
@@ -474,6 +497,43 @@ def _find_skeleton_file(dataset: str, body_id: int,
     return nested[0] if nested else None
 
 
+def _fafb_skeleton_zip_path(dataset: str,
+                            project_root: Optional[str] = None) -> Optional[Path]:
+    """Path of the healed FAFB skeleton bundle (``{bodyId}.swc`` entries).
+
+    The FlyWire local mesh cache cannot serve NBLAST (dotprops want
+    skeletons); the official healed skeleton ZIP is the real skeleton source.
+    Returns None when the dataset has no such bundle.
+    """
+    root = Path(project_root) if project_root else Path(__file__).parent.parent
+    folder = _dataset_folder(dataset)
+    base = root / "datasets" / folder
+    for candidate in (
+        base / "sk_lod1_783_healed.zip",
+        base / "downloads" / "sk_lod1_783_healed.zip",
+        base / f"{folder}_skeletons.zip",
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _read_fafb_zip_skeleton(zfile: "zipfile.ZipFile",
+                            body_id: int) -> Optional["navis.TreeNeuron"]:
+    """Load one skeleton (``{bodyId}.swc``) from the healed FAFB bundle."""
+    try:
+        import io
+
+        content = zfile.read(f"{int(body_id)}.swc").decode("utf-8")
+        nrn = navis.read_swc(io.StringIO(content))
+        nrn.units = "nm"
+        nrn.id = int(body_id)
+        nrn.name = str(int(body_id))
+        return nrn
+    except Exception:
+        return None
+
+
 def _skeleton_folder_level(dataset: str,
                            project_root: Optional[str] = None) -> str:
     """Simplification level of a dataset's on-disk skeleton cache.
@@ -590,6 +650,19 @@ def similarity_matrix(query: np.ndarray, matrix: np.ndarray, metric: str = "cosi
     if metric == "pearson":
         return pearson_similarity_matrix(query, matrix)
     return cosine_similarity_matrix(query, matrix)
+
+
+def _sorted_candidates(candidates: pd.DataFrame) -> pd.DataFrame:
+    """Candidate frame sorted by ``_score`` descending (ties by bodyId).
+
+    Every discovery screen hands out its candidates in this one canonical
+    order so the scoring pool is unambiguously the first ``candidate_cap``
+    rows, whatever the source mode."""
+    if candidates is None or candidates.empty or "_score" not in candidates.columns:
+        return candidates
+    return candidates.sort_values(
+        ["_score", "target_bodyId"], ascending=[False, True]
+    ).reset_index(drop=True)
 
 
 # =============================================================================
@@ -1498,26 +1571,31 @@ class MorphologyComparer:
         level: str = "auto",
         method: str = "vector",
         metric: str = "cosine",
-        top_n: int = 20,
-        nblast_prefilter: int = 100,
-        n_per_type: int = 5,
+        # The two size knobs shared by EVERY candidate source mode:
+        # ``candidate_cap`` bounds how many screen candidates enter the
+        # morphology comparison (also the NBLAST prefilter of cache-direct
+        # searches) and ``visualize_top_n`` bounds rendering only. Results
+        # themselves are never truncated: every compared candidate is
+        # returned and written.
+        candidate_cap: int = 500,
         candidate_source: str = "auto",
-        fetch_top_n: int = 20,
-        fetch_missing: Optional[int] = None,
-        candidate_expansion: int = 3,
+        visualize_top_n: int = 0,
+        visualize_by: str = "type",
+        # Connection-cache screen thresholds ('profile' / 'combined' modes).
         min_weight: int = 3,
         min_shared_partners: int = 2,
         roi_filter: Optional[List[str]] = None,
-        max_pool_per_type: int = 100,
-        visualize_top_n: int = 0,
-        visualize_by: str = "type",
         visualization_settings: Optional[Dict[str, object]] = None,
         output_dir: Optional[str] = None,
         saveas: Optional[str] = None,
         verbose: bool = True,
         n_workers: int = 8,
         use_cache: bool = True,
-        cache_fetched_skeletons: bool = False,
+        # Transiently-fetched skeletons (profile-first candidate fetches /
+        # NBLAST) are persisted to the skeleton cache by default so later
+        # runs reuse them; set False to keep them in memory only (their
+        # VECTORS are always cached regardless).
+        cache_fetched_skeletons: bool = True,
         project_root: Optional[str] = None,
     ):
         self.query = query
@@ -1525,17 +1603,13 @@ class MorphologyComparer:
         self.level = str(level).lower()
         self.method = str(method).lower()
         self.metric = str(metric).lower()
-        self.top_n = int(top_n)
-        self.nblast_prefilter = int(nblast_prefilter)
-        self.n_per_type = int(n_per_type)
+        self.candidate_cap = int(candidate_cap)
         self.candidate_source = str(candidate_source).lower()
-        # Backward-compatible alias: fetch_missing -> fetch_top_n.
-        self.fetch_top_n = int(fetch_top_n if fetch_missing is None else fetch_missing)
-        self.candidate_expansion = int(candidate_expansion)
+        # Lazily-built ROI profile store for 'roi'/'combined' screens.
+        self._roi_store: Optional[RoiProfileStore] = None
         self.min_weight = int(min_weight)
         self.min_shared_partners = int(min_shared_partners)
         self.roi_filter = list(roi_filter) if roi_filter else None
-        self.max_pool_per_type = int(max_pool_per_type)
         self.visualize_top_n = int(visualize_top_n)
         self.visualize_by = str(visualize_by).lower()
         self.visualization_settings = dict(visualization_settings or {})
@@ -1543,7 +1617,7 @@ class MorphologyComparer:
         self.n_workers = max(1, int(n_workers))
         self.use_cache = use_cache
         # Persist transiently-fetched skeletons (profile-first / NBLAST) to
-        # the skeleton cache for reuse; off by default (memory-only fetches).
+        # the skeleton cache for reuse; on by default.
         self.cache_fetched_skeletons = bool(cache_fetched_skeletons)
         self.project_root = Path(project_root) if project_root else Path(__file__).parent.parent
 
@@ -1553,13 +1627,15 @@ class MorphologyComparer:
             raise ValueError(f"Invalid method: {self.method} (vector|nblast)")
         if self.metric not in ("cosine", "pearson"):
             raise ValueError(f"Invalid metric: {self.metric} (cosine|pearson)")
-        if self.candidate_source not in ("auto", "cache", "profile"):
+        if self.candidate_source not in ("auto", "roi", "combined", "profile",
+                                         "cache"):
             raise ValueError(
-                f"Invalid candidate_source: {self.candidate_source} (auto|cache|profile)"
+                f"Invalid candidate_source: {self.candidate_source} "
+                "(auto|roi|combined|profile|cache)"
             )
-        if self.candidate_expansion < 1:
+        if self.candidate_cap < 1:
             raise ValueError(
-                f"Invalid candidate_expansion: {self.candidate_expansion} (>= 1)"
+                f"Invalid candidate_cap: {self.candidate_cap} (>= 1)"
             )
         if self.min_shared_partners < 1:
             raise ValueError(
@@ -1599,10 +1675,38 @@ class MorphologyComparer:
     def _resolved_candidate_source(self) -> str:
         if self.candidate_source != "auto":
             return self.candidate_source
-        # NeuPrint datasets have sparse skeleton caches: start from connection
-        # similarity, then fetch skeletons for the top-N candidates only.
-        # FlyWire has bulk mesh caches, so search the vector cache directly.
-        return "profile" if not self._is_flywire() else "cache"
+        # NeuPrint datasets screen candidates from the per-neuron primary-ROI
+        # distributions: every neuron is reachable, while the connection-cache
+        # screen can never find neurons without shared partners. FlyWire
+        # datasets have no ROI table and search the vector cache directly.
+        if self._is_flywire():
+            return "cache"
+        return "roi" if self._roi_screening_ready(allow_backfill=True) \
+            else "profile"
+
+    def _roi_screening_ready(self, allow_backfill: bool) -> bool:
+        """Cheap local probe for the ROI screen's prerequisites.
+
+        Checks the ROI-count CSV and the metadata sidecar; when the sidecar is
+        missing, ``allow_backfill`` fetches and saves it once through the
+        dataset-preparation code (network). The partition validation of the
+        ROI list happens later, at store build.
+        """
+        try:
+            if not roi_count_csv_path(
+                    self.dataset, str(self.project_root)).exists():
+                return False
+            if load_primary_rois(self.dataset, str(self.project_root)):
+                return True
+            if allow_backfill:
+                meta = backfill_dataset_metadata(
+                    self.dataset, str(self.project_root), log=self._log)
+                return bool(
+                    meta and (meta.get("roi_coverage") or {}).get("roi_list")
+                )
+        except Exception:
+            return False
+        return False
 
     # ------------------------------------------------------------------ query
     def _resolve_level(self, query_df: pd.DataFrame) -> str:
@@ -1655,10 +1759,13 @@ class MorphologyComparer:
         if self.dataset is None:
             raise ValueError("No dataset specified.")
         source = self._resolved_candidate_source()
-        # The step scheme depends on the pipeline: connectivity-first
-        # (NeuPrint) reports 6 steps, vector-cache-direct (FlyWire) 4.
-        total_steps = (PROFILE_FIRST_TOTAL_STEPS if source == "profile"
+        # The step scheme depends on the pipeline: candidate-screen-first
+        # (NeuPrint: roi / combined / profile) reports 6 steps,
+        # vector-cache-direct (FlyWire) 4.
+        total_steps = (PROFILE_FIRST_TOTAL_STEPS
+                       if source in CANDIDATE_SCREEN_SOURCES
                        else CACHE_DIRECT_TOTAL_STEPS)
+        self.resolved_candidate_source = source
         self._log(f"Morphological similarity: query={self.query} dataset={self.dataset} "
                   f"method={self.method} level={self.level} metric={self.metric} "
                   f"candidate_source={source}")
@@ -1672,12 +1779,9 @@ class MorphologyComparer:
             log=self._log,
         )
 
-        # NBLAST needs skeletons; FlyWire bulk caches hold meshes only.
-        if self.method == "nblast" and self._is_flywire():
-            raise ValueError(
-                "NBLAST requires neuron skeletons, but this FlyWire dataset "
-                "cache contains meshes. Use the 'vector' method instead."
-            )
+        # BANC raises FlyWireSkeletonAccessError in the guard above (no BANC
+        # skeleton source exists); FAFB may proceed because its real skeleton
+        # sources (healed ZIP / CAVE fallback) were validated there.
 
         self._progress(1, total_steps, "Resolving query neuron")
         query_df = self._resolve_query()
@@ -1690,8 +1794,9 @@ class MorphologyComparer:
             n_workers=self.n_workers, verbose=self.verbose,
         )
 
-        if source == "profile":
-            bodyid_df, type_df = self._profile_first_search(query_df, cache)
+        if source in CANDIDATE_SCREEN_SOURCES:
+            bodyid_df, type_df = self._profile_first_search(query_df, cache,
+                                                            source)
             if bodyid_df.empty and type_df.empty:
                 # Connection-profile discovery can return nothing for neurons
                 # with sparse connectivity; fall back to the vector cache when
@@ -1879,70 +1984,169 @@ class MorphologyComparer:
         )
         return out
 
-    def _profile_first_search(self, query_df: pd.DataFrame, cache: SkeletonVectorCache) -> pd.DataFrame:
-        """Connectivity-first, then morphology on the expanded candidate pool.
+    def _roi_candidates(self, query_df: pd.DataFrame,
+                         top_k: Optional[int] = None) -> pd.DataFrame:
+        """Rank candidate neurons by primary-ROI distribution similarity.
 
-        Candidate discovery reads the connection cache directly
-        (``_connection_cache_candidates``); the top ``top_n * candidate_expansion``
-        connectivity-similar TYPES are then expanded to ALL their member
-        bodyIds (type map, safety cap ``max_pool_per_type``) — the scoring
-        pool. Fetched skeletons are TRANSIENT (used for the current
-        comparison only, never written to the skeleton cache); cached
-        skeletons are reused. Every scored vector is standardized with ONE
-        consistent set of statistics (cache meta, sample-based population
-        stats, or pool stats as a last resort), and the whole comparison
-        runs at ONE representation level (skeleton vs mesh — rows of any
-        other representation are unscorable).
+        Uses ``RoiProfileStore`` (built once per dataset from the ROI-count
+        CSV, cached under ``cache/{dataset}/morphology/roi_profiles.npz``):
+        mirrored cosine of the input/output synapse distributions over the
+        dataset's primary ROIs. Raises ``RoiScreeningUnavailable`` when the
+        dataset lacks the ROI table or a usable primary-ROI list. Returns a
+        DataFrame [target_bodyId, roi_similarity, target_type] sorted by
+        similarity descending; ``top_k`` bounds it to the best K rows.
         """
-        self._log("Step 2/6 — Discovering candidates: running connection-cache "
+        if self._roi_store is None:
+            self._roi_store = RoiProfileStore(
+                self.dataset, project_root=str(self.project_root),
+                verbose=self.verbose, log=self._log,
+            ).ensure()
+        scores = self._roi_store.screen(
+            [int(b) for b in query_df["bodyId"].tolist()], top_k=top_k
+        )
+        if scores.empty:
+            return pd.DataFrame()
+        type_map, _ = _load_neuron_type_map(self.dataset, str(self.project_root))
+        out = pd.DataFrame({
+            "target_bodyId": scores["bodyId"].astype(np.int64),
+            "roi_similarity": scores["roi_similarity"].astype(float),
+        })
+        # Vectorized type lookup (the previous per-row lambda mapped the
+        # full dataset population in Python).
+        out["target_type"] = (
+            pd.Series(out["target_bodyId"].values).map(type_map)
+            .fillna("").astype(str)
+        )
+        return out
+
+    def _discover_candidates(self, query_df: pd.DataFrame,
+                             source: str) -> Tuple[pd.DataFrame, str]:
+        """Rank candidate neurons for the scoring-pool selection.
+
+        Returns the unified candidate frame and the source label recorded in
+        the results. The frame carries ``target_bodyId`` / ``target_type`` /
+        ``profile_similarity`` (connectivity evidence, 0-1) /
+        ``roi_similarity`` (ROI-screen evidence, 0-1) and ``_score``, the
+        per-candidate ranking value: shared-partner count for 'profile', ROI
+        cosine for 'roi', and the mean of the max-normalized scores of both
+        screens for 'combined'. The frame is ALWAYS sorted by ``_score``
+        descending — the pool is simply its top ``candidate_cap`` rows.
+        """
+        if source == "profile":
+            candidates = self._connection_cache_candidates(query_df)
+            if not candidates.empty:
+                candidates = candidates.copy()
+                candidates["_score"] = candidates["shared_count"].astype(float)
+                candidates["roi_similarity"] = np.nan
+            return _sorted_candidates(candidates), "profile"
+
+        roi = self._roi_candidates(
+            query_df,
+            # 'roi' mode pools exactly the top candidate_cap rows, so the
+            # screen can return the partial ranking directly; 'combined'
+            # needs the full list to merge with the connectivity screen.
+            top_k=self.candidate_cap if source == "roi" else None,
+        )   # raises when unavailable
+        if source == "roi":
+            roi = roi.copy()
+            roi["_score"] = roi["roi_similarity"]
+            roi["profile_similarity"] = np.nan
+            return _sorted_candidates(roi), "roi"
+
+        # combined: outer-merge both screens; a missing connection cache
+        # degrades to the ROI screen (the reverse is not possible — the ROI
+        # table is a hard requirement here).
+        conn = self._connection_cache_candidates(query_df)
+        if conn.empty:
+            self._log("Connection cache missing; 'combined' candidate "
+                      "discovery uses the ROI screen only.")
+            roi = roi.copy()
+            roi["_score"] = roi["roi_similarity"]
+            roi["profile_similarity"] = np.nan
+            return _sorted_candidates(roi), "combined"
+        conn = conn.copy()
+        conn["_score"] = conn["shared_count"] / max(
+            1.0, float(conn["shared_count"].max()))
+        roi = roi.copy()
+        roi["_score"] = roi["roi_similarity"] / max(
+            1e-9, float(roi["roi_similarity"].max()))
+        merged = conn.merge(
+            roi, on="target_bodyId", how="outer",
+            suffixes=("", "_roi"),
+        )
+        # Both frames type their candidates from the same map; keep whichever
+        # side has a non-empty label, then average the per-screen scores
+        # (pandas mean skips the NaN of a screen that missed the neuron).
+        merged["target_type"] = (
+            merged["target_type"].replace("", np.nan)
+            .fillna(merged["target_type_roi"].replace("", np.nan))
+            .fillna("")
+        )
+        merged["_score"] = merged[["_score", "_score_roi"]].mean(axis=1)
+        merged = merged.drop(columns=["target_type_roi", "_score_roi"])
+        return _sorted_candidates(merged), "combined"
+
+    def _profile_first_search(self, query_df: pd.DataFrame,
+                              cache: SkeletonVectorCache,
+                              source: str = "profile") -> pd.DataFrame:
+        """Candidate-screen-first, then morphology on the capped pool.
+
+        Candidate discovery ranks neurons by the selected screen
+        (``_discover_candidates``: connection-cache shared partners, primary-
+        ROI distribution cosine, or both) and returns them sorted; the
+        scoring pool is simply the top ``candidate_cap`` candidates (query
+        members are already excluded by the screens). Fetched skeletons are
+        TRANSIENT (used for the current comparison only, never written to
+        the skeleton cache); cached skeletons are reused. Every scored
+        vector is standardized with ONE consistent set of statistics (cache
+        meta, sample-based population stats, or pool stats as a last
+        resort), and the whole comparison runs at ONE representation level
+        (skeleton vs mesh — rows of any other representation are
+        unscorable). ALL compared candidates are returned and written.
+        """
+        step2_label = {
+            "profile": "connection cache",
+            "roi": "ROI distribution screen",
+            "combined": "ROI + connectivity screens",
+        }.get(source, source)
+        self._log(f"Step 2/6 — Discovering candidates: running {step2_label} "
                   "candidate discovery...")
         self._progress(2, PROFILE_FIRST_TOTAL_STEPS,
-                       "Discovering candidates (connection cache)")
-        candidates = self._connection_cache_candidates(query_df)
+                       f"Discovering candidates ({step2_label})")
+        try:
+            candidates, source = self._discover_candidates(query_df, source)
+        except RoiScreeningUnavailable as exc:
+            # Auto-resolved ROI runs fall back to the connection-cache screen;
+            # explicit roi/combined selections surface the preparation hint.
+            if self.candidate_source != "auto":
+                raise
+            self._log(f"{exc}")
+            self._log("Falling back to the connection-cache candidate screen.")
+            candidates, source = self._discover_candidates(query_df, "profile")
+        self.resolved_candidate_source = source
         if candidates.empty:
-            self._log("Connection-cache search returned no candidates.")
+            self._log(f"Candidate discovery ({source}) returned no candidates.")
             return pd.DataFrame(), pd.DataFrame()
 
-        # Rank the candidate TYPES by mean shared-partner count, keep the
-        # top (top_n * candidate_expansion) types.
-        import collections
-        type_scores: Dict[str, List[float]] = collections.defaultdict(list)
-        for _, row in candidates.iterrows():
-            t = str(row.get("target_type", "") or "")
-            if t:
-                type_scores[t].append(float(row["shared_count"]))
-        ranked_types = sorted(type_scores.items(),
-                              key=lambda kv: (-np.mean(kv[1]), kv[0]))
-        keep_types = [t for t, _ in ranked_types[: max(1, self.top_n * self.candidate_expansion)]]
-        if not keep_types:
-            self._log("Connection-cache candidates carry no types.")
-            return pd.DataFrame(), pd.DataFrame()
-
-        expansion_label = (
-            f"Expanding {len(keep_types)} candidate types to the scoring pool"
-        )
-        self._log(f"Step 3/6 — {expansion_label}")
-        self._progress(3, PROFILE_FIRST_TOTAL_STEPS, expansion_label)
-
-        # Expand every kept type to ALL its member bodyIds (type map); the
-        # union is the scoring pool. Per-type safety cap bounds huge types.
-        type_map, _ = _load_neuron_type_map(self.dataset, str(self.project_root))
-        pool_ids: List[int] = []
-        seen_pool = set()
-        for t in keep_types:
-            members = [int(b) for b, tt in type_map.items() if tt == t]
-            members = members[: self.max_pool_per_type]
-            for m in members:
-                if m not in seen_pool:
-                    seen_pool.add(m)
-                    pool_ids.append(m)
-        self._log(f"Profile-first: {len(keep_types)} expanded types -> "
-                  f"{len(pool_ids)} pool neurons "
-                  f"({len(candidates)} connectivity candidates)")
+        # The scoring pool: the sorted candidate list truncated to the cap.
+        # Untyped candidates stay in — they are comparable neurons, their
+        # rows just carry an empty target_type.
+        pool_ids = [int(b) for b in candidates["target_bodyId"].tolist()]
+        pool_ids = pool_ids[: self.candidate_cap]
+        n_screened = len(candidates)
+        self._log(f"Step 3/6 — Selecting the scoring pool: top {len(pool_ids)} "
+                  f"of {n_screened} candidates (cap {self.candidate_cap})")
+        self._progress(3, PROFILE_FIRST_TOTAL_STEPS,
+                       f"Selecting top {len(pool_ids)} candidates for scoring")
 
         prof_by_id = {
             int(b): float(v)
             for b, v in zip(candidates["target_bodyId"], candidates["profile_similarity"])
+            if np.isfinite(v)
+        }
+        roi_by_id = {
+            int(b): float(v)
+            for b, v in zip(candidates["target_bodyId"], candidates["roi_similarity"])
             if np.isfinite(v)
         }
 
@@ -2184,19 +2388,22 @@ class MorphologyComparer:
 
         rows: List[Dict[str, object]] = []
         if self.level == "type":
-            # Compare every resolved query member to every usable candidate.
-            # The old centroid row carried query_ids[0] as its source and
-            # therefore made a multi-bodyId type query look like one neuron.
+            # Compare every resolved query member to every pool candidate.
+            # Candidates whose vector is unavailable keep a NaN similarity
+            # row so the written candidate list stays complete (they rank
+            # last and are excluded from type aggregations and rendering).
             candidate_indices = [i for i, ok in enumerate(keep) if ok]
             query_indices = [i for i, ok in enumerate(mask_q) if ok]
             for query_i in query_indices:
                 q_bid = int(query_ids[query_i])
                 raw_q_type = query_df["type"].iloc[query_i]
                 q_type = "" if pd.isna(raw_q_type) else str(raw_q_type).strip()
-                q_scores = (similarity_matrix(
-                    X_q[query_i], X_c[candidate_indices], self.metric
-                ) if candidate_indices else np.asarray([]))
-                for score_i, candidate_i in enumerate(candidate_indices):
+                q_scores = np.full(len(pool_ids), np.nan)
+                if candidate_indices:
+                    q_scores[candidate_indices] = similarity_matrix(
+                        X_q[query_i], X_c[candidate_indices], self.metric
+                    )
+                for candidate_i in range(len(pool_ids)):
                     bid = int(pool_ids[candidate_i])
                     if bid in query_ids_set:
                         continue
@@ -2208,20 +2415,21 @@ class MorphologyComparer:
                         "target_type": target_type,
                         "target_instance": id_to_instance.get(bid, ""),
                         "profile_similarity": prof_by_id.get(bid, np.nan),
-                        "similarity": float(q_scores[score_i]),
+                        "roi_similarity": roi_by_id.get(bid, np.nan),
+                        "similarity": float(q_scores[candidate_i]),
                         "is_same_type": target_type == q_type if target_type else False,
                         "intra_type_similarity": intra,
                         "method": self.method,
                         "metric": self.metric,
-                        "candidate_source": "profile",
+                        "candidate_source": source,
                     })
             rows.extend(self._type_query_intra_rows(
-                query_df, X_q, mask_q, intra, candidate_source="profile"
+                query_df, X_q, mask_q, intra, candidate_source=source
             ))
         else:
+            # Every pool candidate gets a row: comparable ones carry their
+            # similarity, the rest a NaN (sorted last, never rendered).
             for i, bid in enumerate(pool_ids):
-                if not keep[i]:
-                    continue
                 bid = int(bid)
                 target_type = str(id_to_type.get(bid, "") or "").strip()
                 if bid in query_ids_set:
@@ -2233,12 +2441,13 @@ class MorphologyComparer:
                     "target_type": target_type,
                     "target_instance": id_to_instance.get(bid, ""),
                     "profile_similarity": prof_by_id.get(bid, np.nan),
+                    "roi_similarity": roi_by_id.get(bid, np.nan),
                     "similarity": float(scores[i]),
                     "is_same_type": target_type == query_type if target_type else False,
                     "intra_type_similarity": intra,
                     "method": self.method,
                     "metric": self.metric,
-                    "candidate_source": "profile",
+                    "candidate_source": source,
                 })
         if not rows and not (self.level == "type" and np.isfinite(intra)):
             return pd.DataFrame(), pd.DataFrame()
@@ -2251,7 +2460,7 @@ class MorphologyComparer:
             query_type=query_type,
             intra=intra,
             query_type_count=query_type_count,
-            candidate_source="profile",
+            candidate_source=source,
         )
 
         # bodyId-level rows: top-N scored neurons.
@@ -2264,6 +2473,47 @@ class MorphologyComparer:
             bodyid_df = self._nblast_refine(bodyid_df, query_df, cache, neurons)
         return bodyid_df, type_df
 
+    def _nblast_pairwise(self, query_dps: Dict[int, object],
+                         cand_dps: Dict[int, object],
+                         desc: str = "NBLAST scoring") -> Dict[int, float]:
+        """Score every query-candidate pair in-process with a per-individual
+        progress bar.
+
+        Mirrors ``navis.nblast`` defaults (forward, normalized, FCWB scoring)
+        but scores pair-by-pair with ``navis.nbl.NBlaster`` so the bar can
+        name the current candidate. This also avoids navis' process-pool
+        startup (its spawn overhead dominates small candidate pools)."""
+        from navis.nbl.nblast_funcs import NBlaster
+
+        nb = NBlaster(use_alpha=False, normalized=True, progress=False)
+        q_idx = {}
+        for q_bid, q_dp in query_dps.items():
+            q_idx[q_bid] = nb.append(q_dp, self_hit=nb.calc_self_hit(q_dp))
+        t_idx = {}
+        for t_bid, t_dp in cand_dps.items():
+            t_idx[t_bid] = nb.append(t_dp, self_hit=nb.calc_self_hit(t_dp))
+
+        total = len(q_idx) * len(t_idx)
+        pbar = tqdm(total=total, desc=desc, unit="pair",
+                    disable=not self.verbose, leave=False, file=sys.stdout)
+        nblast_scores: Dict[int, float] = {}
+        try:
+            for q_bid, qi in q_idx.items():
+                for t_bid, ti in t_idx.items():
+                    pbar.set_postfix_str(f"{q_bid} x {t_bid}")
+                    try:
+                        val = float(nb.single_query_target(qi, ti,
+                                                           scores='forward'))
+                    except Exception:
+                        val = float("nan")
+                    if np.isfinite(val):
+                        nblast_scores[t_bid] = max(
+                            nblast_scores.get(t_bid, -np.inf), val)
+                    pbar.update(1)
+        finally:
+            pbar.close()
+        return nblast_scores
+
     def _nblast_refine(self, results: pd.DataFrame, query_df: pd.DataFrame,
                        cache: SkeletonVectorCache,
                        neurons: Optional[Dict[int, "navis.TreeNeuron"]] = None) -> pd.DataFrame:
@@ -2274,8 +2524,9 @@ class MorphologyComparer:
         # is another query member.  They are reference pairs, not candidates
         # for refinement; keep their vector similarity below.
         cand_ids = [
-            int(b) for b in results["target_bodyId"].tolist()
-            if int(b) not in query_ids
+            int(b) for b, s in zip(results["target_bodyId"],
+                                   results["similarity"])
+            if int(b) not in query_ids and pd.notna(s)
         ]
         query_dp = self._dotprops_for_ids(
             [int(b) for b in query_df["bodyId"].tolist()], neurons=neurons
@@ -2288,18 +2539,8 @@ class MorphologyComparer:
         if not cand_dp:
             self._log("NBLAST: no candidate dotprops; keeping vector scores.")
             return results
-        n_cores = min(self.n_workers, max(1, len(cand_dp)))
-        nblast_scores: Dict[int, float] = {}
-        for q_bid, q_dp in query_dp.items():
-            targets = list(cand_dp.keys())
-            mat = navis.nblast(
-                q_dp, [cand_dp[t] for t in targets], normalized=True,
-                n_cores=n_cores, progress=False,
-            )
-            row = mat.iloc[0]
-            for j, t in enumerate(targets):
-                val = float(row.iloc[j])
-                nblast_scores[t] = max(nblast_scores.get(t, -np.inf), val)
+        nblast_scores = self._nblast_pairwise(
+            query_dp, cand_dp, desc="NBLAST scoring")
         results = results.copy()
         # In type mode, ``results`` also contains the vector-based ordered
         # intra-type pairs.  They are not in the candidate NBLAST map because
@@ -2433,6 +2674,7 @@ class MorphologyComparer:
                 "target_type": target_type,
                 "target_instance": target_instance,
                 "profile_similarity": np.nan,
+                "roi_similarity": np.nan,
                 "similarity": score,
                 "is_same_type": True,
                 "intra_type_similarity": intra,
@@ -2477,10 +2719,14 @@ class MorphologyComparer:
                 int(row["target_bodyId"])
                 for row in subrows
                 if row.get("target_bodyId") is not None
+                and pd.notna(row.get("similarity"))
             }
             profile_values = [float(row["profile_similarity"])
                               for row in subrows
                               if pd.notna(row.get("profile_similarity"))]
+            roi_values = [float(row["roi_similarity"])
+                          for row in subrows
+                          if pd.notna(row.get("roi_similarity"))]
             is_intra = target_type == str(query_type or "").strip()
             row = {
                 "target_type": target_type,
@@ -2491,6 +2737,10 @@ class MorphologyComparer:
                 "profile_similarity": (
                     np.nan if is_intra else
                     (float(np.mean(profile_values)) if profile_values else np.nan)
+                ),
+                "roi_similarity": (
+                    np.nan if is_intra else
+                    (float(np.mean(roi_values)) if roi_values else np.nan)
                 ),
                 "is_intra_type": is_intra,
                 "intra_type_similarity": intra if is_intra else float("nan"),
@@ -2507,6 +2757,7 @@ class MorphologyComparer:
                 "similarity": intra,
                 "n_bodyids": int(query_type_count),
                 "profile_similarity": np.nan,
+                "roi_similarity": np.nan,
                 "is_intra_type": True,
                 "intra_type_similarity": intra,
                 "method": self.method,
@@ -2524,45 +2775,39 @@ class MorphologyComparer:
                 str(row["target_type"]),
             ),
         )
-        result = pd.DataFrame(agg_rows).head(self.top_n).reset_index(drop=True)
+        result = pd.DataFrame(agg_rows).reset_index(drop=True)
         result.insert(0, "rank", np.arange(1, len(result) + 1))
         return result
 
     def _bodyid_dataframe(
         self, rows: List[Dict[str, object]], query_type: str = ""
     ) -> pd.DataFrame:
-        """Rank bodyId rows, retaining all intra-type pairs for type queries."""
+        """Rank bodyId rows, retaining every compared candidate.
+
+        All compared neurons are kept (no top-N truncation; the candidate cap
+        already bounded the pool). Rows without a finite similarity
+        (unscorable candidates) are kept but rank after every scored row. For
+        type queries every resolved same-type pair is preserved so the query
+        does not collapse to one source."""
         if not rows:
             return pd.DataFrame()
-        ordered = sorted(
-            rows,
-            key=lambda row: (-float(row["similarity"]), int(row["target_bodyId"])),
-        )
+
+        def _sim_key(row: Dict[str, object]) -> float:
+            sim = row.get("similarity")
+            value = float(sim)
+            return -value if np.isfinite(value) else float("inf")
+
         if self.level == "type" and query_type:
-            # Preserve every resolved same-type pair so a type query does not
-            # collapse to the first source bodyId. Inter-type rows retain the
-            # normal top-N limit.
-            intra_rows = [
-                row for row in ordered
-                if bool(row.get("is_same_type"))
-                and str(row.get("target_type", "") or "").strip() == query_type
-            ]
-            inter_rows = [
-                row for row in ordered
-                if not (
-                    bool(row.get("is_same_type"))
-                    and str(row.get("target_type", "") or "").strip() == query_type
-                )
-            ]
-            ordered = intra_rows + inter_rows[: self.top_n]
             ordered = sorted(
-                ordered,
-                key=lambda row: (-float(row["similarity"]),
-                                 int(row["source_bodyId"]),
+                rows,
+                key=lambda row: (_sim_key(row), int(row["source_bodyId"]),
                                  int(row["target_bodyId"])),
             )
         else:
-            ordered = ordered[: self.top_n]
+            ordered = sorted(
+                rows,
+                key=lambda row: (_sim_key(row), int(row["target_bodyId"])),
+            )
         result = pd.DataFrame(ordered).reset_index(drop=True)
         result.insert(0, "rank", np.arange(1, len(result) + 1))
         return result
@@ -2747,7 +2992,7 @@ class MorphologyComparer:
             })
         # The intra-type (query-type) row always ranks first as the reference.
         rows = sorted(rows, key=lambda r: (not r["is_intra_type"], -r["similarity"], r["target_type"]))
-        results = pd.DataFrame(rows).head(self.top_n).reset_index(drop=True)
+        results = pd.DataFrame(rows).reset_index(drop=True)
         results.insert(0, "rank", np.arange(1, len(results) + 1))
         return results
 
@@ -2772,7 +3017,7 @@ class MorphologyComparer:
             s = similarity_matrix(q_vec, X, "cosine")
             scores = np.maximum(scores, s)
         prefilter_idx = np.where(candidate_mask)[0]
-        prefilter_idx = prefilter_idx[np.argsort(-scores[prefilter_idx])][: self.nblast_prefilter]
+        prefilter_idx = prefilter_idx[np.argsort(-scores[prefilter_idx])][: self.candidate_cap]
 
         if not len(prefilter_idx):
             self._log("NBLAST: no candidates survived the vector prefilter.")
@@ -2786,20 +3031,10 @@ class MorphologyComparer:
         cand_dp = self._dotprops_for_ids(cand_ids)
         cand_dp = {bid: dp for bid, dp in cand_dp.items() if dp is not None}
 
-        n_cores = min(self.n_workers, max(1, len(cand_dp)))
         self._log(f"NBLAST: {len(query_dp)} query x {len(cand_dp)} candidates "
-                  f"({self.nblast_prefilter} prefiltered), {n_cores} cores")
-        nblast_scores: Dict[int, float] = {}
-        for q_bid, q_dp in query_dp.items():
-            targets = list(cand_dp.keys())
-            mat = navis.nblast(
-                q_dp, [cand_dp[t] for t in targets], normalized=True,
-                n_cores=n_cores, progress=False,
-            )
-            row = mat.iloc[0]
-            for j, t in enumerate(targets):
-                val = float(row.iloc[j])
-                nblast_scores[t] = max(nblast_scores.get(t, -np.inf), val)
+                  f"({self.candidate_cap} prefiltered)")
+        nblast_scores = self._nblast_pairwise(
+            query_dp, cand_dp, desc="NBLAST scoring")
 
         # Rank candidates by NBLAST score.
         ranked = sorted(nblast_scores.items(), key=lambda kv: (-kv[1], kv[0]))
@@ -2883,8 +3118,8 @@ class MorphologyComparer:
                 agg[t].append(score)
         agg_rows = []
         for t, vals in agg.items():
-            # Cap per-type pairs to n_per_type for the mean.
-            vals = sorted(vals, reverse=True)[: self.n_per_type]
+            # Cap per-type pairs to the sampling cap for the mean.
+            vals = sorted(vals, reverse=True)[: TYPE_MEMBER_SAMPLE_CAP]
             agg_rows.append({
                 "target_type": t,
                 "similarity": float(np.mean(vals)),
@@ -2909,39 +3144,180 @@ class MorphologyComparer:
                 "metric": "nblast",
             })
         agg_rows = sorted(agg_rows, key=lambda r: (not r["is_intra_type"], -r["similarity"], r["target_type"]))
-        type_df = pd.DataFrame(agg_rows).head(self.top_n).reset_index(drop=True)
+        type_df = pd.DataFrame(agg_rows).reset_index(drop=True)
         type_df.insert(0, "rank", np.arange(1, len(type_df) + 1))
         return bodyid_df, type_df
 
+    def _load_fafb_skeletons(self, body_ids: List[int]
+                             ) -> Dict[int, "navis.TreeNeuron"]:
+        """Load FAFB skeletons following the visualization pipeline:
+
+        1. local first: extrusion-fixed skeletons cached under
+           ``cache/{dataset}/API_cache/skeletons/``,
+        2. the healed skeleton bundle (``{bodyId}.swc``),
+        3. extrusion test on the bundle skeletons (results cached),
+        4. online fallback via the CAVE API (token-gated) for ids missing
+           locally or flagged by the extrusion test.
+        """
+        from fafb_utils import flag_extrusions
+
+        ids = sorted({int(b) for b in body_ids})
+        if not ids:
+            return {}
+        root = self.project_root
+        folder = _dataset_folder(self.dataset)
+        loaded: Dict[int, navis.TreeNeuron] = {}
+
+        # 1. Local first: the API skeleton cache holds previously fetched
+        #    (extrusion-fixed) skeletons and takes priority over the bundle,
+        #    exactly like the visualization pipeline.
+        api_dir = root / "cache" / folder / "API_cache" / "skeletons"
+        zip_ids: List[int] = []
+        for bid in ids:
+            nrn = None
+            api_pkl = api_dir / f"{bid}.pkl"
+            if api_pkl.exists():
+                try:
+                    with open(api_pkl, "rb") as f:
+                        nrn = pickle.load(f)
+                except Exception:
+                    nrn = None
+            if nrn is not None:
+                loaded[bid] = nrn
+            else:
+                zip_ids.append(bid)
+
+        # 2. The healed skeleton bundle.
+        if zip_ids:
+            zip_path = _fafb_skeleton_zip_path(self.dataset, str(root))
+            if zip_path is not None:
+                import zipfile
+                with zipfile.ZipFile(zip_path, "r") as z:
+                    for bid in zip_ids:
+                        nrn = _read_fafb_zip_skeleton(z, bid)
+                        if nrn is not None:
+                            loaded[bid] = nrn
+
+        # 3. Extrusion test on the bundle-sourced skeletons (cached per
+        #    neuron; unchecked ids are analyzed in a parallel batch).
+        zip_loaded = {b: loaded[b] for b in zip_ids if b in loaded}
+        extrusion_ids = flag_extrusions(
+            str(root), folder, zip_loaded,
+            verbose=self.verbose, log=self._log,
+            n_workers=self.n_workers,
+        )
+
+        missing = [b for b in ids if b not in loaded]
+        to_fetch = sorted(set(missing) | set(extrusion_ids))
+        # 4. Online fallback (token-gated; matches the visualization
+        #    pipeline's CAVE_TOKEN check).
+        if to_fetch:
+            self._log(f"FAFB: {len(to_fetch)} skeleton(s) missing locally or "
+                      "extrusion-affected; trying the CAVE API fallback.")
+            loaded.update(self._fafb_cave_fallback(to_fetch))
+        return loaded
+
+    def _fafb_cave_fallback(self, body_ids: List[int]
+                            ) -> Dict[int, "navis.TreeNeuron"]:
+        """Fetch FAFB skeletons through the CAVE API (token-gated).
+
+        Returns an empty dict when CAVE_TOKEN is not configured so the run
+        continues with local skeleton data only.
+        """
+        from utils.flywire_readiness import flywire_skeleton_readiness
+
+        status = flywire_skeleton_readiness(self.dataset, self.project_root)
+        if not status.get("cave_token"):
+            self._log("FAFB API fallback skipped: CAVE_TOKEN is not "
+                      "configured; using local skeleton data only.")
+            return {}
+        from cave_data_fetcher import CAVEDataFetcher
+
+        pbar = tqdm(total=len(body_ids), desc="Fetching skeletons (CAVE)",
+                    unit="neuron", disable=not self.verbose, leave=False,
+                    file=sys.stdout)
+        out: Dict[int, navis.TreeNeuron] = {}
+        try:
+            fetcher = CAVEDataFetcher(
+                dataset=_dataset_folder(self.dataset), verbose=False
+            )
+            neurons = fetcher.fetch_skeletons(
+                [int(b) for b in body_ids], use_cache=True
+            )
+            for n in neurons:
+                bid = getattr(n, "id", None)
+                if bid is not None:
+                    out[int(bid)] = n
+                pbar.update(1)
+                pbar.set_postfix_str(str(bid))
+        except Exception as exc:
+            self._log(f"FAFB API fallback failed ({exc}); keeping local "
+                      "skeleton data only.")
+        finally:
+            pbar.close()
+        return out
+
     def _dotprops_for_ids(self, body_ids: List[int],
-                          neurons: Optional[Dict[int, "navis.TreeNeuron"]] = None
+                          neurons: Optional[Dict[int, "navis.TreeNeuron"]] = None,
+                          desc: str = "Building dotprops"
                           ) -> Dict[int, Optional["navis.core.dotprop.Dotprops"]]:
         """Load skeletons and build dotprops in microns.
 
         ``neurons`` supplies transient in-memory skeletons (profile-first
         fetches) so they are not re-fetched; anything missing is fetched
-        (persisted only when ``cache_fetched_skeletons`` is enabled)."""
+        (persisted only when ``cache_fetched_skeletons`` is enabled). For
+        FlyWire datasets the skeleton sources follow the visualization
+        pipeline (local API cache / healed bundle -> extrusion check ->
+        token-gated CAVE fallback); other datasets use the local pickle
+        cache and the on-demand fetch."""
         out: Dict[int, Optional[navis.core.dotprop.Dotprops]] = {}
-        for bid in body_ids:
-            nrn = (neurons or {}).get(bid)
-            if nrn is None:
-                pkl = _find_skeleton_file(self.dataset, bid, project_root=str(self.project_root))
-                if pkl is None:
-                    nrn = fetch_skeleton_on_demand(
-                        self.dataset, bid, project_root=str(self.project_root),
-                        persist=self.cache_fetched_skeletons,
-                    )
-                else:
-                    with open(pkl, "rb") as f:
-                        nrn = pickle.load(f)
-            if nrn is None:
-                out[bid] = None
-                continue
-            try:
-                nrn_um = nrn / 1000.0  # nanometres -> microns (NBLAST requirement)
-                out[bid] = navis.make_dotprops(nrn_um, k=20)
-            except Exception:
-                out[bid] = None
+
+        # FlyWire skeletons: resolve every non-transient id through the
+        # FAFB pipeline once for the whole batch (the extrusion check is
+        # cached, so repeated batches reuse earlier results).
+        flywire_local: Dict[int, navis.TreeNeuron] = {}
+        if self._is_flywire():
+            flywire_local = self._load_fafb_skeletons(
+                [int(b) for b in body_ids if int(b) not in (neurons or {})]
+            )
+
+        pbar = tqdm(body_ids, desc=desc, unit="neuron",
+                    disable=not self.verbose, leave=False, file=sys.stdout)
+        try:
+            for bid in pbar:
+                bid = int(bid)
+                pbar.set_postfix_str(f"{bid}")
+                nrn = (neurons or {}).get(bid)
+                if nrn is None and self._is_flywire():
+                    nrn = flywire_local.get(bid)
+                if nrn is None and self._is_flywire():
+                    # The FAFB pipeline (API cache -> healed bundle ->
+                    # extrusion check -> CAVE fallback) already ran for this
+                    # id; there is no other source to try.
+                    out[bid] = None
+                    continue
+                if nrn is None:
+                    pkl = _find_skeleton_file(
+                        self.dataset, bid, project_root=str(self.project_root))
+                    if pkl is None:
+                        nrn = fetch_skeleton_on_demand(
+                            self.dataset, bid,
+                            project_root=str(self.project_root),
+                            persist=self.cache_fetched_skeletons,
+                        )
+                    else:
+                        with open(pkl, "rb") as f:
+                            nrn = pickle.load(f)
+                if nrn is None:
+                    out[bid] = None
+                    continue
+                try:
+                    nrn_um = nrn / 1000.0  # nanometres -> microns (NBLAST requirement)
+                    out[bid] = navis.make_dotprops(nrn_um, k=20)
+                except Exception:
+                    out[bid] = None
+        finally:
+            pbar.close()
         return out
 
     # ------------------------------------------------------------------ save
@@ -2966,10 +3342,12 @@ class MorphologyComparer:
             "level": self.level,
             "method": self.method,
             "metric": self.metric,
-            "top_n": self.top_n,
-            "nblast_prefilter": self.nblast_prefilter,
-            "n_per_type": self.n_per_type,
-            "fetch_top_n": self.fetch_top_n,
+            "candidate_source": getattr(self, "resolved_candidate_source",
+                                        self.candidate_source),
+            "candidate_cap": self.candidate_cap,
+            "note": ("results.csv/type_summary.csv contain EVERY compared "
+                     "candidate (never truncated; bounded by candidate_cap); "
+                     "visualize_top_n applies to visualization only"),
             "visualize_top_n": self.visualize_top_n,
             "visualize_by": self.visualize_by,
             "query_bodyIds": [int(b) for b in query_df["bodyId"].tolist()],
@@ -3029,6 +3407,9 @@ class MorphologyComparer:
 
         if "is_intra_type" in work.columns:
             work = work[work["is_intra_type"] != True]  # noqa: E712
+        # Unscorable candidates (NaN similarity) are never rendered.
+        if "similarity" in work.columns:
+            work = work[work["similarity"].notna()]
 
         layers: List[List[int]] = []
         names: List[str] = []
@@ -3176,9 +3557,9 @@ class MorphologyComparer:
             self._log(f"3D visualization failed (search results kept): {ex}")
 
     def _type_members_from_cache(self, type_name: str) -> List[int]:
-        """Member bodyIds of a type from the vector cache (capped to
-        n_per_type so type-level renders stay bounded); falls back to the
-        neuron table / index when the dataset has no vector cache yet."""
+        """Member bodyIds of a type from the vector cache (capped to the
+        per-type sample size so type-level renders stay bounded); falls back
+        to the neuron table / index when the dataset has no vector cache."""
         try:
             data = SkeletonVectorCache(
                 self.dataset, project_root=str(self.project_root), verbose=False
@@ -3192,7 +3573,7 @@ class MorphologyComparer:
                     self.dataset, str(self.project_root)
                 )
                 members = [int(b) for b, t in type_map.items() if t == type_name]
-            return members[: max(1, self.n_per_type)]
+            return members[: TYPE_MEMBER_SAMPLE_CAP]
         except Exception:
             return []
 

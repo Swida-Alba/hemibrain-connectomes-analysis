@@ -229,12 +229,9 @@ DEFAULTS = {
     "morph_level": "auto",
     "morph_method": "vector",
     "morph_metric": "cosine",
-    "morph_top_n": 20,
-    "nblast_prefilter": 100,
-    "n_per_type": 5,
     "candidate_source": "auto",
-    "morph_candidate_expansion": 3,
-    "morph_visualize_top_n": 6,
+    "candidate_cap": 500,
+    "morph_visualize_top_n": 10,
     "morph_visualize_by": "type",
 }
 

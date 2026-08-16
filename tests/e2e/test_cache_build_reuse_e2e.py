@@ -371,7 +371,7 @@ class TestSimilarFindingCacheBuildReuse:
         out = tmp_path / "similar"
         comparer = morph.MorphologyComparer(
             query=bid, dataset=DATASET, level="bodyid", method="vector",
-            candidate_source="cache", top_n=30, output_dir=str(out),
+            candidate_source="cache", output_dir=str(out),
             project_root=str(PROJECT_ROOT), verbose=False,
         )
         res1 = comparer.find_similar()

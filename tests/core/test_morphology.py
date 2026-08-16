@@ -1,6 +1,7 @@
 """Tests for src/morphology.py — morphological similarity, vector cache,
 NBLAST wrapper, on-demand fetch, and homolog enrichment."""
 
+import json
 import os
 import pickle
 import sys
@@ -14,6 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 import morphology as morph  # noqa: E402
+import roi_screening as rois_mod  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -393,7 +395,7 @@ class TestMorphologyComparer:
     def _make_comparer(self, root, **kwargs):
         params = dict(
             dataset="test:v1", level="bodyid", method="vector", metric="cosine",
-            top_n=5, output_dir=str(root / "out"),
+            output_dir=str(root / "out"),
             project_root=str(root), verbose=False, candidate_source="cache",
         )
         params.update(kwargs)
@@ -468,7 +470,7 @@ class TestMorphologyComparer:
         root = self._setup(tmp_path, monkeypatch)
         comparer = self._make_comparer(
             root, query=101, level="type", method="nblast",
-            nblast_prefilter=10, n_workers=1,
+            candidate_cap=10, n_workers=1,
         )
         res = comparer.find_similar()
         assert not res.empty
@@ -487,7 +489,7 @@ class TestMorphologyComparer:
     def test_nblast_method_and_outputs(self, tmp_path, monkeypatch):
         root = self._setup(tmp_path, monkeypatch)
         comparer = self._make_comparer(
-            root, query=101, method="nblast", nblast_prefilter=10, n_workers=1,
+            root, query=101, method="nblast", candidate_cap=10, n_workers=1,
         )
         res = comparer.find_similar()
         assert not res.empty
@@ -631,7 +633,7 @@ class TestVisualizeTopResults:
 
     def _setup(self, tmp_path, monkeypatch, **kwargs):
         root = TestMorphologyComparer()._setup(tmp_path, monkeypatch)
-        params = dict(query=101, dataset="test:v1", top_n=5,
+        params = dict(query=101, dataset="test:v1",
                       output_dir=str(root / "out"), project_root=str(root),
                       verbose=False, candidate_source="cache",
                       visualize_top_n=3, visualize_by="type")
@@ -996,15 +998,444 @@ class TestCandidateSource:
             morph.MorphologyComparer(query=1, dataset="x", candidate_source="bad",
                                      project_root="/tmp", verbose=False)
 
-    def test_fetch_missing_alias(self):
-        c = morph.MorphologyComparer(query=1, dataset="x", fetch_missing=7,
+    def test_size_knobs_are_visualize_top_n_and_candidate_cap(self):
+        """The only size knobs across candidate source modes are the
+        visualize top-N and the candidate cap (deprecated top-N/expansion
+        parameters are gone)."""
+        c = morph.MorphologyComparer(query=1, dataset="x",
+                                     visualize_top_n=7, candidate_cap=250,
                                      project_root="/tmp", verbose=False)
-        assert c.fetch_top_n == 7
+        assert c.visualize_top_n == 7
+        assert c.candidate_cap == 250
+        # NBLAST prefilter and per-type sampling derive from the same cap
+        assert c.candidate_cap == 250
+        import inspect
+        sig = inspect.signature(morph.MorphologyComparer.__init__)
+        for gone in ("top_n", "nblast_prefilter", "n_per_type",
+                     "fetch_top_n", "fetch_missing", "candidate_expansion",
+                     "max_pool_per_type"):
+            assert gone not in sig.parameters, gone
+
+
+def write_roi_dataset(tmp_path, dataset, counts, metadata_rois=None,
+                      neuron_df=None):
+    """Minimal local ROI dataset: roi-count CSV, neuron table, sidecar.
+
+    ``counts``: {bodyId: {"post": {roi: n}, "pre": {roi: n},
+    "type": str}}. Neuron-table pre/post totals are the ROI sums, so the
+    sidecar's primary list is a true partition. ``neuron_df`` overrides the
+    neuron table (to give true totals when counts include hierarchical
+    parent ROIs).
+    """
+    folder = morph._dataset_folder(dataset)
+    base = tmp_path / "datasets" / folder
+    base.mkdir(parents=True, exist_ok=True)
+    rows, neuron_rows = [], []
+    for bid, blocks in counts.items():
+        pre_map, post_map = blocks.get("pre", {}), blocks.get("post", {})
+        for roi in set(pre_map) | set(post_map):
+            rows.append({"bodyId": bid, "roi": roi,
+                         "pre": pre_map.get(roi, 0),
+                         "post": post_map.get(roi, 0)})
+        neuron_rows.append({"bodyId": bid,
+                            "type": blocks.get("type", ""),
+                            "instance": blocks.get("instance", ""),
+                            "pre": sum(pre_map.values()),
+                            "post": sum(post_map.values())})
+    pd.DataFrame(rows).to_csv(base / f"{folder}_allneurons_roi_count_df.csv",
+                              index=False)
+    if neuron_df is not None:
+        neuron_rows = neuron_df
+    pd.DataFrame(neuron_rows).to_csv(
+        base / f"{folder}_allneurons_neuron_df.csv", index=False)
+    rois_list = (metadata_rois if metadata_rois is not None
+                 else sorted({r for c in counts.values()
+                              for r in list(c.get("pre", {}))
+                              + list(c.get("post", {}))}))
+    meta = {"dataset": dataset, "source": "neuprint",
+            "roi_coverage": {"roi_list": rois_list,
+                             "roi_count": len(rois_list),
+                             "neuron_counts_per_roi": {}}}
+    (base / f"{folder}_metadata.json").write_text(json.dumps(meta))
+    return base
+
+
+def roi_fixture_counts():
+    """Query 101 (right), its contralateral twin 201, a same-hemisphere
+    decoy 202 and an unrelated midline neuron 204."""
+    return {
+        101: {"post": {"A(R)": 10, "M": 5}, "pre": {"A(R)": 8, "M": 4},
+              "type": "T", "instance": "T_R"},
+        201: {"post": {"A(L)": 10, "M": 5}, "pre": {"A(L)": 8, "M": 4},
+              "type": "T2", "instance": "T2_L"},
+        202: {"post": {"A(R)": 10, "M": 50}, "pre": {"A(R)": 8, "M": 40},
+              "type": "Y", "instance": "Y_R"},
+        204: {"post": {"M": 3}, "pre": {"M": 3},
+              "type": "Z", "instance": "Z_1"},
+    }
+
+
+class TestRoiCandidateSource:
+    def test_auto_resolves_roi_when_data_present(self, tmp_path):
+        write_roi_dataset(tmp_path, "np:v1", roi_fixture_counts())
+        c = morph.MorphologyComparer(query=101, dataset="np:v1",
+                                     project_root=str(tmp_path), verbose=False)
+        assert c._resolved_candidate_source() == "roi"
+
+    def test_auto_stays_profile_when_backfill_fails(self, tmp_path,
+                                                    monkeypatch):
+        # ROI table exists but no sidecar: without a successful backfill the
+        # auto source must not promise ROI screening.
+        write_roi_dataset(tmp_path, "np:v1", roi_fixture_counts())
+        (tmp_path / "datasets" / "np_v1" / "np_v1_metadata.json").unlink()
+        monkeypatch.setattr(morph, "backfill_dataset_metadata",
+                            lambda *a, **k: None)
+        c = morph.MorphologyComparer(query=101, dataset="np:v1",
+                                     project_root=str(tmp_path), verbose=False)
+        assert c._resolved_candidate_source() == "profile"
+
+    def test_auto_without_roi_table_stays_profile(self, tmp_path):
+        c = morph.MorphologyComparer(query=1, dataset="hemibrain:v1.2.1",
+                                     project_root=str(tmp_path), verbose=False)
+        assert c._resolved_candidate_source() == "profile"
+
+
+class TestRoiProfileFirst:
+    """ROI-screened pipeline: primary-ROI cosine candidates -> top types ->
+    all members -> morphology. Mirrors TestProfileFirst's fixtures."""
+
+    def _setup(self, tmp_path, monkeypatch, query=101, **kwargs):
+        write_roi_dataset(tmp_path, "np:v1", roi_fixture_counts())
+        write_skeleton(tmp_path, "np:v1", query, line_neuron(length=20))
+        write_skeleton(tmp_path, "np:v1", 201, line_neuron(length=20))
+        write_skeleton(tmp_path, "np:v1", 202, bushy_y_neuron())
+        params = dict(
+            query=query, dataset="np:v1", level="bodyid", method="vector",
+            candidate_source="roi",
+            output_dir=str(tmp_path / "out"), project_root=str(tmp_path),
+            verbose=False,
+        )
+        params.update(kwargs)
+        comparer = morph.MorphologyComparer(**params)
+        monkeypatch.setattr(comparer, "_resolve_query", lambda: pd.DataFrame({
+            "bodyId": [query], "type": ["T"], "instance": ["T_1"],
+        }))
+        return comparer
+
+    def _fake_fetch(self, monkeypatch):
+        fetched = []
+
+        def fake_fetch(dataset, bid, project_root=None, persist=True):
+            fetched.append(bid)
+            return line_neuron(length=25)
+
+        monkeypatch.setattr(morph, "fetch_skeleton_on_demand", fake_fetch)
+        return fetched
+
+    def test_roi_source_ranks_twin_and_carries_roi_scores(self, tmp_path,
+                                                          monkeypatch):
+        comparer = self._setup(tmp_path, monkeypatch)
+        fetched = self._fake_fetch(monkeypatch)
+        res = comparer.find_similar()
+        assert not res.empty
+        # pool: every typed neuron; only 204 has no cached skeleton
+        assert fetched == [204]
+        # the mirrored twin is the ROI screen's top candidate
+        roi_scores = res.set_index("target_bodyId")["roi_similarity"]
+        assert roi_scores.index[0] == res.iloc[0]["target_bodyId"]
+        assert 201 in roi_scores.index
+        assert roi_scores[201] == pytest.approx(1.0, abs=1e-4)
+        # screen evidence columns and source label
+        assert res["roi_similarity"].notna().all()
+        assert res["profile_similarity"].isna().all()
+        assert (res["candidate_source"] == "roi").all()
+        assert 101 not in res["target_bodyId"].tolist()
+
+    def test_combined_merges_both_screens(self, tmp_path, monkeypatch):
+        comparer = self._setup(tmp_path, monkeypatch,
+                               candidate_source="combined")
+        self._fake_fetch(monkeypatch)
+        monkeypatch.setattr(comparer, "_connection_cache_candidates",
+                            lambda q: pd.DataFrame({
+                                "target_bodyId": [201, 204],
+                                "shared_count": [9, 3],
+                                "profile_similarity": [1.0, 0.3],
+                                "target_type": ["T2", "Z"],
+                            }))
+        res = comparer.find_similar()
+        assert not res.empty
+        by_id = res.set_index("target_bodyId")
+        # connectivity-only evidence: 201/204 have profile scores
+        assert by_id.loc[201, "profile_similarity"] == pytest.approx(1.0)
+        assert by_id.loc[204, "profile_similarity"] == pytest.approx(0.3)
+        # ROI-only evidence: 202 was not a connectivity candidate
+        assert pd.isna(by_id.loc[202, "profile_similarity"])
+        assert np.isfinite(by_id.loc[202, "roi_similarity"])
+        assert (res["candidate_source"] == "combined").all()
+        # candidate types came from BOTH screens (Y only via ROI)
+        readme = Path(comparer.output_folder, "README.txt").read_text()
+        assert "candidate_source: combined" in readme
+
+    def test_auto_roi_falls_back_to_profile_in_run(self, tmp_path,
+                                                   monkeypatch):
+        """A hierarchical sidecar passes the cheap availability probe but
+        fails the partition validation at build: an auto run must degrade to
+        the connection-cache screen, an explicit roi run must raise."""
+        counts = roi_fixture_counts()
+        # parent ROI 'A' re-counts the hemispheric synapses (hierarchy)
+        for bid, parent_post, parent_pre in ((101, 10, 8), (201, 10, 8),
+                                             (202, 10, 8)):
+            counts[bid]["post"]["A"] = parent_post
+            counts[bid]["pre"]["A"] = parent_pre
+        neuron_df = [
+            {"bodyId": 101, "type": "T", "instance": "T_R", "pre": 8,
+             "post": 15},
+            {"bodyId": 201, "type": "T2", "instance": "T2_L", "pre": 8,
+             "post": 15},
+            {"bodyId": 202, "type": "Y", "instance": "Y_R", "pre": 48,
+             "post": 60},
+            {"bodyId": 204, "type": "Z", "instance": "Z_1", "pre": 3,
+             "post": 3},
+        ]
+        write_roi_dataset(tmp_path, "np:v1", counts,
+                          metadata_rois=["A", "A(L)", "A(R)", "M"],
+                          neuron_df=neuron_df)
+        write_skeleton(tmp_path, "np:v1", 101, line_neuron(length=20))
+        write_skeleton(tmp_path, "np:v1", 201, line_neuron(length=20))
+        params = dict(
+            query=101, dataset="np:v1", level="bodyid", method="vector",
+            output_dir=str(tmp_path / "out"), project_root=str(tmp_path),
+            verbose=False,
+        )
+        monkeypatch.setattr(morph, "backfill_dataset_metadata",
+                            lambda *a, **k: None)
+        # the store's own recovery path must not reach the network either
+        monkeypatch.setattr(rois_mod, "backfill_dataset_metadata",
+                            lambda *a, **k: None)
+        self._fake_fetch(monkeypatch)
+
+        auto = morph.MorphologyComparer(candidate_source="auto", **params)
+        monkeypatch.setattr(auto, "_resolve_query", lambda: pd.DataFrame({
+            "bodyId": [101], "type": ["T"], "instance": ["T_1"],
+        }))
+        monkeypatch.setattr(auto, "_connection_cache_candidates",
+                            lambda q: pd.DataFrame({
+                                "target_bodyId": [201],
+                                "shared_count": [9],
+                                "profile_similarity": [1.0],
+                                "target_type": ["T2"],
+                            }))
+        res = auto.find_similar()
+        assert not res.empty
+        assert (res["candidate_source"] == "profile").all()
+        assert res["profile_similarity"].notna().all()
+
+        explicit = morph.MorphologyComparer(candidate_source="roi", **params)
+        monkeypatch.setattr(explicit, "_resolve_query", lambda: pd.DataFrame({
+            "bodyId": [101], "type": ["T"], "instance": ["T_1"],
+        }))
+        with pytest.raises(morph.RoiScreeningUnavailable):
+            explicit.find_similar()
+
+
+class TestFlyWireNblast:
+    """NBLAST on FlyWire datasets: FAFB has real skeleton sources (the
+    healed skeleton bundle + CAVE fallback), so NBLAST is not blanket-
+    blocked; dotprops prefer the bundle's skeletons over the local mesh
+    pickle cache."""
+
+    def test_fafb_nblast_not_blanket_blocked(self, tmp_path, monkeypatch):
+        """Regression: the old guard rejected every FlyWire NBLAST run with
+        'cache contains meshes' even though FAFB skeleton access was
+        validated as ready. The run must proceed past that point."""
+        monkeypatch.setattr(morph, "require_flywire_skeleton_access",
+                            lambda *a, **k: {"ready": True})
+        c = morph.MorphologyComparer(query="aMe12", dataset="flywire_FAFB_v783",
+                                     method="nblast", project_root=str(tmp_path),
+                                     verbose=False)
+
+        class Sentinel(Exception):
+            pass
+
+        def boom():
+            raise Sentinel()
+
+        monkeypatch.setattr(c, "_resolve_query", boom)
+        with pytest.raises(Sentinel):
+            c.find_similar()
+
+    def test_dotprops_prefer_healed_zip_skeletons(self, tmp_path, monkeypatch):
+        """FlyWire dotprops follow the visualization pipeline: the healed
+        bundle serves the skeletons, ids missing locally are handed to the
+        token-gated CAVE fallback (never the generic on-demand fetch)."""
+        import zipfile
+        import fafb_utils
+
+        def _swc():
+            lines = ["# SWC skeleton"]
+            for i in range(1, 31):
+                parent = -1 if i == 1 else i - 1
+                lines.append(f"{i} 1 {i} 0 0 1.0 {parent}")
+            return "\n".join(lines)
+
+        zip_path = tmp_path / "sk.zip"
+        with zipfile.ZipFile(zip_path, "w") as z:
+            z.writestr("42.swc", _swc())
+            z.writestr("43.swc", _swc())
+        monkeypatch.setattr(morph, "_fafb_skeleton_zip_path",
+                            lambda dataset, project_root=None: zip_path)
+        # The extrusion test is exercised separately; keep this test focused
+        # on the local-bundle -> CAVE fallback flow.
+        monkeypatch.setattr(fafb_utils, "flag_extrusions",
+                            lambda *a, **k: [])
+        c = morph.MorphologyComparer(query=42, dataset="flywire_FAFB_v783",
+                                     method="nblast", project_root=str(tmp_path),
+                                     verbose=False)
+        fetched = []
+        monkeypatch.setattr(c, "_fafb_cave_fallback",
+                            lambda ids: (fetched.extend(ids), {})[1])
+
+        def no_fetch(*a, **k):
+            raise AssertionError(
+                "generic on-demand fetch must not serve FlyWire")
+
+        monkeypatch.setattr(morph, "fetch_skeleton_on_demand", no_fetch)
+        monkeypatch.setattr(morph, "_find_skeleton_file",
+                            lambda d, b, project_root=None: None)
+        dps = c._dotprops_for_ids([42, 43, 44])
+        # bundle skeletons served without touching the pickle cache or fetch
+        assert dps[42] is not None and dps[43] is not None
+        # ids missing from the bundle go to the CAVE fallback
+        assert dps[44] is None
+        assert fetched == [44]
+
+    def test_nblast_pairwise_scores_match_nblaster(self, tmp_path):
+        """The in-process pair scoring produces exactly the NBlaster
+        (navis.nblast) forward normalized scores."""
+        import navis
+        from navis.nbl.nblast_funcs import NBlaster
+
+        c = morph.MorphologyComparer(query=101, dataset="np:v1",
+                                     method="nblast", project_root=str(tmp_path),
+                                     verbose=False)
+        q_dp = navis.make_dotprops(line_neuron(length=20) / 1000.0, k=20)
+        cand_dps = {
+            202: navis.make_dotprops(bushy_y_neuron() / 1000.0, k=20),
+            203: navis.make_dotprops(line_neuron(length=30) / 1000.0, k=20),
+        }
+        scores = c._nblast_pairwise({101: q_dp}, cand_dps)
+        nb = NBlaster(use_alpha=False, normalized=True, progress=False)
+        qi = nb.append(q_dp, self_hit=nb.calc_self_hit(q_dp))
+        for bid, t_dp in cand_dps.items():
+            ti = nb.append(t_dp, self_hit=nb.calc_self_hit(t_dp))
+            expected = float(nb.single_query_target(qi, ti, scores='forward'))
+            assert scores[bid] == pytest.approx(expected, abs=1e-9)
+
+    def test_fafb_pipeline_checks_extrusions(self, tmp_path, monkeypatch):
+        """Bundle skeletons run through the cached extrusion check; flagged
+        neurons join the CAVE fallback batch."""
+        import zipfile
+        import fafb_utils
+
+        def _swc():
+            lines = ["# SWC skeleton"]
+            for i in range(1, 31):
+                parent = -1 if i == 1 else i - 1
+                lines.append(f"{i} 1 {i} 0 0 1.0 {parent}")
+            return "\n".join(lines)
+
+        zip_path = tmp_path / "sk.zip"
+        with zipfile.ZipFile(zip_path, "w") as z:
+            z.writestr("42.swc", _swc())
+            z.writestr("43.swc", _swc())
+        monkeypatch.setattr(morph, "_fafb_skeleton_zip_path",
+                            lambda dataset, project_root=None: zip_path)
+        monkeypatch.setattr(fafb_utils, "flag_extrusions",
+                            lambda *a, **k: [42])
+        c = morph.MorphologyComparer(query=42, dataset="flywire_FAFB_v783",
+                                     method="nblast", project_root=str(tmp_path),
+                                     verbose=False)
+        fetched = []
+        monkeypatch.setattr(c, "_fafb_cave_fallback",
+                            lambda ids: (fetched.extend(ids), {})[1])
+        loaded = c._load_fafb_skeletons([42, 43])
+        assert 42 in loaded and 43 in loaded
+        # 42 flagged by the extrusion check -> CAVE fallback requested
+        assert fetched == [42]
+
+
+class TestExtrusionCheck:
+    """The shared FAFB extrusion check (fafb_utils): spike detection,
+    cached batch results and the parallel/serial flag_extrusions path."""
+
+    def _neuron(self, spike=False):
+        """A small curved neuron, SWC-loaded like the healed-bundle input.
+
+        A straight DataFrame-constructed TreeNeuron makes navis' tube
+        orientation ill-defined; going through the same SWC reader the
+        pipeline uses produces a well-formed tube mesh.
+        """
+        import io
+
+        import navis
+
+        n = 30
+        t = np.arange(n) * 2.0
+        coords = np.column_stack(
+            [t, 5 * np.sin(t / 5), 5 * np.cos(t / 5)])
+        if spike:
+            coords[-1, 0] += 60.0  # single long jump = extrusion spike
+        lines = ["# SWC skeleton"]
+        for i in range(n):
+            parent = -1 if i == 0 else i  # 1-based parent of node i+1
+            lines.append(
+                f"{i + 1} 1 {coords[i, 0]} {coords[i, 1]} "
+                f"{coords[i, 2]} 0.25 {parent}"
+            )
+        nrn = navis.read_swc(io.StringIO("\n".join(lines)))
+        nrn.units = "nm"
+        return nrn
+
+    def _smooth(self):
+        return self._neuron(spike=False)
+
+    def _spiky(self):
+        return self._neuron(spike=True)
+
+    def test_detect_extrusion_flags_spike_only(self):
+        """A single long jump edge exceeds the 50,000 nm spike threshold;
+        a smooth neuron stays unflagged."""
+        from fafb_utils import detect_extrusion
+
+        assert detect_extrusion(self._smooth()) is False
+        assert detect_extrusion(self._spiky()) is True
+
+    def test_flag_extrusions_batch_and_cache(self, tmp_path):
+        """flag_extrusions returns flagged ids, persists the per-neuron
+        results and serves repeat calls from the cache (parallel batch with
+        a serial fallback)."""
+        import fafb_utils
+
+        root = str(tmp_path)
+        skeletons = {1: self._smooth(), 2: self._spiky(), 3: self._smooth()}
+        flagged = fafb_utils.flag_extrusions(
+            root, "flywire_FAFB_v783", skeletons, verbose=False, n_workers=2)
+        assert sorted(flagged) == [2]
+        assert fafb_utils.extrusion_check_cache_path(
+            root, "flywire_FAFB_v783").exists()
+        # repeat call: served from the cache (same answer, no re-analysis)
+        flagged2 = fafb_utils.flag_extrusions(
+            root, "flywire_FAFB_v783", skeletons, verbose=False, n_workers=2)
+        assert sorted(flagged2) == [2]
+        # cached spikes are returned even for a single-neuron batch
+        assert sorted(fafb_utils.flag_extrusions(
+            root, "flywire_FAFB_v783", {2: self._spiky()},
+            verbose=False, n_workers=1)) == [2]
 
 
 class TestProfileFirst:
-    """Connectivity-expanded pipeline: connection-cache candidates ->
-    top-(top_n x candidate_expansion) types -> all members -> morphology."""
+    """Connection-profile pipeline: connection-cache candidates ->
+    top candidate_cap rows -> morphology."""
 
     def _setup(self, tmp_path, monkeypatch, query=101, **kwargs):
         write_skeleton(tmp_path, "np:v1", query, line_neuron(length=20))
@@ -1013,7 +1444,7 @@ class TestProfileFirst:
 
         params = dict(
             query=query, dataset="np:v1", level="bodyid", method="vector",
-            candidate_source="profile", candidate_expansion=3, top_n=5,
+            candidate_source="profile",
             output_dir=str(tmp_path / "out"), project_root=str(tmp_path),
             verbose=False,
         )
@@ -1036,10 +1467,12 @@ class TestProfileFirst:
     def _index(self, tmp_path, entries):
         write_neuron_index(tmp_path, "np:v1", entries)
 
-    def test_type_expansion_pool_and_transient_fetch(self, tmp_path, monkeypatch):
-        """Candidates -> top types -> ALL their members become the pool;
-        missing members are fetched transiently (never persisted)."""
-        comparer = self._setup(tmp_path, monkeypatch)
+    def test_pool_is_screened_candidates_and_transient_fetch(self, tmp_path, monkeypatch):
+        """The sorted screen list's top candidate_cap rows are the pool;
+        missing members are fetched (memory-only when opted out via
+        cache_fetched_skeletons=False)."""
+        comparer = self._setup(tmp_path, monkeypatch,
+                               cache_fetched_skeletons=False)
         self._index(tmp_path, [
             (101, "T", "T_1"), (201, "T", "T_2"),
             (202, "Y", "Y_1"), (204, "Z", "Z_1"),
@@ -1053,7 +1486,7 @@ class TestProfileFirst:
 
         def fake_fetch(dataset, bid, project_root=None, persist=True):
             fetched.append(bid)
-            # transient: the pipeline must not persist fetched skeletons
+            # memory-only mode: the pipeline must not persist fetched skeletons
             assert persist is False
             return line_neuron(length=25)
 
@@ -1073,8 +1506,9 @@ class TestProfileFirst:
         assert set(res["target_bodyId"]) == {201, 202, 204}
 
     def test_cache_fetched_skeletons_controls_persistence(self, tmp_path, monkeypatch):
-        """cache_fetched_skeletons=True persists transient fetches to the
-        skeleton cache; the default keeps them memory-only (persist=False)."""
+        """cache_fetched_skeletons=True (the default) persists transient
+        fetches to the skeleton cache; False keeps them memory-only
+        (persist=False)."""
         comparer = self._setup(tmp_path, monkeypatch, cache_fetched_skeletons=True)
         self._index(tmp_path, [
             (101, "T", "T_1"), (201, "T", "T_2"),
@@ -1097,13 +1531,14 @@ class TestProfileFirst:
         # pool = T {101, 201} + Y {202} + Z {204}; only 204 is missing, and
         # with the option on the fetch requests a permanent cache write.
         assert fetched == [(204, True)]
-        # default (option off) stays memory-only
+        # default is now on: cached skeletons (and their vectors) persist
         default = self._setup(tmp_path, monkeypatch)
-        assert default.cache_fetched_skeletons is False
+        assert default.cache_fetched_skeletons is True
 
-    def test_type_expansion_caps_types(self, tmp_path, monkeypatch):
-        """Only the top (top_n x expansion) TYPES enter the pool."""
-        comparer = self._setup(tmp_path, monkeypatch, top_n=1, candidate_expansion=2)
+    def test_candidate_cap_truncates_pool(self, tmp_path, monkeypatch):
+        """Only the top candidate_cap rows of the sorted screen list
+        enter the pool; lower-ranked candidates are never scored."""
+        comparer = self._setup(tmp_path, monkeypatch, candidate_cap=2)
         self._index(tmp_path, [
             (101, "T", "T_1"), (201, "T", "T_2"),
             (202, "Y", "Y_1"), (204, "Z", "Z_1"), (205, "Z", "Z_2"),
@@ -1119,8 +1554,9 @@ class TestProfileFirst:
                             lambda d, b, project_root=None, persist=True:
                             line_neuron(length=25))
         res = comparer.find_similar()
-        # top-1 x 2 types = T, Y -> Z members never scored
+        # cap 2 -> only the top-2 candidates (201, 202) are scored
         assert not res.empty
+        assert set(res["target_bodyId"]) == {201, 202}
         assert "Z" not in res["target_type"].tolist()
         assert 204 not in res["target_bodyId"].tolist()
 
@@ -1253,8 +1689,8 @@ class TestProfileFirst:
         )
 
     def test_type_search_uses_only_connectivity_candidates(self, tmp_path, monkeypatch):
-        """Regression: a cached-only type must NOT rank; a member of an
-        expanded candidate type that is not itself a candidate row must."""
+        """Regression: a cached-only type must NOT rank; only the screened
+        candidate rows enter the pool (no type -> member expansion)."""
         comparer = self._setup(tmp_path, monkeypatch)
         # 103 (Y) is cached but Y is NOT among the connectivity candidates
         write_skeleton(tmp_path, "np:v1", 103, y_neuron())
@@ -1272,8 +1708,8 @@ class TestProfileFirst:
         assert not res.empty
         assert not (res["target_type"] == "Y").any(), \
             "cached-only type leaked into the connectivity-only pool"
-        # now Y enters via a candidate: all Y members (even non-candidate 103)
-        # join the pool through the type expansion
+        # a Y member entering as its own candidate row joins the pool; other
+        # Y members without candidate rows stay out (no type expansion)
         comparer2 = self._setup(tmp_path, monkeypatch)
         comparer2.level = "type"
         monkeypatch.setattr(comparer2, "_connection_cache_candidates",
@@ -1281,7 +1717,12 @@ class TestProfileFirst:
                                 (201, 9, 1.0, "T"), (103, 4, 0.4, "Y"),
                             ]))
         res2 = comparer2.find_similar()
-        assert (res2["target_type"] == "Y").any(),             "type -> individual expansion failed (non-candidate member missing)"
+        assert (res2["target_type"] == "Y").any(), \
+            "candidate row for Y missing from the pool"
+        body = pd.read_csv(Path(comparer2.output_folder) / "results.csv")
+        assert 103 in body["target_bodyId"].tolist()
+        assert 202 not in body["target_bodyId"].tolist(), \
+            "non-candidate member leaked into the pool"
 
     def test_pool_standardization_without_vector_cache(self, tmp_path, monkeypatch):
         """Without a vector cache the pool vectors are z-scored with
@@ -1601,7 +2042,7 @@ class TestStepProgress:
 
         comparer = morph.MorphologyComparer(
             query=101, dataset="np:v1", level="bodyid", method="vector",
-            candidate_source="profile", top_n=5, candidate_expansion=3,
+            candidate_source="profile",
             output_dir=str(tmp_path / "out"), project_root=str(tmp_path),
             verbose=True,
         )
@@ -1621,7 +2062,7 @@ class TestStepProgress:
 
         out = capsys.readouterr().out
         assert "Step 2/6 — Discovering candidates" in out
-        assert "Step 3/6 — Expanding 2 candidate types" in out
+        assert "Step 3/6 — Selecting the scoring pool" in out
         assert "Step 4/6 — Loading & vectorizing skeletons" in out
         assert "Profile-first:" in out and "pool neurons" in out
         events = [ln.strip() for ln in out.splitlines()
@@ -1631,7 +2072,7 @@ class TestStepProgress:
         assert events == [
             "[DROCAT][progress] 1/6 Resolving query neuron",
             "[DROCAT][progress] 2/6 Discovering candidates (connection cache)",
-            "[DROCAT][progress] 3/6 Expanding 2 candidate types to the scoring pool",
+            "[DROCAT][progress] 3/6 Selecting top 2 candidates for scoring",
             "[DROCAT][progress] 4/6 Loading & vectorizing skeletons",
             "[DROCAT][progress] 5/6 Scoring similarity (vector)",
             "[DROCAT][progress] 6/6 Saving results",
@@ -1808,7 +2249,7 @@ class TestRepresentationConsistency:
         ])
         comparer = morph.MorphologyComparer(
             query=101, dataset="np:v1", level="bodyid", method="vector",
-            candidate_source="profile", top_n=5, candidate_expansion=3,
+            candidate_source="profile",
             output_dir=str(tmp_path / "out"), project_root=str(tmp_path),
             verbose=False,
         )
@@ -1823,9 +2264,13 @@ class TestRepresentationConsistency:
                                 "target_type": ["T", "M"],
                             }))
         res = comparer.find_similar()
-        # the skeleton pool neuron is scored; the mesh is excluded
+        # the skeleton pool neuron is scored; the mesh row stays in the
+        # written candidate list with NaN similarity (ranked last)
         assert 201 in res["target_bodyId"].tolist()
-        assert 301 not in res["target_bodyId"].tolist()
+        mesh_rows = res[res["target_bodyId"] == 301]
+        assert len(mesh_rows) == 1
+        assert pd.isna(mesh_rows.iloc[0]["similarity"])
+        assert res["similarity"].notna().iloc[0]
 
 
 # ---------------------------------------------------------------------------
@@ -1879,7 +2324,7 @@ class TestVectorPersistence:
         monkeypatch.setattr(morph, "fetch_skeleton_on_demand", fake_fetch)
         params = dict(
             query=101, dataset="np:v1", level="bodyid", method="vector",
-            candidate_source="profile", top_n=5, candidate_expansion=3,
+            candidate_source="profile",
             output_dir=str(tmp_path / "out"), project_root=str(tmp_path),
             verbose=False,
         )

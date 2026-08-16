@@ -130,7 +130,7 @@ def test_male_cns_v1_0_bodyid_profile_first_same_type(tmp_path_factory):
     out = tmp_path_factory.mktemp("similar-morphology_malcns_live")
     comparer = morph.MorphologyComparer(
         query=query, dataset=dataset, level="bodyid", method="vector",
-        candidate_source="auto", top_n=30, candidate_expansion=3,
+        candidate_source="auto", candidate_cap=500,
         output_dir=str(out), project_root=str(PROJECT_ROOT), verbose=False,
     )
     try:

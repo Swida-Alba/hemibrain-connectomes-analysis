@@ -45,43 +45,64 @@
     morphological scoring:</p>
   <ul>
     <li><b>auto</b> (default): NeuPrint datasets (hemibrain, male-cns, ...)
-      use the <b>connectivity-expanded</b> search: candidates are found
+      use the <b>ROI-distribution screen</b>: every neuron of the dataset is
+      ranked by cosine similarity of its input/output synapse distributions
+      over the dataset's <b>primary ROIs</b> (from
+      <code>{dataset}_allneurons_roi_count_df.csv</code>), comparing both
+      orientations across the midline (bilateral mirror) so contralateral
+      homologs match. This reaches <b>every</b> neuron — the connectivity
+      screen below can never find neurons without shared partners (~8% of
+      same-type members on male-cns). A one-time per-dataset matrix is
+      cached (<code>cache/{dataset}/morphology/roi_profiles.npz</code>);
+      the top <b>N × Candidate Expansion</b> screen-ranked <b>types</b>
+      are kept and expanded to <b>all their member neurons</b>; skeletons
+      are then fetched for the pool (transient) and morphology is compared.
+      FlyWire datasets (which have no ROI table but bulk mesh caches)
+      search the vector cache directly (full-morphology). All scores are
+      computed at <b>one consistent representation level</b>: skeleton and
+      mesh neurons (or two simplification levels) are never mixed in a
+      single comparison — neurons cached or fetched at a different level
+      than the query are simply not scored.</li>
+    <li><b>roi</b>: the ROI-distribution screen only. Requires the dataset's
+      ROI-count table and metadata sidecar (missing sidecars are fetched
+      and saved once automatically).</li>
+    <li><b>combined</b>: union of the ROI screen and the connectivity
+      (shared-partner) screen — the widest candidate pool and the highest
+      recall per fetched skeleton, at the cost of more transient skeleton
+      fetches.</li>
+    <li><b>profile</b>: the connectivity screen only — candidates found
       directly in the connection cache
-      (<code>cache/{dataset}/connections.parquet</code> — neurons sharing
-      upstream/downstream partners with the query, ranked by shared-partner
-      count), the top <b>N × Candidate Expansion</b> connectivity-similar
-      <b>types</b> are kept and expanded to <b>all their member neurons</b>;
-      skeletons are then fetched for the pool (transient) and morphology is
-      compared. FlyWire datasets (which have bulk mesh caches) search the
-      vector cache directly (full-morphology). All scores are computed at
-      <b>one consistent representation level</b>: skeleton and mesh neurons
-      (or two simplification levels) are never mixed in a single
-      comparison — neurons cached or fetched at a different level than the
-      query are simply not scored.</li>
-    <li><b>profile</b>: always connectivity-expanded (all datasets).</li>
+      (<code>cache/{dataset}/connections.parquet</code>: neurons sharing
+      upstream/downstream partners with the query, ranked by
+      shared-partner count).</li>
     <li><b>cache</b>: full-morphology over the complete local skeleton
       population (download skeletons first — see below).</li>
   </ul>
-  <p><b>Candidate Expansion (×)</b> (default 3) controls the type-level
-    expansion: with <code>top_n=10</code> the top 30 connectivity-similar
-    types are kept and every member of those types enters the scoring pool
-    (per-type safety cap 100). Fetched skeletons are <b>transient</b> by
-    default — used for the current comparison only and never written to the
-    skeleton cache; the <b>Cache Fetched Skeletons</b> option saves them to
-    the local cache for reuse (for a persistent full-morphology pool prefer
-    <b>Download All Skeletons</b>). Either way the computed <b>vectors</b>
-    are always persisted into the vector cache — the lookup order is
-    vector cache, then cached skeleton file, then online fetch, and a
-    fetched neuron is never vectorized twice. Already-cached skeletons are
-    reused and the query neuron is always fetched if missing. <b>ROI
-    Filter</b> (shown
+  <p><b>Candidate Cap</b> (default 500) is the single knob bounding how many
+    candidates are ever compared: the sorted candidate list of the selected
+    screen is truncated to this many neurons, which become the scoring pool
+    (it also serves as the NBLAST prefilter of <b>cache</b>-mode searches;
+    pure <b>cache</b> vector searches compare the whole local population).
+    Fetched skeletons are <b>transient</b> by default — used for the
+    current comparison only and never written to the skeleton cache; the
+    <b>Cache Fetched Skeletons</b> option saves them to the local cache for
+    reuse (for a persistent full-morphology pool prefer <b>Download All
+    Skeletons</b>). Either way the computed <b>vectors</b> are always
+    persisted into the vector cache — the lookup order is vector cache,
+    then cached skeleton file, then online fetch, and a fetched neuron is
+    never vectorized twice. Already-cached skeletons are reused and the
+    query neuron is always fetched if missing. <b>ROI Filter</b> (shown
     when the dataset's connection cache carries synapse location data —
     male-cns has 114 ROIs like <code>AL(L)</code>, hemibrain has none)
-    restricts candidate discovery to synapse rows in the selected ROIs.
-    Results carry both <code>profile_similarity</code> (normalized
-    shared-partner count) and <code>similarity</code> (morphology) scores. If
-    no candidates are found, the search falls back to the vector cache when
-    available.</p>
+    restricts the candidate rows of the connectivity screen (roi/combined
+    discovery is dataset-wide by design).
+    <b>results.csv and type_summary.csv contain ALL compared candidates</b>
+    (bounded by the cap), each row carrying the screen evidence —
+    <code>roi_similarity</code> (primary-ROI distribution cosine) and/or
+    <code>profile_similarity</code> (normalized shared-partner count) —
+    alongside <code>similarity</code> (morphology); <b>Top N</b> applies to
+    the optional 3D visualization only. If no candidates are found, the
+    search falls back to the vector cache when available.</p>
 
   <h2>Full-morphology mode &amp; skeleton download</h2>
   <p><b>Download All Skeletons</b> fetches every missing skeleton of the
