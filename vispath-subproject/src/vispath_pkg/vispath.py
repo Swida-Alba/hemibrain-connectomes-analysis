@@ -4421,6 +4421,14 @@ class VisualizePath:
                     '<span style="font-size: 10px; color: #888;">Dataset codes in node names:</span>'
                     '</div>' + ''.join(legend_items)
                 )
+
+        # Keep the browser-side NT lookup in sync with the Python palette used
+        # to color the default network edges. The hover label uses this same
+        # lookup, so a palette change cannot make the edge and label diverge.
+        nt_colors_js = json_safe({
+            str(nt).strip().lower(): color
+            for nt, color in NT_COLORS.items()
+        })
         
         # Create HTML content
         html_content = f"""<!DOCTYPE html>
@@ -7080,26 +7088,11 @@ class VisualizePath:
         const customGroups = {{}};
         
         // NT color mapping for JavaScript
-        const ntColors = {{
-            'acetylcholine': '#F39C12',
-            'ach': '#F39C12',
-            'gaba': '#27AE60', 
-            'glutamate': '#E74C3C',
-            'glut': '#E74C3C',
-            'dopamine': '#9B59B6',
-            'da': '#9B59B6',
-            'serotonin': '#3498DB',
-            'ser': '#3498DB',
-            'octopamine': '#1ABC9C',
-            'oct': '#1ABC9C',
-            'histamine': '#E67E22',
-            'glycine': '#16A085',
-            'unknown': '#95A5A6'
-        }};
+        const ntColors = {nt_colors_js};
         
         function getNTColor(nt) {{
-            if (!nt) return '#95A5A6';
-            const ntLower = nt.toLowerCase();
+            if (!nt) return ntColors['unknown'];
+            const ntLower = String(nt).trim().toLowerCase();
             return ntColors[ntLower] || ntColors['unknown'];
         }}
 
