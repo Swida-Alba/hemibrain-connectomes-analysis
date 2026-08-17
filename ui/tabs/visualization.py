@@ -14,6 +14,7 @@ from nicegui import ui
 
 from ..config import (
     PROJECT_ROOT,
+    DEFAULTS,
     SKELETON_MODES,
     BRAIN_MESH_OPTIONS,
     NETWORK_LAYOUTS,
@@ -577,6 +578,7 @@ def create_skeleton_tab():
             "hemisphere": hemisphere.value,
             "custom_layer_names": custom_names,
             "output_dir": output_dir.value,
+            "output_format": DEFAULTS["output_format"],
             "skeleton_mode": skeleton_mode.value,
             "brain_mesh": brain_mesh.value,
             "vnc_mesh": vnc_mesh.value,

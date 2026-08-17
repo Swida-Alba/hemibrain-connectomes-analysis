@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, Iterable, Optional
 
 from nicegui import ui
 
-from ..config import BRAIN_MESH_OPTIONS, SKELETON_MODES
+from ..config import BRAIN_MESH_OPTIONS, DEFAULTS, SKELETON_MODES
 from .common import (
     checkbox_input,
     multi_select_input,
@@ -88,6 +88,10 @@ class SkeletonVisualizationSettings:
             values["mesh_roi"] = list(values["mesh_roi"] or [])
         if "roi_colors" in values:
             values["mesh_color"] = values.pop("roi_colors")
+        # Keep all skeleton visualizations aligned with the application's
+        # global data-output preference while still allowing programmatic
+        # callers to override it in their settings dictionary.
+        values.setdefault("output_format", DEFAULTS["output_format"])
         return values
 
     def warn_empty_custom_palettes(self) -> None:

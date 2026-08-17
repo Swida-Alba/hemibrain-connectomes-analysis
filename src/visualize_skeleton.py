@@ -1525,6 +1525,10 @@ class VisualizeSkeleton:
     
     skip_synapse : bool, default=False
         Skip all synapse operations for faster initialization and smaller files.
+
+    output_format : str, default='csv'
+        Synapse data export format. Use ``'csv'`` for one merged CSV file or
+        ``'xlsx'`` for one merged Excel sheet.
     
     export_views : bool | list, default=True
         PNG export configuration:
@@ -2263,6 +2267,11 @@ class VisualizeSkeleton:
     True: skip all synapse operations (faster initialization, smaller file size)
     False: fetch and plot synapses between layers (default behavior)
     Note: This only affects inter-layer synapses, not show_connectors (neuron connectors)
+    '''
+
+    output_format: str = 'csv'
+    '''
+    format for the merged inter-layer synapse export: 'xlsx' or 'csv'
     '''
 
 
@@ -3919,6 +3928,11 @@ class VisualizeSkeleton:
         elif self.client_type not in ('neuprint', 'flywire'):
             errors.append(f"client_type must be 'neuprint' or 'flywire', got '{self.client_type}'")
 
+        if not isinstance(self.output_format, str):
+            errors.append(f"output_format must be a string, got {type(self.output_format).__name__}")
+        elif self.output_format.lower() not in ('xlsx', 'csv'):
+            errors.append(f"output_format must be 'xlsx' or 'csv', got '{self.output_format}'")
+
         if not isinstance(self.search_columns, str):
             errors.append(f"search_columns must be a string, got {type(self.search_columns).__name__}")
         elif self.search_columns not in ('auto', 'type', 'instance', 'bodyId'):
@@ -4985,6 +4999,32 @@ class VisualizeSkeleton:
             with pd.ExcelWriter(file_path,mode=mode,engine='openpyxl') as writer:
                 self.neuron_dfs[i].to_excel(writer, sheet_name=f'neuron_df{i}')
                 self.roi_dfs[i].to_excel(writer, sheet_name=f'roi_count_df{i}')
+
+    def _save_synapse_data(self, synapse_frames):
+        """Save all non-empty inter-layer synapse frames as one merged file.
+
+        Each frame must already contain a ``viz_layer`` column identifying its
+        source and target layer, for example ``0->1``.
+        """
+        if not synapse_frames:
+            return None
+
+        merged_synapses = pd.concat(synapse_frames, ignore_index=True, sort=False)
+        output_format = str(getattr(self, 'output_format', 'csv')).lower()
+        if output_format not in ('xlsx', 'csv'):
+            raise ValueError(f"output_format must be 'xlsx' or 'csv', got '{output_format}'")
+
+        extension = 'csv' if output_format == 'csv' else 'xlsx'
+        file_path = os.path.join(self.save_folder, self.saveas + f'_synapses.{extension}')
+
+        if output_format == 'csv':
+            merged_synapses.to_csv(file_path, index=False)
+        else:
+            with pd.ExcelWriter(file_path, mode='w', engine='openpyxl') as writer:
+                merged_synapses.to_excel(writer, sheet_name='synapses', index=False)
+
+        self._vprint(f'  ✓ Saved merged synapse data to: {file_path}', level='full')
+        return file_path
 
     def _write_user_warning_notes(self):
         """Record the effective mesh simplification for this render.
@@ -7985,11 +8025,12 @@ class VisualizeSkeleton:
             self._vprint('Skipping synapse plotting as requested.', level='full')
             return
 
+        synapse_frames = []
         for i in range(len(self.neuron_layers) - 1):
             source_criteria = self.layer_criteria[i]
             target_criteria = self.layer_criteria[i + 1]
-            # Use a single file for all synapse layers, consistent with neuron_info.xlsx
-            file_path = os.path.join(self.save_folder, self.saveas + '_synapses.xlsx')
+            # Collect all inter-layer frames for one merged export alongside
+            # neuron_info.csv.
             conn_df = None
 
             # --- Begin FlyWire/NeuPrint synapse loading logic ---
@@ -8156,14 +8197,9 @@ class VisualizeSkeleton:
                 self._vprint('  No synapses found.', level='full')
                 continue
 
-            # Check if file exists to determine mode (handle skipped layers)
-            if os.path.exists(file_path):
-                mode = 'a'
-            else:
-                mode = 'w'
-                
-            with pd.ExcelWriter(file_path, mode=mode, engine='openpyxl') as writer:
-                conn_df.to_excel(writer, sheet_name=f'conn_df{i}_{i+1}')
+            export_df = conn_df.copy()
+            export_df['viz_layer'] = f'{i}->{i+1}'
+            synapse_frames.append(export_df)
             
             self._vprint('plotting...', end='', level='full')
             
@@ -8409,6 +8445,8 @@ class VisualizeSkeleton:
                 )
                 self.fig_3d.add_trace(dummy_legend)
             self._vprint('Done', level='full')
+
+        self._save_synapse_data(synapse_frames)
         return 0
     
     def _get_dataset_mesh_dir(self):

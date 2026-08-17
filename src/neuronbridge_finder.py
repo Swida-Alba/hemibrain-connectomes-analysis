@@ -7358,6 +7358,7 @@ class NeuronBridgeFinder:
                     'synapse_alpha', 'synapse_colors', 'mesh_roi',
                     'mesh_color', 'mesh_alpha', 'brain_mesh_color',
                     'vnc_mesh_color',
+                    'output_format',
                 ):
                     if key in viz_settings:
                         value = viz_settings[key]
