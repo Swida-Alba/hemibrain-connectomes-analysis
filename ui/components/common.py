@@ -283,6 +283,8 @@ def refresh_dataset_selector_statuses(service=None) -> int:
                 dataset: "  ".join(_dataset_label_parts(dataset, service))
                 for dataset in options
             }
+            if getattr(selector, "options", None) == labels:
+                continue
             selector.set_options(labels, value=selector.value)
             updated += 1
         except RuntimeError:
@@ -295,23 +297,43 @@ def refresh_dataset_selector_statuses(service=None) -> int:
 def _dataset_label_parts(ds: str, service) -> List[str]:
     """Build the option label parts with source + local status tags."""
     src_tag = "[FW]" if ds.startswith("flywire_") else "[NP]"
-    status_tag = ""
     info = service._cache.get(ds)
-    if info and info.local_prepared:
+    # The filesystem is authoritative for local state.  DatasetInfo can be a
+    # persisted or server-backed snapshot, so trusting its old local flags
+    # would leave a selector showing "cached" after the cache is deleted.
+    if service._check_local_prepared(ds):
         status_tag = "✓ local"
-    elif info and info.local_cache:
+    elif service._check_local_cache(ds):
         status_tag = "◐ cached"
+    elif info and info.available:
+        status_tag = "☁ server"
     else:
-        # A pull can finish after the selector's DatasetInfo was cached. The
-        # local files are authoritative for this UI label, so check them
-        # before falling back to the cached server flag.
-        if service._check_local_prepared(ds):
-            status_tag = "✓ local"
-        elif service._check_local_cache(ds):
-            status_tag = "◐ cached"
-        elif info and info.available:
-            status_tag = "☁ server"
+        status_tag = ""
     return [ds, src_tag] + ([status_tag] if status_tag else [])
+
+
+def _refresh_local_dataset_flags(results, service) -> bool:
+    """Sync local file flags in an availability result mapping.
+
+    This deliberately does no network work.  It is used by the Settings
+    timer so creating or removing a local cache is reflected while the page
+    remains open.
+    """
+    changed = False
+    for info in (results or {}).values():
+        local_prepared = service._check_local_prepared(info.name)
+        local_cache = service._check_local_cache(info.name)
+        if info.local_prepared != local_prepared:
+            info.local_prepared = local_prepared
+            changed = True
+        if info.local_cache != local_cache:
+            info.local_cache = local_cache
+            changed = True
+        if info.source == "flywire" and info.available != local_prepared:
+            info.available = local_prepared
+            changed = True
+        service._cache[info.name] = info
+    return changed
 
 
 def dataset_selector(
@@ -2402,6 +2424,7 @@ def dataset_status_card() -> ui.card:
                 if info.local_prepared or info.local_cache
             }
             if local_results:
+                state["results"] = local_results
                 render_results(local_results)
                 refresh_dataset_selector_statuses(service)
 
@@ -2440,15 +2463,21 @@ def dataset_status_card() -> ui.card:
         refresh_btn.on_click(on_refresh_click)
 
         def poll_results():
-            if not state["done"]:
-                return
-            state["done"] = False
-            if state["results"] is not None:
-                render_results(state["results"], state.get("updated_at"))
-                refresh_dataset_selector_statuses(service)
-            elif state["error"] is not None:
-                render_error(state["error"])
-            refresh_btn.enable()
+            if state["done"]:
+                state["done"] = False
+                if state["results"] is not None:
+                    render_results(state["results"], state.get("updated_at"))
+                elif state["error"] is not None:
+                    render_error(state["error"])
+                refresh_btn.enable()
+
+            # Keep local status live without issuing another network request.
+            # This catches both a pull creating connections.parquet and an
+            # external cleanup/removal while the Settings page is open.
+            if not state["running"] and state["results"] is not None:
+                if _refresh_local_dataset_flags(state["results"], service):
+                    render_results(state["results"], state.get("updated_at"))
+            refresh_dataset_selector_statuses(service)
 
         ui.timer(1.0, poll_results)
 

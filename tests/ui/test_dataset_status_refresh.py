@@ -1,6 +1,7 @@
 """Regression tests for live dataset-status labels in the Settings flow."""
 
 from nicegui import Client
+from nicegui.elements.timer import Timer
 from nicegui.page import page
 
 
@@ -40,6 +41,12 @@ def test_selector_status_refreshes_after_a_pull_creates_local_cache(
     assert "◐ cached" in selector.options[dataset]
     assert "☁ server" not in selector.options[dataset]
 
+    (cache_dir / "connections.parquet").unlink()
+    refresh_dataset_selector_statuses(service)
+
+    assert "☁ server" in selector.options[dataset]
+    assert "◐ cached" not in selector.options[dataset]
+
 
 def test_status_card_prefers_cached_icon_when_server_is_also_available(
     monkeypatch, tmp_path
@@ -49,6 +56,7 @@ def test_status_card_prefers_cached_icon_when_server_is_also_available(
     from ui.dataset_service import DatasetInfo, DatasetService
 
     service = DatasetService()
+    service._datasets_dir = tmp_path / "datasets"
     service._cache_dir = tmp_path / "cache"
     service._availability_loaded = True
     dataset = "manc:v1.2.3"
@@ -74,3 +82,63 @@ def test_status_card_prefers_cached_icon_when_server_is_also_available(
     }
     assert "cached" in icons
     assert "cloud_done" not in icons
+
+
+def test_settings_watcher_updates_selector_and_card_on_create_and_remove(
+    monkeypatch, tmp_path
+):
+    import ui.dataset_service as dataset_service_module
+    from ui.components.common import dataset_selector, dataset_status_card
+    from ui.dataset_service import DatasetInfo, DatasetService
+
+    service = DatasetService()
+    service._datasets_dir = tmp_path / "datasets"
+    service._cache_dir = tmp_path / "cache"
+    service._availability_loaded = True
+    dataset = "manc:v1.2.3"
+    info = DatasetInfo(
+        name=dataset,
+        source="neuprint",
+        available=True,
+        display_name=dataset,
+    )
+    service._availability_snapshot = {dataset: info}
+    service._cache[dataset] = info
+    monkeypatch.setattr(dataset_service_module, "_dataset_service", service)
+
+    client = Client(page("/dataset-status-auto-watcher"))
+    with client:
+        selector = dataset_selector(datasets=[dataset])
+        dataset_status_card()
+
+    timer = next(
+        element
+        for element in client.elements.values()
+        if isinstance(element, Timer)
+    )
+    cache_file = service._cache_dir / "manc_v1_2_3" / "connections.parquet"
+    cache_file.parent.mkdir(parents=True)
+    cache_file.touch()
+
+    with client:
+        timer.callback()
+
+    assert "◐ cached" in selector.options[dataset]
+    icons = {
+        element._props.get("name")
+        for element in client.elements.values()
+        if getattr(element, "_props", {}).get("name")
+    }
+    assert "cached" in icons
+
+    cache_file.unlink()
+    with client:
+        timer.callback()
+
+    assert "☁ server" in selector.options[dataset]
+    icons = {
+        element._props.get("name")
+        for element in client.elements.values()
+        if getattr(element, "_props", {}).get("name")
+    }
+    assert "cloud_done" in icons
