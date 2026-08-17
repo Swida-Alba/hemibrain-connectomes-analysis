@@ -2191,14 +2191,20 @@ class TestDatasetService:
             getattr(el, "text", None) == "Idle"
             for el in client.elements.values()
         )
-        assert any(
+        assert not any(
             getattr(el, "_props", {}).get("label") == "Skeleton cache"
             for el in client.elements.values()
         )
-        assert any(
-            getattr(el, "text", None) == "Download All Skeletons"
-            for el in client.elements.values()
+        elements = list(client.elements.values())
+        download_button = next(
+            el for el in elements if getattr(el, "text", None) == "Download All Skeletons"
         )
+        dataset_cache_title = labels["card_title"]
+        cancel_button = next(
+            el for el in elements if getattr(el, "text", None) == "Cancel"
+        )
+        assert elements.index(dataset_cache_title) < elements.index(download_button)
+        assert elements.index(download_button) < elements.index(cancel_button)
 
     def test_settings_shows_availability_timestamp_and_shared_mapping_panel(
         self, tmp_path, monkeypatch

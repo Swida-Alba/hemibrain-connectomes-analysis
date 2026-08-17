@@ -83,6 +83,7 @@ class TestSkeletonPuller:
         # progress callback was wired with the cancel event
         assert fake_download["impl"].called_with["cancel_event"] is not None
         assert fake_download["impl"].called_with["max_workers"] == 8
+        assert fake_download["impl"].called_with["mode"] == "raw"
 
     def test_cancel(self, fake_download):
         fake_download["impl"].delay = 0.05

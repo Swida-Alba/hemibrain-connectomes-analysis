@@ -113,14 +113,11 @@
     search falls back to the vector cache when available.</p>
 
   <h2>Full-morphology mode &amp; skeleton download</h2>
-  <p>Use <b>Settings → Dataset Cache → Skeleton Cache Pull</b> to download a
-    complete skeleton population. Choose <b>Raw skeletons</b> or
-    <b>95% fine simplification</b>; both options populate the same shared raw
-    cache because fine meshes are generated transiently during
-    visualization. New bulk raw files use portable
+  <p>Use <b>Settings → Dataset Cache → Download All Skeletons</b> to download
+    a complete raw skeleton population. The button sits beside Pull Complete
+    Connections, before Cancel. New bulk files use portable
     <code>{bodyId}.swc.gz</code>; older pickle files remain readable. Both
-    choices are resumable and the raw vector cache is updated immediately
-    after each batched fetch. After a raw download, build the vector cache and
+    the download and vector-cache update are resumable. After a raw download, build the vector cache and
     run with <b>Candidate Source = cache</b> to compare the query against the
     entire local skeleton population. The healed FAFB skeleton bundle remains
     a local raw source and is vectorized without copying its SWC entries.</p>

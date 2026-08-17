@@ -52,23 +52,13 @@
   <p>In <b>Dataset Cache</b>, choose a dataset and set the batch size and
     parallel worker count. <b>Pull Full Dataset</b> builds the local neuron
     index and the resumable connection cache. <b>Pull Complete Connections</b>
-    provides an explicit connection-cache pull for the selected dataset. Both
-    actions use the same batched builder and shared
+    provides an explicit connection-cache pull for the selected dataset.
+    <b>Download All Skeletons</b> sits beside it, before <b>Cancel</b>, and
+    fetches missing raw skeletons into the shared
+    <code>{bodyId}.swc.gz</code> cache. The connection actions use the same batched builder and shared
     <code>cache/&lt;dataset&gt;/connections.parquet</code> cache, so either action
     can resume an interrupted pull. Enable <b>Force rebuild</b> only when the
     existing connection cache needs to be replaced.</p>
-
-  <h2>Skeleton cache pull</h2>
-  <p>In <b>Dataset Cache → Skeleton Cache Pull</b>, choose a dataset and
-    download every missing skeleton with a resumable progress bar. The
-    <b>Raw skeletons</b> option writes full TreeNeurons to the shared dataset
-    skeleton cache using portable <code>{bodyId}.swc.gz</code> files. The
-    <b>95% fine simplification</b> option prefetches the same raw
-    <code>.swc.gz</code> TreeNeuron population used by fine visualization.
-    The FAFB-style transform, tube mesh, and 95% simplification are rebuilt
-    after loading for each visualization and are never cached as meshes. Raw
-    vectors are vectorized and appended immediately after the batched online
-    fetch. Existing pickle raw caches remain readable.</p>
 
   <h2>Output settings</h2>
   <p><b>Default Output Directory</b> is pre-filled in every panel; change it

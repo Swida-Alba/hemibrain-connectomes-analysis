@@ -47,12 +47,13 @@ class SkeletonPuller:
             return self._state["running"]
 
     def start(self, dataset: str, max_workers: Optional[int] = None,
-              raw: bool = False, mode: Optional[str] = None) -> bool:
+              raw: bool = True, mode: Optional[str] = None) -> bool:
         """Start a background skeleton download. Returns False when one is
         already running.
 
         ``raw`` is retained for callers from the earlier Find Similar UI;
-        Settings passes the explicit ``mode`` (``raw`` or ``fine``).
+        raw SWC is now the default shared cache representation. Settings
+        passes the explicit ``mode="raw"``.
         """
         selected_mode = str(mode or ("raw" if raw else "fast")).lower()
         with self._lock:

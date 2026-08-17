@@ -190,7 +190,8 @@ def create_find_similar_tab():
                     "Raw skeletons fetched by Find Similar, visualization, and "
                     "dataset pulls are always stored as reusable .swc.gz files "
                     "under cache/<dataset>/skeletons/raw_skeletons/. Use "
-                    "Settings → Dataset Cache → Skeleton Cache Pull to prefetch "
+                    "Settings → Dataset Cache → Download All Skeletons "
+                    "to prefetch "
                     "the shared population."
                 ).classes("text-caption drocat-muted")
 
