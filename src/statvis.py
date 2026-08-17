@@ -7644,6 +7644,22 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
     # Keep only existing columns
     cols_to_keep = [c for c in cols_to_keep if c in conn_df.columns]
     bodyid_pairs = conn_df.select(cols_to_keep).unique(subset=['bodyId_pre', 'bodyId_post'])
+
+    # Polars preserves a Null dtype when a whole column contains only nulls.
+    # That is valid for the bodyId-level table, but it cannot be joined to the
+    # String-typed global type-total table below (this is common for untyped
+    # post-synaptic neurons).  Normalize all optional grouping keys before any
+    # aggregation/join so an all-null column remains nullable String rather
+    # than becoming an unjoinable Null column.
+    string_columns = [
+        'type_pre', 'type_post', 'std_label_pre', 'std_label_post',
+        'custom_group_pre', 'custom_group_post',
+    ]
+    bodyid_pairs = bodyid_pairs.with_columns([
+        pl.col(column).cast(pl.Utf8, strict=False).alias(column)
+        for column in string_columns
+        if column in bodyid_pairs.columns
+    ])
     
     # Rename nt_type_pre to nt_type for consistency in downstream processing
     if nt_col == 'nt_type_pre' and 'nt_type_pre' in bodyid_pairs.columns:
@@ -7671,6 +7687,14 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
             global_incoming_pl = pl.from_pandas(global_incoming_weights)
         else:
             global_incoming_pl = global_incoming_weights
+
+        # Match the normalized nullable-string key above.  Without this cast,
+        # an all-null `type_post` on the left is Polars' Null dtype and joining
+        # it to a normal String key raises SchemaError.
+        if 'type_post' in global_incoming_pl.columns:
+            global_incoming_pl = global_incoming_pl.with_columns(
+                pl.col('type_post').cast(pl.Utf8, strict=False).alias('type_post')
+            )
     
     # Check if nt_type exists
     has_nt_type = 'nt_type' in bodyid_pairs.columns

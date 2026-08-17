@@ -125,6 +125,17 @@ class TestDatasetPuller:
         assert fake_fnc["build"].called_with["force_rebuild"] is True
         assert fake_fnc["build"].called_with["batch_size"] == 25
 
+    def test_complete_connection_operation_uses_shared_builder(self, fake_fnc):
+        """The explicit connection action uses the same cache builder as the
+        full-dataset action, with only the UI operation label changed."""
+        fake_fnc["build"] = _FakeBuild()
+        puller = DatasetPuller()
+        assert puller.start("hemibrain:v1.2.1", operation="connections") is True
+        assert _wait_until(lambda: puller.state["done"])
+        assert puller.state["operation"] == "connections"
+        assert fake_fnc["build"].called_with["quiet"] is True
+        assert fake_fnc["build"].called_with["batch_size"] == 100
+
     def test_max_workers_passed_through(self, fake_fnc):
         fake_fnc["build"] = _FakeBuild()
         puller = DatasetPuller()

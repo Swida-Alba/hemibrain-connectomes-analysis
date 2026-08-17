@@ -142,6 +142,119 @@ class TestThresholdedConnectionMap:
         totals = cm.total_incoming_by_bodyid().to_dict(as_series=False)
         assert totals == {"bodyId_post": ["X"], "total_incoming_weight": [3]}
 
+    def test_batch_only_cache_and_mixed_id_dtypes_are_read(self, tmp_path):
+        """A resumable batch cache remains queryable before consolidation."""
+        index_path = tmp_path / "neuron_index.parquet"
+        pl.DataFrame({
+            "bodyId": ["1", "2", "3"],
+            "type": ["T1", "T2", "T1"],
+        }).write_parquet(index_path)
+
+        cache_dir = tmp_path / "cache"
+        batch_dir = cache_dir / "_batch_files"
+        batch_dir.mkdir(parents=True)
+        # Simulate an old batch with numeric IDs and a current batch with
+        # string IDs.  The loader must normalize both before concatenating.
+        pl.DataFrame({
+            "bodyId_pre": [1, 2],
+            "bodyId_post": [2, 3],
+            "weight": [4, 5],
+        }).write_parquet(batch_dir / "batch_000000.parquet")
+        pl.DataFrame({
+            "bodyId_pre": ["1", "2"],
+            "bodyId_post": ["2", "3"],
+            "weight": [4, 6],
+            "roi": ["AL", "MB"],
+            "cached_date": ["today", "today"],
+        }).write_parquet(batch_dir / "batch_000001.parquet")
+
+        cm = ThresholdedConnectionMap(
+            str(cache_dir / "connections.parquet"),
+            str(index_path),
+            min_weight=1,
+        )
+        body = cm.total_incoming_by_bodyid().sort("bodyId_post")
+        assert body.to_dict(as_series=False) == {
+            "bodyId_post": ["2", "3"],
+            "total_incoming_weight": [8, 11],
+        }
+
+
+class TestConnectionCacheLoader:
+    def test_check_cache_accepts_pending_batch_cache(self, tmp_path):
+        import coana
+
+        dataset = "pending:v1"
+        cache_dir = tmp_path / "cache" / "pending_v1" / "_batch_files"
+        cache_dir.mkdir(parents=True)
+        pl.DataFrame({
+            "bodyId_pre": [1],
+            "bodyId_post": [2],
+            "weight": [3],
+        }).write_parquet(cache_dir / "batch_000000.parquet")
+
+        index_path = tmp_path / "neuron_indexes" / "pending_v1" / "neuron_index.parquet"
+        index_path.parent.mkdir(parents=True)
+        pl.DataFrame({"bodyId": ["1"], "type": ["T"]}).write_parquet(index_path)
+
+        fc = object.__new__(coana.FindNeuronConnection)
+        fc.dataset = dataset
+        fc.script_path = str(tmp_path)
+        status = fc._check_cache_exists()
+
+        assert status["has_connections"] is True
+        assert status["has_neuron_index"] is True
+        assert status["is_usable"] is True
+        assert status["connection_count"] == 1
+
+    def test_load_normalizes_mixed_main_and_batch_files(self, tmp_path):
+        import coana
+
+        db_path = tmp_path / "connections.parquet"
+        batch_dir = tmp_path / "_batch_files"
+        batch_dir.mkdir()
+        # Legacy main cache: numeric IDs and no optional columns.
+        pl.DataFrame({
+            "bodyId_pre": [1, 2],
+            "bodyId_post": [2, 3],
+            "weight": [4, 5],
+        }).write_parquet(db_path)
+        # New batch cache: string IDs and optional columns.  The first row is
+        # a duplicate of the legacy row and should not be double-counted.
+        pl.DataFrame({
+            "bodyId_pre": ["1", "2"],
+            "bodyId_post": ["2", "3"],
+            "weight": [4, 6],
+            "roi": ["", "MB"],
+            "cached_date": ["today", "today"],
+        }).write_parquet(batch_dir / "batch_000000.parquet")
+
+        dataset_key = f"test_cache_loader_{tmp_path.name}"
+        fc = object.__new__(coana.FindNeuronConnection)
+        fc._conn_df_cache = None
+        fc._conn_index = None
+        fc._conn_index_post = None
+        fc._conn_db_pre_id_cache = None
+        fc._dataset_safe = dataset_key
+        fc._get_connection_db_path = lambda: str(db_path)
+        fc._vprint = lambda *args, **kwargs: None
+        try:
+            out = fc._load_connection_db()
+            assert out.schema == {
+                "bodyId_pre": pl.String,
+                "bodyId_post": pl.String,
+                "weight": pl.Int64,
+                "roi": pl.String,
+                "cached_date": pl.String,
+            }
+            assert out.height == 3
+            assert out.filter(
+                (pl.col("bodyId_pre") == "2")
+                & (pl.col("bodyId_post") == "3")
+            )["weight"].sort().to_list() == [5, 6]
+        finally:
+            coana._FNC_CACHE.pop(dataset_key, None)
+
 
 class TestConnectionMapInvalidation:
     def test_source_signature_rebuilds_map(self, tmp_path):
@@ -361,6 +474,27 @@ class TestEngineParity:
         )
         t2t3 = rows.loc[("T2", "T3")]
         assert t2t3["traversal_probability"] == pytest.approx(1.0)  # capped pair
+
+    def test_all_null_type_post_is_joinable_with_global_type_totals(self):
+        """Untyped post neurons must fall back to their bodyId without a
+        Polars Null-vs-String join error during type aggregation."""
+        conn = pl.DataFrame({
+            "bodyId_pre": ["A"],
+            "bodyId_post": ["U"],
+            "type_pre": ["T1"],
+            "type_post": [None],
+            "weight": [3],
+        })
+        global_type = pl.DataFrame({
+            "type_post": ["T2"],
+            "total_incoming_weight": [100],
+        })
+        _, conn_type, _ = EnrichConnectionTablePolars(
+            conn,
+            global_incoming_weights=global_type,
+        )
+        assert conn_type.height == 1
+        assert conn_type["type_post"].to_list() == ["U"]
 
     def test_average_is_weight_weighted_mean(self):
         global_type, global_body = self._globals()

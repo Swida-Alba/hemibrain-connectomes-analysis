@@ -49,7 +49,7 @@ def create_settings_tab():
         # two different availability controls.
         dataset_status_card()
 
-        # Dataset cache (pull full dataset to local)
+        # Dataset cache (pull full dataset or explicitly pull all connections)
         from ..dataset_pull import DatasetPuller
 
         with ui.card().classes("w-full drocat-card"):
@@ -59,7 +59,9 @@ def create_settings_tab():
                 "(cache/<dataset>/connections.parquet + neuron_indexes/<dataset>/"
                 "neuron_index.parquet). Re-running "
                 "resumes interrupted builds from their checkpoint; 'Force rebuild' clears "
-                "a broken cache first and rebuilds it completely."
+                "a broken cache first and rebuilds it completely. 'Pull Complete Connections' "
+                "is an explicit connection-cache action for the selected dataset; it uses "
+                "the same resumable, batched builder and shared connections.parquet cache."
             ).classes("text-caption drocat-muted")
 
             puller = DatasetPuller()
@@ -107,6 +109,9 @@ def create_settings_tab():
 
             with ui.row().classes("items-center gap-2"):
                 run_btn = ui.button("Pull Full Dataset", icon="download", color="primary")
+                connection_run_btn = ui.button(
+                    "Pull Complete Connections", icon="hub", color="secondary"
+                ).props("outline")
                 cancel_btn = ui.button("Cancel", icon="stop", color="negative").props("outline")
                 cancel_btn.set_enabled(False)
 
@@ -117,9 +122,14 @@ def create_settings_tab():
 
             def refresh_pull_state():
                 st = puller.state
-                if not st["running"] and run_btn.enabled:
+                if (
+                    not st["running"]
+                    and run_btn.enabled
+                    and connection_run_btn.enabled
+                ):
                     return
                 run_btn.set_enabled(not st["running"])
+                connection_run_btn.set_enabled(not st["running"])
                 cancel_btn.set_enabled(st["running"])
                 ds_select.set_enabled(not st["running"])
                 force_rebuild.set_enabled(not st["running"])
@@ -130,8 +140,13 @@ def create_settings_tab():
                     total = st["total"] or 1
                     frac = min(st["current"] / total, 1.0)
                     progress.set_value(frac)
+                    operation_label = (
+                        "complete connections"
+                        if st.get("operation") == "connections"
+                        else "full dataset"
+                    )
                     status_label.text = (
-                        f"Pulling {st['dataset']}: {st['info']} "
+                        f"Pulling {operation_label} for {st['dataset']}: {st['info']} "
                         f"({st['current']:,}/{st['total']:,} neurons, "
                         f"{frac * 100:.2f}%) | {_format_eta(st)}"
                     )
@@ -149,10 +164,15 @@ def create_settings_tab():
                     result_label.text = f"❌ {st['error']}"
                 else:
                     s = st["summary"] or {}
+                    operation_label = (
+                        "Complete connection pull"
+                        if st.get("operation") == "connections"
+                        else "Full dataset pull"
+                    )
                     head = (
                         "⏹ Cancelled - fetched batches consolidated; re-run to resume."
                         if st["cancelled"]
-                        else "✅ Pull complete."
+                        else f"✅ {operation_label} complete."
                     )
                     result_label.text = (
                         f"{head} Target: {s.get('total_neurons', 0):,} | "
@@ -164,15 +184,17 @@ def create_settings_tab():
                     )
                     status_label.text = "Idle"
 
-            def start_pull():
+            def _start_pull(operation: str):
                 ok = puller.start(
                     str(ds_select.value),
                     force_rebuild=force_rebuild.value,
                     batch_size=int(batch_input.value or 100),
                     max_workers=int(parallel_input.value or 1),
+                    operation=operation,
                 )
                 if ok:
                     run_btn.set_enabled(False)
+                    connection_run_btn.set_enabled(False)
                     cancel_btn.set_enabled(True)
                     result_label.text = ""
                     progress.set_value(0)
@@ -180,11 +202,18 @@ def create_settings_tab():
                 else:
                     ui.notify("A dataset pull is already running", type="warning")
 
+            def start_pull():
+                _start_pull("full_dataset")
+
+            def start_connection_pull():
+                _start_pull("connections")
+
             def stop_pull():
                 puller.cancel()
                 status_label.text = "Cancelling after the current batch..."
 
             run_btn.on_click(start_pull)
+            connection_run_btn.on_click(start_connection_pull)
             cancel_btn.on_click(stop_pull)
             ui.timer(0.5, refresh_pull_state)
 

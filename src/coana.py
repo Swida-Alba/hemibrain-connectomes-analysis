@@ -2195,7 +2195,8 @@ class FindNeuronConnection:
         Returns:
         --------
         dict : Cache status with keys:
-            - 'has_connections': bool - True if connections.parquet exists
+            - 'has_connections': bool - True if connections.parquet or
+              resumable connection batches exist
             - 'has_neuron_index': bool - True if neuron_index.parquet exists
             - 'has_dataset': bool - True if dataset CSV files exist
             - 'is_usable': bool - True if cache appears sufficient for basic operations
@@ -2208,10 +2209,19 @@ class FindNeuronConnection:
         datasets_folder = os.path.join(self.script_path, 'datasets', dataset_safe)
         
         conn_path = os.path.join(cache_folder, 'connections.parquet')
+        batch_dir = os.path.join(cache_folder, '_batch_files')
+        batch_files = []
+        if os.path.isdir(batch_dir):
+            batch_files = sorted(
+                os.path.join(batch_dir, name)
+                for name in os.listdir(batch_dir)
+                if name.startswith('batch_') and name.endswith('.parquet')
+            )
         index_path = os.path.join(index_folder, 'neuron_index.parquet')
         neuron_csv = os.path.join(datasets_folder, f"{dataset_safe}_allneurons_neuron_df.csv")
         
-        has_connections = os.path.exists(conn_path)
+        connection_files = ([conn_path] if os.path.exists(conn_path) else []) + batch_files
+        has_connections = bool(connection_files)
         has_neuron_index = os.path.exists(index_path)
         has_dataset = os.path.exists(neuron_csv)
         
@@ -2225,8 +2235,12 @@ class FindNeuronConnection:
         if has_connections:
             try:
                 import polars as pl
-                # Use lazy scan to just get row count without loading all data
-                connection_count = pl.scan_parquet(conn_path).select(pl.len()).collect().item()
+                # Count lazily; the full loader later normalizes mixed schemas
+                # and deduplicates main+batch rows before serving queries.
+                connection_count = sum(
+                    pl.scan_parquet(path).select(pl.len()).collect().item()
+                    for path in connection_files
+                )
             except Exception:
                 pass
         
@@ -2678,6 +2692,44 @@ class FindNeuronConnection:
                 level='full',
             )
 
+    @staticmethod
+    def _scan_connection_cache_file(path):
+        """Return a normalized lazy frame for one connection-cache parquet.
+
+        Cache files written by older DROCAT versions do not all have the same
+        optional columns or bodyId dtype. Selecting a schema from the first
+        file and applying it blindly to every batch makes a mixed cache fail
+        to load, so each file is normalized independently first.
+        """
+        lf = pl.scan_parquet(path)
+        names = set(lf.collect_schema().names())
+        required = {'bodyId_pre', 'bodyId_post', 'weight'}
+        missing = required - names
+        if missing:
+            raise ValueError(
+                f'connection cache file {path!r} is missing required columns: '
+                f'{sorted(missing)}'
+            )
+
+        expressions = [
+            pl.col('bodyId_pre').cast(pl.Utf8, strict=False).alias('bodyId_pre'),
+            pl.col('bodyId_post').cast(pl.Utf8, strict=False).alias('bodyId_post'),
+            pl.col('weight').cast(pl.Int64, strict=False).alias('weight'),
+        ]
+        if 'roi' in names:
+            expressions.append(
+                pl.col('roi').cast(pl.Utf8, strict=False).alias('roi')
+            )
+        else:
+            expressions.append(pl.lit('', dtype=pl.Utf8).alias('roi'))
+        if 'cached_date' in names:
+            expressions.append(
+                pl.col('cached_date').cast(pl.Utf8, strict=False).alias('cached_date')
+            )
+        else:
+            expressions.append(pl.lit('', dtype=pl.Utf8).alias('cached_date'))
+        return lf.select(expressions)
+
     def _load_connection_db(self, force_reload=False):
         '''
         Load unified connection database with in-memory caching and O(1) index.
@@ -2786,48 +2838,62 @@ class FindNeuronConnection:
                 except Exception as e:
                     self._vprint(f'  ⚠️ Error importing FlyWire CSV: {e}', level='full')
         
-        if os.path.exists(db_path):
+        # Include resumable batch files even when the main parquet has not
+        # been created yet. A previous interrupted pull can legitimately be
+        # in that state, and those rows are still valid cache data.
+        cache_dir = os.path.dirname(db_path)
+        batch_dir = os.path.join(cache_dir, '_batch_files')
+        batch_files = []
+        if os.path.exists(batch_dir):
+            batch_files = sorted([
+                os.path.join(batch_dir, f)
+                for f in os.listdir(batch_dir)
+                if f.startswith('batch_') and f.endswith('.parquet')
+            ])
+        cache_files = ([db_path] if os.path.exists(db_path) else []) + batch_files
+
+        if cache_files:
             try:
-                file_size_mb = os.path.getsize(db_path) / (1024 * 1024)
+                file_size_mb = sum(
+                    os.path.getsize(path) for path in cache_files
+                    if os.path.exists(path)
+                ) / (1024 * 1024)
                 self._vprint(f'  ⏳ Loading connection database ({file_size_mb:.1f} MB)...', level='always')
-                
-                # Check for batch files that haven't been consolidated
-                cache_dir = os.path.dirname(db_path)
-                batch_dir = os.path.join(cache_dir, '_batch_files')
-                batch_files = []
-                if os.path.exists(batch_dir):
-                    batch_files = sorted([
-                        os.path.join(batch_dir, f) 
-                        for f in os.listdir(batch_dir) 
-                        if f.startswith('batch_') and f.endswith('.parquet')
-                    ])
-                
+
                 # Use Polars for memory-efficient loading
                 self._vprint(f'  ⏳ Using Polars to load {len(batch_files)} batch files + main cache...', level='always')
-                
-                # Load all files with Polars
-                all_files = [db_path] + batch_files
-                
-                # Common columns to avoid schema mismatch
-                # We scan the first file to get schema, assuming consistency
-                lf_schema = pl.scan_parquet(db_path).collect_schema()
-                common_cols = ['bodyId_pre', 'bodyId_post', 'weight', 'roi', 'cached_date']
-                available_cols = [c for c in common_cols if c in lf_schema.names()]
-                
-                # Scan and concat lazily with column selection, then collect
+
+                # Normalize every file independently; old main caches and new
+                # batch files can otherwise disagree on optional columns or
+                # bodyId dtypes. A malformed leftover file must not hide valid
+                # rows in the other files.
                 lazy_frames = []
-                for f in all_files:
-                    lf = pl.scan_parquet(f)
-                    lazy_frames.append(lf.select(available_cols))
+                failed_files = []
+                for path in cache_files:
+                    try:
+                        lazy_frames.append(self._scan_connection_cache_file(path))
+                    except Exception as exc:
+                        failed_files.append((path, exc))
+                        self._vprint(
+                            f'  ⚠️ Skipping unreadable connection cache file '
+                            f'{path}: {exc}', level='always'
+                        )
+                if not lazy_frames:
+                    if failed_files:
+                        raise failed_files[0][1]
+                    raise ValueError('no readable connection cache files found')
+
+                df = pl.concat(lazy_frames, how='vertical_relaxed').collect()
+                if not df.is_empty():
+                    # A crash can leave a main parquet plus its already-merged
+                    # batch files. Deduplicate at the read boundary so a
+                    # resumed query never double-counts those rows.
+                    df = df.unique(
+                        subset=['bodyId_pre', 'bodyId_post', 'roi'],
+                        keep='last',
+                        maintain_order=True,
+                    )
                 
-                df = pl.concat(lazy_frames, how='diagonal_relaxed').collect()
-                
-                # Ensure string types
-                df = df.with_columns([
-                    pl.col('bodyId_pre').cast(pl.Utf8),
-                    pl.col('bodyId_post').cast(pl.Utf8)
-                ])
-                    
                 self._vprint(f'  ✓ Loaded {len(df):,} cached connections', level='always')
                 
                 # Cache in memory and build index
@@ -2838,12 +2904,14 @@ class FindNeuronConnection:
                 self._vprint(f'  ⚠️ Warning: Failed to load connection database: {e}', level='full')
                 self._conn_df_cache = pl.DataFrame(schema={'bodyId_pre': pl.Utf8, 'bodyId_post': pl.Utf8, 'weight': pl.Int64, 'roi': pl.Utf8, 'cached_date': pl.Utf8})
                 self._conn_index = {}
+                self._conn_index_post = {}
                 return self._conn_df_cache
         
         # No cache exists - return empty DataFrame
         self._vprint(f'  ℹ️ No connection cache found. Starting fresh.', level='full')
         self._conn_df_cache = pl.DataFrame(schema={'bodyId_pre': pl.Utf8, 'bodyId_post': pl.Utf8, 'weight': pl.Int64, 'roi': pl.Utf8, 'cached_date': pl.Utf8})
         self._conn_index = {}
+        self._conn_index_post = {}
         return self._conn_df_cache
 
     def _build_conn_index(self):
@@ -3063,23 +3131,14 @@ class FindNeuronConnection:
             import polars as pl
             print(f"  Using Polars for memory-efficient consolidation...")
             
-            # Common columns we need (ignore extras like conn_roiInfo)
-            common_cols = ['bodyId_pre', 'bodyId_post', 'weight', 'roi', 'cached_date']
-            
             # Collect all parquet files to merge
             all_files = batch_files.copy()
             if os.path.exists(db_path):
                 all_files.insert(0, db_path)
             
-            # Use lazy evaluation to minimize memory usage
-            # Select only common columns to avoid schema mismatch
-            lazy_frames = []
-            for f in all_files:
-                lf = pl.scan_parquet(f)
-                # Get available columns and select only the ones we need
-                available_cols = [c for c in common_cols if c in lf.collect_schema().names()]
-                lazy_frames.append(lf.select(available_cols))
-            
+            # Normalize each file independently so old main caches and new
+            # batch files can be consolidated even when their schemas differ.
+            lazy_frames = [self._scan_connection_cache_file(f) for f in all_files]
             combined = pl.concat(lazy_frames, how='diagonal_relaxed')
             
             # Deduplicate if requested (using lazy API)
@@ -3092,6 +3151,7 @@ class FindNeuronConnection:
                     combined = combined.unique(subset=merge_cols, keep='last')
             
             # Write to temp file, then replace original
+            os.makedirs(os.path.dirname(db_path), exist_ok=True)
             tmp_path = db_path + '.tmp'
             print(f"  Writing consolidated cache...")
             combined.collect().write_parquet(tmp_path, compression='gzip')
@@ -3100,13 +3160,31 @@ class FindNeuronConnection:
             total_count = pl.scan_parquet(tmp_path).select(pl.len()).collect().item()
             
             # Replace original with consolidated
-            if os.path.exists(db_path):
-                os.remove(db_path)
-            os.rename(tmp_path, db_path)
+            # Replace atomically. Removing the live cache first leaves a
+            # window where an interrupted consolidation makes the cache
+            # unreadable; os.replace keeps the previous file until the new
+            # parquet is complete.
+            os.replace(tmp_path, db_path)
             
             # Clean up batch files
             import shutil
             shutil.rmtree(batch_dir)
+
+            # The file on disk is now newer than any frame/index loaded
+            # earlier in this process. Drop those snapshots so the next cache
+            # query reads the consolidated parquet instead of returning stale
+            # rows from the shared module cache.
+            self._conn_df_cache = None
+            self._conn_index = None
+            self._conn_index_post = None
+            self._conn_db_pre_id_cache = None
+            if hasattr(self, '_connection_maps'):
+                self._connection_maps.clear()
+            global _FNC_CACHE
+            if getattr(self, '_dataset_safe', None) in _FNC_CACHE:
+                _FNC_CACHE[self._dataset_safe]['conn_df'] = None
+                _FNC_CACHE[self._dataset_safe]['conn_index'] = None
+                _FNC_CACHE[self._dataset_safe]['conn_index_post'] = None
             
             print(f"  ✓ Consolidated to {total_count:,} connections")
             return total_count
@@ -4481,6 +4559,23 @@ class FindNeuronConnection:
     # ============================================================================
     # Main Fetch Method (replaces old _fetch_connections_with_cache)
     # ============================================================================
+
+    def _fetch_path_connections(self, upstream_bodyIds, downstream_bodyIds=None):
+        """Fetch one path-discovery layer through the shared connection cache.
+
+        FindPath (legacy complete-path mode), FindAllPath, and
+        FindShortestPath all use this entry point.  The implementation below
+        owns the persistent ``connections.parquet`` lookup/save behavior and
+        the batched NeuPrint pull, so path modes cannot silently diverge in
+        cache location or fetch strategy.
+        """
+        return self._fetch_connections_with_cache(
+            upstream_bodyIds=upstream_bodyIds,
+            downstream_bodyIds=downstream_bodyIds,
+            min_weight=self.min_synapse_num,
+            min_conn_ratio=self.min_ratio,
+            min_traversal_prob=self.min_traversal_probability,
+        )
     
     def _fetch_connections_with_cache(self, upstream_bodyIds, downstream_bodyIds=None, 
                                       min_weight=None, min_traversal_prob=None, min_conn_ratio=None):
@@ -4696,11 +4791,22 @@ class FindNeuronConnection:
                                         )
                                     else:
                                         from neuprint import fetch_adjacencies
+                                        # NeuPrint's own fetch_adjacencies()
+                                        # wraps every call in a trange over its
+                                        # default 200-ID chunks.  DROCAT
+                                        # already owns the outer batch and
+                                        # progress bar, so make this one API
+                                        # call a single NeuPrint batch; this
+                                        # removes the noisy nested 2/4/5/5
+                                        # bars from the output stream.
+                                        adjacency_kwargs = dict(self.kwargs_fetch)
+                                        adjacency_kwargs.pop('batch_size', None)
+                                        adjacency_kwargs['batch_size'] = max(1, len(b))
                                         neuron_df, roi_conn_df = fetch_adjacencies(
                                             sources=b,
                                             targets=neuprint_downstream,
                                             min_total_weight=1,
-                                            **self.kwargs_fetch
+                                            **adjacency_kwargs
                                         )
                                         # roi_conn_df already has bodyId_pre, bodyId_post, roi, weight
                                         return roi_conn_df
@@ -4733,6 +4839,11 @@ class FindNeuronConnection:
                                     failed_batches.append(batch_idx + 1)
                                 finally:
                                     progress.update(len(batch))
+                                    if hasattr(progress, 'set_postfix_str'):
+                                        progress.set_postfix_str(
+                                            f'batch {batch_idx + 1}/{len(batches)}',
+                                            refresh=True,
+                                        )
                         finally:
                             if progress is not None:
                                 progress.close()
@@ -4849,13 +4960,30 @@ class FindNeuronConnection:
         """
         db_path = self._get_connection_db_path()
         index_path = self._get_neuron_index_path()
-        if self._conn_df_cache is not None and not self._is_empty_df(self._conn_df_cache):
+        batch_dir = os.path.join(os.path.dirname(db_path), '_batch_files')
+        batch_signature = ()
+        if os.path.isdir(batch_dir):
+            batch_signature = tuple(
+                (path, os.path.getmtime(path), os.path.getsize(path))
+                for path in sorted(
+                    os.path.join(batch_dir, name)
+                    for name in os.listdir(batch_dir)
+                    if name.startswith('batch_') and name.endswith('.parquet')
+                )
+                if os.path.exists(path)
+            )
+        # A pending batch directory is newer cache state than the in-memory
+        # snapshot.  Force maps to read disk in that case; otherwise an
+        # interrupted/resumable build could be invisible until the process is
+        # restarted.
+        if self._conn_df_cache is not None and not self._is_empty_df(self._conn_df_cache) and not batch_signature:
             return ('mem', id(self._conn_df_cache))
         try:
             return ('disk', db_path, index_path,
-                    os.path.getmtime(db_path), os.path.getmtime(index_path))
+                    os.path.getmtime(db_path), os.path.getmtime(index_path),
+                    batch_signature)
         except OSError:
-            return ('disk', db_path, index_path, None, None)
+            return ('disk', db_path, index_path, None, None, batch_signature)
 
     def _connection_map(self, min_weight: int = 1) -> 'ThresholdedConnectionMap':
         """Return the D_t map for cutoff *min_weight* (lazily built, cached).
@@ -4865,15 +4993,16 @@ class FindNeuronConnection:
         so the bodyId- and type-level denominators always come from the same
         thresholded graph.
         """
-        cm = self._connection_maps.get(min_weight)
         signature = self._connection_source_signature()
+        cm = self._connection_maps.get(min_weight)
         if cm is None or cm.source_signature != signature:
             cm = ThresholdedConnectionMap(
                 db_path=self._get_connection_db_path(),
                 neuron_index_path=self._get_neuron_index_path(),
                 min_weight=min_weight,
                 conn_frame=(
-                    None if self._conn_df_cache is None
+                    None if signature[0] == 'disk'
+                    or self._conn_df_cache is None
                     or self._is_empty_df(self._conn_df_cache)
                     else self._conn_df_cache
                 ),
@@ -4983,11 +5112,14 @@ class FindNeuronConnection:
             
             # Fetch all connections TO the post-synaptic neurons
             # Note: targets=post_ints, sources=None means ALL sources
+            adjacency_kwargs = dict(self.kwargs_fetch)
+            adjacency_kwargs.pop('batch_size', None)
+            adjacency_kwargs['batch_size'] = max(1, len(post_ints))
             neuron_df, roi_conn_df = fetch_adjacencies(
                 sources=None,  # All sources
                 targets=post_ints,  # To these targets
                 min_total_weight=min_weight,
-                **self.kwargs_fetch
+                **adjacency_kwargs
             )
             
             if roi_conn_df is not None and len(roi_conn_df) > 0:
@@ -5824,7 +5956,11 @@ class FindNeuronConnection:
                     gc.collect()
                     if not quiet and hasattr(batch_iter, 'set_postfix_str'):
                         mem_usage = f"{process.memory_info().rss / 1024 / 1024:.0f}MB" if process else "?"
-                        batch_iter.set_postfix_str(f'neurons={len(newly_cached):,}, conns={batch_connections:,} Mem:{mem_usage}')
+                        batch_iter.set_postfix_str(
+                            f'batch={batch_num}/{total_batches}, '
+                            f'neurons={len(newly_cached):,}, '
+                            f'conns={batch_connections:,} Mem:{mem_usage}'
+                        )
                 except _FetchCancelled:
                     # The pull was cancelled mid-batch: stop cleanly, do NOT
                     # record the batch as failed (re-run resumes it).
@@ -5834,7 +5970,11 @@ class FindNeuronConnection:
                     if not quiet:
                         _print(f"\n  ⚠️ Batch {batch_num} error: {type(e).__name__}: {e}")
                         if hasattr(batch_iter, 'set_postfix_str'):
-                            batch_iter.set_postfix_str(f'neurons={len(newly_cached):,}, failed={len(failed_neurons)}')
+                            batch_iter.set_postfix_str(
+                                f'batch={batch_num}/{total_batches}, '
+                                f'neurons={len(newly_cached):,}, '
+                                f'failed={len(failed_neurons)}'
+                            )
 
             def finish_cancelled() -> None:
                 nonlocal cancelled
@@ -6055,11 +6195,14 @@ class FindNeuronConnection:
                         **self.kwargs_fetch
                     )
                 else:
+                    adjacency_kwargs = dict(self.kwargs_fetch)
+                    adjacency_kwargs.pop('batch_size', None)
+                    adjacency_kwargs['batch_size'] = max(1, len(upstream_ints))
                     neuron_df, roi_conn_df = fetch_adjacencies(
                         sources=upstream_ints,
                         targets=downstream_ints,
                         min_total_weight=1,
-                        **self.kwargs_fetch
+                        **adjacency_kwargs
                     )
                     # roi_conn_df already has bodyId_pre, bodyId_post, roi, weight
                     return roi_conn_df
@@ -7182,12 +7325,9 @@ class FindNeuronConnection:
         # This ensures neurons are marked as 'downstream_complete' in the cache
         # and avoids potential issues with API-side target filtering (especially for FlyWire)
         print('  (Fetching all downstream connections for robust caching)')
-        self.conn_df = self._fetch_connections_with_cache(
+        self.conn_df = self._fetch_path_connections(
             upstream_bodyIds=source_bodyIds,
             downstream_bodyIds=None,  # Fetch ALL downstream
-            min_weight=self.min_synapse_num,
-            min_conn_ratio=self.min_ratio,
-            min_traversal_prob=self.min_traversal_probability
         )
         
         # Filter to only keep connections within the target set
@@ -8241,12 +8381,9 @@ class FindNeuronConnection:
         # searching for target neurons
         while Flag and currLayer <= self.max_interlayer:
             print(f'Layer {currLayer}->{currLayer+1}:')
-            conn_df = self._fetch_connections_with_cache(
+            conn_df = self._fetch_path_connections(
                 upstream_bodyIds=source_ID.tolist(),
                 downstream_bodyIds=None,
-                min_weight=self.min_synapse_num,
-                min_conn_ratio=self.min_ratio,
-                min_traversal_prob=self.min_traversal_probability
             )
             
             # Ensure connection dataframe has string bodyIds
@@ -9488,12 +9625,9 @@ class FindNeuronConnection:
                     self._vprint(f'layer {layer_idx}->{layer_idx+1}: processing...', level='simple', end='', flush=True)
                 elif self.verbose_mode == 'full':
                     self._vprint(f'Layer {layer_idx}->{layer_idx+1}:', level='full')
-                conn_df = self._fetch_connections_with_cache(
+                conn_df = self._fetch_path_connections(
                     upstream_bodyIds=neurons_to_fetch,
                     downstream_bodyIds=None,
-                    min_weight=self.min_synapse_num,
-                    min_conn_ratio=self.min_ratio,
-                    min_traversal_prob=self.min_traversal_probability
                 )
                 
                 # Convert to Polars for faster processing

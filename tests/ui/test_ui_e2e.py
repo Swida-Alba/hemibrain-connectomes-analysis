@@ -2142,8 +2142,8 @@ class TestDatasetService:
         }
 
     def test_settings_dataset_cache_card(self):
-        """The Settings tab exposes the 'Pull Full Dataset' operation: a
-        dataset selector, a force-rebuild option, run/cancel buttons, and a
+        """The Settings tab exposes full-dataset and complete-connection pulls:
+        a dataset selector, a force-rebuild option, run/cancel buttons, and a
         progress element - all wired to a DatasetPuller."""
         from nicegui import Client
         from nicegui.page import page
@@ -2170,6 +2170,10 @@ class TestDatasetService:
         assert "Parallel workers" in labels
         assert any(
             getattr(el, "text", None) == "Pull Full Dataset"
+            for el in client.elements.values()
+        )
+        assert any(
+            getattr(el, "text", None) == "Pull Complete Connections"
             for el in client.elements.values()
         )
         assert any(

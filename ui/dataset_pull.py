@@ -33,6 +33,7 @@ class DatasetPuller:
         self._state: Dict = {
             "running": False,
             "dataset": None,
+            "operation": "full_dataset",
             "current": 0,
             "total": 0,
             "info": "",
@@ -61,14 +62,22 @@ class DatasetPuller:
         force_rebuild: bool = False,
         batch_size: int = 100,
         max_workers: Optional[int] = None,
+        operation: str = "full_dataset",
     ) -> bool:
-        """Start a background pull. Returns False when one is already running."""
+        """Start a background pull.
+
+        ``operation`` is a UI label (``full_dataset`` or ``connections``);
+        both operations intentionally use the same resumable connection-cache
+        builder so they share the same parquet cache and batching behavior.
+        Returns False when one is already running.
+        """
         with self._lock:
             if self._state["running"]:
                 return False
             self._state = {
                 "running": True,
                 "dataset": dataset,
+                "operation": operation,
                 "current": 0,
                 "total": 0,
                 "info": "Connecting to dataset...",

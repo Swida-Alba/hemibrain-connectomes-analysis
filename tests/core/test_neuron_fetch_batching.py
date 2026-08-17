@@ -184,6 +184,7 @@ class TestFetchConnectionsBulk:
 
         def flaky_adj(sources, targets=None, min_total_weight=1, **kw):
             attempts['n'] += 1
+            assert kw.get('batch_size') == len(sources)
             if attempts['n'] < 3:
                 raise ConnectionError('server not responding')
             return pd.DataFrame(), _conn_df(sources)

@@ -56,6 +56,12 @@ class ThresholdedConnectionMap:
         their bodyId at type level and served by the bodyId-level table).
         """
         index = pl.read_parquet(self._index_path, columns=["bodyId", "type"])
+        # Connection caches are normalized to string body IDs, but older
+        # parquet files may have stored them as integers.  Normalize the
+        # lookup side as well so type-level totals work for both schemas.
+        index = index.with_columns(
+            pl.col("bodyId").cast(pl.Utf8, strict=False).alias("bodyId")
+        )
         index = index.unique(subset=["bodyId"], keep="last")
         if "type" in index.columns:
             index = index.filter(
@@ -71,7 +77,61 @@ class ThresholdedConnectionMap:
                 conn = pl.from_pandas(conn)
             lazy = conn.lazy()
         else:
-            lazy = pl.scan_parquet(self._db_path)
+            # A cancelled/resumable cache build can leave only batch parquet
+            # files until consolidation runs.  Read those files too, and
+            # tolerate the optional-column differences found in older cache
+            # generations.
+            import os
+            from pathlib import Path
+
+            paths = []
+            if self._db_path and os.path.exists(self._db_path):
+                paths.append(self._db_path)
+            if self._db_path:
+                batch_dir = Path(self._db_path).parent / "_batch_files"
+                paths.extend(str(path) for path in sorted(batch_dir.glob("batch_*.parquet")))
+            if not paths:
+                return pl.LazyFrame({
+                    "bodyId_pre": pl.Series([], dtype=pl.Utf8),
+                    "bodyId_post": pl.Series([], dtype=pl.Utf8),
+                    "weight": pl.Series([], dtype=pl.Int64),
+                })
+            # Scan each file separately.  Passing a list of parquet files to
+            # scan_parquet makes Polars choose one physical schema for the
+            # whole scan before the casts below run; a legacy numeric batch
+            # followed by a string-ID batch can therefore still fail during
+            # the union.  Selecting/casting each file first keeps mixed cache
+            # generations readable.
+            required = {"bodyId_pre", "bodyId_post", "weight"}
+            lazy_frames = []
+            for path in paths:
+                frame = pl.scan_parquet(path)
+                names = set(frame.collect_schema().names())
+                missing = required - names
+                if missing:
+                    continue
+                lazy_frames.append(
+                    frame.select([
+                        pl.col("bodyId_pre").cast(pl.Utf8, strict=False).alias("bodyId_pre"),
+                        pl.col("bodyId_post").cast(pl.Utf8, strict=False).alias("bodyId_post"),
+                        pl.col("weight").cast(pl.Int64, strict=False).alias("weight"),
+                    ])
+                )
+            if not lazy_frames:
+                return pl.LazyFrame({
+                    "bodyId_pre": pl.Series([], dtype=pl.Utf8),
+                    "bodyId_post": pl.Series([], dtype=pl.Utf8),
+                    "weight": pl.Series([], dtype=pl.Int64),
+                })
+            lazy = pl.concat(lazy_frames, how="vertical_relaxed")
+
+        # Normalize IDs at the read boundary.  This covers both the on-disk
+        # cache and callers that provide an in-memory pandas frame.
+        lazy = lazy.with_columns([
+            pl.col("bodyId_pre").cast(pl.Utf8, strict=False).alias("bodyId_pre"),
+            pl.col("bodyId_post").cast(pl.Utf8, strict=False).alias("bodyId_post"),
+            pl.col("weight").cast(pl.Int64, strict=False).alias("weight"),
+        ])
         if self._min_weight > 1:
             lazy = lazy.filter(pl.col("weight") >= self._min_weight)
         return lazy

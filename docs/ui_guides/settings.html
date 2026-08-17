@@ -48,6 +48,16 @@
     <tr><td>not ready</td><td>No token or no data</td></tr>
   </table>
 
+  <h2>Dataset and connection cache</h2>
+  <p>In <b>Dataset Cache</b>, choose a dataset and set the batch size and
+    parallel worker count. <b>Pull Full Dataset</b> builds the local neuron
+    index and the resumable connection cache. <b>Pull Complete Connections</b>
+    provides an explicit connection-cache pull for the selected dataset. Both
+    actions use the same batched builder and shared
+    <code>cache/&lt;dataset&gt;/connections.parquet</code> cache, so either action
+    can resume an interrupted pull. Enable <b>Force rebuild</b> only when the
+    existing connection cache needs to be replaced.</p>
+
   <h2>Output settings</h2>
   <p><b>Default Output Directory</b> is pre-filled in every panel; change it
     here and click <b>Save Default Directory</b>. Each run creates its own
