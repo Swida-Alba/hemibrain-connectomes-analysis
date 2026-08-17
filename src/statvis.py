@@ -162,11 +162,11 @@ def _get_cached_neuron_df(dataset: str, dataset_path_body: str):
     
     # File paths
     neuron_csv = dataset_path_body + '_neuron_df.csv'
-    roi_csv = dataset_path_body + '_roi_count_df.csv'
-    
+    roi_table = roi_count_table_path(dataset_path_body)
+
     # Load using fast loader (handles parquet/polars/pandas priority)
     ndf = _load_dataframe_fast(neuron_csv)
-    rdf = _load_dataframe_fast(roi_csv)
+    rdf = _load_dataframe_fast(roi_table)
     
     # Ensure bodyId is int64 for neuprint/navis compatibility
     # This prevents "No neurons matching the given criteria" errors
@@ -269,6 +269,18 @@ def _get_dataset_path_body(dataset: str) -> tuple[str, str, str]:
     return dataset_normalized, dataset_dir, dataset_path_body
 
 
+def roi_count_table_path(dataset_path_body: str) -> str:
+    """Path of a dataset's ROI-count table: parquet when present, else CSV.
+
+    ``pull_dataset`` writes ``_roi_count_df.parquet`` (zstd); CSVs from older
+    pulls are still a valid source, so readers resolve whichever exists.
+    """
+    parquet = dataset_path_body + '_roi_count_df.parquet'
+    if os.path.exists(parquet):
+        return parquet
+    return dataset_path_body + '_roi_count_df.csv'
+
+
 def _ensure_local_dataset_files(dataset: str, client=None, verbose: bool = True) -> tuple[str, str]:
     """
     Ensure local dataset CSVs exist exactly once per dataset per process.
@@ -281,20 +293,20 @@ def _ensure_local_dataset_files(dataset: str, client=None, verbose: bool = True)
 
     dataset_normalized, dataset_dir, dataset_path_body = _get_dataset_path_body(dataset)
     neuron_csv = dataset_path_body + '_neuron_df.csv'
-    roi_csv = dataset_path_body + '_roi_count_df.csv'
+    roi_table = roi_count_table_path(dataset_path_body)
 
-    if os.path.exists(neuron_csv) and os.path.exists(roi_csv):
+    if os.path.exists(neuron_csv) and os.path.exists(roi_table):
         return dataset_normalized, dataset_path_body
 
     if dataset_normalized in _FAILED_DATASET_DOWNLOADS:
         raise FileNotFoundError(
-            f"Dataset '{dataset}' is still missing local CSV files after a previous pull attempt. "
-            f"Expected: {neuron_csv} and {roi_csv}"
+            f"Dataset '{dataset}' is still missing local data files after a previous pull attempt. "
+            f"Expected: {neuron_csv} and {roi_table}"
         )
 
     lock = _DATASET_DOWNLOAD_LOCKS.setdefault(dataset_normalized, threading.Lock())
     with lock:
-        if os.path.exists(neuron_csv) and os.path.exists(roi_csv):
+        if os.path.exists(neuron_csv) and os.path.exists(roi_count_table_path(dataset_path_body)):
             return dataset_normalized, dataset_path_body
 
         if verbose:
@@ -303,7 +315,6 @@ def _ensure_local_dataset_files(dataset: str, client=None, verbose: bool = True)
         os.makedirs(dataset_dir, exist_ok=True)
         dataset_path_body = os.path.join(dataset_dir, f"{dataset_normalized}_allneurons")
         neuron_csv = dataset_path_body + '_neuron_df.csv'
-        roi_csv = dataset_path_body + '_roi_count_df.csv'
 
         try:
             pull_dataset(dataset, save_path=dataset_path_body, omitNoneType=False, client=client)
@@ -311,11 +322,11 @@ def _ensure_local_dataset_files(dataset: str, client=None, verbose: bool = True)
             _FAILED_DATASET_DOWNLOADS.add(dataset_normalized)
             raise
 
-        if not os.path.exists(neuron_csv) or not os.path.exists(roi_csv):
+        if not os.path.exists(neuron_csv) or not os.path.exists(roi_count_table_path(dataset_path_body)):
             _FAILED_DATASET_DOWNLOADS.add(dataset_normalized)
             raise FileNotFoundError(
                 f"pull_dataset('{dataset}') completed without creating the expected files: "
-                f"{neuron_csv} and {roi_csv}"
+                f"{neuron_csv} and {dataset_path_body + '_roi_count_df.parquet'}"
             )
 
         _FAILED_DATASET_DOWNLOADS.discard(dataset_normalized)
@@ -1245,7 +1256,8 @@ def _build_dataset_metadata(dataset, neuron_df, roi_count_df, client=None):
 def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch_size=2000, fetch_fn=None, drop_roi_cols=True):
     '''
     Download the complete neuron table of a NeuPrint dataset (including
-    neurons with type=None) and save it as CSV.
+    neurons with type=None) and save it as CSV (neurons) and zstd parquet
+    (ROI counts).
 
     The download is CHUNKED, time-bounded and retried: fetching the whole
     dataset in one ``fetch_neurons(None)`` call has no timeout and no
@@ -1260,11 +1272,11 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch
     dataset : str
         NeuPrint dataset identifier, e.g. 'male-cns:v1.0'.
     save_path : str, optional
-        Output path prefix; ``_neuron_df.csv`` and ``_roi_count_df.csv``
+        Output path prefix; ``_neuron_df.csv`` and ``_roi_count_df.parquet``
         are written next to it.  By default the per-neuron ROI columns
         ``roiInfo``, ``inputRois`` and ``outputRois`` are dropped from
         ``_neuron_df.csv`` before saving (see ``drop_roi_cols``); the same
-        data is always kept long-form in ``_roi_count_df.csv``.
+        data is always kept long-form in ``_roi_count_df.parquet``.
     omitNoneType : bool
         Drop rows without a type before saving (default False = keep).
     client : object, optional
@@ -1279,12 +1291,12 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch
         Drop the per-neuron ROI columns ``roiInfo``, ``inputRois`` and
         ``outputRois`` from ``_neuron_df.csv`` before saving (default True).
         These columns are fully derivable from the long-form
-        ``_roi_count_df.csv`` and can account for ~90% of the CSV size
+        ``_roi_count_df.parquet`` and dominate the neuron CSV size
         (male-cns); set False only when the raw per-neuron columns must be
         stored locally.
 
     A ``<dataset>_metadata.json`` sidecar (neuron/synapse counts, ROI
-    coverage) is always written next to the CSVs, computed from the pulled
+    coverage) is always written next to the tables, computed from the pulled
     frames.
     '''
     # requires login to hemibrain dataset
@@ -1437,9 +1449,15 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch
         neuron_df = neuron_df[neuron_df['type'].notna()]
     print(f'Pulled {len(neuron_df)} neurons from {dataset}')
     print('Writing to',save_path, end='...')
-    # write to csv
+    # write neuron table as csv; the ROI-count table is numeric long-form
+    # (bodyId/roi/count columns), so a zstd parquet is ~5x smaller than the
+    # equivalent CSV and loads without schema inference
     neuron_df.to_csv(save_path + '_neuron_df.csv',index=True)
-    roi_count_df.to_csv(save_path + '_roi_count_df.csv',index=True)
+    roi_count_df.to_parquet(save_path + '_roi_count_df.parquet', index=False, compression='zstd')
+    stale_roi_csv = save_path + '_roi_count_df.csv'
+    if os.path.exists(stale_roi_csv):
+        # A previous pull wrote CSV; drop it so the parquet is the only copy
+        os.remove(stale_roi_csv)
 
     # Metadata sidecar: computed from the frames just saved, so every pulled
     # dataset gets its statistics without waiting for a cross-dataset
@@ -6572,14 +6590,22 @@ def Vis3S(data_df,**kwargs):
                 except Exception as e:
                     print(f"Error opening zip file: {e}")
         else:
-            # Hemibrain fetch: fetch skeletons via the NeuPrint API and
-            # assign class colors exactly like the FAFB zip branch above.
+            # NeuPrint fetch: use the shared cache-aware batched path so this
+            # legacy 2D view follows the same online-fetch policy as 3D
+            # visualization and Find Similar.
             try:
-                from neuprint import fetch_skeletons
-                bodyids = [str(summary_df.at[ind, 'bodyId']) for ind in summary_df.index]
-                nl = fetch_skeletons(bodyids)
-                for i, n in enumerate(nl):
-                    ind = summary_df.index[i]
+                from morphology import fetch_skeletons_on_demand_batch
+                bodyids = [int(summary_df.at[ind, 'bodyId'])
+                           for ind in summary_df.index]
+                by_id = fetch_skeletons_on_demand_batch(
+                    str(op.dataset), bodyids, project_root=_REPO_ROOT,
+                    persist=False,
+                )
+                for ind in summary_df.index:
+                    bodyid = int(summary_df.at[ind, 'bodyId'])
+                    n = by_id.get(bodyid)
+                    if n is None:
+                        continue
                     n.name = str(summary_df.at[ind, 'bodyId'])
                     cls = summary_df.at[ind, op.classby]
                     cls_idx = classes.index(cls)

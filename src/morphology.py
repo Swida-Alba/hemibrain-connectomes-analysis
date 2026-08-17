@@ -39,12 +39,12 @@ from statvis import getNeurons
 try:
     from .roi_screening import (
         RoiProfileStore, RoiScreeningUnavailable, backfill_dataset_metadata,
-        load_primary_rois, roi_count_csv_path,
+        load_primary_rois, roi_count_table_path,
     )
 except ImportError:
     from roi_screening import (
         RoiProfileStore, RoiScreeningUnavailable, backfill_dataset_metadata,
-        load_primary_rois, roi_count_csv_path,
+        load_primary_rois, roi_count_table_path,
     )
 
 try:
@@ -106,6 +106,14 @@ VECTOR_BASIS_SIMP90 = "simp90"
 SKELETON_CACHE_LEVEL = VECTOR_BASIS_SIMP90   # on-disk NeuPrint cache level
 SKELETON_DOWNSAMPLE_FACTOR = 10             # navis.downsample_neuron factor
                                             # (keeps ~10% of nodes)
+
+# Keep the online NeuPrint fetch policy shared by visualization and similarity
+# workflows.  The request is batched at the application boundary, while
+# navis/NeuPrint performs the individual SWC requests in a small worker pool.
+# This avoids one client/query setup per neuron without creating an unbounded
+# nested thread pool.
+NEUPRINT_FETCH_BATCH_SIZE = 64
+NEUPRINT_FETCH_MAX_THREADS = 3
 
 
 # =============================================================================
@@ -852,10 +860,14 @@ class SkeletonVectorCache:
                 else:
                     have |= {int(Path(f).stem) for f in files}
                 missing = [b for b in index if b not in have]
-                for bid in missing[:fetch_missing]:
-                    nrn = fetch_skeleton_on_demand(self.dataset, bid, project_root=str(self.project_root))
-                    if nrn is not None:
-                        fetched_new += 1
+                fetched_map = fetch_skeletons_on_demand_batch(
+                    self.dataset,
+                    missing[:fetch_missing],
+                    project_root=str(self.project_root),
+                    persist=True,
+                    level=VECTOR_BASIS_RAW,
+                )
+                fetched_new = len(fetched_map)
             if fetched_new:
                 # Re-discover after the fetches: they wrote new skeleton
                 # files (and, in the real pipeline, already appended the
@@ -1557,6 +1569,231 @@ def fetch_skeleton_on_demand(dataset: str, body_id: int,
     return neuron
 
 
+# Keep a compatibility seam for callers/tests that intentionally replace the
+# singular fetcher (for example, an offline fixture). Normal production calls
+# never take this branch; the optimized path below remains the default.
+_SINGLE_FETCH_IMPLEMENTATION = fetch_skeleton_on_demand
+
+
+def fetch_skeletons_on_demand_batch(
+        dataset: str, body_ids, project_root: Optional[str] = None,
+        persist: bool = True, level: str = VECTOR_BASIS_RAW,
+        batch_size: int = NEUPRINT_FETCH_BATCH_SIZE,
+        max_threads: int = NEUPRINT_FETCH_MAX_THREADS,
+        progress_callback=None, client=None) -> Dict[int, object]:
+    """Fetch a set of skeletons through one cache-aware online phase.
+
+    The NeuPrint path is deliberately shared by Find Similar, full-dataset
+    cache builds, and other non-visual callers.  It deduplicates the request,
+    loads any requested ``simp90`` files first, fetches the remaining raw
+    skeletons in bounded batches, vectorizes them, and writes the fixed
+    simplified cache level in one persistence phase.  ``raw`` requests never
+    read a simplified pickle, preserving the level invariant of the singular
+    :func:`fetch_skeleton_on_demand` API.
+
+    ``progress_callback(done, total, message)`` is optional and is called at
+    batch boundaries.  The returned mapping is keyed by integer body ID and
+    contains only skeletons that were available or successfully fetched.
+    """
+    requested = []
+    seen = set()
+    if body_ids is not None:
+        for body_id in body_ids:
+            try:
+                bid = int(body_id)
+            except (TypeError, ValueError):
+                continue
+            if bid not in seen:
+                seen.add(bid)
+                requested.append(bid)
+
+    level = str(level).lower()
+    if level not in (VECTOR_BASIS_RAW, VECTOR_BASIS_SIMP90):
+        raise ValueError(f"Invalid level: {level} (raw|simp90)")
+    if not requested:
+        return {}
+
+    root = Path(project_root) if project_root else Path(__file__).parent.parent
+    cache_dir = root / "cache" / _dataset_folder(dataset) / "skeletons"
+    loaded: Dict[int, object] = {}
+    missing = []
+
+    # Only a simp90 consumer may use an on-disk skeleton.  A raw consumer must
+    # fetch raw because raw skeletons are intentionally not persisted.
+    if level == VECTOR_BASIS_SIMP90:
+        for bid in requested:
+            existing = _find_skeleton_file(
+                dataset, bid, project_root=str(root))
+            if existing is None:
+                missing.append(bid)
+                continue
+            try:
+                with open(existing, "rb") as handle:
+                    neuron = pickle.load(handle)
+                if type(neuron).__name__ not in ("TreeNeuron", "MeshNeuron"):
+                    raise TypeError(type(neuron).__name__)
+                loaded[bid] = neuron
+            except Exception:
+                missing.append(bid)
+    else:
+        missing = list(requested)
+
+    if progress_callback:
+        progress_callback(len(loaded), len(requested),
+                          f"Skeleton cache ({len(loaded)}/{len(requested)})")
+
+    if missing:
+        dataset_l = dataset.lower()
+        fetched_by_id: Dict[int, object] = {}
+        using_single_override = False
+
+        if fetch_skeleton_on_demand is not _SINGLE_FETCH_IMPLEMENTATION:
+            # Preserve an explicit singular-fetch override. This is useful
+            # for offline clients and keeps downstream integrations that
+            # monkeypatch the old public seam working while production uses
+            # the batch API below.
+            using_single_override = True
+            for bid in missing:
+                try:
+                    neuron = fetch_skeleton_on_demand(
+                        dataset, bid, project_root=str(root), persist=persist)
+                except TypeError as exc:
+                    # A few older integrations exposed the original helper
+                    # without its newer ``persist`` keyword.
+                    if "persist" not in str(exc):
+                        raise
+                    neuron = fetch_skeleton_on_demand(
+                        dataset, bid, project_root=str(root))
+                if neuron is not None:
+                    fetched_by_id[int(bid)] = neuron
+            if progress_callback:
+                progress_callback(
+                    len(loaded) + len(fetched_by_id), len(requested),
+                    f"Fetching skeletons ({len(loaded) + len(fetched_by_id)}/"
+                    f"{len(requested)})")
+        elif any(k in dataset_l for k in ("flywire", "fafb", "banc")):
+            # CAVE already exposes a batch API and manages its own local API
+            # cache.  Keep this branch separate from NeuPrint's SWC batching.
+            from cave_data_fetcher import CAVEDataFetcher
+            fetcher = CAVEDataFetcher(
+                dataset=_dataset_folder(dataset), verbose=False)
+            neurons = fetcher.fetch_skeletons(missing, use_cache=True)
+            for neuron in neurons or []:
+                neuron_id = getattr(neuron, "id", None)
+                if neuron_id is None:
+                    continue
+                try:
+                    fetched_by_id[int(neuron_id)] = neuron
+                except (TypeError, ValueError):
+                    continue
+        else:
+            # One NeuPrint client is shared by all bounded requests.  This is
+            # the important distinction from the legacy per-neuron helper.
+            from neuprint import Client, set_default_client
+            from navis.interfaces import neuprint as neu
+
+            if client is None:
+                try:
+                    from utils.token_manager import token_manager
+                    token = token_manager.get_token("NEUPRINT_TOKEN")
+                except Exception:
+                    token = ""
+                client = Client(
+                    "neuprint.janelia.org", dataset=dataset, token=token)
+            try:
+                set_default_client(client)
+            except Exception:
+                pass
+
+            effective_batch_size = max(1, int(batch_size))
+            effective_threads = max(1, int(max_threads))
+            total_missing = len(missing)
+            for start in range(0, total_missing, effective_batch_size):
+                batch_ids = missing[start:start + effective_batch_size]
+                batch_df = pd.DataFrame({"bodyId": batch_ids})
+                result = neu.fetch_skeletons(
+                    batch_df,
+                    parallel=True,
+                    max_threads=max(1, min(effective_threads, len(batch_ids))),
+                    missing_swc="warn",
+                    client=client,
+                )
+                for index, neuron in enumerate(list(result or [])):
+                    neuron_id = getattr(neuron, "id", None)
+                    if neuron_id is None and index < len(batch_ids):
+                        neuron_id = batch_ids[index]
+                    try:
+                        fetched_by_id[int(neuron_id)] = neuron
+                    except (TypeError, ValueError):
+                        continue
+                if progress_callback:
+                    done = min(len(requested), len(loaded) + start
+                               + len(batch_ids))
+                    progress_callback(
+                        done, len(requested),
+                        f"Fetching skeletons ({done}/{len(requested)})")
+
+        # Normalize IDs and NeuPrint soma metadata once, before vectorization
+        # and persistence.  The visualization fetcher returns TreeNeurons,
+        # while a few test/client versions return a skeleton DataFrame.
+        for fallback_id, neuron in fetched_by_id.items():
+            try:
+                if not isinstance(neuron, navis.TreeNeuron):
+                    neuron = navis.TreeNeuron(neuron)
+                neuron.id = int(fallback_id)
+                soma = getattr(neuron, "soma", None)
+                if soma is not None and hasattr(soma, "__len__") and len(soma) > 1:
+                    neuron.soma = None
+                fetched_by_id[int(fallback_id)] = neuron
+            except Exception:
+                continue
+
+        # Vectorize raw skeletons in the same phase as the online fetch.  A
+        # single append keeps Find Similar's vector cache consistent with the
+        # skeleton cache and avoids one vector-cache write per worker result.
+        vector_rows = []
+        for bid, neuron in fetched_by_id.items():
+            try:
+                _, vector = vectorize_neuron(neuron)
+                vector_rows.append((int(bid), vector, _neuron_rep(neuron)))
+            except Exception:
+                continue
+        if vector_rows:
+            try:
+                SkeletonVectorCache(
+                    dataset, project_root=str(root), verbose=False
+                ).append_vectors(vector_rows, vector_basis=VECTOR_BASIS_RAW)
+            except Exception:
+                pass
+
+        if persist and fetched_by_id and not using_single_override:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            for bid, neuron in fetched_by_id.items():
+                try:
+                    with open(cache_dir / f"{int(bid)}.pkl", "wb") as handle:
+                        pickle.dump(_downsample_for_cache(neuron), handle)
+                except Exception:
+                    # A vector or an in-memory visualization should not fail
+                    # only because one optional disk write was unavailable.
+                    continue
+            if any(k not in dataset_l for k in ("flywire", "fafb", "banc")):
+                _write_skeleton_level_marker(dataset, str(root))
+
+        loaded.update(fetched_by_id)
+        if level == VECTOR_BASIS_SIMP90:
+            for bid in list(fetched_by_id):
+                try:
+                    loaded[bid] = _downsample_for_cache(fetched_by_id[bid])
+                except Exception:
+                    pass
+
+    if progress_callback:
+        progress_callback(len(loaded), len(requested),
+                          f"Skeletons ready ({len(loaded)}/{len(requested)})")
+
+    return {bid: loaded[bid] for bid in requested if bid in loaded}
+
+
 def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
                            max_workers: int = 8, limit: Optional[int] = None,
                            progress_callback=None, cancel_event=None,
@@ -1566,9 +1803,10 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
     Mirrors the Settings-panel full dataset pull: iterates the neuron index
     (allneurons table, neuron index fallback), fetches only the neurons
     missing from ``cache/{dataset}/skeletons/`` (resumable — existing files
-    are skipped), parallel over a thread pool, and persists each skeleton at
-    the fixed simplified cache level (``persist=True``; raw is never
-    persisted, raw vectors are appended at fetch time).
+    are skipped), and persists each skeleton at the fixed simplified cache
+    level (``persist=True``; raw is never persisted, raw vectors are appended
+    at fetch time). NeuPrint requests use bounded online batches; the
+    FlyWire/CAVE fallback retains its local-bundle behavior.
     ``progress_callback(current, total, info)`` and
     ``cancel_event`` (threading.Event) drive the UI; ``limit`` bounds the
     download (tests / smoke runs). Returns a summary dict.
@@ -1650,6 +1888,54 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
     cancelled = False
     cancel_event = cancel_event or threading.Event()
     lock = threading.Lock()
+
+    # NeuPrint downloads use the same aggregated, bounded batch path as the
+    # visualization and similarity workflows. Keep FlyWire's legacy worker
+    # path below because its local-bundle/API fallback has per-neuron
+    # cancellation semantics that are independent of NeuPrint's SWC API.
+    if not is_fafb_dataset(dataset) and 'flywire' not in dataset.lower():
+        if cancel_event.is_set():
+            cancelled = True
+        else:
+            def _batch_progress(done, batch_total, message):
+                if progress_callback:
+                    progress_callback(min(done, total), total, message)
+
+            try:
+                fetched_map = fetch_skeletons_on_demand_batch(
+                    dataset,
+                    missing,
+                    project_root=str(root),
+                    persist=True,
+                    level=VECTOR_BASIS_RAW,
+                    batch_size=NEUPRINT_FETCH_BATCH_SIZE,
+                    max_threads=max_workers,
+                    progress_callback=_batch_progress,
+                )
+                fetched = len(fetched_map)
+                errors = total - fetched
+                cancelled = cancel_event.is_set()
+            except Exception as exc:
+                errors = total
+                if verbose:
+                    print(f"[morphology] batched NeuPrint fetch failed: {exc}")
+            finally:
+                if progress_callback:
+                    progress_callback(
+                        fetched + errors, total,
+                        "Cancelled." if cancelled else "Finished.")
+
+        summary = {
+            "total": total,
+            "fetched": fetched,
+            "skipped_existing": skipped_existing,
+            "cancelled": cancelled,
+            "errors": errors,
+        }
+        if verbose:
+            print(f"[morphology] download_all_skeletons: {fetched}/{total} "
+                  f"fetched, {errors} errors, cancelled={cancelled}")
+        return summary
 
     def _fetch_one(bid: int) -> bool:
         if cancel_event.is_set():
@@ -1835,13 +2121,13 @@ class MorphologyComparer:
     def _roi_screening_ready(self, allow_backfill: bool) -> bool:
         """Cheap local probe for the ROI screen's prerequisites.
 
-        Checks the ROI-count CSV and the metadata sidecar; when the sidecar is
-        missing, ``allow_backfill`` fetches and saves it once through the
-        dataset-preparation code (network). The partition validation of the
-        ROI list happens later, at store build.
+        Checks the ROI-count table (parquet or CSV) and the metadata sidecar;
+        when the sidecar is missing, ``allow_backfill`` fetches and saves it
+        once through the dataset-preparation code (network). The partition
+        validation of the ROI list happens later, at store build.
         """
         try:
-            if not roi_count_csv_path(
+            if not roi_count_table_path(
                     self.dataset, str(self.project_root)).exists():
                 return False
             if load_primary_rois(self.dataset, str(self.project_root)):
@@ -2298,46 +2584,6 @@ class MorphologyComparer:
             if np.isfinite(v)
         }
 
-        def _load_missing(ids: List[int], rep: str = "") -> Dict[int, "navis.TreeNeuron"]:
-            """Fetch skeletons missing from the cache, kept in memory only.
-
-            Workflow order: neurons whose VECTOR is already cached need no
-            skeleton at all (``cache_ids``); otherwise a cached skeleton
-            file is reused — but only when its simplification level matches
-            the cache's ``vector_basis`` (post-cleanup NeuPrint caches hold
-            simp90 files while the basis is raw, so those are fetched raw
-            transiently); only the truly missing ones are fetched online.
-            ``rep`` ('skeleton'|'mesh') is the comparison's representation:
-            fetches of any other representation are skipped so levels are
-            never mixed within one comparison.
-            """
-            loaded: Dict[int, navis.TreeNeuron] = {}
-            n_ids = len(ids)
-            for i, bid in enumerate(ids, start=1):
-                if int(bid) in cache_ids:
-                    continue  # vector already cached: no skeleton needed
-                if (_find_skeleton_file(self.dataset, bid, project_root=str(self.project_root)) is not None
-                        and _skeleton_folder_level(self.dataset, str(self.project_root)) == cache_basis):
-                    continue
-                load_label = f"Step 4/6 — Loading skeletons ({i}/{n_ids})"
-                self._progress(4, PROFILE_FIRST_TOTAL_STEPS,
-                               load_label.replace("Step 4/6 — ", ""))
-                # Progress events drive the determinate UI bar and are not
-                # copied into the execution log.  Emit coarse-grained phase
-                # updates there as well so a long fetch is auditable.
-                checkpoint = max(1, n_ids // 10)
-                if i == 1 or i == n_ids or i % checkpoint == 0:
-                    self._log(load_label)
-                nrn = fetch_skeleton_on_demand(
-                    self.dataset, bid, project_root=str(self.project_root),
-                    persist=self.cache_fetched_skeletons,
-                )
-                if nrn is not None:
-                    if rep and _neuron_rep(nrn) != rep:
-                        continue  # different representation: never comparable
-                    loaded[bid] = nrn
-            return loaded
-
         self._log("Step 4/6 — Loading & vectorizing skeletons")
         self._progress(4, PROFILE_FIRST_TOTAL_STEPS, "Loading & vectorizing skeletons")
         query_ids = [int(b) for b in query_df["bodyId"].tolist()]
@@ -2350,9 +2596,50 @@ class MorphologyComparer:
                         or VECTOR_BASIS_RAW) if cache_data is not None
                        else VECTOR_BASIS_RAW)
 
-        # Query skeleton is always ensured (fetched transiently if missing;
-        # neurons with a cached VECTOR need no fetch at all).
-        query_neurons = _load_missing(query_ids)
+        # Determine every online miss before fetching anything.  Query and
+        # candidate IDs are intentionally combined: a query can also occur in
+        # the candidate pool, and the optimized path must not issue two
+        # separate online phases for the same comparison.
+        all_load_ids = []
+        seen_load_ids = set()
+        for bid in query_ids + pool_ids:
+            bid = int(bid)
+            if bid not in seen_load_ids:
+                seen_load_ids.add(bid)
+                all_load_ids.append(bid)
+        missing_ids = []
+        for bid in all_load_ids:
+            if bid in cache_ids:
+                continue  # the vector cache is sufficient for screening
+            pkl = _find_skeleton_file(
+                self.dataset, bid, project_root=str(self.project_root))
+            if (pkl is not None
+                    and _skeleton_folder_level(
+                        self.dataset, str(self.project_root)) == cache_basis):
+                continue
+            missing_ids.append(bid)
+
+        def _report_fetch(done, total, message):
+            self._progress(4, PROFILE_FIRST_TOTAL_STEPS, message)
+            if total and (done == 0 or done >= total
+                          or done % max(1, total // 10) == 0):
+                self._log(f"Step 4/6 — {message}")
+
+        fetched_all = fetch_skeletons_on_demand_batch(
+            self.dataset,
+            missing_ids,
+            project_root=str(self.project_root),
+            persist=self.cache_fetched_skeletons,
+            level=VECTOR_BASIS_RAW,
+            max_threads=min(NEUPRINT_FETCH_MAX_THREADS,
+                            max(1, int(self.n_workers))),
+            progress_callback=_report_fetch,
+        ) if missing_ids else {}
+
+        query_neurons = {
+            int(bid): fetched_all[int(bid)]
+            for bid in query_ids if int(bid) in fetched_all
+        }
 
         # The comparison's representation: the majority among the query
         # members (cache rows carry the cache's representation).
@@ -2371,10 +2658,14 @@ class MorphologyComparer:
             # the dataset's skeleton store.
             q_rep = _infer_dataset_rep(self.dataset, str(self.project_root))
 
-        # Fetch skeletons for pool neurons missing from the cache (bounded,
-        # transient; every pool neuron can trigger a fetch). Fetches of a
-        # different representation than the query are skipped.
-        pool_neurons = _load_missing(pool_ids, rep=q_rep)
+        # The one combined fetch above supplies both sides of the comparison.
+        # Filter only after q_rep is known so the representation guard remains
+        # identical to the former query-then-pool implementation.
+        pool_neurons = {
+            int(bid): fetched_all[int(bid)]
+            for bid in pool_ids if int(bid) in fetched_all
+            and (not q_rep or _neuron_rep(fetched_all[int(bid)]) == q_rep)
+        }
         self._log(f"Profile-first: {len(pool_ids)} pool neurons, "
                   f"{len(pool_neurons)} skeletons fetched (transient)")
 
@@ -3171,12 +3462,22 @@ class MorphologyComparer:
             self._log("NBLAST: no candidates survived the vector prefilter.")
             return pd.DataFrame(), pd.DataFrame()
 
-        # Build dotprops for query + candidates (in microns; NEVER cached).
-        query_dp = self._dotprops_for_ids(list(query_ids))
+        # Build dotprops for query + candidates in one load/fetch phase
+        # (in microns; NEVER cached). Splitting after construction prevents a
+        # query/candidate overlap from triggering two online batch requests.
+        cand_ids = [int(body_ids[i]) for i in prefilter_idx]
+        all_dotprop_ids = []
+        seen_dotprop_ids = set()
+        for bid in list(query_ids) + cand_ids:
+            if int(bid) not in seen_dotprop_ids:
+                seen_dotprop_ids.add(int(bid))
+                all_dotprop_ids.append(int(bid))
+        all_dp = self._dotprops_for_ids(all_dotprop_ids)
+        query_dp = {bid: all_dp.get(bid) for bid in query_ids
+                    if all_dp.get(bid) is not None}
         if not query_dp:
             raise ValueError("NBLAST: could not build dotprops for the query neuron(s).")
-        cand_ids = [int(body_ids[i]) for i in prefilter_idx]
-        cand_dp = self._dotprops_for_ids(cand_ids)
+        cand_dp = {bid: all_dp.get(bid) for bid in cand_ids}
         cand_dp = {bid: dp for bid, dp in cand_dp.items() if dp is not None}
 
         self._log(f"NBLAST: {len(query_dp)} query x {len(cand_dp)} candidates "
@@ -3419,15 +3720,44 @@ class MorphologyComparer:
         token-gated CAVE fallback); other datasets use the local pickle
         cache and the on-demand fetch."""
         out: Dict[int, Optional[navis.core.dotprop.Dotprops]] = {}
+        local_neurons: Dict[int, object] = {
+            int(bid): neuron for bid, neuron in (neurons or {}).items()
+        }
 
         # FlyWire skeletons: resolve every non-transient id through the
         # FAFB pipeline once for the whole batch (the extrusion check is
         # cached, so repeated batches reuse earlier results).
-        flywire_local: Dict[int, navis.TreeNeuron] = {}
         if self._is_flywire():
-            flywire_local = self._load_fafb_skeletons(
-                [int(b) for b in body_ids if int(b) not in (neurons or {})]
-            )
+            local_neurons.update(self._load_fafb_skeletons(
+                [int(b) for b in body_ids if int(b) not in local_neurons]
+            ))
+        else:
+            # Resolve local files first, then issue one combined NeuPrint
+            # fetch for all remaining dotprops.  This covers cache-direct
+            # NBLAST, where no profile-first in-memory map is available.
+            missing_online = []
+            for body_id in body_ids:
+                bid = int(body_id)
+                if bid in local_neurons:
+                    continue
+                pkl = _find_skeleton_file(
+                    self.dataset, bid, project_root=str(self.project_root))
+                if pkl is None:
+                    missing_online.append(bid)
+                    continue
+                try:
+                    with open(pkl, "rb") as handle:
+                        local_neurons[bid] = pickle.load(handle)
+                except Exception:
+                    missing_online.append(bid)
+            if missing_online:
+                local_neurons.update(fetch_skeletons_on_demand_batch(
+                    self.dataset,
+                    missing_online,
+                    project_root=str(self.project_root),
+                    persist=self.cache_fetched_skeletons,
+                    level=VECTOR_BASIS_RAW,
+                ))
 
         pbar = tqdm(body_ids, desc=desc, unit="neuron",
                     disable=not self.verbose, leave=False, file=sys.stdout)
@@ -3435,28 +3765,11 @@ class MorphologyComparer:
             for bid in pbar:
                 bid = int(bid)
                 pbar.set_postfix_str(f"{bid}")
-                nrn = (neurons or {}).get(bid)
-                if nrn is None and self._is_flywire():
-                    nrn = flywire_local.get(bid)
-                if nrn is None and self._is_flywire():
+                nrn = local_neurons.get(bid)
+                if nrn is None:
                     # The FAFB pipeline (API cache -> healed bundle ->
                     # extrusion check -> CAVE fallback) already ran for this
                     # id; there is no other source to try.
-                    out[bid] = None
-                    continue
-                if nrn is None:
-                    pkl = _find_skeleton_file(
-                        self.dataset, bid, project_root=str(self.project_root))
-                    if pkl is None:
-                        nrn = fetch_skeleton_on_demand(
-                            self.dataset, bid,
-                            project_root=str(self.project_root),
-                            persist=self.cache_fetched_skeletons,
-                        )
-                    else:
-                        with open(pkl, "rb") as f:
-                            nrn = pickle.load(f)
-                if nrn is None:
                     out[bid] = None
                     continue
                 try:
@@ -3687,7 +4000,7 @@ class MorphologyComparer:
                     continue
                 viz_kwargs[key] = value
 
-            # The shared panel returns None when its dataset-aware default is
+            # The shared panel returns None when its analysis default is
             # selected. Resolve that default at the analysis boundary so the
             # dedicated Skeleton tab can retain its own historical defaults.
             if viz_kwargs.get("skeleton_mesh_simplification") is None:

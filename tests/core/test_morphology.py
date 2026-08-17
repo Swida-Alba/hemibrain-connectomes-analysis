@@ -278,6 +278,36 @@ class TestSkeletonVectorCache:
 # ---------------------------------------------------------------------------
 
 class TestFetchOnDemand:
+    def test_batch_fetch_uses_bounded_requests_and_one_cache_phase(
+            self, tmp_path, monkeypatch):
+        import navis.interfaces.neuprint as neu
+
+        calls = []
+
+        def fake_fetch(batch, **kwargs):
+            calls.append((batch["bodyId"].tolist(), kwargs))
+            out = []
+            for body_id in batch["bodyId"].tolist():
+                neuron = line_neuron(length=8)
+                neuron.id = int(body_id)
+                out.append(neuron)
+            return out
+
+        monkeypatch.setattr(neu, "fetch_skeletons", fake_fetch)
+        result = morph.fetch_skeletons_on_demand_batch(
+            "test:v1", [101, 102, 101, 103],
+            project_root=str(tmp_path), persist=False,
+            batch_size=2, max_threads=3,
+            client=object(),
+        )
+
+        assert list(result) == [101, 102, 103]
+        assert [ids for ids, _ in calls] == [[101, 102], [103]]
+        assert [kwargs["max_threads"] for _, kwargs in calls] == [2, 1]
+        assert all(kwargs["parallel"] is True for _, kwargs in calls)
+        assert not list((tmp_path / "cache" / "test_v1" / "skeletons")
+                        .glob("*.pkl"))
+
     def test_neuprint_fetch_persists_simplified_and_reuses_at_simp90(self, tmp_path, monkeypatch):
         """persist=True writes the SIMPLIFIED skeleton (raw never persisted);
         a raw request never hits the disk cache, a simp90 request does."""
@@ -665,7 +695,7 @@ class TestVisualizeTopResults:
         assert vs.kwargs["skip_synapse"] is True
         assert vs.kwargs["show_fig"] is False
         assert vs.kwargs["saveas"] == morph._dataset_folder("test:v1")
-        assert vs.kwargs["skeleton_mesh_simplification"] == 0.95
+        assert vs.kwargs["skeleton_mesh_simplification"] == 0.98
 
     def test_type_level_excludes_intra_reference_row(self, tmp_path, monkeypatch):
         """The intra-type reference row (rank 1) must never be rendered."""
