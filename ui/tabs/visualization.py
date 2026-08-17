@@ -306,6 +306,13 @@ def create_skeleton_tab():
                         "Cache Neurons", True,
                         hint="Cache fetched skeletons locally for faster repeat renders.",
                     )
+                    cache_default_state = {"user_changed": False, "updating": False}
+
+                    def on_cache_neurons_change(_event):
+                        if not cache_default_state["updating"]:
+                            cache_default_state["user_changed"] = True
+
+                    cache_neurons.on_value_change(on_cache_neurons_change)
                     cache_synapses = checkbox_input(
                         "Cache Synapses", True,
                         hint="Cache fetched synapse data locally.",
@@ -325,25 +332,27 @@ def create_skeleton_tab():
                 with ui.row().classes("gap-4"):
                     simplification_method = select_input(
                         "Simplification Method",
-                        ["fast", "fine_opt", "fine_opt1"],
+                        ["fast", "fine", "artistic"],
                         "fast",
                         hint=(
-                            "NeuPrint tube rendering: 'fast' uses the original "
-                            "direct simplification; 'fine_opt' smooths/resamples "
-                            "with the accelerated FAFB radius profile; "
-                            "all methods use batched parallel online fetching "
-                            "across layers ('fine_opt1' retains the explicit "
-                            "optimized fine name). "
+                            "NeuPrint tube rendering: 'fast' uses direct simp90 "
+                            "simplification; 'fine' smooths/resamples with the "
+                            "accelerated FAFB radius profile; 'artistic' uses "
+                            "vertex-cluster mesh decimation. All methods use "
+                            "batched parallel online fetching. "
                             "Disabled for FlyWire/FAFB and line mode."
                         ),
                     )
                     default_simplification = checkbox_input(
                         "Use Default Mesh Simplification", True,
-                        hint="Use the Skeleton tab default: 0.95 faces removed. "
-                             "Uncheck to set the value below.",
+                        hint="Use the method default: fast removes 0.90 of faces; "
+                             "fine/artistic remove 0.95. Uncheck to set the "
+                             "value below.",
                     )
                     mesh_simplification = number_input(
-                        "Mesh Simplification (faces removed)", 0.95, 0.0, 0.99, 0.05,
+                        "Mesh Simplification (faces removed)",
+                        0.9 if simplification_method.value == "fast" else 0.95,
+                        0.0, 0.99, 0.05,
                         hint="Fraction of tube-mesh faces REMOVED for rendering: "
                              "0.95 = keep 5%. Higher = faster/coarser, lower = "
                              "more detailed but slower.",
@@ -419,6 +428,11 @@ def create_skeleton_tab():
 
         def _sync_simplification_controls():
             is_line = skeleton_mode.value == "line"
+            pipeline = str(simplification_method.value or "fine").strip().lower()
+            if default_simplification.value:
+                mesh_simplification.set_value(
+                    0.9 if pipeline in {"fast", "direct"} else 0.95
+                )
             mesh_simplification.set_enabled(
                 not is_line and not default_simplification.value
             )
@@ -426,11 +440,22 @@ def create_skeleton_tab():
             simplification_method.set_enabled(
                 not is_line and not is_flywire_dataset(str(dataset.value or ""))
             )
+            if not cache_default_state["user_changed"]:
+                default_cache = pipeline not in {"fast", "artistic"}
+                if cache_neurons.value != default_cache:
+                    cache_default_state["updating"] = True
+                    try:
+                        cache_neurons.set_value(default_cache)
+                    finally:
+                        cache_default_state["updating"] = False
 
         default_simplification.on_value_change(
             lambda _e: _sync_simplification_controls()
         )
         skeleton_mode.on_value_change(lambda _e: _sync_simplification_controls())
+        simplification_method.on_value_change(
+            lambda _e: _sync_simplification_controls()
+        )
         dataset.on_value_change(lambda _e: _sync_simplification_controls())
         _sync_simplification_controls()
 
@@ -630,7 +655,8 @@ def create_skeleton_tab():
             "brain_mesh_color": brain_mesh_picker.get_value(),
             "neuprint_skeleton_pipeline": simplification_method.value,
             "skeleton_mesh_simplification": (
-                0.95 if default_simplification.value
+                (0.9 if simplification_method.value in {"fast", "direct"}
+                 else 0.95) if default_simplification.value
                 else float(mesh_simplification.value)
             ),
         }

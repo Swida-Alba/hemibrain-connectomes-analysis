@@ -2,7 +2,7 @@
 
 Mirrors ``DatasetPuller`` (Settings tab full dataset pull): runs
 ``morphology.download_all_skeletons`` in a worker thread so the UI stays
-responsive; the Similar tab polls :attr:`SkeletonPuller.state` with a
+responsive; the Settings tab polls :attr:`SkeletonPuller.state` with a
 ``ui.timer`` and renders progress/ETA.
 
 Resume-safe: already-cached skeletons are skipped, so interrupted runs
@@ -46,15 +46,22 @@ class SkeletonPuller:
         with self._lock:
             return self._state["running"]
 
-    def start(self, dataset: str, max_workers: Optional[int] = None) -> bool:
+    def start(self, dataset: str, max_workers: Optional[int] = None,
+              raw: bool = False, mode: Optional[str] = None) -> bool:
         """Start a background skeleton download. Returns False when one is
-        already running."""
+        already running.
+
+        ``raw`` is retained for callers from the earlier Find Similar UI;
+        Settings passes the explicit ``mode`` (``raw`` or ``fine``).
+        """
+        selected_mode = str(mode or ("raw" if raw else "fast")).lower()
         with self._lock:
             if self._state["running"]:
                 return False
             self._state = {
                 "running": True,
                 "dataset": dataset,
+                "mode": selected_mode,
                 "current": 0,
                 "total": 0,
                 "info": "Reading the neuron index...",
@@ -68,7 +75,7 @@ class SkeletonPuller:
             self._cancel_event.clear()
         self._thread = threading.Thread(
             target=self._run,
-            args=(dataset, max_workers),
+            args=(dataset, max_workers, selected_mode),
             daemon=True,
             name=f"skeleton-pull-{dataset}",
         )
@@ -89,7 +96,7 @@ class SkeletonPuller:
             if self._state["fetch_started_at"] is None and total > 0:
                 self._state["fetch_started_at"] = time.time()
 
-    def _run(self, dataset: str, max_workers: Optional[int]) -> None:
+    def _run(self, dataset: str, max_workers: Optional[int], mode: str) -> None:
         try:
             import sys
             sys.path.insert(0, str(
@@ -103,6 +110,7 @@ class SkeletonPuller:
                 progress_callback=self._progress,
                 cancel_event=self._cancel_event,
                 verbose=False,
+                mode=mode,
             )
             with self._lock:
                 self._state["summary"] = summary

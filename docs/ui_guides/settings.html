@@ -58,6 +58,18 @@
     can resume an interrupted pull. Enable <b>Force rebuild</b> only when the
     existing connection cache needs to be replaced.</p>
 
+  <h2>Skeleton cache pull</h2>
+  <p>In <b>Dataset Cache → Skeleton Cache Pull</b>, choose a dataset and
+    download every missing skeleton with a resumable progress bar. The
+    <b>Raw skeletons</b> option writes full TreeNeurons to the shared dataset
+    skeleton cache using portable <code>{bodyId}.swc.gz</code> files. The
+    <b>95% fine simplification</b> option prefetches the same raw
+    <code>.swc.gz</code> TreeNeuron population used by fine visualization.
+    The FAFB-style transform, tube mesh, and 95% simplification are rebuilt
+    after loading for each visualization and are never cached as meshes. Raw
+    vectors are vectorized and appended immediately after the batched online
+    fetch. Existing pickle raw caches remain readable.</p>
+
   <h2>Output settings</h2>
   <p><b>Default Output Directory</b> is pre-filled in every panel; change it
     here and click <b>Save Default Directory</b>. Each run creates its own

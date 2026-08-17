@@ -6736,11 +6736,10 @@ class HomologFinder:
                                 'show_fig': False,
                                 'export_views': False,
                                 'brain_mesh': 'template',
-                                'neuron_alpha': 0.3,
+                                'neuron_alpha': 0.2,
                                 'legend_mode': 'layer',
                                 'verbose': 'simple',
                                 'skip_synapse': True,
-                                'cache_neurons': True,
                             },
                             dataset=vis_target_dataset,
                             neuron_layers=bodyid_layers,
@@ -6758,7 +6757,7 @@ class HomologFinder:
                             output_format=['png', 'html'],
                             views=['front'],
                             summary_format=['pdf'],  # Generate PDF summary
-                            neuron_alpha=0.8,  # Higher alpha for individual views
+                            neuron_alpha=0.2,
                         )
                         
                         if files_saved is not None:
@@ -6890,7 +6889,6 @@ class HomologFinder:
                             'legend_mode': 'layer',
                             'verbose': 'simple',
                             'skip_synapse': True,
-                            'cache_neurons': True,
                         },
                         dataset=vis_target_dataset,
                         neuron_layers=type_layers,
@@ -6907,7 +6905,7 @@ class HomologFinder:
                         output_format=['png', 'html'],
                         views=['front'],
                         summary_format=['pdf'],
-                        neuron_alpha=0.6,
+                        neuron_alpha=0.2,
                     )
 
                     if files_saved is not None:
@@ -6969,10 +6967,9 @@ class HomologFinder:
                                 'export_views': True,
                                 'brain_mesh': 'template',
                                 'legend_mode': 'layer',
-                                'neuron_alpha': 0.3,
+                                'neuron_alpha': 0.2,
                                 'verbose': 'simple',
                                 'skip_synapse': True,
-                                'cache_neurons': True,
                             },
                             dataset=vis_source_dataset,
                             neuron_layers=source_layers,
@@ -6988,7 +6985,7 @@ class HomologFinder:
                             output_format=['png', 'html'],
                             views=['front'],
                             summary_format=['pdf'],
-                            neuron_alpha=0.8,
+                            neuron_alpha=0.2,
                         )
                         
                         if files_saved is not None:
@@ -7007,10 +7004,9 @@ class HomologFinder:
                                 'export_views': True,
                                 'brain_mesh': 'template',
                                 'legend_mode': 'single',
-                                'neuron_alpha': 0.6,
+                                'neuron_alpha': 0.2,
                                 'verbose': 'simple',
                                 'skip_synapse': True,
-                                'cache_neurons': True,
                             },
                             dataset=vis_source_dataset,
                             neuron_layers=source_layers,
@@ -7045,10 +7041,24 @@ class HomologFinder:
         options.pop('visualize_top_n', None)
         options.pop('visualize_by', None)
         options.pop('use_default_simplification', None)
+        # Homolog-result visualizations default to line mode; the dedicated
+        # Visualization > Skeleton workflow remains the high-quality tube
+        # entry point unless the caller explicitly opts into tube/fine here.
+        options.setdefault('skeleton_mode', 'line')
+        pipeline = str(
+            options.get('neuprint_skeleton_pipeline', 'fine') or 'fine'
+        ).strip().lower()
+        options.setdefault(
+            'cache_neurons', pipeline not in {
+                'fast', 'direct', 'artistic', 'fine_opt1'
+            }
+        )
         options.update(required)
         if options.get('skeleton_mesh_simplification') is None:
             options['skeleton_mesh_simplification'] = (
-                default_analysis_skeleton_mesh_simplification(options.get('dataset'))
+                default_analysis_skeleton_mesh_simplification(
+                    options.get('dataset'), pipeline
+                )
             )
         if options.get('mesh_color') == 'auto':
             options.pop('mesh_color', None)
@@ -7079,7 +7089,7 @@ class HomologFinder:
                     {
                         'show_fig': False,
                         'brain_mesh': 'template',
-                        'neuron_alpha': 0.6,
+                        'neuron_alpha': 0.2,
                         'legend_mode': 'layer',
                         'verbose': 'simple',
                     },
@@ -7117,7 +7127,7 @@ class HomologFinder:
                     {
                         'show_fig': False,
                         'brain_mesh': 'template',
-                        'neuron_alpha': 0.6,
+                        'neuron_alpha': 0.2,
                         'legend_mode': 'single',
                         'verbose': 'simple',
                     },
@@ -7164,7 +7174,7 @@ class HomologFinder:
                     {
                         'show_fig': False,
                         'brain_mesh': 'template',
-                        'neuron_alpha': 0.6,
+                        'neuron_alpha': 0.2,
                         'legend_mode': 'layer',
                         'verbose': 'simple',
                     },

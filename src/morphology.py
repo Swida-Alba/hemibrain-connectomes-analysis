@@ -6,11 +6,15 @@ Two comparison backends are provided:
 - **Vector-based** (default, fast): each neuron is reduced to a fixed vector
   of ~24 L-Measure-style morphometrics plus a 100-dim persistence vector
   (navis). Vectors are cached per dataset as a single parquet file
-  (``cache/{dataset}/morphology/skeleton_vectors.parquet``) and queried with
-  cosine / Pearson similarity.
+  (``cache/{dataset}/find_similar/morphology/skeleton_vectors.parquet``) and
+  queried with cosine / Pearson similarity. Raw skeleton files live in the
+  shared dataset skeleton cache at
+  ``cache/{dataset}/skeletons/raw_skeletons/`` as portable ``.swc.gz``
+  files. The former ``find_similar/raw_skeletons`` directory remains a
+  read-only migration fallback.
 - **NBLAST** (navis implementation of Costa et al. 2016): the canonical
-  pairwise morphology score. Dotprops are NEVER cached (a persisted cache
-  would be ~100 KB/neuron); they are rebuilt on demand for the vector-
+  pairwise morphology score. It uses the same raw skeleton/vector cache for
+  prefiltering, while dotprops are rebuilt on demand for the vector-
   prefiltered candidate set of the current query.
 
 Also provides ``enrich_homolog_results``, which attaches vector-based
@@ -18,6 +22,7 @@ morphological similarity scores to already-ranked homolog finding results
 (post-search, result rows only).
 """
 
+import gzip
 import json
 import multiprocessing as mp
 import os
@@ -27,6 +32,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from pathlib import Path
+import tempfile
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -98,9 +104,9 @@ MIN_POPULATION_STATS_SKELETONS = 300
 
 # Vectorization levels ("basis"). Every vector cache holds ONE level; the
 # basis is decided by the M2.1 level sweep (raw won: simplification adds no
-# discrimination). NeuPrint skeletons are cached on disk ONLY at the fixed
-# 90%-simplified level (``SKELETON_CACHE_LEVEL``), raw skeletons are never
-# persisted; raw vectors are persisted at fetch time instead.
+# discrimination). NeuPrint's shared visualization skeletons remain fixed at
+# the 90%-simplified level, while the shared raw skeleton namespace is
+# raw-only; raw vectors are persisted at fetch time in that namespace.
 VECTOR_BASIS_RAW = "raw"
 VECTOR_BASIS_SIMP90 = "simp90"
 SKELETON_CACHE_LEVEL = VECTOR_BASIS_SIMP90   # on-disk NeuPrint cache level
@@ -143,7 +149,19 @@ def _has_local_dataset_presence(dataset: str, root: Path) -> bool:
     if (cache_dir / "connections.parquet").exists():
         return True
     skeletons = cache_dir / "skeletons"
-    if skeletons.is_dir() and any(skeletons.rglob("*.pkl")):
+    if skeletons.is_dir() and any(
+            p.suffix == ".pkl" or str(p).endswith(".swc.gz")
+            for p in skeletons.rglob("*")):
+        return True
+    raw_skeletons = cache_dir / "skeletons" / "raw_skeletons"
+    if raw_skeletons.is_dir() and any(
+            p.suffix == ".pkl" or str(p).endswith(".swc.gz")
+            for p in raw_skeletons.rglob("*")):
+        return True
+    legacy_raw_skeletons = cache_dir / "find_similar" / "raw_skeletons"
+    if legacy_raw_skeletons.is_dir() and any(
+            p.suffix == ".pkl" or str(p).endswith(".swc.gz")
+            for p in legacy_raw_skeletons.rglob("*")):
         return True
     return False
 
@@ -419,20 +437,76 @@ def _neuron_rep(neuron) -> str:
     return ""
 
 
+def _skeleton_body_id(path) -> int:
+    """Extract a bodyId from a cached skeleton filename.
+
+    The raw Find Similar cache accepts both the historical ``.pkl`` files and
+    the portable compressed-SWC form (``{bodyId}.swc.gz``). Keeping this
+    parser in one place prevents ``Path.stem`` from turning ``123.swc.gz``
+    into the invalid bodyId ``123.swc`` during parallel cache builds.
+    """
+    name = Path(path).name
+    if name.endswith(".swc.gz"):
+        name = name[:-len(".swc.gz")]
+    elif name.endswith(".pkl"):
+        name = name[:-len(".pkl")]
+    return int(name)
+
+
+def _load_cached_skeleton_file(path):
+    """Load a legacy pickle or a compressed, portable SWC skeleton."""
+    path = Path(path)
+    if str(path).endswith(".swc.gz"):
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            neuron = navis.read_swc(handle)
+        try:
+            neuron.id = _skeleton_body_id(path)
+        except Exception:
+            pass
+        # SWC has no units field. Local skeleton caches use nanometers, so
+        # restore that convention after a compressed-SWC round trip.
+        try:
+            neuron.units = "nm"
+        except Exception:
+            pass
+        return neuron
+    with open(path, "rb") as handle:
+        return pickle.load(handle)
+
+
+def _write_compressed_swc(path: Path, neuron) -> None:
+    """Atomically write one TreeNeuron as reusable ``.swc.gz``."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_swc = None
+    temp_gz = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with tempfile.NamedTemporaryFile(
+                suffix=".swc", dir=str(path.parent), delete=False) as handle:
+            temp_swc = Path(handle.name)
+        navis.write_swc(neuron, temp_swc, write_meta=True)
+        payload = temp_swc.read_bytes()
+        temp_gz.write_bytes(gzip.compress(payload, compresslevel=6, mtime=0))
+        os.replace(temp_gz, path)
+    finally:
+        if temp_swc is not None:
+            temp_swc.unlink(missing_ok=True)
+        temp_gz.unlink(missing_ok=True)
+
+
 def _vectorize_one_file(path: str) -> Optional[Tuple[int, List[float], List[float], str]]:
     """Module-level worker for parallel cache builds (picklable).
 
-    Returns None for un-vectorizable pickles (corrupt or unexpected types)
+    Returns None for un-vectorizable files (corrupt or unexpected types)
     so a single bad file cannot break the whole build. The 4th element is
     the neuron representation ('skeleton' | 'mesh')."""
     try:
-        with open(path, "rb") as f:
-            neuron = pickle.load(f)
+        neuron = _load_cached_skeleton_file(path)
         morph, vector = vectorize_neuron(neuron)
         rep = _neuron_rep(neuron)
     except Exception:
         return None
-    body_id = int(Path(path).stem)
+    body_id = _skeleton_body_id(path)
     # Shape block (persistence / spatial histogram) = the tail after the
     # morphometric block.
     return (body_id, [morph[f] for f in MORPHOMETRIC_FEATURES],
@@ -525,7 +599,7 @@ def _load_neuron_type_map(dataset: str, project_root: Optional[str] = None
 
 def _find_skeleton_file(dataset: str, body_id: int,
                         project_root: Optional[str] = None) -> Optional[Path]:
-    """Locate a cached skeleton/mesh pickle for a bodyId.
+    """Locate a cached skeleton/mesh file for a bodyId.
 
     Searches the dataset's skeletons directory recursively (datasets such as
     FlyWire keep bulk downloads in nested subfolders) and returns the first
@@ -535,10 +609,20 @@ def _find_skeleton_file(dataset: str, body_id: int,
     cache_dir = root / "cache" / _dataset_folder(dataset) / "skeletons"
     if not cache_dir.exists():
         return None
-    direct = cache_dir / f"{body_id}.pkl"
-    if direct.exists():
-        return direct
-    nested = sorted(cache_dir.rglob(f"{body_id}.pkl"))
+    for name in (f"{body_id}.pkl", f"{body_id}.swc.gz"):
+        direct = cache_dir / name
+        if direct.exists():
+            return direct
+    nested = sorted(
+        path for path in cache_dir.rglob(f"{body_id}.pkl")
+        if "raw_skeletons" not in path.parts
+    )
+    if nested:
+        return nested[0]
+    nested = sorted(
+        path for path in cache_dir.rglob(f"{body_id}.swc.gz")
+        if "raw_skeletons" not in path.parts
+    )
     return nested[0] if nested else None
 
 
@@ -617,12 +701,16 @@ def _write_skeleton_level_marker(dataset: str,
         pass
 
 
-def _downsample_for_cache(neuron) -> "navis.TreeNeuron":
+def _downsample_for_cache(
+        neuron, downsampling_factor: int = SKELETON_DOWNSAMPLE_FACTOR
+        ) -> "navis.TreeNeuron":
     """Deterministic simplification for the on-disk NeuPrint skeleton cache.
 
     ``navis.downsample_neuron(factor=10)`` keeps ~10% of nodes while
     preserving root/leaves/branchpoints — the canonical "90% simplified"
-    skeleton. Falls back to the original neuron when downsampling fails.
+    skeleton. ``downsampling_factor=20`` is used by the Settings bulk-pull
+    option for the separate 95% simplified skeleton cache. Falls back to the
+    original neuron when downsampling fails.
     """
     try:
         # navis' default soma detection flags every node with radius >= 1
@@ -633,7 +721,8 @@ def _downsample_for_cache(neuron) -> "navis.TreeNeuron":
         if soma is not None and hasattr(soma, "__len__") and len(soma) > 1:
             neuron = neuron.copy()
             neuron.soma = None
-        return navis.downsample_neuron(neuron, downsampling_factor=SKELETON_DOWNSAMPLE_FACTOR)
+        return navis.downsample_neuron(
+            neuron, downsampling_factor=max(1, int(downsampling_factor)))
     except Exception:
         return neuron
 
@@ -658,8 +747,7 @@ def _infer_dataset_rep(dataset: str, project_root: Optional[str] = None) -> str:
             dataset, project_root=str(root), verbose=False
         )._discover_skeleton_files()
         if files:
-            with open(files[0], "rb") as f:
-                rep = _neuron_rep(pickle.load(f))
+            rep = _neuron_rep(_load_cached_skeleton_file(files[0]))
     except Exception:
         rep = ""
     _REP_MEMO[key] = rep
@@ -697,6 +785,33 @@ def similarity_matrix(query: np.ndarray, matrix: np.ndarray, metric: str = "cosi
     return cosine_similarity_matrix(query, matrix)
 
 
+def pairwise_similarity_matrix(matrix: np.ndarray,
+                               metric: str = "cosine") -> np.ndarray:
+    """Pairwise similarity for every row of ``matrix``.
+
+    The one-query helper is convenient for a single search, but calling it
+    once per member repeats the row norms (and the matrix multiply setup) for
+    every member of a type.  Normalize the whole matrix once and use one
+    matrix multiplication instead.  Zero vectors remain zero-similarity,
+    matching :func:`cosine_similarity_matrix`.
+    """
+    values = np.asarray(matrix, dtype=float)
+    if values.ndim != 2:
+        raise ValueError("matrix must be a two-dimensional array")
+    if values.shape[0] == 0:
+        return np.zeros((0, 0), dtype=float)
+    if metric == "pearson":
+        values = values - values.mean(axis=1, keepdims=True)
+    norms = np.linalg.norm(values, axis=1)
+    normalized = values / np.maximum(norms[:, None], 1e-12)
+    scores = normalized @ normalized.T
+    zero = norms == 0
+    if np.any(zero):
+        scores[zero, :] = 0.0
+        scores[:, zero] = 0.0
+    return scores
+
+
 def _sorted_candidates(candidates: pd.DataFrame) -> pd.DataFrame:
     """Candidate frame sorted by ``_score`` descending (ties by bodyId).
 
@@ -715,17 +830,39 @@ def _sorted_candidates(candidates: pd.DataFrame) -> pd.DataFrame:
 # =============================================================================
 
 class SkeletonVectorCache:
-    """Per-dataset cache of vectorized skeletons (parquet + meta.json)."""
+    """Per-dataset cache of vectorized skeletons (parquet + meta.json).
+
+    ``raw_only=True`` creates the shared raw skeleton cache used by
+    visualization and morphology comparison. Its files live below
+    ``cache/{dataset}/skeletons/raw_skeletons/`` and never overlap the
+    visualization cache's legacy simp90 pickles. The former
+    ``find_similar/raw_skeletons`` directory is read as a migration fallback.
+    """
 
     def __init__(self, dataset: str, project_root: Optional[str] = None,
-                 n_workers: int = 8, verbose: bool = True):
+                 n_workers: int = 8, verbose: bool = True,
+                 raw_only: bool = False, raw_format: str = "pkl"):
         self.dataset = dataset
         self.project_root = Path(project_root) if project_root else Path(__file__).parent.parent
         self.n_workers = max(1, int(n_workers))
         self.verbose = verbose
+        self.raw_only = bool(raw_only)
+        raw_format = str(raw_format or "pkl").strip().lower()
+        if raw_format not in {"pkl", "swc.gz"}:
+            raise ValueError("raw_format must be 'pkl' or 'swc.gz'")
+        self.raw_format = raw_format
         folder = _dataset_folder(dataset)
-        self.morph_dir = self.project_root / "cache" / folder / "morphology"
-        self.skeleton_dir = self.project_root / "cache" / folder / "skeletons"
+        if self.raw_only:
+            base = self.project_root / "cache" / folder
+            self.morph_dir = base / "find_similar" / "morphology"
+            self.skeleton_dir = base / "skeletons" / "raw_skeletons"
+            self.legacy_skeleton_dir = (
+                base / "find_similar" / "raw_skeletons"
+            )
+        else:
+            self.morph_dir = self.project_root / "cache" / folder / "morphology"
+            self.skeleton_dir = self.project_root / "cache" / folder / "skeletons"
+            self.legacy_skeleton_dir = None
         self.parquet_path = self.morph_dir / "skeleton_vectors.parquet"
         self.meta_path = self.morph_dir / "meta.json"
 
@@ -734,11 +871,120 @@ class SkeletonVectorCache:
         return self.parquet_path.exists()
 
     def _discover_skeleton_files(self) -> List[str]:
-        """All cached skeleton/mesh pickles, including nested bulk folders
-        (e.g. FlyWire's skeletons/FLYWIRE_simp95_soma80_r20/)."""
-        if not self.skeleton_dir.exists():
+        """All cached skeleton/mesh files, including nested bulk folders."""
+        directories = [self.skeleton_dir]
+        if self.raw_only and self.legacy_skeleton_dir is not None:
+            directories.append(self.legacy_skeleton_dir)
+        directories = [directory for directory in directories
+                       if directory.exists()]
+        if not directories:
             return []
-        return sorted(str(p) for p in self.skeleton_dir.rglob("*.pkl"))
+        files = []
+        for directory in directories:
+            files.extend(directory.rglob("*.pkl"))
+            files.extend(directory.rglob("*.swc.gz"))
+        if not self.raw_only:
+            files = [path for path in files
+                     if "raw_skeletons" not in path.parts]
+        preferred = {}
+        for path in files:
+            try:
+                body_id = _skeleton_body_id(path)
+            except (TypeError, ValueError):
+                continue
+            current = preferred.get(body_id)
+            # Prefer the new shared path over the legacy Find Similar path,
+            # then prefer compressed SWC over a legacy pickle in that path.
+            path_rank = (
+                0 if self.skeleton_dir in path.parents else 1,
+                0 if str(path).endswith(".swc.gz") else 1,
+            )
+            current_rank = (
+                0 if self.skeleton_dir in Path(current).parents else 1,
+                0 if str(current).endswith(".swc.gz") else 1,
+            ) if current is not None else None
+            if current is None or path_rank < current_rank:
+                preferred[body_id] = path
+        return sorted(str(path) for path in preferred.values())
+
+    def find_skeleton_file(self, body_id: int) -> Optional[Path]:
+        """Find a skeleton belonging to this cache namespace.
+
+        The raw cache must never fall back to the shared simp90 pickle files.
+        Its canonical location is the shared dataset skeleton namespace;
+        historical Find Similar raw files are accepted only as a migration
+        fallback.
+        """
+        body_id = int(body_id)
+        if self.raw_only:
+            directories = [self.skeleton_dir]
+            if self.legacy_skeleton_dir is not None:
+                directories.append(self.legacy_skeleton_dir)
+            # Prefer the new shared path, and within each path prefer SWC.
+            for directory in directories:
+                if not directory.exists():
+                    continue
+                for name in (f"{body_id}.swc.gz", f"{body_id}.pkl"):
+                    direct = directory / name
+                    if direct.exists():
+                        return direct
+                    nested = sorted(directory.rglob(name))
+                    if nested:
+                        return nested[0]
+            return None
+        return _find_skeleton_file(
+            self.dataset, body_id, project_root=str(self.project_root)
+        )
+
+    def load_skeleton(self, body_id: int):
+        """Load one valid cached neuron from this cache namespace."""
+        path = self.find_skeleton_file(body_id)
+        if path is None:
+            return None
+        try:
+            neuron = _load_cached_skeleton_file(path)
+            allowed = ("TreeNeuron",) if self.raw_only else ("TreeNeuron", "MeshNeuron")
+            if type(neuron).__name__ not in allowed:
+                return None
+            if (self.raw_only and self.raw_format == "swc.gz"
+                    and (self.skeleton_dir not in path.parents
+                         or not str(path).endswith(".swc.gz"))):
+                # Migrate legacy Find Similar files, and any temporary raw
+                # pickle, to the canonical shared compressed-SWC namespace on
+                # first successful load. The old file is intentionally kept
+                # recoverable as a non-destructive fallback.
+                self.persist_skeletons({int(body_id): neuron})
+            return neuron
+        except Exception:
+            return None
+
+    def persist_skeletons(self, neurons: Dict[int, object]) -> int:
+        """Persist neurons in this cache's skeleton namespace.
+
+        Shared raw caches store the fetched TreeNeuron unchanged as portable
+        ``.swc.gz`` files by default; legacy pickle files remain readable and
+        selectable with ``raw_format='pkl'``. The legacy visualization cache
+        continues to use its explicit downsampling path and does not call
+        this helper.
+        """
+        if not neurons:
+            return 0
+        self.skeleton_dir.mkdir(parents=True, exist_ok=True)
+        written = 0
+        for body_id, neuron in neurons.items():
+            try:
+                if self.raw_only and _neuron_rep(neuron) != "skeleton":
+                    continue
+                if self.raw_only and self.raw_format == "swc.gz":
+                    _write_compressed_swc(
+                        self.skeleton_dir / f"{int(body_id)}.swc.gz", neuron)
+                else:
+                    with open(self.skeleton_dir / f"{int(body_id)}.pkl", "wb") as handle:
+                        pickle.dump(neuron, handle)
+                written += 1
+            except Exception:
+                continue
+        return written
 
     def _log(self, msg: str):
         if self.verbose:
@@ -757,6 +1003,7 @@ class SkeletonVectorCache:
             # Simplification level of the vectors in this cache ("raw" |
             # "simp90"); the cache holds ONE level and never mixes.
             "vector_basis": vector_basis,
+            "raw_format": self.raw_format if self.raw_only else None,
             "built_at": datetime.now().isoformat(timespec="seconds"),
             "mean": stats["mean"],
             "std": stats["std"],
@@ -825,8 +1072,12 @@ class SkeletonVectorCache:
         # matches that basis: post-cleanup NeuPrint caches hold simp90
         # files while the basis is raw, so those files are skipped (their
         # vectors come from the vector cache / raw fetches instead).
-        basis = (self._load_meta() or {}).get("vector_basis") or VECTOR_BASIS_RAW
-        folder_level = _skeleton_folder_level(self.dataset, str(self.project_root))
+        basis = (VECTOR_BASIS_RAW if self.raw_only else
+                 ((self._load_meta() or {}).get("vector_basis")
+                  or VECTOR_BASIS_RAW))
+        folder_level = (VECTOR_BASIS_RAW if self.raw_only else
+                         _skeleton_folder_level(self.dataset,
+                                                 str(self.project_root)))
 
         # Candidate skeletons not yet vectorized.
         if use_bundle:
@@ -835,7 +1086,7 @@ class SkeletonVectorCache:
         else:
             files = self._discover_skeleton_files()
             files = [f for f in files if folder_level == basis]
-            pending = [f for f in files if int(Path(f).stem) not in existing]
+            pending = [f for f in files if _skeleton_body_id(f) not in existing]
 
         # Optional on-demand fetch to extend coverage (cap applies).
         # fetch_skeleton_on_demand already vectorizes at fetch time (raw
@@ -858,7 +1109,7 @@ class SkeletonVectorCache:
                 if use_bundle:
                     have |= set(bundle_ids)
                 else:
-                    have |= {int(Path(f).stem) for f in files}
+                    have |= {_skeleton_body_id(f) for f in files}
                 missing = [b for b in index if b not in have]
                 fetched_map = fetch_skeletons_on_demand_batch(
                     self.dataset,
@@ -866,6 +1117,8 @@ class SkeletonVectorCache:
                     project_root=str(self.project_root),
                     persist=True,
                     level=VECTOR_BASIS_RAW,
+                    raw_cache=self if self.raw_only else None,
+                    vector_cache=self if self.raw_only else None,
                 )
                 fetched_new = len(fetched_map)
             if fetched_new:
@@ -885,7 +1138,7 @@ class SkeletonVectorCache:
                 else:
                     files = self._discover_skeleton_files()
                     files = [f for f in files if folder_level == basis]
-                    pending = [f for f in files if int(Path(f).stem) not in existing]
+                    pending = [f for f in files if _skeleton_body_id(f) not in existing]
 
         rows = []
         if pending:
@@ -927,7 +1180,8 @@ class SkeletonVectorCache:
         rep = ""
         if ok_rows:
             from collections import Counter
-            rep = Counter(r[3] for r in ok_rows).most_common(1)[0][0]
+            rep = ("skeleton" if self.raw_only else
+                   Counter(r[3] for r in ok_rows).most_common(1)[0][0])
             foreign = sum(1 for r in ok_rows if r[3] != rep)
             if foreign:
                 self._log(
@@ -1128,6 +1382,8 @@ class SkeletonVectorCache:
             )
             rows_new = []
             for bid, vec, rep in records:
+                if self.raw_only and str(rep) != "skeleton":
+                    continue
                 bid = int(bid)
                 row = {"bodyId": bid, "rep": rep}
                 for i, name in enumerate(MORPHOMETRIC_FEATURES):
@@ -1196,6 +1452,8 @@ class SkeletonVectorCache:
             # their own basis (enforced by the check above).
             if "vector_basis" not in meta:
                 meta["vector_basis"] = vector_basis
+            if self.raw_only and "raw_format" not in meta:
+                meta["raw_format"] = self.raw_format
             self.meta_path.write_text(json.dumps(meta, indent=2))
             return len(df_new)
         finally:
@@ -1248,15 +1506,16 @@ class SkeletonVectorCache:
                 # (post-cleanup NeuPrint caches hold simp90 files while
                 # the basis is raw -> never vectorized here).
                 pkl = None
-                if _skeleton_folder_level(self.dataset, str(self.project_root)) == basis:
-                    pkl = _find_skeleton_file(
-                        self.dataset, bid, project_root=str(self.project_root)
-                    )
+                if (self.raw_only or
+                        _skeleton_folder_level(
+                            self.dataset, str(self.project_root)) == basis):
+                    pkl = self.find_skeleton_file(bid)
                 if pkl is not None:
                     try:
-                        with open(pkl, "rb") as f:
-                            neuron = pickle.load(f)
+                        neuron = _load_cached_skeleton_file(pkl)
                         row_rep = _neuron_rep(neuron)
+                        if self.raw_only and row_rep != "skeleton":
+                            continue
                         if dataset_rep and row_rep != dataset_rep:
                             continue  # different representation: never mix
                         _, vec = vectorize_neuron(neuron)
@@ -1271,6 +1530,113 @@ class SkeletonVectorCache:
             self.append_vectors(computed, vector_basis=basis)
         mask = ~np.isnan(result[:, 0])
         return result, mask, reps
+
+
+def find_similar_raw_cache(dataset: str,
+                           project_root: Optional[str] = None,
+                           n_workers: int = 8,
+                           verbose: bool = True,
+                           raw_format: str = "swc.gz") -> SkeletonVectorCache:
+    """Return the shared raw-skeleton/vector cache for a dataset.
+
+    The historical function name is retained for compatibility with callers,
+    but raw skeletons now live outside the Find Similar directory at
+    ``cache/{dataset}/skeletons/raw_skeletons/``. New persisted raw skeletons
+    use compressed SWC by default; pass ``raw_format='pkl'`` only for legacy
+    compatibility.
+    """
+    return SkeletonVectorCache(
+        dataset,
+        project_root=project_root,
+        n_workers=n_workers,
+        verbose=verbose,
+        raw_only=True,
+        raw_format=raw_format,
+    )
+
+
+def cache_fetched_skeleton_vectors(
+        dataset: str, neurons, project_root: Optional[str] = None,
+        vector_cache: Optional[SkeletonVectorCache] = None,
+        progress_callback=None, progress_offset: int = 0,
+        progress_total: Optional[int] = None, verbose: bool = False
+        ) -> Dict[str, object]:
+    """Vectorize and persist freshly fetched raw skeletons synchronously.
+
+    This is the cache transaction shared by the morphology batch fetcher and
+    the visualizer's own NeuPrint batch loop.  The function returns only after
+    the parquet append has completed, so a caller cannot enter layered
+    rendering (or similarity scoring) while the vector cache is still being
+    written.  ``progress_callback`` uses the same ``(done, total, message)``
+    contract as the online skeleton fetch.
+
+    Cache failures are reported explicitly and do not discard the fetched
+    neurons: visualization remains usable even if a read-only cache directory
+    is encountered. The returned ``cached`` count makes that condition
+    observable to callers and tests.
+    """
+    if isinstance(neurons, dict):
+        items = list(neurons.items())
+    else:
+        items = []
+        for index, neuron in enumerate(list(neurons or [])):
+            body_id = getattr(neuron, "id", None)
+            if body_id is None:
+                body_id = index
+            items.append((body_id, neuron))
+
+    total = int(progress_total if progress_total is not None
+               else progress_offset + len(items))
+    if progress_callback:
+        progress_callback(
+            progress_offset, total,
+            f"Vectorizing fetched skeletons (0/{len(items)})")
+
+    started = time.perf_counter()
+    rows = []
+    failures = 0
+    for index, (body_id, neuron) in enumerate(items, start=1):
+        try:
+            if _neuron_rep(neuron) != "skeleton":
+                raise TypeError(f"expected TreeNeuron, got {type(neuron).__name__}")
+            _, vector = vectorize_neuron(neuron)
+            rows.append((int(body_id), vector, "skeleton"))
+        except Exception as exc:
+            failures += 1
+            if verbose:
+                print(f"[morphology] vectorization skipped for {body_id}: {exc}")
+        if progress_callback:
+            progress_callback(
+                progress_offset + index, total,
+                f"Vectorizing fetched skeletons ({index}/{len(items)})")
+
+    cached = 0
+    cache_error = None
+    if rows:
+        target = vector_cache or SkeletonVectorCache(
+            dataset, project_root=project_root, verbose=False)
+        try:
+            cached = int(target.append_vectors(
+                rows, vector_basis=VECTOR_BASIS_RAW))
+        except Exception as exc:
+            cache_error = f"{type(exc).__name__}: {exc}"
+            if verbose:
+                print(f"[morphology] vector cache write failed: {cache_error}")
+
+    elapsed = time.perf_counter() - started
+    if progress_callback:
+        progress_callback(
+            progress_offset + len(items), total,
+            f"Vector cache complete ({cached}/{len(rows)} rows; "
+            f"{elapsed:.2f}s)")
+    return {
+        "seen": len(items),
+        "vectorized": len(rows),
+        "cached": cached,
+        "failures": failures,
+        "elapsed": elapsed,
+        "cache_error": cache_error,
+    }
 
 
 # =============================================================================
@@ -1335,7 +1701,8 @@ def _sibling_skeleton_dirs(dataset: str, root: Path) -> List[Path]:
 
 
 def population_stats(dataset: str, project_root: Optional[str] = None,
-                     max_sample: int = POPULATION_STATS_SAMPLE
+                     max_sample: int = POPULATION_STATS_SAMPLE,
+                     cache: Optional[SkeletonVectorCache] = None
                      ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     """Population mean/std for a dataset's cached skeletons.
 
@@ -1343,15 +1710,16 @@ def population_stats(dataset: str, project_root: Optional[str] = None,
     cache: pool-only statistics depend on the (connectivity-skewed) pool
     composition and distort the geometry between query and candidates. The
     stats are computed once from a bounded sample of cached skeletons and
-    persisted under ``morphology/population_stats.json`` for reuse. A
-    dataset with too few cached skeletons extends its sample with a version
-    sibling's skeletons (same reconstruction, e.g. male-cns v1.0 <- v0.9).
+    persisted under the selected cache namespace's
+    ``morphology/population_stats.json`` for reuse. The legacy visualization
+    cache may extend a sparse sample with a version sibling; the raw-only
+    cache never borrows simplified/shared skeletons.
     Returns (None, None) when no statistics can be estimated.
     """
     root = Path(project_root) if project_root else Path(__file__).parent.parent
-    folder = _dataset_folder(dataset)
-    cache_dir = root / "cache" / folder
-    stats_file = cache_dir / "morphology" / "population_stats.json"
+    vc = cache or SkeletonVectorCache(dataset, project_root=str(root),
+                                      verbose=False)
+    stats_file = vc.morph_dir / "population_stats.json"
     if stats_file.exists():
         try:
             data = json.loads(stats_file.read_text())
@@ -1363,7 +1731,6 @@ def population_stats(dataset: str, project_root: Optional[str] = None,
         except Exception:
             pass
 
-    vc = SkeletonVectorCache(dataset, project_root=str(root), verbose=False)
     files = vc._discover_skeleton_files()
 
     # Level guard: the statistics must match the vector basis (raw). Once
@@ -1372,7 +1739,8 @@ def population_stats(dataset: str, project_root: Optional[str] = None,
     # back to the vector cache's own raw meta stats, which were computed
     # from the same feature schema at fetch time.
     basis = (vc._load_meta() or {}).get("vector_basis") or VECTOR_BASIS_RAW
-    if _skeleton_folder_level(dataset, str(root)) != basis:
+    if (not vc.raw_only and
+            _skeleton_folder_level(dataset, str(root)) != basis):
         data = vc.load()
         if data is not None:
             meta = data.get("meta") or {}
@@ -1385,16 +1753,36 @@ def population_stats(dataset: str, project_root: Optional[str] = None,
                     return mm, ss
         return None, None
 
+    # A raw comparison may have vector rows but no persisted raw files (for
+    # example after an interrupted run). Its metadata is still a valid
+    # raw-vector standardization baseline once the cache is large enough;
+    # never borrow the shared visualization cache or a sibling's simplified
+    # files.
+    if vc.raw_only and len(files) == 0:
+        data = vc.load()
+        if data is not None and len(data["bodyIds"]) >= MIN_POPULATION_STATS_SKELETONS:
+            meta = data.get("meta") or {}
+            m, s = meta.get("mean"), meta.get("std")
+            if m is not None and s is not None:
+                mm, ss = np.asarray(m, dtype=float), np.asarray(s, dtype=float)
+                if mm.shape == (VECTOR_DIM,) and ss.shape == (VECTOR_DIM,):
+                    return mm, ss
+
     # Too few cached skeletons for stable stats: sample from the version
     # sibling's cache instead — it contains the same neurons (shared
     # reconstruction, e.g. male-cns v1.0 <- v0.9), and the sparse local
     # cache may be morphologically skewed (e.g. one query's transient
     # fetches), which would bias the statistics. Only a LARGER sibling
     # cache is used (the sibling may itself be the sparse one).
-    if len(files) < MIN_POPULATION_STATS_SKELETONS:
+    if len(files) < MIN_POPULATION_STATS_SKELETONS and not vc.raw_only:
         sibling_files: List[str] = []
         for skel_dir in _sibling_skeleton_dirs(dataset, root):
-            sf = sorted(str(p) for p in skel_dir.rglob("*.pkl"))
+            sf = sorted(
+                [str(p) for p in skel_dir.rglob("*.pkl")
+                 if "raw_skeletons" not in p.parts]
+                + [str(p) for p in skel_dir.rglob("*.swc.gz")
+                   if "raw_skeletons" not in p.parts]
+            )
             if len(sf) > len(sibling_files):
                 sibling_files = sf
         if len(sibling_files) > len(files):
@@ -1429,7 +1817,7 @@ def population_stats(dataset: str, project_root: Optional[str] = None,
     sd = mat.std(axis=0)
     sd = np.where(sd <= 0, 1.0, sd)
     try:
-        (cache_dir / "morphology").mkdir(parents=True, exist_ok=True)
+        stats_file.parent.mkdir(parents=True, exist_ok=True)
         stats_file.write_text(json.dumps({
             "dataset": dataset,
             "dim": VECTOR_DIM,
@@ -1488,28 +1876,36 @@ def _fetch_cave_skeleton(dataset: str, body_id: int):
 def fetch_skeleton_on_demand(dataset: str, body_id: int,
                              project_root: Optional[str] = None,
                              persist: bool = True,
-                             level: str = VECTOR_BASIS_RAW
+                             level: str = VECTOR_BASIS_RAW,
+                             raw_cache: Optional[SkeletonVectorCache] = None,
+                             vector_cache: Optional[SkeletonVectorCache] = None
                              ) -> Optional["navis.TreeNeuron"]:
     """Fetch a neuron skeleton if missing (reusing any cached file).
 
     NeuPrint datasets use ``neuprint.fetch_skeleton``; FlyWire/CAVE datasets
-    use ``CAVEDataFetcher.fetch_skeleton`` (which caches itself). With
-    ``persist=True`` the fetched neuron is simplified to the fixed cache
-    level (``SKELETON_CACHE_LEVEL``, downsample factor 10) and pickled to
-    ``cache/{dataset}/skeletons/{body_id}.pkl`` so later calls reuse it; with
-    ``persist=False`` (transient, profile-first comparisons) the neuron is
-    returned in memory only and never written to the skeleton cache.
+    use ``CAVEDataFetcher.fetch_skeleton`` (which caches itself). Raw requests
+    persist the fetched neuron as portable
+    ``cache/{dataset}/skeletons/raw_skeletons/{body_id}.swc.gz`` so all
+    workflows share one source. ``persist=False`` remains a low-level
+    compatibility escape hatch for callers that explicitly request a
+    transient fetch; normal visualization, comparison, and Settings paths
+    always pass ``persist=True``.
+
+    ``raw_cache`` optionally supplies the shared raw-skeleton namespace. When
+    omitted for a raw request, the shared cache is created automatically. The
+    legacy visualization simp90 cache is never used as a raw source.
 
     ``level`` selects the consumer's simplification level:
 
-    - ``"raw"`` (default): returns the RAW skeleton. Raw is NEVER served
-      from the disk cache (raw skeletons are not persisted); vectors come
-      from the vector cache instead.
+    - ``"raw"`` (default): returns the RAW skeleton. With ``raw_cache`` it
+      reuses a persisted raw TreeNeuron; without it, raw is never served from
+      the shared visualization disk cache.
     - ``"simp90"``: hits the simplified cache file when present.
 
     Every online fetch vectorizes the RAW skeleton immediately and persists
-    the vector (basis ``VECTOR_BASIS_RAW``), so later comparisons reuse it
-    even though the raw skeleton is not stored on disk.
+    the vector (basis ``VECTOR_BASIS_RAW``), so later comparisons reuse it.
+    Raw TreeNeuron persistence is written to the shared cache when
+    ``persist=True``.
     """
     body_id = int(body_id)
     level = str(level).lower()
@@ -1518,14 +1914,33 @@ def fetch_skeleton_on_demand(dataset: str, body_id: int,
     root = Path(project_root) if project_root else Path(__file__).parent.parent
     cache_dir = root / "cache" / _dataset_folder(dataset) / "skeletons"
 
-    # Cache hit only for simp90 consumers: raw skeletons are never on disk,
-    # so a raw request always goes to the server (or the vector cache).
+    if level == VECTOR_BASIS_RAW and raw_cache is None:
+        try:
+            raw_cache = find_similar_raw_cache(
+                dataset, project_root=str(root), verbose=False,
+            )
+        except Exception:
+            raw_cache = None
+
+    if raw_cache is not None and level == VECTOR_BASIS_RAW:
+        cached = raw_cache.load_skeleton(body_id)
+        if cached is not None:
+            # A raw-file hit should also populate the raw vector cache when
+            # a previous interrupted run left only the skeleton behind.
+            cache_fetched_skeleton_vectors(
+                dataset, {body_id: cached}, project_root=str(root),
+                vector_cache=vector_cache or raw_cache, verbose=False,
+            )
+            return cached
+
+    # The raw namespace was checked above when supplied.  Only simp90
+    # consumers may consult the shared visualization skeleton cache here;
+    # a raw request without a raw-cache hit must go to the server.
     if level == VECTOR_BASIS_SIMP90:
         existing = _find_skeleton_file(dataset, body_id, project_root=str(root))
         if existing is not None:
             try:
-                with open(existing, "rb") as f:
-                    neuron = pickle.load(f)
+                neuron = _load_cached_skeleton_file(existing)
                 if type(neuron).__name__ in ("TreeNeuron", "MeshNeuron"):
                     return neuron
             except Exception:
@@ -1542,21 +1957,19 @@ def fetch_skeleton_on_demand(dataset: str, body_id: int,
     if neuron is None:
         return None
 
-    # Vectorize the RAW skeleton at fetch time and persist the vector
-    # (basis raw): later comparisons reuse it without re-fetching or
-    # re-vectorizing, even though the raw skeleton itself is not stored.
-    # Best-effort: a vectorization failure must not break the fetch.
-    try:
-        _, vec = vectorize_neuron(neuron)
-        SkeletonVectorCache(dataset, project_root=str(root), verbose=False).append_vectors(
-            [(body_id, vec, _neuron_rep(neuron))], vector_basis=VECTOR_BASIS_RAW
-        )
-    except Exception:
-        pass
+    # Vectorize the RAW skeleton at fetch time and persist the vector before
+    # returning. Raw SWC persistence is handled separately below.
+    cache_fetched_skeleton_vectors(
+        dataset, {body_id: neuron}, project_root=str(root),
+        vector_cache=vector_cache or raw_cache, verbose=False,
+    )
 
-    if persist:
-        # Persist ONLY the simplified skeleton (raw never cached) and mark
-        # the folder's level so level guards can enforce the invariant.
+    if persist and raw_cache is not None and level == VECTOR_BASIS_RAW:
+        raw_cache.persist_skeletons({body_id: neuron})
+    elif persist:
+        # Legacy visualization callers persist ONLY the simplified skeleton
+        # and mark the folder's level so level guards can enforce the
+        # invariant. Raw callers take the branch above.
         cache_dir.mkdir(parents=True, exist_ok=True)
         with open(cache_dir / f"{body_id}.pkl", "wb") as f:
             pickle.dump(_downsample_for_cache(neuron), f)
@@ -1580,16 +1993,19 @@ def fetch_skeletons_on_demand_batch(
         persist: bool = True, level: str = VECTOR_BASIS_RAW,
         batch_size: int = NEUPRINT_FETCH_BATCH_SIZE,
         max_threads: int = NEUPRINT_FETCH_MAX_THREADS,
-        progress_callback=None, client=None) -> Dict[int, object]:
+        progress_callback=None, client=None,
+        raw_cache: Optional[SkeletonVectorCache] = None,
+        vector_cache: Optional[SkeletonVectorCache] = None) -> Dict[int, object]:
     """Fetch a set of skeletons through one cache-aware online phase.
 
     The NeuPrint path is deliberately shared by Find Similar, full-dataset
     cache builds, and other non-visual callers.  It deduplicates the request,
-    loads any requested ``simp90`` files first, fetches the remaining raw
-    skeletons in bounded batches, vectorizes them, and writes the fixed
-    simplified cache level in one persistence phase.  ``raw`` requests never
-    read a simplified pickle, preserving the level invariant of the singular
-    :func:`fetch_skeleton_on_demand` API.
+    loads any requested files from the appropriate cache namespace first,
+    fetches the remaining raw skeletons in bounded batches, vectorizes them,
+    and writes the selected cache in one persistence phase. ``raw`` requests
+    never read a simp90 pickle. Raw reads and writes use the shared raw cache;
+    an explicitly supplied ``raw_cache`` can provide an alternate compatible
+    namespace for integrations.
 
     ``progress_callback(done, total, message)`` is optional and is called at
     batch boundaries.  The returned mapping is keyed by integer body ID and
@@ -1617,10 +2033,31 @@ def fetch_skeletons_on_demand_batch(
     cache_dir = root / "cache" / _dataset_folder(dataset) / "skeletons"
     loaded: Dict[int, object] = {}
     missing = []
+    raw_lookup_cache = raw_cache
+    if level == VECTOR_BASIS_RAW and raw_lookup_cache is None:
+        # Every raw-skeleton caller, including visualization/statvis callers
+        # that do not explicitly request persistence, gets the same first
+        # lookup into the shared raw cache. The same cache is also the raw-file
+        # write target, so every raw caller converges on one namespace.
+        try:
+            raw_lookup_cache = find_similar_raw_cache(
+                dataset, project_root=str(root), verbose=False)
+        except Exception:
+            raw_lookup_cache = None
+        if raw_cache is None:
+            raw_cache = raw_lookup_cache
 
-    # Only a simp90 consumer may use an on-disk skeleton.  A raw consumer must
-    # fetch raw because raw skeletons are intentionally not persisted.
-    if level == VECTOR_BASIS_SIMP90:
+    if level == VECTOR_BASIS_RAW and raw_lookup_cache is not None:
+        for bid in requested:
+            neuron = raw_lookup_cache.load_skeleton(bid)
+            if neuron is None:
+                missing.append(bid)
+            else:
+                loaded[bid] = neuron
+    # Only a simp90 consumer may use the shared visualization skeleton.  A
+    # A raw consumer without a usable shared raw-cache object must fetch raw;
+    # the shared visualization cache is simplified and is never a raw source.
+    elif level == VECTOR_BASIS_SIMP90:
         for bid in requested:
             existing = _find_skeleton_file(
                 dataset, bid, project_root=str(root))
@@ -1628,8 +2065,7 @@ def fetch_skeletons_on_demand_batch(
                 missing.append(bid)
                 continue
             try:
-                with open(existing, "rb") as handle:
-                    neuron = pickle.load(handle)
+                neuron = _load_cached_skeleton_file(existing)
                 if type(neuron).__name__ not in ("TreeNeuron", "MeshNeuron"):
                     raise TypeError(type(neuron).__name__)
                 loaded[bid] = neuron
@@ -1656,14 +2092,26 @@ def fetch_skeletons_on_demand_batch(
             for bid in missing:
                 try:
                     neuron = fetch_skeleton_on_demand(
-                        dataset, bid, project_root=str(root), persist=persist)
+                        dataset, bid, project_root=str(root), persist=persist,
+                        level=level, raw_cache=raw_cache,
+                        vector_cache=vector_cache)
                 except TypeError as exc:
                     # A few older integrations exposed the original helper
-                    # without its newer ``persist`` keyword.
-                    if "persist" not in str(exc):
+                    # without the newer cache/level keywords.  The batch
+                    # phase below owns persistence, so old overrides remain
+                    # compatible without changing the new raw-cache path.
+                    if not any(k in str(exc) for k in
+                               ("persist", "level", "raw_cache", "vector_cache")):
                         raise
-                    neuron = fetch_skeleton_on_demand(
-                        dataset, bid, project_root=str(root))
+                    try:
+                        neuron = fetch_skeleton_on_demand(
+                            dataset, bid, project_root=str(root),
+                            persist=persist)
+                    except TypeError as older_exc:
+                        if "persist" not in str(older_exc):
+                            raise
+                        neuron = fetch_skeleton_on_demand(
+                            dataset, bid, project_root=str(root))
                 if neuron is not None:
                     fetched_by_id[int(bid)] = neuron
             if progress_callback:
@@ -1748,25 +2196,29 @@ def fetch_skeletons_on_demand_batch(
             except Exception:
                 continue
 
-        # Vectorize raw skeletons in the same phase as the online fetch.  A
-        # single append keeps Find Similar's vector cache consistent with the
-        # skeleton cache and avoids one vector-cache write per worker result.
-        vector_rows = []
-        for bid, neuron in fetched_by_id.items():
-            try:
-                _, vector = vectorize_neuron(neuron)
-                vector_rows.append((int(bid), vector, _neuron_rep(neuron)))
-            except Exception:
-                continue
-        if vector_rows:
-            try:
-                SkeletonVectorCache(
-                    dataset, project_root=str(root), verbose=False
-                ).append_vectors(vector_rows, vector_basis=VECTOR_BASIS_RAW)
-            except Exception:
-                pass
+        # Vectorize and persist the raw vectors before the batch returns. A
+        # single append keeps the vector cache consistent with the fetched
+        # skeleton set and exposes the previously invisible post-fetch wait.
+        vector_stats = cache_fetched_skeleton_vectors(
+            dataset,
+            fetched_by_id,
+            project_root=str(root),
+            vector_cache=vector_cache or raw_cache,
+            progress_callback=progress_callback,
+            progress_offset=len(loaded),
+            progress_total=len(requested),
+            verbose=True,
+        )
+        if vector_stats.get("cache_error"):
+            print(
+                f"[morphology] vector cache incomplete for {dataset}: "
+                f"{vector_stats['cache_error']}"
+            )
 
-        if persist and fetched_by_id and not using_single_override:
+        if persist and fetched_by_id and raw_cache is not None \
+                and level == VECTOR_BASIS_RAW:
+            raw_cache.persist_skeletons(fetched_by_id)
+        elif persist and fetched_by_id and not using_single_override:
             cache_dir.mkdir(parents=True, exist_ok=True)
             for bid, neuron in fetched_by_id.items():
                 try:
@@ -1797,16 +2249,26 @@ def fetch_skeletons_on_demand_batch(
 def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
                            max_workers: int = 8, limit: Optional[int] = None,
                            progress_callback=None, cancel_event=None,
-                           verbose: bool = True) -> Dict[str, object]:
+                           verbose: bool = True,
+                           raw: bool = False, mode: Optional[str] = None,
+                           raw_format: str = "swc.gz") -> Dict[str, object]:
     """Download every missing skeleton of a dataset to the local cache.
 
-    Mirrors the Settings-panel full dataset pull: iterates the neuron index
-    (allneurons table, neuron index fallback), fetches only the neurons
-    missing from ``cache/{dataset}/skeletons/`` (resumable — existing files
-    are skipped), and persists each skeleton at the fixed simplified cache
-    level (``persist=True``; raw is never persisted, raw vectors are appended
-    at fetch time). NeuPrint requests use bounded online batches; the
-    FlyWire/CAVE fallback retains its local-bundle behavior.
+    Mirrors the Settings-panel full dataset pull. ``mode`` is one of:
+
+    - ``"raw"``: full raw TreeNeurons plus raw vectors in the shared dataset
+      skeleton cache. New bulk pulls default to portable ``.swc.gz`` files;
+      historical raw pickles remain readable.
+    - ``"fine"``: full raw TreeNeurons plus raw vectors in the shared dataset
+      skeleton cache. This is the prefetch option for 95% fine
+      visualization; the FAFB-style transform, tube mesh, and simplification
+      are deliberately performed after loading during visualization and are
+      never persisted as a mesh cache.
+    - ``"fast"``: the legacy shared 90%-simplified visualization cache.
+
+    ``raw=True`` remains a compatibility alias for ``mode="raw"``. NeuPrint
+    requests use bounded online batches; the FlyWire/CAVE fallback retains its
+    local-bundle behavior.
     ``progress_callback(current, total, info)`` and
     ``cancel_event`` (threading.Event) drive the UI; ``limit`` bounds the
     download (tests / smoke runs). Returns a summary dict.
@@ -1822,7 +2284,26 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
 
     root = Path(project_root) if project_root else Path(__file__).parent.parent
     folder = _dataset_folder(dataset)
-    skeleton_dir = root / "cache" / folder / "skeletons"
+    if mode is None:
+        mode = "raw" if raw else "fast"
+    mode = str(mode).strip().lower()
+    mode = {"raw_skeletons": "raw", "fine95": "fine",
+            "fine_skeletons": "fine", "simp90": "fast"}.get(mode, mode)
+    if mode not in {"raw", "fine", "fast"}:
+        raise ValueError("mode must be 'raw', 'fine', or 'fast'")
+    raw_mode = mode == "raw"
+    fine_mode = mode == "fine"
+    # Both the explicit raw pull and the fine-prefetch pull write the same
+    # portable raw TreeNeuron namespace. Fine is a rendering choice, not a
+    # second on-disk representation.
+    raw_cache = (find_similar_raw_cache(
+        dataset, project_root=str(root), n_workers=max_workers,
+        verbose=verbose, raw_format=raw_format
+    ) if (raw_mode or fine_mode) else None)
+    if raw_mode or fine_mode:
+        skeleton_dir = raw_cache.skeleton_dir
+    else:
+        skeleton_dir = root / "cache" / folder / "skeletons"
     skeleton_dir.mkdir(parents=True, exist_ok=True)
 
     # Index of all bodyIds.
@@ -1844,7 +2325,23 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
             except Exception:
                 index = []
 
-    existing = {int(p.stem) for p in skeleton_dir.rglob("*.pkl")}
+    if raw_mode or fine_mode:
+        # The raw cache has its own namespace below skeletons/.  Include the
+        # legacy Find Similar directory through the cache's migration-aware
+        # discovery helper so moving the cache does not trigger duplicate
+        # downloads.
+        existing_paths = [Path(path) for path in raw_cache._discover_skeleton_files()]
+    else:
+        # Fast mode uses the legacy simp90 pickles.  Do not count the shared
+        # raw .swc.gz files as fast-cache hits.
+        existing_paths = [path for path in skeleton_dir.rglob("*.pkl")
+                          if "raw_skeletons" not in path.parts]
+    existing = set()
+    for path in existing_paths:
+        try:
+            existing.add(_skeleton_body_id(path))
+        except (TypeError, ValueError):
+            continue
 
     # FAFB v783 only: the healed bundle already provides most skeletons
     # locally — count its entries as available instead of re-fetching them
@@ -1875,7 +2372,7 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
                   f"({len(existing)} cached, {len(local_bundle_ids)} from the "
                   f"healed bundle); nothing to fetch.")
         return {"total": 0, "fetched": 0, "skipped_existing": skipped_existing,
-                "cancelled": False, "errors": 0}
+                "cancelled": False, "errors": 0, "mode": mode}
 
     if verbose:
         print(f"[morphology] download_all_skeletons: fetching {total} "
@@ -1911,6 +2408,8 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
                     batch_size=NEUPRINT_FETCH_BATCH_SIZE,
                     max_threads=max_workers,
                     progress_callback=_batch_progress,
+                    raw_cache=raw_cache,
+                    vector_cache=raw_cache,
                 )
                 fetched = len(fetched_map)
                 errors = total - fetched
@@ -1931,6 +2430,7 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
             "skipped_existing": skipped_existing,
             "cancelled": cancelled,
             "errors": errors,
+            "mode": mode,
         }
         if verbose:
             print(f"[morphology] download_all_skeletons: {fetched}/{total} "
@@ -1941,10 +2441,34 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
         if cancel_event.is_set():
             return False
         try:
-            nrn = fetch_skeleton_on_demand(
-                dataset, bid, project_root=str(root), persist=True
+            fetch_kwargs = {
+                "project_root": str(root),
+                "persist": True,
+            }
+            if raw_mode or fine_mode:
+                fetch_kwargs.update({"raw_cache": raw_cache,
+                                     "vector_cache": raw_cache})
+            try:
+                nrn = fetch_skeleton_on_demand(dataset, bid, **fetch_kwargs)
+            except TypeError as exc:
+                # Keep raw Download All compatible with older integrations
+                # that still expose the pre-namespace singular fetcher.
+                if not (raw_mode or fine_mode) or not any(
+                        k in str(exc) for k in ("raw_cache", "vector_cache")):
+                    raise
+                nrn = fetch_skeleton_on_demand(
+                    dataset, bid, project_root=str(root),
+                    persist=True,
+                )
+            if (raw_mode or fine_mode) and nrn is not None \
+                    and raw_cache is not None:
+                try:
+                    raw_cache.persist_skeletons({int(bid): nrn})
+                except Exception:
+                    pass
+            ok = nrn is not None and (
+                not (raw_mode or fine_mode) or _neuron_rep(nrn) == "skeleton"
             )
-            ok = nrn is not None
         except Exception:
             ok = False
         with lock:
@@ -1979,6 +2503,7 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
         "skipped_existing": skipped_existing,
         "cancelled": cancelled,
         "errors": errors,
+        "mode": mode,
     }
     if verbose:
         print(f"[morphology] download_all_skeletons: {fetched}/{total} fetched, "
@@ -2025,10 +2550,8 @@ class MorphologyComparer:
         verbose: bool = True,
         n_workers: int = 8,
         use_cache: bool = True,
-        # Transiently-fetched skeletons (profile-first candidate fetches /
-        # NBLAST) are persisted to the skeleton cache by default so later
-        # runs reuse them; set False to keep them in memory only (their
-        # VECTORS are always cached regardless).
+        # Retained as a compatibility keyword. Raw skeletons are now always
+        # persisted as compressed SWC in the shared dataset skeleton cache.
         cache_fetched_skeletons: bool = True,
         project_root: Optional[str] = None,
     ):
@@ -2050,9 +2573,9 @@ class MorphologyComparer:
         self.verbose = verbose
         self.n_workers = max(1, int(n_workers))
         self.use_cache = use_cache
-        # Persist transiently-fetched skeletons (profile-first / NBLAST) to
-        # the skeleton cache for reuse; on by default.
-        self.cache_fetched_skeletons = bool(cache_fetched_skeletons)
+        # Keep accepting the old keyword, but raw persistence is unconditional
+        # so visualization, Find Similar, and Settings pulls share one source.
+        self.cache_fetched_skeletons = True
         self.project_root = Path(project_root) if project_root else Path(__file__).parent.parent
 
         if self.level not in ("auto", "bodyid", "type"):
@@ -2223,7 +2746,7 @@ class MorphologyComparer:
             self.level = self._resolve_level(query_df)
             self._log(f"Level auto-resolved to: {self.level} "
                       f"({'type-to-type' if self.level == 'type' else 'bodyId-to-bodyId'})")
-        cache = SkeletonVectorCache(
+        cache = find_similar_raw_cache(
             self.dataset, project_root=str(self.project_root),
             n_workers=self.n_workers, verbose=self.verbose,
         )
@@ -2265,15 +2788,52 @@ class MorphologyComparer:
                     )
         else:
             # Cache-direct search (FlyWire bulk caches and explicit choice).
-            # Skeletons are only ever fetched explicitly (Download All
-            # Skeletons); the vector cache builds from what is local.
+            # Build from raw local sources first, then fetch any missing query
+            # skeletons online. Candidate skeletons remain bounded by the
+            # available raw population; this avoids silently using the shared
+            # visualization simp90 cache.
             self._progress(2, CACHE_DIRECT_TOTAL_STEPS, "Loading vector cache")
             cache.ensure(fetch_missing=0)
             data = cache.load()
+            query_ids = [int(b) for b in query_df["bodyId"].tolist()]
+            cached_ids = (set(int(b) for b in data["bodyIds"])
+                          if data is not None else set())
+            missing_query = [bid for bid in query_ids if bid not in cached_ids]
+            if missing_query:
+                self._log(
+                    f"Vector cache miss: fetching {len(missing_query)} raw "
+                    "query skeleton(s) online."
+                )
+                fetched_query = fetch_skeletons_on_demand_batch(
+                    self.dataset,
+                    missing_query,
+                    project_root=str(self.project_root),
+                    persist=self.cache_fetched_skeletons,
+                    level=VECTOR_BASIS_RAW,
+                    max_threads=min(NEUPRINT_FETCH_MAX_THREADS,
+                                    max(1, int(self.n_workers))),
+                    raw_cache=cache,
+                    vector_cache=cache,
+                )
+                # Keep the vector-mode contract even for integrations that
+                # override the batch fetch seam and return neurons without
+                # appending their own vector rows.
+                rows = []
+                for bid, neuron in (fetched_query or {}).items():
+                    try:
+                        if _neuron_rep(neuron) != "skeleton":
+                            continue
+                        _, vec = vectorize_neuron(neuron)
+                        rows.append((int(bid), vec, "skeleton"))
+                    except Exception:
+                        continue
+                if rows:
+                    cache.append_vectors(rows, vector_basis=VECTOR_BASIS_RAW)
+                data = cache.load()
             if data is None or len(data["bodyIds"]) == 0:
                 raise ValueError(
-                    f"No vectorized neurons for {self.dataset}. Build the vector "
-                    "cache first (Build Vector Cache button)."
+                    f"No raw vectorized neurons for {self.dataset}. Fetch or "
+                    "build the shared raw vector cache first."
                 )
             self._progress(3, CACHE_DIRECT_TOTAL_STEPS, self._scoring_step_label())
             if self.method == "vector":
@@ -2530,8 +3090,8 @@ class MorphologyComparer:
         ROI distribution cosine, or both) and returns them sorted; the
         scoring pool is simply the top ``candidate_cap`` candidates (query
         members are already excluded by the screens). Fetched skeletons are
-        TRANSIENT (used for the current comparison only, never written to
-        the skeleton cache); cached skeletons are reused. Every scored
+        transient (used for the current comparison only), while their raw
+        vectors are persisted for reuse; cached skeletons are reused. Every scored
         vector is standardized with ONE consistent set of statistics (cache
         meta, sample-based population stats, or pool stats as a last
         resort), and the whole comparison runs at ONE representation level
@@ -2611,11 +3171,8 @@ class MorphologyComparer:
         for bid in all_load_ids:
             if bid in cache_ids:
                 continue  # the vector cache is sufficient for screening
-            pkl = _find_skeleton_file(
-                self.dataset, bid, project_root=str(self.project_root))
-            if (pkl is not None
-                    and _skeleton_folder_level(
-                        self.dataset, str(self.project_root)) == cache_basis):
+            pkl = cache.find_skeleton_file(bid)
+            if pkl is not None:
                 continue
             missing_ids.append(bid)
 
@@ -2634,6 +3191,8 @@ class MorphologyComparer:
             max_threads=min(NEUPRINT_FETCH_MAX_THREADS,
                             max(1, int(self.n_workers))),
             progress_callback=_report_fetch,
+            raw_cache=cache,
+            vector_cache=cache,
         ) if missing_ids else {}
 
         query_neurons = {
@@ -2669,32 +3228,76 @@ class MorphologyComparer:
         self._log(f"Profile-first: {len(pool_ids)} pool neurons, "
                   f"{len(pool_neurons)} skeletons fetched (transient)")
 
-        # Vectors for query + pool: cached vectors first, then any
-        # in-memory fetched neurons. ``reps`` tracks each row's
-        # representation ('skeleton' | 'mesh') so the comparison never mixes
-        # levels.
-        X_q, mask_q, rep_q = cache.vectors_for(query_ids, compute_missing=True)
+        # Vectorize any in-memory fetches before the cache lookup.  The batch
+        # fetcher normally appends these rows itself; this append is a
+        # deduplicating compatibility path for singular-fetch overrides and
+        # offline fixtures.  It also makes the subsequent snapshot complete.
         fetched_vectors: List[Tuple[int, np.ndarray, str]] = []
-        for i, bid in enumerate(query_ids):
-            if not mask_q[i] and bid in query_neurons:
-                _, vec = vectorize_neuron(query_neurons[bid])
-                X_q[i], mask_q[i] = vec, True
-                rep_q[i] = _neuron_rep(query_neurons[bid])
-                fetched_vectors.append((int(bid), vec, rep_q[i]))
-        X_c, mask_c, rep_c = cache.vectors_for(pool_ids, compute_missing=True)
-        for i, bid in enumerate(pool_ids):
-            if not mask_c[i] and bid in pool_neurons:
-                _, vec = vectorize_neuron(pool_neurons[bid])
-                X_c[i], mask_c[i] = vec, True
-                rep_c[i] = _neuron_rep(pool_neurons[bid])
-                fetched_vectors.append((int(bid), vec, rep_c[i]))
-
-        # ALWAYS persist the computed vectors, even when the skeleton itself
-        # was not cached (transient fetch): later queries reuse the vector
-        # without re-fetching or re-vectorizing. Rows of a representation
-        # different from the cache's are rejected inside append_vectors.
+        for bid, neuron in fetched_all.items():
+            try:
+                _, vec = vectorize_neuron(neuron)
+                rep = _neuron_rep(neuron)
+                if not q_rep or rep == q_rep:
+                    fetched_vectors.append((int(bid), vec, rep))
+            except Exception:
+                continue
         if fetched_vectors:
             cache.append_vectors(fetched_vectors, vector_basis=cache_basis)
+
+        # Resolve all local-file misses in one call, then reload the cache.
+        # ``vectors_for`` can return raw vectors for rows it computes during
+        # that call, while cached rows are standardized.  Scoring that mixed
+        # result was the first-run/warm-cache inconsistency: the online batch
+        # had already appended standardized rows before this function used
+        # its stale ``cache_data`` snapshot.  The fresh snapshot below makes
+        # every row use the same persisted representation and statistics.
+        pre_X, pre_mask, pre_reps = cache.vectors_for(
+            all_load_ids, compute_missing=True
+        )
+        cache_data = cache.load()
+        cache_ids = (set(int(b) for b in cache_data["bodyIds"])
+                     if cache_data is not None else set())
+        cache_rep = (cache_data.get("dataset_rep", "")
+                     if cache_data is not None else "")
+        cache_basis = (((cache_data.get("meta") or {}).get("vector_basis")
+                        or VECTOR_BASIS_RAW) if cache_data is not None
+                       else VECTOR_BASIS_RAW)
+
+        snapshot_rows = {}
+        if cache_data is not None:
+            snapshot_rows = {
+                int(bid): i for i, bid in enumerate(cache_data["bodyIds"])
+            }
+        pre_rows = {int(bid): i for i, bid in enumerate(all_load_ids)}
+
+        def _snapshot_vectors(ids):
+            vectors = np.full((len(ids), VECTOR_DIM), np.nan)
+            mask = np.zeros(len(ids), dtype=bool)
+            reps = [""] * len(ids)
+            for i, bid in enumerate(ids):
+                bid = int(bid)
+                row = snapshot_rows.get(bid)
+                if row is not None and cache_data is not None:
+                    candidate = cache_data["X"][row]
+                    if np.isfinite(candidate).all():
+                        vectors[i] = candidate
+                        mask[i] = True
+                        reps[i] = (cache_data["rep"][row]
+                                   or cache_data.get("dataset_rep", ""))
+                        continue
+                # If persistence was unavailable, retain the raw vector
+                # computed by this call as a last-resort transient row.  It
+                # is intentionally marked as non-cache data below so the
+                # standardization block applies the chosen transform.
+                pre_row = pre_rows.get(bid)
+                if pre_row is not None and pre_mask[pre_row]:
+                    vectors[i] = pre_X[pre_row]
+                    mask[i] = True
+                    reps[i] = pre_reps[pre_row]
+            return vectors, mask, reps
+
+        X_q, mask_q, rep_q = _snapshot_vectors(query_ids)
+        X_c, mask_c, rep_c = _snapshot_vectors(pool_ids)
 
         # ONE representation per comparison: skeletons and meshes (or two
         # simplification levels) produce different features in the shared
@@ -2739,7 +3342,9 @@ class MorphologyComparer:
                     and len(cache_data["bodyIds"]) >= MIN_POPULATION_STATS_SKELETONS):
                 mu, sd, using_cache_stats = meta_mu, meta_sd, True
             if mu is None:
-                mu, sd = population_stats(self.dataset, str(self.project_root))
+                mu, sd = population_stats(
+                    self.dataset, str(self.project_root), cache=cache
+                )
             if mu is None:
                 # Last resort: pool-computed statistics.
                 all_rows = np.vstack([X_q[mask_q], X_c[mask_c]])
@@ -3016,11 +3621,10 @@ class MorphologyComparer:
         if n == 1:
             return 1.0
         sub = X[idxs]
-        # Pairwise similarity among members: similarity_matrix takes a single
-        # query vector against matrix rows, so evaluate row by row.
-        pair = np.empty((n, n))
-        for i in range(n):
-            pair[i] = similarity_matrix(sub[i], sub, metric)
+        # Compute the whole pairwise matrix once.  The previous row-by-row
+        # implementation recalculated all row norms for every member and was
+        # unnecessarily slow for large types.
+        pair = pairwise_similarity_matrix(sub, metric)
         total = float(pair.sum()) - n  # drop the diagonal (self = 1)
         return total / (n * (n - 1))
 
@@ -3100,12 +3704,14 @@ class MorphologyComparer:
             for j in range(i + 1, n_records):
                 pair_directions.setdefault((i, j), (i, j))
 
+        pair_matrix = pairwise_similarity_matrix(
+            np.asarray([X[i] for i, _, _, _ in records], dtype=float),
+            self.metric,
+        )
         for source_i, target_i in pair_directions.values():
             _, source_bid, source_type, _ = records[source_i]
             _, target_bid, target_type, target_instance = records[target_i]
-            score = float(similarity_matrix(
-                X[source_i], X[target_i].reshape(1, -1), self.metric
-            )[0])
+            score = float(pair_matrix[source_i, target_i])
             row: Dict[str, object] = {
                 "source_bodyId": source_bid,
                 "source_type": source_type,
@@ -3712,52 +4318,94 @@ class MorphologyComparer:
                           ) -> Dict[int, Optional["navis.core.dotprop.Dotprops"]]:
         """Load skeletons and build dotprops in microns.
 
-        ``neurons`` supplies transient in-memory skeletons (profile-first
-        fetches) so they are not re-fetched; anything missing is fetched
-        (persisted only when ``cache_fetched_skeletons`` is enabled). For
-        FlyWire datasets the skeleton sources follow the visualization
-        pipeline (local API cache / healed bundle -> extrusion check ->
-        token-gated CAVE fallback); other datasets use the local pickle
-        cache and the on-demand fetch."""
+        ``neurons`` supplies transient in-memory raw skeletons (profile-first
+        fetches) so they are not re-fetched; anything missing is resolved
+        through the shared raw cache and batched online fetch (raw skeletons
+        are always persisted as compressed SWC). For
+        FlyWire datasets the raw sources follow the healed-skeleton pipeline
+        (local API cache / healed bundle -> extrusion check -> token-gated
+        CAVE fallback); visualization simp90 pickles are never used."""
         out: Dict[int, Optional[navis.core.dotprop.Dotprops]] = {}
         local_neurons: Dict[int, object] = {
             int(bid): neuron for bid, neuron in (neurons or {}).items()
+            if _neuron_rep(neuron) == "skeleton"
         }
+
+        raw_cache = find_similar_raw_cache(
+            self.dataset, project_root=str(self.project_root),
+            n_workers=self.n_workers, verbose=False,
+        )
+
+        # Keep raw vector rows and raw skeleton persistence in the same cache
+        # transaction. This makes an NBLAST-first run useful to a later
+        # vector-mode or visualization run.
+        def _cache_raw_neurons(mapping: Dict[int, object]) -> None:
+            rows = []
+            for bid, neuron in mapping.items():
+                try:
+                    if _neuron_rep(neuron) != "skeleton":
+                        continue
+                    _, vec = vectorize_neuron(neuron)
+                    rows.append((int(bid), vec, "skeleton"))
+                except Exception:
+                    continue
+            if rows:
+                try:
+                    raw_cache.append_vectors(rows, vector_basis=VECTOR_BASIS_RAW)
+                except Exception:
+                    pass
+            try:
+                raw_cache.persist_skeletons(mapping)
+            except Exception:
+                pass
+
+        # The shared raw cache has priority for every dataset.
+        for body_id in body_ids:
+            bid = int(body_id)
+            if bid in local_neurons:
+                continue
+            cached = raw_cache.load_skeleton(bid)
+            if cached is not None:
+                local_neurons[bid] = cached
 
         # FlyWire skeletons: resolve every non-transient id through the
         # FAFB pipeline once for the whole batch (the extrusion check is
         # cached, so repeated batches reuse earlier results).
         if self._is_flywire():
-            local_neurons.update(self._load_fafb_skeletons(
+            fetched = self._load_fafb_skeletons(
                 [int(b) for b in body_ids if int(b) not in local_neurons]
-            ))
+            )
+            local_neurons.update(fetched)
+            _cache_raw_neurons(fetched)
         else:
-            # Resolve local files first, then issue one combined NeuPrint
-            # fetch for all remaining dotprops.  This covers cache-direct
+            # Resolve raw-cache hits first, then issue one combined NeuPrint
+            # fetch for all remaining dotprops. This covers cache-direct
             # NBLAST, where no profile-first in-memory map is available.
             missing_online = []
             for body_id in body_ids:
                 bid = int(body_id)
                 if bid in local_neurons:
                     continue
-                pkl = _find_skeleton_file(
-                    self.dataset, bid, project_root=str(self.project_root))
-                if pkl is None:
-                    missing_online.append(bid)
-                    continue
-                try:
-                    with open(pkl, "rb") as handle:
-                        local_neurons[bid] = pickle.load(handle)
-                except Exception:
-                    missing_online.append(bid)
+                missing_online.append(bid)
             if missing_online:
-                local_neurons.update(fetch_skeletons_on_demand_batch(
+                fetched = fetch_skeletons_on_demand_batch(
                     self.dataset,
                     missing_online,
                     project_root=str(self.project_root),
                     persist=self.cache_fetched_skeletons,
                     level=VECTOR_BASIS_RAW,
-                ))
+                    raw_cache=raw_cache,
+                    vector_cache=raw_cache,
+                )
+                local_neurons.update(fetched)
+                # Compatibility with singular-fetch overrides that predate
+                # the raw_cache/vector_cache keywords.
+                _cache_raw_neurons(fetched)
+
+        _cache_raw_neurons({
+            int(b): n for b, n in local_neurons.items()
+            if int(b) in {int(x) for x in body_ids}
+        })
 
         pbar = tqdm(body_ids, desc=desc, unit="neuron",
                     disable=not self.verbose, leave=False, file=sys.stdout)
@@ -3773,6 +4421,9 @@ class MorphologyComparer:
                     out[bid] = None
                     continue
                 try:
+                    if _neuron_rep(nrn) != "skeleton":
+                        out[bid] = None
+                        continue
                     nrn_um = nrn / 1000.0  # nanometres -> microns (NBLAST requirement)
                     out[bid] = navis.make_dotprops(nrn_um, k=20)
                 except Exception:
@@ -3811,6 +4462,19 @@ class MorphologyComparer:
                      "visualize_top_n applies to visualization only"),
             "visualize_top_n": self.visualize_top_n,
             "visualize_by": self.visualize_by,
+            "cache_raw_skeletons": self.cache_fetched_skeletons,
+            "raw_skeleton_cache": str(
+                find_similar_raw_cache(
+                    self.dataset, project_root=str(self.project_root),
+                    verbose=False,
+                ).skeleton_dir
+            ),
+            "raw_vector_cache": str(
+                find_similar_raw_cache(
+                    self.dataset, project_root=str(self.project_root),
+                    verbose=False,
+                ).parquet_path
+            ),
             "query_bodyIds": [int(b) for b in query_df["bodyId"].tolist()],
             "n_bodyid_rows": len(bodyid_df),
             "n_type_rows": len(type_df),
@@ -3975,6 +4639,11 @@ class MorphologyComparer:
 
         run_dir = Path(getattr(self, "output_folder", "") or self.output_dir)
         try:
+            pipeline = str(
+                self.visualization_settings.get(
+                    "neuprint_skeleton_pipeline", "fine"
+                ) or "fine"
+            ).strip().lower()
             viz_kwargs = {
                 "dataset": self.dataset,
                 "output_dir": str(run_dir),
@@ -3983,12 +4652,19 @@ class MorphologyComparer:
                 "saveas": _dataset_folder(self.dataset),
                 "include_timestamp": False,
                 "skip_synapse": True,
-                "skeleton_mode": "tube",
+                # Analysis visualizations default to the light-weight line
+                # representation. Callers can explicitly request tube/fine
+                # rendering through visualization_settings.
+                "skeleton_mode": self.visualization_settings.get(
+                    "skeleton_mode", "line"
+                ),
                 "legend_mode": "layer" if self.visualize_by == "type" else "single",
                 "brain_mesh": "template",
                 "export_views": False,
                 "show_fig": False,
-                "cache_neurons": True,
+                "cache_neurons": pipeline not in {
+                    "fast", "direct", "artistic", "fine_opt1"
+                },
                 "verbose": "simple",
             }
             # The panel contains the same keyword names as VisualizeSkeleton.
@@ -4005,7 +4681,9 @@ class MorphologyComparer:
             # dedicated Skeleton tab can retain its own historical defaults.
             if viz_kwargs.get("skeleton_mesh_simplification") is None:
                 viz_kwargs["skeleton_mesh_simplification"] = (
-                    default_analysis_skeleton_mesh_simplification(self.dataset)
+                    default_analysis_skeleton_mesh_simplification(
+                        self.dataset, pipeline
+                    )
                 )
 
             vs = VisualizeSkeleton(
@@ -4022,8 +4700,9 @@ class MorphologyComparer:
         per-type sample size so type-level renders stay bounded); falls back
         to the neuron table / index when the dataset has no vector cache."""
         try:
-            data = SkeletonVectorCache(
-                self.dataset, project_root=str(self.project_root), verbose=False
+            data = find_similar_raw_cache(
+                self.dataset, project_root=str(self.project_root),
+                n_workers=self.n_workers, verbose=False,
             ).load()
             members: List[int] = []
             if data is not None:
@@ -4064,7 +4743,7 @@ def enrich_homolog_results(
         return results_df
 
     def _vectors(dataset: str, bids: List[int]) -> Tuple[np.ndarray, np.ndarray]:
-        cache = SkeletonVectorCache(
+        cache = find_similar_raw_cache(
             dataset, project_root=project_root, verbose=verbose
         )
         X, ok, _ = cache.vectors_for(bids, compute_missing=True)

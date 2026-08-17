@@ -51,6 +51,7 @@ def create_settings_tab():
 
         # Dataset cache (pull full dataset or explicitly pull all connections)
         from ..dataset_pull import DatasetPuller
+        from ..skeleton_pull import SkeletonPuller
 
         with ui.card().classes("w-full drocat-card"):
             section_header("Dataset Cache", "download")
@@ -65,6 +66,7 @@ def create_settings_tab():
             ).classes("text-caption drocat-muted")
 
             puller = DatasetPuller()
+            skeleton_puller = SkeletonPuller()
 
             def _format_eta(st) -> str:
                 """Human-readable remaining-time estimate from fetch progress."""
@@ -122,19 +124,21 @@ def create_settings_tab():
 
             def refresh_pull_state():
                 st = puller.state
+                skeleton_running = skeleton_puller.running
                 if (
                     not st["running"]
                     and run_btn.enabled
                     and connection_run_btn.enabled
+                    and not skeleton_running
                 ):
                     return
-                run_btn.set_enabled(not st["running"])
-                connection_run_btn.set_enabled(not st["running"])
+                run_btn.set_enabled(not st["running"] and not skeleton_running)
+                connection_run_btn.set_enabled(not st["running"] and not skeleton_running)
                 cancel_btn.set_enabled(st["running"])
-                ds_select.set_enabled(not st["running"])
-                force_rebuild.set_enabled(not st["running"])
-                batch_input.set_enabled(not st["running"])
-                parallel_input.set_enabled(not st["running"])
+                ds_select.set_enabled(not st["running"] and not skeleton_running)
+                force_rebuild.set_enabled(not st["running"] and not skeleton_running)
+                batch_input.set_enabled(not st["running"] and not skeleton_running)
+                parallel_input.set_enabled(not st["running"] and not skeleton_running)
                 if st["running"]:
                     pull_done_synced["value"] = False
                     total = st["total"] or 1
@@ -216,6 +220,106 @@ def create_settings_tab():
             connection_run_btn.on_click(start_connection_pull)
             cancel_btn.on_click(stop_pull)
             ui.timer(0.5, refresh_pull_state)
+
+            ui.separator().classes("w-full")
+            section_header("Skeleton Cache Pull", "account_tree")
+            ui.label(
+                "Download every missing skeleton for the selected dataset. "
+                "Raw mode stores full TreeNeurons in the shared dataset skeleton "
+                "cache using reusable .swc.gz files; fine mode uses the same "
+                "raw .swc.gz population for 95% fine visualization. Fine meshes "
+                "are built transiently during visualization and are never cached. "
+                "Both modes vectorize and cache raw vectors immediately after each "
+                "batched fetch."
+            ).classes("text-caption drocat-muted")
+            with ui.row().classes("items-center gap-3 w-full").style("flex-wrap: wrap"):
+                skeleton_mode = ui.select(
+                    options={
+                        "raw": "Raw skeletons",
+                        "fine": "95% fine simplification",
+                    },
+                    value="raw",
+                    label="Skeleton cache",
+                ).props("outlined").classes("drocat-select").style("min-width: 240px")
+                skeleton_run_btn = ui.button(
+                    "Download All Skeletons", icon="download", color="secondary"
+                ).props("outline")
+                skeleton_cancel_btn = ui.button(
+                    "Cancel", icon="stop", color="negative"
+                ).props("outline")
+                skeleton_cancel_btn.set_enabled(False)
+
+            skeleton_progress = ui.linear_progress(value=0).props(
+                "instant-feedback"
+            ).classes("w-full")
+            skeleton_status = ui.label("Idle").classes("text-caption drocat-muted")
+            skeleton_result = ui.label("").classes("text-caption")
+            skeleton_done_synced = {"value": False}
+
+            def refresh_skeleton_pull_state():
+                st = skeleton_puller.state
+                running = bool(st["running"])
+                dataset_running = puller.running
+                skeleton_run_btn.set_enabled(not running and not dataset_running)
+                skeleton_cancel_btn.set_enabled(running)
+                skeleton_mode.set_enabled(not running and not dataset_running)
+                # The dataset selector is shared with both dataset-cache pulls.
+                ds_select.set_enabled(not running and not puller.running)
+                if running:
+                    skeleton_done_synced["value"] = False
+                    total = st["total"] or 1
+                    frac = min(st["current"] / total, 1.0)
+                    skeleton_progress.set_value(frac)
+                    skeleton_status.text = (
+                        f"Pulling {st['dataset']} ({st.get('mode', 'raw')}): "
+                        f"{st['info']} ({st['current']:,}/{st['total']:,}) | "
+                        f"{_format_eta(st)}"
+                    )
+                    return
+                if not st["done"]:
+                    return
+                if not skeleton_done_synced["value"]:
+                    refresh_dataset_selector_statuses()
+                    skeleton_done_synced["value"] = True
+                if st["error"]:
+                    skeleton_status.text = "Failed"
+                    skeleton_result.text = f"❌ {st['error']}"
+                else:
+                    summary = st.get("summary") or {}
+                    head = "⏹ Cancelled." if st["cancelled"] else "✅ Skeleton pull complete."
+                    skeleton_result.text = (
+                        f"{head} Mode: {summary.get('mode', st.get('mode', 'raw'))}; "
+                        f"fetched: {summary.get('fetched', 0):,}; "
+                        f"already available: {summary.get('skipped_existing', 0):,}; "
+                        f"errors: {summary.get('errors', 0):,}"
+                    )
+                    skeleton_status.text = "Idle"
+
+            def start_skeleton_pull():
+                if puller.running:
+                    ui.notify("Finish the full dataset pull before downloading skeletons", type="warning")
+                    return
+                ok = skeleton_puller.start(
+                    str(ds_select.value),
+                    max_workers=int(parallel_input.value or 1),
+                    mode=str(skeleton_mode.value or "raw"),
+                )
+                if ok:
+                    skeleton_run_btn.set_enabled(False)
+                    skeleton_cancel_btn.set_enabled(True)
+                    skeleton_result.text = ""
+                    skeleton_progress.set_value(0)
+                    skeleton_done_synced["value"] = False
+                else:
+                    ui.notify("A skeleton pull is already running", type="warning")
+
+            def stop_skeleton_pull():
+                skeleton_puller.cancel()
+                skeleton_status.text = "Cancelling after the current batch..."
+
+            skeleton_run_btn.on_click(start_skeleton_pull)
+            skeleton_cancel_btn.on_click(stop_skeleton_pull)
+            ui.timer(0.5, refresh_skeleton_pull_state)
 
         # Tokens
         with ui.card().classes("w-full drocat-card"):

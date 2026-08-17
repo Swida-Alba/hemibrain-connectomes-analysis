@@ -73,6 +73,26 @@ def write_skeleton(tmp_path, dataset, body_id, neuron):
     folder.mkdir(parents=True, exist_ok=True)
     with open(folder / f"{body_id}.pkl", "wb") as f:
         pickle.dump(neuron, f)
+    # Raw skeleton fixtures use the shared raw namespace; the legacy
+    # find_similar/raw_skeletons path is covered separately as a migration
+    # fallback.
+    raw_folder = (tmp_path / "cache" / morph._dataset_folder(dataset)
+                  / "skeletons" / "raw_skeletons")
+    raw_folder.mkdir(parents=True, exist_ok=True)
+    with open(raw_folder / f"{body_id}.pkl", "wb") as f:
+        pickle.dump(neuron, f)
+    return folder / f"{body_id}.pkl"
+
+
+def write_raw_find_similar_skeleton(tmp_path, dataset, body_id, neuron,
+                                    legacy=False):
+    """Persist a raw TreeNeuron to the shared or legacy raw cache."""
+    folder = (tmp_path / "cache" / morph._dataset_folder(dataset)
+              / ("find_similar" if legacy else "skeletons")
+              / "raw_skeletons")
+    folder.mkdir(parents=True, exist_ok=True)
+    with open(folder / f"{body_id}.pkl", "wb") as f:
+        pickle.dump(neuron, f)
     return folder / f"{body_id}.pkl"
 
 
@@ -165,6 +185,16 @@ class TestSimilarity:
     def test_cosine_self_is_one(self):
         v = np.random.default_rng(0).normal(size=50)
         assert morph.cosine_similarity_matrix(v, v.reshape(1, -1))[0] == pytest.approx(1.0)
+
+    def test_pairwise_cosine_matches_single_query_helper(self):
+        rng = np.random.default_rng(10)
+        X = rng.normal(size=(9, 17))
+        expected = np.vstack([
+            morph.cosine_similarity_matrix(row, X)
+            for row in X
+        ])
+        actual = morph.pairwise_similarity_matrix(X, "cosine")
+        np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
 
     def test_pearson_self_is_one(self):
         v = np.random.default_rng(1).normal(size=50)
@@ -272,6 +302,73 @@ class TestSkeletonVectorCache:
         assert fetched == {999: True}
         assert stats["fetched"] == 1 and stats["rows"] == 4
 
+    def test_shared_raw_cache_isolated_from_simp90(self, tmp_path):
+        """The shared raw cache never treats the visualization simp90 pickle as raw."""
+        folder = tmp_path / "cache" / morph._dataset_folder("np:v1") / "skeletons"
+        folder.mkdir(parents=True, exist_ok=True)
+        with open(folder / "101.pkl", "wb") as handle:
+            pickle.dump(line_neuron(length=20), handle)
+        (folder / ".level").write_text("simp90\n")
+
+        raw_cache = morph.find_similar_raw_cache(
+            "np:v1", project_root=str(tmp_path), verbose=False
+        )
+        assert raw_cache.find_skeleton_file(101) is None
+        _, mask, _ = raw_cache.vectors_for([101], compute_missing=True)
+        assert mask.tolist() == [False]
+
+        write_raw_find_similar_skeleton(tmp_path, "np:v1", 101,
+                                        line_neuron(length=20))
+        stats = raw_cache.build()
+        assert stats["rows"] == 1
+        assert raw_cache.load()["dataset_rep"] == "skeleton"
+
+    def test_shared_raw_cache_reads_legacy_find_similar_path(self, tmp_path):
+        write_raw_find_similar_skeleton(
+            tmp_path, "np:v1", 101, line_neuron(length=20), legacy=True
+        )
+        cache = morph.find_similar_raw_cache(
+            "np:v1", project_root=str(tmp_path), verbose=False
+        )
+        assert cache.find_skeleton_file(101).parent.name == "raw_skeletons"
+        assert type(cache.load_skeleton(101)).__name__ == "TreeNeuron"
+        assert (cache.skeleton_dir / "101.swc.gz").exists()
+
+    def test_raw_batch_persists_raw_skeleton_but_vector_only_is_independent(
+            self, tmp_path, monkeypatch):
+        import navis.interfaces.neuprint as neu
+
+        def fake_fetch(batch, **kwargs):
+            out = []
+            for body_id in batch["bodyId"].tolist():
+                neuron = line_neuron(length=12)
+                neuron.id = int(body_id)
+                out.append(neuron)
+            return out
+
+        monkeypatch.setattr(neu, "fetch_skeletons", fake_fetch)
+        raw_cache = morph.find_similar_raw_cache(
+            "np:v1", project_root=str(tmp_path), verbose=False
+        )
+        fetched = morph.fetch_skeletons_on_demand_batch(
+            "np:v1", [101], project_root=str(tmp_path), persist=False,
+            level=morph.VECTOR_BASIS_RAW, raw_cache=raw_cache,
+            vector_cache=raw_cache, client=object(),
+        )
+        assert 101 in fetched
+        assert not (raw_cache.skeleton_dir / "101.pkl").exists()
+        assert 101 in set(raw_cache.load()["bodyIds"].tolist())
+
+        fetched = morph.fetch_skeletons_on_demand_batch(
+            "np:v1", [102], project_root=str(tmp_path), persist=True,
+            level=morph.VECTOR_BASIS_RAW, raw_cache=raw_cache,
+            vector_cache=raw_cache, client=object(),
+        )
+        assert 102 in fetched
+        cached_path = raw_cache.find_skeleton_file(102)
+        assert cached_path is not None
+        assert type(raw_cache.load_skeleton(102)).__name__ == "TreeNeuron"
+
 
 # ---------------------------------------------------------------------------
 # On-demand fetch
@@ -308,9 +405,8 @@ class TestFetchOnDemand:
         assert not list((tmp_path / "cache" / "test_v1" / "skeletons")
                         .glob("*.pkl"))
 
-    def test_neuprint_fetch_persists_simplified_and_reuses_at_simp90(self, tmp_path, monkeypatch):
-        """persist=True writes the SIMPLIFIED skeleton (raw never persisted);
-        a raw request never hits the disk cache, a simp90 request does."""
+    def test_neuprint_fetch_persists_raw_swc_and_reuses_it(self, tmp_path, monkeypatch):
+        """Raw requests persist portable SWC and reuse that shared cache."""
         neuron = line_neuron()
         monkeypatch.setattr(morph, "_fetch_neuprint_skeleton",
                             lambda dataset, bid: neuron)
@@ -321,17 +417,11 @@ class TestFetchOnDemand:
             "test:v1", 101, project_root=str(tmp_path), level="raw"
         )
         assert nrn_raw is not None
-        assert pkl.exists()  # simplified cache written
-        # the persisted file must hold the simplified skeleton (fewer nodes)
-        import pickle as _p
-        with open(pkl, "rb") as f:
-            cached = _p.load(f)
-        assert len(cached.nodes) <= len(neuron.nodes)
-        # the .level marker records the simplified cache level
-        marker = pkl.parent / ".level"
-        assert marker.read_text().strip() == "simp90"
+        raw_path = (tmp_path / "cache" / morph._dataset_folder("test:v1")
+                    / "skeletons" / "raw_skeletons" / "101.swc.gz")
+        assert raw_path.exists()
 
-        # A RAW request never hits the cache (raw is not persisted).
+        # A RAW request reuses the shared compressed cache.
         calls = {"n": 0}
 
         def counting_fetch(dataset, bid):
@@ -342,16 +432,8 @@ class TestFetchOnDemand:
         again_raw = morph.fetch_skeleton_on_demand(
             "test:v1", 101, project_root=str(tmp_path), level="raw"
         )
-        assert calls["n"] == 1
+        assert calls["n"] == 0
         assert again_raw is not None
-
-        # A SIMP90 request reuses the persisted file without the fetcher.
-        again_simp = morph.fetch_skeleton_on_demand(
-            "test:v1", 101, project_root=str(tmp_path), level="simp90"
-        )
-        assert calls["n"] == 1
-        assert again_simp is not None
-        assert len(again_simp.nodes) <= len(neuron.nodes)
 
     def test_persist_false_does_not_write_cache(self, tmp_path, monkeypatch):
         """Transient fetches (persist=False) must not create skeleton files."""
@@ -364,12 +446,12 @@ class TestFetchOnDemand:
         )
         assert neuron is not None
         assert not list(skel_dir.glob("*.pkl"))
-        # persist=True (default) writes the file for reuse
+        # persist=True (default) writes the raw SWC file for reuse
         neuron2 = morph.fetch_skeleton_on_demand(
             "np:v1", 43, project_root=str(tmp_path)
         )
         assert neuron2 is not None
-        assert (skel_dir / "43.pkl").exists()
+        assert (skel_dir / "raw_skeletons" / "43.swc.gz").exists()
 
     def test_cave_fetch_used_for_flywire(self, monkeypatch, tmp_path):
         used = {}
@@ -397,6 +479,9 @@ class TestMorphologyComparer:
         write_skeleton(tmp_path, dataset, 101, line_neuron(length=20))
         write_skeleton(tmp_path, dataset, 102, translated(line_neuron(length=20)))
         write_skeleton(tmp_path, dataset, 103, bushy_y_neuron())
+        write_raw_find_similar_skeleton(tmp_path, dataset, 101, line_neuron(length=20))
+        write_raw_find_similar_skeleton(tmp_path, dataset, 102, translated(line_neuron(length=20)))
+        write_raw_find_similar_skeleton(tmp_path, dataset, 103, bushy_y_neuron())
         write_neuron_index(tmp_path, dataset, [
             (101, "LINE", "LINE_1"), (102, "LINE", "LINE_2"), (103, "Y", "Y_1"),
         ])
@@ -1560,6 +1645,12 @@ class TestProfileFirst:
         write_skeleton(tmp_path, "np:v1", query, line_neuron(length=20))
         write_skeleton(tmp_path, "np:v1", 201, line_neuron(length=20))  # identical
         write_skeleton(tmp_path, "np:v1", 202, bushy_y_neuron())
+        write_raw_find_similar_skeleton(tmp_path, "np:v1", query,
+                                        line_neuron(length=20))
+        write_raw_find_similar_skeleton(tmp_path, "np:v1", 201,
+                                        line_neuron(length=20))
+        write_raw_find_similar_skeleton(tmp_path, "np:v1", 202,
+                                        bushy_y_neuron())
 
         params = dict(
             query=query, dataset="np:v1", level="bodyid", method="vector",
@@ -1586,10 +1677,10 @@ class TestProfileFirst:
     def _index(self, tmp_path, entries):
         write_neuron_index(tmp_path, "np:v1", entries)
 
-    def test_pool_is_screened_candidates_and_transient_fetch(self, tmp_path, monkeypatch):
+    def test_pool_is_screened_candidates_and_persists_raw_fetch(
+            self, tmp_path, monkeypatch):
         """The sorted screen list's top candidate_cap rows are the pool;
-        missing members are fetched (memory-only when opted out via
-        cache_fetched_skeletons=False)."""
+        missing members are fetched and written to the shared raw cache."""
         comparer = self._setup(tmp_path, monkeypatch,
                                cache_fetched_skeletons=False)
         self._index(tmp_path, [
@@ -1605,8 +1696,7 @@ class TestProfileFirst:
 
         def fake_fetch(dataset, bid, project_root=None, persist=True):
             fetched.append(bid)
-            # memory-only mode: the pipeline must not persist fetched skeletons
-            assert persist is False
+            assert persist is True
             return line_neuron(length=25)
 
         monkeypatch.setattr(morph, "fetch_skeleton_on_demand", fake_fetch)
@@ -1614,9 +1704,9 @@ class TestProfileFirst:
         assert not res.empty
         # pool = T {101, 201} + Y {202} + Z {204}; only 204 is missing
         assert fetched == [204]
-        # no skeleton cache files were created by the transient fetches
-        skel_dir = tmp_path / "cache" / morph._dataset_folder("np:v1") / "skeletons"
-        assert sorted(p.name for p in skel_dir.glob("*.pkl")) ==             ["101.pkl", "201.pkl", "202.pkl"]
+        raw_dir = (tmp_path / "cache" / morph._dataset_folder("np:v1")
+                   / "skeletons" / "raw_skeletons")
+        assert (raw_dir / "204.swc.gz").exists()
         # query neuron excluded from its own results
         assert 101 not in res["target_bodyId"].tolist()
         # identical morphology ranks first; all pool members are ranked
@@ -1624,11 +1714,10 @@ class TestProfileFirst:
         assert {"profile_similarity", "target_type"} <= set(res.columns)
         assert set(res["target_bodyId"]) == {201, 202, 204}
 
-    def test_cache_fetched_skeletons_controls_persistence(self, tmp_path, monkeypatch):
-        """cache_fetched_skeletons=True (the default) persists transient
-        fetches to the skeleton cache; False keeps them memory-only
-        (persist=False)."""
-        comparer = self._setup(tmp_path, monkeypatch, cache_fetched_skeletons=True)
+    def test_raw_skeleton_persistence_is_always_enabled(self, tmp_path, monkeypatch):
+        """The legacy cache_fetched_skeletons flag cannot disable raw SWC writes."""
+        comparer = self._setup(tmp_path, monkeypatch,
+                               cache_fetched_skeletons=False)
         self._index(tmp_path, [
             (101, "T", "T_1"), (201, "T", "T_2"),
             (202, "Y", "Y_1"), (204, "Z", "Z_1"),
@@ -1650,7 +1739,7 @@ class TestProfileFirst:
         # pool = T {101, 201} + Y {202} + Z {204}; only 204 is missing, and
         # with the option on the fetch requests a permanent cache write.
         assert fetched == [(204, True)]
-        # default is now on: cached skeletons (and their vectors) persist
+        # The compatibility flag is ignored by the shared raw-cache contract.
         default = self._setup(tmp_path, monkeypatch)
         assert default.cache_fetched_skeletons is True
 
@@ -1861,7 +1950,9 @@ class TestProfileFirst:
         assert not res.empty
 
         # manual: raw vectors for query + pool, z-scored with pool stats
-        cache = morph.SkeletonVectorCache("np:v1", project_root=str(tmp_path), verbose=False)
+        cache = morph.find_similar_raw_cache(
+            "np:v1", project_root=str(tmp_path), verbose=False
+        )
         ids = [101, 201, 202]
         Xr, mask, _ = cache.vectors_for(ids, compute_missing=True)
         assert mask.all()
@@ -1874,6 +1965,62 @@ class TestProfileFirst:
             idx = ids.index(int(row["target_bodyId"]))
             expected = morph.cosine_similarity_matrix(qz, Xz[idx].reshape(1, -1))[0]
             assert row["similarity"] == pytest.approx(expected, abs=1e-9),                 row["target_bodyId"]
+
+    def test_profile_first_and_warm_cache_use_the_same_cosine_space(
+            self, tmp_path, monkeypatch):
+        """A batch fetch must not make the first run mix raw and cached-X rows.
+
+        The fake batch helper mirrors production: it appends raw vectors before
+        returning the in-memory skeletons.  The first and warmed-cache runs
+        should therefore produce identical cosine scores.
+        """
+        self._index(tmp_path, [
+            (101, "T", "T_1"), (201, "T", "T_2"),
+            (202, "Y", "Y_1"), (204, "Z", "Z_1"),
+        ])
+        calls = []
+
+        def fake_batch(dataset, body_ids, project_root=None, persist=True,
+                       level="raw", **kwargs):
+            ids = [int(b) for b in body_ids]
+            calls.append(ids)
+            neurons = {}
+            records = []
+            for bid in ids:
+                neuron = line_neuron(length=25)
+                neuron.id = bid
+                neurons[bid] = neuron
+                _, vector = morph.vectorize_neuron(neuron)
+                records.append((bid, vector, "skeleton"))
+            morph.SkeletonVectorCache(
+                dataset, project_root=project_root, verbose=False
+            ).append_vectors(records, vector_basis=morph.VECTOR_BASIS_RAW)
+            return neurons
+
+        monkeypatch.setattr(morph, "fetch_skeletons_on_demand_batch", fake_batch)
+
+        def make():
+            comparer = self._setup(
+                tmp_path, monkeypatch, cache_fetched_skeletons=False,
+                metric="cosine",
+            )
+            monkeypatch.setattr(
+                comparer, "_connection_cache_candidates",
+                lambda q: self._candidates([
+                    (201, 9, 1.0, "T"), (204, 5, 0.6, "Z"),
+                ]),
+            )
+            return comparer
+
+        first = make().find_similar()
+        warmed = make().find_similar()
+        assert calls == [[204]]
+        first_scores = first.set_index("target_bodyId")["similarity"].sort_index()
+        warm_scores = warmed.set_index("target_bodyId")["similarity"].sort_index()
+        np.testing.assert_allclose(
+            first_scores.to_numpy(), warm_scores.to_numpy(),
+            rtol=1e-12, atol=1e-12,
+        )
 
     def test_download_all_skeletons_resumable(self, tmp_path, monkeypatch):
         """download_all_skeletons: persist=True, skips existing, respects
@@ -2382,6 +2529,10 @@ class TestRepresentationConsistency:
                                 "profile_similarity": [1.0, 0.6],
                                 "target_type": ["T", "M"],
                             }))
+        # The shared mesh pickle is intentionally invisible to Find Similar;
+        # simulate an unavailable raw online fetch for that candidate.
+        monkeypatch.setattr(morph, "fetch_skeletons_on_demand_batch",
+                            lambda *args, **kwargs: {})
         res = comparer.find_similar()
         # the skeleton pool neuron is scored; the mesh row stays in the
         # written candidate list with NaN similarity (ranked last)
@@ -2466,15 +2617,15 @@ class TestVectorPersistence:
         res = make().find_similar()
         assert not res.empty
         assert fetched == [204]
-        # the vector was persisted even though the skeleton was not
-        cache = morph.SkeletonVectorCache(
+        # the raw vector was persisted even though the raw skeleton was not
+        cache = morph.find_similar_raw_cache(
             "np:v1", project_root=str(tmp_path), verbose=False
         )
         data = cache.load()
         assert data is not None
         assert int(204) in set(int(b) for b in data["bodyIds"])
         assert data["dataset_rep"] == "skeleton"
-        assert not (tmp_path / "cache" / "np_v1" / "skeletons" / "204.pkl").exists()
+        assert not (cache.skeleton_dir / "204.pkl").exists()
 
         # run 2: the cached vector suffices -> no online fetch at all
         fetched.clear()

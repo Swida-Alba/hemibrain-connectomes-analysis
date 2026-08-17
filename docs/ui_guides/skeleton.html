@@ -154,12 +154,14 @@
     <li><b>Cache Neurons/Synapses</b>: faster repeat renders.</li>
     <li><b>Smooth Skeleton</b>, <b>Show Soma</b>, <b>Show Connectors</b>.</li>
     <li><b>Simplification Method</b> (NeuPrint tube mode): <code>fast</code>
-      keeps the original direct path; <code>fine_opt</code> uses the
-      FAFB-style transformed mesh; all methods use batched parallel online
-      skeleton fetching across layers, with <code>fine_opt1</code> retained as
-      the explicit optimized fine name. The selector and simplification
+      is the default direct path with 90% simplification. <code>fine</code>
+      is the FAFB-style transform rebuilt from the shared raw
+      <code>.swc.gz</code> cache; fine meshes are not persisted. <code>artistic</code>
+      uses vertex-cluster mesh decimation. All methods
+      use batched parallel online skeleton fetching across layers. The selector and simplification
       controls are disabled for FlyWire/FAFB datasets and for line mode.</li>
-    <li><b>Mesh Simplification</b>: defaults to 95% faces removed in this tab;
+    <li><b>Mesh Simplification</b>: defaults to 90% faces removed for fast and
+      95% for fine/artistic in this tab;
       line mode does not apply mesh simplification.</li>
     <li><b>Export Method</b>: webdriver (fast, needs Chrome 109+) or kaleido
       (stable fallback). <b>Export Scale</b> and <b>Export Views</b>.</li>

@@ -13,7 +13,7 @@ Key features:
 - Multi-dataset support (hemibrain, male-cns, FlyWire, etc.)
 - Automatic dataset detection from NeuronBridge image metadata
 - Caching of API results to reduce redundant calls
-- Compressed Parquet caching with legacy CSV read compatibility
+- Versioned, compressed Parquet caching
 
 Dependencies:
 - requests (via the bundled lightweight NeuronBridge client)
@@ -548,8 +548,8 @@ class NeuronBridgeFinder:
         """
         Build an in-memory index of all cached files for fast O(1) lookups.
         
-        This scans the cache folder once at initialization and builds a set of
-        cache keys for each cache type (e.g., 'id_to_lines', 'line_to_neuron').
+        This scans the current NeuronBridge-versioned Parquet folder once at
+        initialization and builds a set of id-to-lines cache keys.
         
         The index maps cache_type -> set of full cache keys (filename without extension).
         """
@@ -562,42 +562,28 @@ class NeuronBridgeFinder:
             return
         
         try:
-            # Include the legacy flat CSV files and the new Parquet id tables.
             cache_files = []
-            cache_root = Path(self.cache_folder)
             current_parquet_root = self._get_parquet_cache().root
-            for path in cache_root.rglob('*'):
-                if not path.is_file() or path.suffix not in {'.csv', '.parquet'}:
-                    continue
-                # Do not let a previous NeuronBridge API version make the
-                # current-version in-memory index report a false cache hit.
-                if path.suffix == '.parquet' and current_parquet_root not in path.parents:
-                    continue
-                cache_files.append(path)
+            if current_parquet_root.exists():
+                cache_files = [
+                    path for path in current_parquet_root.rglob('*.parquet')
+                    if path.is_file() and path.parent.name == 'id_to_lines'
+                ]
             
             # Parse each filename and build index
-            # Format: {cache_type}_{identifier}.csv
+            # Format: id_to_lines_{identifier}.parquet
             for cache_path in cache_files:
                 filename = cache_path.name
-                # Remove the file extension (.csv or .parquet)
                 cache_key = cache_path.stem
                 
-                # Extract cache_type (everything before the first underscore + identifier separator)
-                # Files are named like: id_to_lines_12345_cds_male-cns_v0.9_Brain_all.csv
-                # We need to extract cache_type = 'id_to_lines'
-                for cache_type in ['id_to_lines', 'line_to_neuron']:
-                    if filename.startswith(f"{cache_type}_"):
-                        if cache_type not in self._cache_index:
-                            self._cache_index[cache_type] = set()
-                        self._cache_index[cache_type].add(cache_key)
-                        break
+                if filename.startswith('id_to_lines_'):
+                    self._cache_index.setdefault('id_to_lines', set()).add(cache_key)
             
             # Report stats
             total_cached = sum(len(keys) for keys in self._cache_index.values())
             if total_cached > 0 and self.verbose:
                 self._vprint(f"  📁 Cache index: {total_cached} cached files "
-                           f"({len(self._cache_index.get('id_to_lines', set()))} neurons, "
-                           f"{len(self._cache_index.get('line_to_neuron', set()))} lines)")
+                           f"({len(self._cache_index.get('id_to_lines', set()))} id tables)")
         except Exception as e:
             # If indexing fails, continue without index (will fallback to file checks)
             self._cache_index = {}
@@ -613,7 +599,7 @@ class NeuronBridgeFinder:
         Parameters
         ----------
         cache_type : str
-            Type of cache (e.g., 'id_to_lines', 'line_to_neuron')
+        Type of cache (currently only 'id_to_lines')
         identifier : str
             The identifier used to build the cache key
             
@@ -626,10 +612,6 @@ class NeuronBridgeFinder:
         # saved them after the startup index was built.
         if os.path.exists(self._get_cache_path(cache_type, identifier)):
             return True
-        legacy_path = self._get_legacy_cache_path(cache_type, identifier)
-        if os.path.exists(legacy_path):
-            return True
-
         if not self._cache_index:
             return False
         
@@ -4114,19 +4096,13 @@ class NeuronBridgeFinder:
         return match
     
     def _get_cache_path(self, cache_type: str, identifier: str) -> str:
-        """Get the path used by the new cache format."""
+        """Get the path used by the current versioned Parquet cache."""
         if cache_type == 'id_to_lines':
             return str(self._get_parquet_cache().id_path(identifier))
-        safe_id = str(identifier).replace('/', '_').replace(':', '_')
-        return os.path.join(self.cache_folder, f"{cache_type}_{safe_id}.parquet")
-
-    def _get_legacy_cache_path(self, cache_type: str, identifier: str) -> str:
-        """Get the old flat CSV path, retained as a read-only fallback."""
-        safe_id = str(identifier).replace('/', '_').replace(':', '_')
-        return os.path.join(self.cache_folder, f"{cache_type}_{safe_id}.csv")
+        raise ValueError(f"Unsupported NeuronBridge cache type: {cache_type}")
     
     def _load_from_cache(self, cache_type: str, identifier: str) -> Optional[pd.DataFrame]:
-        """Load cached results if available. Lock-free for reads. Uses Polars for fast I/O."""
+        """Load a current-version Parquet result table if available."""
         if not self.use_cache:
             return None
         
@@ -4134,28 +4110,19 @@ class NeuronBridgeFinder:
             return None
 
         cache_path = self._get_cache_path(cache_type, identifier)
-        legacy_path = self._get_legacy_cache_path(cache_type, identifier)
-        # Reading is thread-safe - no lock needed for file reads.  Try the new
-        # Parquet path first, then the legacy CSV path.
-        for candidate in (cache_path, legacy_path):
-            if not os.path.exists(candidate):
-                continue
-            try:
-                if candidate.endswith('.parquet'):
-                    df = pd.read_parquet(candidate)
-                elif HAS_POLARS:
-                    df = pl.read_csv(candidate).to_pandas()
-                else:
-                    df = pd.read_csv(candidate)
-                if not self._batch_mode:
-                    self._vprint(f"  ⏩ Loaded from cache: {candidate}")
-                return df
-            except Exception:
-                continue
-        return None
+        if not os.path.exists(cache_path):
+            return None
+        try:
+            df = pd.read_parquet(cache_path)
+            if not self._batch_mode:
+                self._vprint(f"  ⏩ Loaded from cache: {cache_path}")
+            return df
+        except Exception as exc:
+            warnings.warn(f"Failed to read NeuronBridge cache {cache_path}: {exc}")
+            return None
     
     def _load_from_cache_polars(self, cache_type: str, identifier: str) -> Optional['pl.DataFrame']:
-        """Load cached results as Polars DataFrame. Lock-free for reads."""
+        """Load a current-version Parquet result table as Polars."""
         if not self.use_cache or not HAS_POLARS:
             return None
         
@@ -4163,17 +4130,13 @@ class NeuronBridgeFinder:
             return None
 
         cache_path = self._get_cache_path(cache_type, identifier)
-        legacy_path = self._get_legacy_cache_path(cache_type, identifier)
-        for candidate in (cache_path, legacy_path):
-            if not os.path.exists(candidate):
-                continue
-            try:
-                if candidate.endswith('.parquet'):
-                    return pl.read_parquet(candidate)
-                return pl.read_csv(candidate)
-            except Exception:
-                continue
-        return None
+        if not os.path.exists(cache_path):
+            return None
+        try:
+            return pl.read_parquet(cache_path)
+        except Exception as exc:
+            warnings.warn(f"Failed to read NeuronBridge cache {cache_path}: {exc}")
+            return None
     
     def _load_cached_neurons_bulk_polars(
         self,
@@ -4298,14 +4261,10 @@ class NeuronBridgeFinder:
     def _save_to_cache(self, cache_type: str, identifier: str, df: pd.DataFrame):
         """Save a directional cache table as compressed Parquet.
 
-        Line-level result tables are deliberately not persisted anymore: they
-        duplicate the per-image records and make ``top_n`` part of the cache
-        state.  ``line_to_neuron`` remains supported as a legacy read path.
+        Line-level result tables are deliberately not persisted: they duplicate
+        the per-image records and make ``top_n`` part of the cache state.
         """
         if not self.use_cache or df.empty:
-            return
-
-        if cache_type == 'line_to_neuron':
             return
 
         cache_path = self._get_cache_path(cache_type, identifier)
@@ -4346,13 +4305,7 @@ class NeuronBridgeFinder:
     
     def _get_image_cache_path(self, image_id: str, match_type: str) -> str:
         """Get the new Parquet path for a specific LM image and match type."""
-        self._get_image_cache_dir()  # retain the mapping directory for legacy metadata
         return str(self._get_parquet_cache().image_path(str(image_id), match_type))
-
-    def _get_legacy_image_cache_path(self, image_id: str, match_type: str) -> str:
-        """Get the old per-image CSV path for read-only compatibility."""
-        safe_id = str(image_id).replace('/', '_').replace(':', '_')
-        return os.path.join(self._get_image_cache_dir(), f"{match_type}_{safe_id}.csv")
     
     def _get_line_mapping_path(self) -> str:
         """Get the path to the line-image mapping file."""
@@ -4382,25 +4335,45 @@ class NeuronBridgeFinder:
             }
         }
         """
-        mapping_path = self._get_line_mapping_path()
         with self._cache_lock:
-            if os.path.exists(mapping_path):
-                try:
-                    with open(mapping_path, 'r') as f:
-                        return json.load(f)
-                except Exception:
-                    pass
+            return self._read_line_mapping_unlocked()
+
+    def _read_line_mapping_unlocked(self) -> Dict[str, Any]:
+        """Read the mapping; the caller must hold ``_cache_lock``."""
+        mapping_path = self._get_line_mapping_path()
+        if os.path.exists(mapping_path):
+            try:
+                with open(mapping_path, 'r') as f:
+                    mapping = json.load(f)
+                if isinstance(mapping, dict):
+                    mapping.setdefault("lines", {})
+                    mapping.setdefault("images", {})
+                    return mapping
+            except Exception:
+                pass
         return {"lines": {}, "images": {}}
     
     def _save_line_mapping(self, mapping: Dict[str, Any]):
-        """Save the line-to-image mapping file. Thread-safe."""
+        """Atomically save the line-to-image mapping file. Thread-safe."""
         mapping_path = self._get_line_mapping_path()
         with self._cache_lock:
+            self._write_line_mapping_unlocked(mapping)
+
+    def _write_line_mapping_unlocked(self, mapping: Dict[str, Any]):
+        """Atomically write the mapping; the caller must hold ``_cache_lock``."""
+        mapping_path = self._get_line_mapping_path()
+        temporary = f"{mapping_path}.{os.getpid()}.tmp"
+        try:
+            with open(temporary, 'w') as f:
+                json.dump(mapping, f, indent=2)
+            os.replace(temporary, mapping_path)
+        except Exception as e:
             try:
-                with open(mapping_path, 'w') as f:
-                    json.dump(mapping, f, indent=2)
-            except Exception as e:
-                warnings.warn(f"Failed to save line mapping: {e}")
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+            except Exception:
+                pass
+            warnings.warn(f"Failed to save line mapping: {e}")
     
     def _update_line_mapping(
         self, 
@@ -4426,41 +4399,44 @@ class NeuronBridgeFinder:
         match_type : str, optional
             Match type that was just cached for image_id
         """
-        mapping = self._load_line_mapping()
-        
-        # Update lines section
-        if line_name not in mapping["lines"]:
-            mapping["lines"][line_name] = {}
-        
-        from datetime import datetime
-        mapping["lines"][line_name][region] = {
-            "image_ids": image_ids,
-            "last_checked": datetime.now().isoformat(),
-            "image_count": len(image_ids)
-        }
-        
-        # Update images section
-        for img_id in image_ids:
-            if img_id not in mapping["images"]:
-                mapping["images"][img_id] = {
-                    "line": line_name,
-                    "cached_types": []
-                }
-            else:
-                # Update line info (in case image is shared)
-                mapping["images"][img_id]["line"] = line_name
-        
-        # Update cached_types for specific image
-        if image_id and match_type:
-            if image_id not in mapping["images"]:
-                mapping["images"][image_id] = {
-                    "line": line_name,
-                    "cached_types": []
-                }
-            if match_type not in mapping["images"][image_id]["cached_types"]:
-                mapping["images"][image_id]["cached_types"].append(match_type)
-        
-        self._save_line_mapping(mapping)
+        # Keep the read-modify-write sequence under one lock so concurrent
+        # image workers cannot discard one another's cached-type updates.
+        with self._cache_lock:
+            mapping = self._read_line_mapping_unlocked()
+
+            # Update lines section
+            if line_name not in mapping["lines"]:
+                mapping["lines"][line_name] = {}
+
+            from datetime import datetime
+            mapping["lines"][line_name][region] = {
+                "image_ids": image_ids,
+                "last_checked": datetime.now().isoformat(),
+                "image_count": len(image_ids)
+            }
+
+            # Update images section
+            for img_id in image_ids:
+                if img_id not in mapping["images"]:
+                    mapping["images"][img_id] = {
+                        "line": line_name,
+                        "cached_types": []
+                    }
+                else:
+                    # Update line info (in case image is shared)
+                    mapping["images"][img_id]["line"] = line_name
+
+            # Update cached_types for specific image
+            if image_id and match_type:
+                if image_id not in mapping["images"]:
+                    mapping["images"][image_id] = {
+                        "line": line_name,
+                        "cached_types": []
+                    }
+                if match_type not in mapping["images"][image_id]["cached_types"]:
+                    mapping["images"][image_id]["cached_types"].append(match_type)
+
+            self._write_line_mapping_unlocked(mapping)
     
     def sync_mapping_from_cache_files(self) -> Dict[str, int]:
         """
@@ -4476,21 +4452,17 @@ class NeuronBridgeFinder:
         """
         stats = {'images_scanned': 0, 'types_updated': 0}
         
-        cache_dir = self._get_image_cache_dir()
-        mapping = self._load_line_mapping()
-        
-        # Scan legacy CSVs and new Parquet image tables.  The mapping is a
-        # small compatibility/index artifact; the Parquet files are the data.
-        cache_paths = []
-        for root in (Path(cache_dir), self._get_parquet_cache().image_dir):
-            if root.exists():
-                cache_paths.extend(path for path in root.glob('*') if path.is_file())
+        # The mapping is a small diagnostic/index artifact; Parquet files are
+        # the authoritative cache data.
+        cache_paths = list(self._get_parquet_cache().image_dir.glob('*.parquet'))
+        with self._cache_lock:
+            mapping = self._read_line_mapping_unlocked()
 
         for cache_path in cache_paths:
-            if cache_path.suffix not in {'.csv', '.parquet'}:
+            if not cache_path.is_file():
                 continue
 
-            # Parse filename: {match_type}_{image_id}.csv|parquet
+            # Parse filename: {match_type}_{image_id}.parquet
             parts = cache_path.stem.split('_', 1)
             if len(parts) != 2:
                 continue
@@ -4514,7 +4486,8 @@ class NeuronBridgeFinder:
                 mapping["images"][image_id]["cached_types"].append(match_type)
                 stats['types_updated'] += 1
         
-        self._save_line_mapping(mapping)
+        with self._cache_lock:
+            self._write_line_mapping_unlocked(mapping)
         self._vprint(f"✓ Synced mapping: {stats['images_scanned']} files, {stats['types_updated']} types updated")
         return stats
     
@@ -4538,17 +4511,13 @@ class NeuronBridgeFinder:
             return None
         
         cache_path = self._get_image_cache_path(image_id, match_type)
-        legacy_path = self._get_legacy_image_cache_path(image_id, match_type)
-        for candidate in (cache_path, legacy_path):
-            if not os.path.exists(candidate):
-                continue
-            try:
-                if candidate.endswith('.parquet'):
-                    return pd.read_parquet(candidate)
-                return pd.read_csv(candidate)
-            except Exception:
-                continue
-        return None
+        if not os.path.exists(cache_path):
+            return None
+        try:
+            return pd.read_parquet(cache_path)
+        except Exception as exc:
+            warnings.warn(f"Failed to read NeuronBridge image cache {cache_path}: {exc}")
+            return None
     
     def _save_image_cache(
         self, 
@@ -4582,16 +4551,17 @@ class NeuronBridgeFinder:
             
             # Update mapping with cached type info
             if line_name and cache_path:
-                mapping = self._load_line_mapping()
                 image_id = str(image_id)
-                if image_id not in mapping.get("images", {}):
-                    mapping["images"][image_id] = {
-                        "line": line_name,
-                        "cached_types": []
-                    }
-                if match_type not in mapping["images"][image_id].get("cached_types", []):
-                    mapping["images"][image_id]["cached_types"].append(match_type)
-                self._save_line_mapping(mapping)
+                with self._cache_lock:
+                    mapping = self._read_line_mapping_unlocked()
+                    if image_id not in mapping.get("images", {}):
+                        mapping["images"][image_id] = {
+                            "line": line_name,
+                            "cached_types": []
+                        }
+                    if match_type not in mapping["images"][image_id].get("cached_types", []):
+                        mapping["images"][image_id]["cached_types"].append(match_type)
+                    self._write_line_mapping_unlocked(mapping)
         except Exception as e:
             warnings.warn(f"Failed to save image cache: {e}")
     
@@ -4918,138 +4888,131 @@ class NeuronBridgeFinder:
             self._vprint(f"  ⚠️ {stats['errors']} files had errors")
         return stats
     
+    def _get_em_images(self, body_id: int) -> List[Any]:
+        """Fetch all NeuronBridge EM image records for one body ID."""
+        if not self._client:
+            return []
+        try:
+            em_images = self._client.get_em_images(body_id)
+            if not em_images:
+                return []
+            return em_images if isinstance(em_images, list) else list(em_images)
+        except Exception:
+            return []
+
+    @staticmethod
+    def _dataset_identity(dataset: Optional[str]) -> Tuple[str, Optional[str]]:
+        """Return a normalized ``(base, version)`` dataset identity.
+
+        NeuronBridge uses both ``male-cns:v1.0`` and published names such as
+        ``male-cns:v1.0:12211``.  Folder-style names use underscores.  The
+        body ID is removed before parsing, and versions are normalized to
+        dotted form so equivalent spellings compare equal.
+        """
+        if dataset is None:
+            return '', None
+        value = str(dataset).strip().lower()
+        if not value or value in {'unknown', 'none', 'nan'}:
+            return '', None
+
+        parts = value.split(':')
+        if len(parts) >= 3 and parts[-1].isdigit():
+            value = ':'.join(parts[:-1])
+
+        version_match = re.search(r'(?:^|[:_])v?(\d+(?:[._]\d+)*)$', value)
+        if version_match:
+            version = version_match.group(1).replace('_', '.')
+            base = value[:version_match.start()]
+        else:
+            version = None
+            base = value
+
+        base = base.strip(':_').replace(':', '-').replace('_', '-')
+        return base, version
+
+    @classmethod
+    def _datasets_match(
+        cls,
+        expected_dataset: Optional[str],
+        actual_dataset: Optional[str],
+    ) -> bool:
+        """Match dataset bases and require an exact version when requested."""
+        expected_base, expected_version = cls._dataset_identity(expected_dataset)
+        actual_base, actual_version = cls._dataset_identity(actual_dataset)
+        if not expected_base:
+            return True
+        return (
+            expected_base == actual_base
+            and (expected_version is None or expected_version == actual_version)
+        )
+
+    @staticmethod
+    def _dataset_name_from_em_image(em_image: Any) -> Optional[str]:
+        """Extract a dataset name from an EM image published name."""
+        published_name = str(getattr(em_image, 'publishedName', '') or '')
+        if not published_name:
+            return None
+        parts = published_name.split(':')
+        if len(parts) >= 3 and parts[-1].isdigit():
+            return ':'.join(parts[:-1])
+        return ':'.join(parts[:2]) if len(parts) >= 2 else parts[0]
+
+    @classmethod
+    def _select_em_image_for_dataset(
+        cls,
+        em_images: List[Any],
+        expected_dataset: Optional[str] = None,
+    ) -> Optional[Any]:
+        """Select only an image from the requested dataset/version."""
+        if not em_images:
+            return None
+        if not expected_dataset or str(expected_dataset).strip().lower() == 'unknown':
+            return em_images[0]
+        for em_image in em_images:
+            actual_dataset = cls._dataset_name_from_em_image(em_image)
+            if cls._datasets_match(expected_dataset, actual_dataset):
+                return em_image
+        return None
+
     def _get_em_image_for_dataset(
         self,
         body_id: int,
-        expected_dataset: Optional[str] = None
+        expected_dataset: Optional[str] = None,
     ):
-        """
-        Get EM image for a body ID, optionally filtering by expected dataset.
-        
-        NeuronBridge can return multiple EM images for the same body ID from
-        different datasets (e.g., vnc:v0.5, manc:v1.2.1, male-cns:v0.9).
-        This method finds the one matching the expected dataset.
-        
-        Parameters
-        ----------
-        body_id : int
-            The body ID to look up.
-        expected_dataset : str, optional
-            Expected dataset name (e.g., 'male-cns:v0.9').
-            If None, returns the first result.
-            
-        Returns
-        -------
-        EMImage or None
-            The matching EM image, or None if not found.
-        """
-        if not self._client:
-            return None
-        
-        try:
-            # Use get_em_images (plural) to get ALL results for this body ID
-            em_images = self._client.get_em_images(body_id)
-            
-            if not em_images:
-                return None
-            
-            # Convert to list if needed
-            if not isinstance(em_images, list):
-                em_images = list(em_images)
-            
-            if not em_images:
-                return None
-            
-            # If no expected dataset, return first result
-            if not expected_dataset:
-                return em_images[0]
-            
-            # Normalize expected dataset for comparison
-            expected_base = expected_dataset.lower().split(':')[0].replace('_', '-')
-            
-            # Find the EM image matching the expected dataset
-            for em_image in em_images:
-                pub_name = getattr(em_image, 'publishedName', '')
-                if ':' in pub_name:
-                    actual_base = pub_name.lower().split(':')[0].replace('_', '-')
-                    if actual_base == expected_base:
-                        return em_image
-            
-            # If no exact match, return first result
-            return em_images[0]
-            
-        except Exception:
-            # Fallback to singular get_em_image
-            try:
-                return self._client.get_em_image(body_id)
-            except Exception:
-                return None
-    
+        """Return an EM image only when its dataset/version matches."""
+        return self._select_em_image_for_dataset(
+            self._get_em_images(body_id), expected_dataset
+        )
+
+    def _get_body_metadata(
+        self,
+        body_id: int,
+        expected_dataset: Optional[str],
+    ) -> Tuple[Optional[str], Optional[Any]]:
+        """Fetch body metadata once and return its actual dataset and image."""
+        em_images = self._get_em_images(body_id)
+        if not em_images:
+            return None, None
+        selected = self._select_em_image_for_dataset(em_images, expected_dataset)
+        actual_image = selected or em_images[0]
+        return self._dataset_name_from_em_image(actual_image), selected
+
     def _validate_body_id_dataset(
-        self, 
-        body_id: int, 
-        expected_dataset: str
+        self,
+        body_id: int,
+        expected_dataset: str,
     ) -> Optional[str]:
-        """
-        Validate that a body ID exists in the expected dataset in NeuronBridge.
-        
-        Parameters
-        ----------
-        body_id : int
-            The body ID to validate.
-        expected_dataset : str
-            Expected dataset name (e.g., 'male-cns:v0.9').
-            
-        Returns
-        -------
-        str or None
-            The actual dataset name if found matching expected, or None if not found.
-        """
+        """Return the actual dataset identity reported for a body ID."""
         if not self._client:
-            return expected_dataset  # Can't validate without client
-        
-        try:
-            # Use get_em_images (plural) to get ALL results for this body ID
-            em_images = self._client.get_em_images(body_id)
-            
-            if not em_images:
-                return None
-            
-            # Convert to list if needed
-            if not isinstance(em_images, list):
-                em_images = list(em_images)
-            
-            if not em_images:
-                return None
-            
-            # Normalize expected dataset for comparison
-            expected_base = expected_dataset.lower().split(':')[0].replace('_', '-')
-            
-            # Check if any EM image matches the expected dataset
-            for em_image in em_images:
-                pub_name = getattr(em_image, 'publishedName', '')
-                if ':' in pub_name:
-                    parts = pub_name.split(':')
-                    actual_base = parts[0].lower().replace('_', '-')
-                    if actual_base == expected_base:
-                        # Found matching dataset
-                        return f"{parts[0]}:{parts[1]}" if len(parts) >= 2 else parts[0]
-            
-            # No matching dataset found - return what was found
-            pub_name = getattr(em_images[0], 'publishedName', '')
-            if ':' in pub_name:
-                parts = pub_name.split(':')
-                return f"{parts[0]}:{parts[1]}" if len(parts) >= 2 else parts[0]
-            return None
-            
-        except Exception:
-            return expected_dataset  # On error, assume expected dataset
+            return expected_dataset
+        actual_dataset, _ = self._get_body_metadata(body_id, expected_dataset)
+        return actual_dataset
     
     def _validate_body_ids_parallel(
         self,
         body_info_list: List[Dict[str, Any]],
         max_workers: Optional[int] = None
-    ) -> Dict[int, Optional[str]]:
+    ) -> Dict[int, Dict[str, Any]]:
         """
         Validate multiple body IDs in parallel against NeuronBridge API.
         
@@ -5066,7 +5029,9 @@ class NeuronBridgeFinder:
         Returns
         -------
         dict
-            Mapping of body_id -> actual_dataset (or None if not found)
+            Mapping of body_id -> ``{'dataset', 'em_image'}``.  The selected
+            image is carried forward so the later match fetch does not repeat
+            the metadata request.
         """
         if not body_info_list:
             return {}
@@ -5077,8 +5042,8 @@ class NeuronBridgeFinder:
         def validate_single(body_info):
             body_id = body_info['bodyId']
             expected_ds = body_info.get('dataset', 'unknown')
-            actual_ds = self._validate_body_id_dataset(int(body_id), expected_ds)
-            return body_id, actual_ds
+            actual_ds, em_image = self._get_body_metadata(int(body_id), expected_ds)
+            return body_id, {'dataset': actual_ds, 'em_image': em_image}
         
         # Use ThreadPoolExecutor for parallel API calls
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -5089,7 +5054,10 @@ class NeuronBridgeFinder:
                     results[body_id] = actual_ds
                 except Exception:
                     body_info = futures[future]
-                    results[body_info['bodyId']] = body_info.get('dataset', 'unknown')
+                    results[body_info['bodyId']] = {
+                        'dataset': body_info.get('dataset', 'unknown'),
+                        'em_image': None,
+                    }
         
         return results
     
@@ -7269,13 +7237,19 @@ class NeuronBridgeFinder:
                 # by default.  Keep the same default for programmatic callers.
                 viz_settings = dict(visualization_settings or {})
                 brain_mesh = viz_settings.get('brain_mesh', 'template')
+                pipeline = str(
+                    viz_settings.get('neuprint_skeleton_pipeline', 'fine')
+                    or 'fine'
+                ).strip().lower()
                 
                 # Set skeleton_mesh_simplification based on dataset when the
                 # user leaves the shared control at its default. Analysis
                 # renders use more simplification than the dedicated Skeleton
-                # tab: 0.98 for all datasets.
+                # tab, except fast which follows the fixed simp90 convention.
                 skeleton_simplification = (
-                    default_analysis_skeleton_mesh_simplification(dataset)
+                    default_analysis_skeleton_mesh_simplification(
+                        dataset, pipeline
+                    )
                 )
                 
                 legend_mode = viz_settings.get(
@@ -7324,6 +7298,9 @@ class NeuronBridgeFinder:
                 effective_background = viz_settings.get(
                     'background_color', background_color
                 )
+                default_cache_neurons = pipeline not in {
+                    'fast', 'direct', 'artistic', 'fine_opt1'
+                }
                 viz_kwargs = {
                     'dataset': dataset,
                     'output_dir': output_path,
@@ -7335,7 +7312,10 @@ class NeuronBridgeFinder:
                     'include_timestamp': False,
                     'skip_synapse': viz_settings.get('skip_synapse', True),
                     'neuron_colors': neuron_colors,
-                    'skeleton_mode': viz_settings.get('skeleton_mode', 'tube'),
+                    # NeuronBridge result scenes default to line mode for a
+                    # quick overview. Users can opt into tube/fine through
+                    # the shared visualization settings or Skeleton tab.
+                    'skeleton_mode': viz_settings.get('skeleton_mode', 'line'),
                     'legend_mode': legend_mode,
                     'brain_mesh': brain_mesh,
                     'vnc_mesh': show_vnc_mesh,
@@ -7343,7 +7323,9 @@ class NeuronBridgeFinder:
                     'skeleton_mesh_simplification': effective_simplification,
                     'roi_mesh_simplification': 0.95,
                     'background_color': effective_background,
-                    'cache_neurons': viz_settings.get('cache_neurons', True),
+                    'cache_neurons': viz_settings.get(
+                        'cache_neurons', default_cache_neurons
+                    ),
                     'cache_synapses': viz_settings.get('cache_synapses', True),
                     'smooth_skeleton': viz_settings.get('smooth_skeleton', False),
                     'show_soma': viz_settings.get('show_soma', True),

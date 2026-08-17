@@ -1,7 +1,6 @@
 """FindSimilar Tab - Morphological and connection-profile similarity search."""
 
 import re
-import time
 
 from nicegui import ui
 
@@ -14,7 +13,6 @@ from ..components.common import (
 from ..components.output_panel import OutputPanel
 from ..components.skeleton_visualization_settings import skeleton_visualization_settings
 from ..runner import ScriptRunner
-from ..skeleton_pull import SkeletonPuller
 from ..type_suggestions import dataset_suggestions
 from ..dataset_service import is_banc_dataset
 
@@ -26,7 +24,6 @@ MORPH_LEVELS = ["auto", "bodyid", "type"]
 def create_find_similar_tab():
     runner = ScriptRunner()
     output_panel = OutputPanel("Similarity Output")
-    skeleton_puller = SkeletonPuller()
     dataset = None
     source_dataset = None
 
@@ -167,6 +164,8 @@ def create_find_similar_tab():
                             "controls whether types or individual bodyIds are shown."
                         ),
                         default_visualize_by=DEFAULTS["morph_visualize_by"],
+                        default_skeleton_mode="line",
+                        show_high_quality_warning=True,
                         dataset_provider=lambda: dataset.value,
                         dataset_watchers=[dataset],
                     )
@@ -187,36 +186,13 @@ def create_find_similar_tab():
                         "first query); incremental afterwards."
                     ).classes("text-caption drocat-muted")
 
-                # --- full-morphology skeleton download (like Settings pull) ---
-                download_label = ui.label("").classes("text-caption drocat-muted")
-                download_bar = ui.linear_progress(value=0, show_value=False).classes(
-                    "w-full"
-                ).set_visibility(False)
-                with ui.row().classes("items-center gap-2"):
-                    download_button = ui.button(
-                        "Download All Skeletons", icon="download"
-                    ).props("color=secondary outline")
-                    cancel_download_button = ui.button(
-                        "Cancel", icon="stop"
-                    ).props("flat dense").set_visibility(False)
-                    ui.label(
-                        "Full-morphology mode: fetch every missing skeleton to "
-                        "the local cache (resumable, persists for reuse). "
-                        "FlyWire datasets already have bulk skeletons locally."
-                    ).classes("text-caption drocat-muted")
-                with ui.row().classes("items-center gap-2"):
-                    cache_fetched = checkbox_input(
-                        "Cache Fetched Skeletons", True,
-                        hint="Save skeletons fetched transiently during a search "
-                             "(profile-first candidate fetches / NBLAST) to the "
-                             "local skeleton cache so later runs reuse them. "
-                             "On by default: fetched skeletons (and their "
-                             "vectors, which are always cached) are persisted "
-                             "for reuse.",
-                    )
-                    ui.label(
-                        "For a persistent full-morphology pool, prefer 'Download All Skeletons'."
-                    ).classes("text-caption drocat-muted")
+                ui.label(
+                    "Raw skeletons fetched by Find Similar, visualization, and "
+                    "dataset pulls are always stored as reusable .swc.gz files "
+                    "under cache/<dataset>/skeletons/raw_skeletons/. Use "
+                    "Settings → Dataset Cache → Skeleton Cache Pull to prefetch "
+                    "the shared population."
+                ).classes("text-caption drocat-muted")
 
             def refresh_roi_options():
                 # ROI data availability differs per dataset (male-cns has 114
@@ -243,70 +219,27 @@ def create_find_similar_tab():
                 except Exception:
                     roi_filter.set_visibility(False)
 
-            def refresh_download_ui():
-                st = skeleton_puller.state
-                download_button.set_visibility(not st["running"])
-                cancel_download_button.set_visibility(st["running"])
-                download_bar.set_visibility(st["running"] and st["total"] > 0)
-                if st["running"] and st["total"] > 0:
-                    download_bar.value = st["current"] / max(1, st["total"])
-                    eta = ""
-                    if st["fetch_started_at"] and st["current"] > 0:
-                        elapsed = max(0.001, time.time() - st["fetch_started_at"])
-                        rate = st["current"] / elapsed
-                        remaining = (st["total"] - st["current"]) / rate
-                        eta = f" · ETA {int(remaining // 60)}m {int(remaining % 60):02d}s"
-                    download_label.text = f"{st['info']}{eta}"
-                elif st["done"]:
-                    s = st.get("summary") or {}
-                    if st["error"]:
-                        download_label.text = f"Download failed: {st['error']}"
-                        ui.notify(f"Skeleton download failed: {st['error']}", type="negative")
-                    else:
-                        download_label.text = (
-                            f"Download {st['info']} {s.get('fetched', 0)}/"
-                            f"{s.get('total', 0)} fetched, {s.get('errors', 0)} errors"
-                        )
-                        if s.get("fetched", 0) > 0:
-                            ui.notify(
-                                f"{s.get('fetched')} skeletons downloaded "
-                                f"({s.get('skipped_existing', 0)} already cached)",
-                                type="positive",
-                            )
-                            refresh_coverage()
-                else:
-                    download_label.text = ""
-
-            def start_download():
-                if is_banc_dataset(dataset.value):
-                    morph_dataset_warning.set_visibility(True)
-                    ui.notify(
-                        "BANC skeleton downloads are unavailable; select a non-BANC dataset.",
-                        type="warning",
-                    )
-                    return
-                ok = skeleton_puller.start(dataset.value)
-                if not ok:
-                    ui.notify("A skeleton download is already running", type="warning")
-                refresh_download_ui()
-
-            def stop_download():
-                skeleton_puller.cancel()
-                download_label.text = "Cancelling after the current batch..."
-
-            download_button.on_click(start_download)
-            cancel_download_button.on_click(stop_download)
-
             def refresh_coverage():
                 # Lightweight: no navis/statvis import at page build (they are
                 # heavy and would slow the first page response). The vector
                 # cache is a plain parquet file, countable with polars.
                 try:
                     from pathlib import Path
-                    folder = (Path(PROJECT_ROOT) / "cache"
-                              / dataset.value.replace(":", "_").replace(".", "_"))
-                    # recursive: FlyWire bulk caches live in nested folders
-                    n_skel = len(list((folder / "skeletons").rglob("*.pkl")))
+                    dataset_folder = (Path(PROJECT_ROOT) / "cache"
+                                      / dataset.value.replace(":", "_").replace(".", "_"))
+                    vector_folder = dataset_folder / "find_similar"
+                    # recursive: raw-cache downloads may be grouped in nested
+                    # folders by a dataset-specific source.
+                    raw_dir = dataset_folder / "skeletons" / "raw_skeletons"
+                    raw_files = (list(raw_dir.rglob("*.pkl"))
+                                 + list(raw_dir.rglob("*.swc.gz")))
+                    legacy_raw_dir = vector_folder / "raw_skeletons"
+                    raw_files += (list(legacy_raw_dir.rglob("*.pkl"))
+                                  + list(legacy_raw_dir.rglob("*.swc.gz")))
+                    n_skel = len({
+                        p.name.removesuffix(".swc.gz").removesuffix(".pkl")
+                        for p in raw_files
+                    })
                     # FAFB v783: the healed bundle is the real skeleton source
                     # (the pickle cache holds meshes).
                     bundle = (Path(PROJECT_ROOT) / "datasets"
@@ -322,7 +255,7 @@ def create_find_similar_tab():
                         except Exception:
                             pass
                     n_vec = 0
-                    vec_file = folder / "morphology" / "skeleton_vectors.parquet"
+                    vec_file = vector_folder / "morphology" / "skeleton_vectors.parquet"
                     if vec_file.exists():
                         import polars as pl
                         n_vec = pl.read_parquet(vec_file).height
@@ -349,10 +282,10 @@ def create_find_similar_tab():
                     import asyncio
                     import sys
                     sys.path.insert(0, str(SRC_DIR))
-                    from morphology import SkeletonVectorCache
+                    from morphology import find_similar_raw_cache
 
                     def _run():
-                        cache = SkeletonVectorCache(
+                        cache = find_similar_raw_cache(
                             dataset.value, n_workers=8, verbose=False
                         )
                         return cache.build(fetch_missing=0)
@@ -463,6 +396,8 @@ def create_find_similar_tab():
                             "similarity results."
                         ),
                         default_visualize_by="type",
+                        default_skeleton_mode="line",
+                        show_high_quality_warning=True,
                         dataset_provider=lambda: [source_dataset.value],
                         dataset_watchers=[source_dataset],
                     )
@@ -496,7 +431,6 @@ def create_find_similar_tab():
         dataset.on_value_change(on_dataset_change)
         sync_mode()
         on_dataset_change()
-        ui.timer(0.5, refresh_download_ui)
 
     with results_col:
         output_panel.create(run_label="Run Similarity Search", run_icon="play_arrow")
@@ -574,7 +508,9 @@ def create_find_similar_tab():
             "verbose": True,
             "n_workers": 8,
             "use_cache": True,
-            "cache_fetched_skeletons": cache_fetched.value,
+            # Raw skeleton persistence is now unconditional and shared with
+            # visualization and Settings cache pulls.
+            "cache_fetched_skeletons": True,
         }
         results = []
         last_output_folder = None

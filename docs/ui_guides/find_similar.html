@@ -18,22 +18,34 @@
     A mode toggle switches between the two search families.</p>
 
   <h2>Morphological similarity</h2>
-  <p>Two methods are available. Both reuse the skeleton/mesh data cached
-    under <code>cache/{dataset}/skeletons/</code> (including nested bulk
-    folders); the query neuron's skeleton is fetched on demand if missing.</p>
+  <p>Two methods are available. Find Similar uses raw skeletons only. Raw
+    skeletons are shared at <code>cache/{dataset}/skeletons/raw_skeletons/</code>;
+    Find Similar's vector parquet remains under
+    <code>cache/{dataset}/find_similar/</code>. The visualization simp90 cache
+    is never used for comparison.</p>
   <table>
     <tr><th>Method</th><th>Cost</th><th>Notes</th></tr>
     <tr><td><b>Vector</b> (recommended)</td><td>&lt;10 ms per query</td>
       <td>Each neuron is reduced to ~24 morphometrics plus a 100-dim shape
-        block: a persistence vector for skeletons, a spatial histogram for
-        meshes (FlyWire bulk caches). Scores are cosine / Pearson on
-        z-scored vectors. Requires the skeleton vector cache (auto-built on
-        first query, or use the <b>Build Vector Cache</b> button).</td></tr>
+        block: a persistence vector for raw skeletons. Scores are cosine /
+        Pearson on z-scored vectors. Raw vector rows are cached at
+        <code>find_similar/morphology/skeleton_vectors.parquet</code>; if a
+        row is missing it is fetched online and vectorized.</td></tr>
     <tr><td><b>NBLAST</b></td><td>~5–15 s for 100 prefiltered candidates</td>
-      <td>Canonical Costa et al. 2016 pairwise score via navis, on skeletons
-        only (FlyWire mesh caches do not support NBLAST — use the vector
-        method there). Dotprops are rebuilt per query and never cached.</td></tr>
+      <td>Canonical Costa et al. 2016 pairwise score via navis on raw
+        skeletons only. Dotprops are rebuilt per query and not persisted.</td></tr>
   </table>
+  <p>Dotprops were benchmarked on the 8,839-node raw aMe12 skeleton: building
+    them with <code>k=20</code> took about 28 ms, while a compressed serialized
+    dotprops object was about 144 KB. A compressed raw skeleton was about 48 KB
+    in the same benchmark, so dotprops caching would use more space while
+    saving only tens of milliseconds per neuron. It is not enabled by default.
+    NBLAST score caching was evaluated separately. A final pair-score cache
+    would need a dataset revision, ordered bodyId pair, navis/NBLAST version,
+    dotprop parameters, scale and scoring options in its key. In practice the
+    reusable cost is raw skeleton/vector preparation; the current design keeps
+    those assets and recomputes dotprops/scores so stale scores cannot survive
+    a dataset or parameter change.</p>
 
   <h2>Candidate source</h2>
   <p><b>Level</b> controls the result granularity. <b>auto</b> (default)
@@ -56,14 +68,10 @@
       same-type members on male-cns). A one-time per-dataset matrix is
       cached (<code>cache/{dataset}/morphology/roi_profiles.npz</code>);
       the top <b>N × Candidate Expansion</b> screen-ranked <b>types</b>
-      are kept and expanded to <b>all their member neurons</b>; skeletons
-      are then fetched for the pool (transient) and morphology is compared.
-      FlyWire datasets (which have no ROI table but bulk mesh caches)
-      search the vector cache directly (full-morphology). All scores are
-      computed at <b>one consistent representation level</b>: skeleton and
-      mesh neurons (or two simplification levels) are never mixed in a
-      single comparison — neurons cached or fetched at a different level
-      than the query are simply not scored.</li>
+      are kept and expanded to <b>all their member neurons</b>; raw
+      skeletons are then fetched for the pool and shared for reuse. FlyWire/FAFB sources use healed raw skeletons
+      or the CAVE fallback. Mesh and simp90 visualization files are never
+      candidates for either method.</li>
     <li><b>roi</b>: the ROI-distribution screen only. Requires the dataset's
       ROI-count table and metadata sidecar (missing sidecars are fetched
       and saved once automatically).</li>
@@ -76,23 +84,22 @@
       (<code>cache/{dataset}/connections.parquet</code>: neurons sharing
       upstream/downstream partners with the query, ranked by
       shared-partner count).</li>
-    <li><b>cache</b>: full-morphology over the complete local skeleton
-      population (download skeletons first — see below).</li>
+    <li><b>cache</b>: full-morphology over the complete local raw skeleton
+      population (download raw skeletons first — see below).</li>
   </ul>
   <p><b>Candidate Cap</b> (default 500) is the single knob bounding how many
     candidates are ever compared: the sorted candidate list of the selected
     screen is truncated to this many neurons, which become the scoring pool
     (it also serves as the NBLAST prefilter of <b>cache</b>-mode searches;
     pure <b>cache</b> vector searches compare the whole local population).
-    Fetched skeletons are <b>transient</b> by default — used for the
-    current comparison only and never written to the skeleton cache; the
-    <b>Cache Fetched Skeletons</b> option saves them to the local cache for
-    reuse (for a persistent full-morphology pool prefer <b>Download All
-    Skeletons</b>). Either way the computed <b>vectors</b> are always
-    persisted into the vector cache — the lookup order is vector cache,
-    then cached skeleton file, then online fetch, and a fetched neuron is
-    never vectorized twice. Already-cached skeletons are reused and the
-    query neuron is always fetched if missing. <b>ROI Filter</b> (shown
+    Fetched raw skeletons are always persisted as portable <code>.swc.gz</code>
+    files in the shared dataset cache at
+    <code>skeletons/raw_skeletons/</code> for reuse by every workflow. The
+    computed <b>raw vectors</b> are persisted into the vector cache — the
+    lookup order is vector cache, shared raw skeleton file, then online fetch,
+    and a fetched neuron is never vectorized twice. Already-cached raw
+    skeletons are reused and the
+    query neuron is fetched if missing. <b>ROI Filter</b> (shown
     when the dataset's connection cache carries synapse location data —
     male-cns has 114 ROIs like <code>AL(L)</code>, hemibrain has none)
     restricts the candidate rows of the connectivity screen (roi/combined
@@ -106,19 +113,21 @@
     search falls back to the vector cache when available.</p>
 
   <h2>Full-morphology mode &amp; skeleton download</h2>
-  <p><b>Download All Skeletons</b> fetches every missing skeleton of the
-    dataset to <code>cache/{dataset}/skeletons/</code> — the same resumable
-    background-pull pattern as the Settings panel's full dataset pull
-    (parallel, progress bar with ETA, cancel; already-cached skeletons are
-    skipped). FlyWire FAFB v783 already has bulk skeletons locally, so only
-    the vector cache build is needed there. After the download, build the
-    vector cache and run with <b>Candidate Source = cache</b> to compare the
-    query against the entire local skeleton population (fully
-    morphology-based analysis).</p>
+  <p>Use <b>Settings → Dataset Cache → Skeleton Cache Pull</b> to download a
+    complete skeleton population. Choose <b>Raw skeletons</b> or
+    <b>95% fine simplification</b>; both options populate the same shared raw
+    cache because fine meshes are generated transiently during
+    visualization. New bulk raw files use portable
+    <code>{bodyId}.swc.gz</code>; older pickle files remain readable. Both
+    choices are resumable and the raw vector cache is updated immediately
+    after each batched fetch. After a raw download, build the vector cache and
+    run with <b>Candidate Source = cache</b> to compare the query against the
+    entire local skeleton population. The healed FAFB skeleton bundle remains
+    a local raw source and is vectorized without copying its SWC entries.</p>
 
   <h2>Skeleton vector cache</h2>
-  <p>One parquet file per dataset:
-    <code>cache/{dataset}/morphology/skeleton_vectors.parquet</code>
+  <p>One raw parquet file per dataset:
+    <code>cache/{dataset}/find_similar/morphology/skeleton_vectors.parquet</code>
     (~1 KB/neuron, ~30–50x smaller than the raw skeletons). It builds
     incrementally from already-cached skeletons (~15–85 ms/neuron) and is
     auto-triggered on the first query. Without a vector cache, the
@@ -185,6 +194,12 @@
       members from the vector cache, bounded by <b>BodyIds / Type</b>);
       <code>bodyId</code> renders one layer per top result neuron.</li>
   </ul>
+  <div class="callout warning">
+    Analysis-tab visualizations default to <b>Skeleton Mode = line</b> for
+    speed. For high-quality morphology, open <b>Visualization → Skeleton</b>,
+    or change the mode to <b>tube</b> and choose <b>fine</b> with 95%
+    simplification.
+  </div>
   <p>When multiple queries are entered, the tab runs them sequentially and
     saves each query in its own run folder. Morphological output is saved next
     to its results in

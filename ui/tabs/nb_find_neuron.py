@@ -51,6 +51,8 @@ def create_nb_find_neuron_tab():
                     top_n_label="Visualize Top N",
                     top_n_hint="Number of top types or bodyIds to render in 3D.",
                     default_visualize_by="type",
+                    default_skeleton_mode="line",
+                    show_high_quality_warning=True,
                     default_show_fig=False,
                     default_export_views=True,
                 )

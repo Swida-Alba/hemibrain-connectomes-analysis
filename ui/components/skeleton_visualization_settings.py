@@ -23,9 +23,12 @@ from .palette_picker import color_swatch_picker, palette_editor
 from ..dataset_service import is_flywire_dataset
 
 
-def _default_analysis_simplification(dataset_value: Any) -> float:
+def _default_analysis_simplification(
+        dataset_value: Any, pipeline: str = "fine") -> float:
     """Return the visible default for analysis-generated visualizations."""
 
+    if str(pipeline or "fine").strip().lower() in {"fast", "direct"}:
+        return 0.90
     return 0.98
 
 
@@ -123,7 +126,9 @@ def skeleton_visualization_settings(
     default_visualize_by: str = "type",
     include_ranking: bool = True,
     default_brain_mesh: str = "template",
-    default_neuron_alpha: float = 0.3,
+    default_skeleton_mode: str = "tube",
+    show_high_quality_warning: bool = False,
+    default_neuron_alpha: float = 0.2,
     default_show_fig: bool = False,
     default_export_views: bool = False,
     default_export_method: str = "webdriver",
@@ -172,7 +177,7 @@ def skeleton_visualization_settings(
             fields["skeleton_mode"] = select_input(
                 "Skeleton Mode",
                 SKELETON_MODES,
-                "tube",
+                default_skeleton_mode,
                 hint="'tube' is detailed; 'line' is faster for many neurons.",
             )
             fields["legend_mode"] = select_input(
@@ -201,6 +206,14 @@ def skeleton_visualization_settings(
                 False,
                 hint="Show the ventral nerve cord mesh when the dataset supports it.",
             )
+
+        if show_high_quality_warning:
+            ui.label(
+                "⚠️ Analysis visualizations default to line mode for speed. "
+                "For high-quality morphology, open Visualization → Skeleton, "
+                "or change Skeleton Mode to tube and choose fine with 95% "
+                "mesh simplification."
+            ).classes("text-caption text-amber-8")
 
         with ui.row().classes("w-full items-start gap-4"):
             with ui.column().classes("flex-grow"):
@@ -305,6 +318,13 @@ def skeleton_visualization_settings(
                 True,
                 hint="Cache fetched skeletons for faster repeat renders.",
             )
+            cache_default_state = {"user_changed": False, "updating": False}
+
+            def on_cache_neurons_change(_event):
+                if not cache_default_state["updating"]:
+                    cache_default_state["user_changed"] = True
+
+            fields["cache_neurons"].on_value_change(on_cache_neurons_change)
             fields["cache_synapses"] = checkbox_input(
                 "Cache Synapses",
                 True,
@@ -329,34 +349,36 @@ def skeleton_visualization_settings(
                 "Default Simplification",
                 True,
                 hint=(
-                    "Use the analysis default: 0.98 faces removed. The dedicated "
-                    "Skeleton tab uses 0.95."
+                    "Use the method default: fast removes 0.90 of faces; "
+                    "fine/artistic remove 0.98. The dedicated Skeleton tab "
+                    "uses 0.95 for fine/artistic."
                 ),
             )
             fields["neuprint_skeleton_pipeline"] = select_input(
                 "Simplification Method",
-                ["fast", "fine_opt", "fine_opt1"],
-                "fast",
+                ["fast", "fine", "artistic"],
+                "fine",
                 hint=(
-                    "NeuPrint tube rendering: 'fast' uses the original direct "
-                    "simplification; 'fine_opt' smooths/resamples and uses "
-                    "the accelerated FAFB radius profile; all methods use "
-                    "batched parallel online fetching ('fine_opt1' retains "
-                    "the explicit optimized fine name). Disabled for "
+                    "NeuPrint tube rendering: 'fast' uses direct simp90 "
+                    "simplification; 'fine' smooths/resamples and uses "
+                    "the accelerated FAFB radius profile; 'artistic' uses "
+                    "vertex-cluster mesh decimation. All methods use "
+                    "batched parallel online fetching. Disabled for "
                     "FlyWire/FAFB and line mode."
                 ),
             )
             fields["skeleton_mesh_simplification"] = number_input(
                 "Mesh Simplification",
                 _default_analysis_simplification(
-                    dataset_provider() if dataset_provider else None
+                    dataset_provider() if dataset_provider else None,
+                    fields["neuprint_skeleton_pipeline"].value,
                 ),
                 0,
                 0.99,
                 0.05,
                 hint=(
                     "Fraction of skeleton-mesh faces removed (higher is coarser). "
-                    "Analysis visualizations default to 0.98."
+                    "Analysis defaults are 0.90 for fast and 0.98 for fine/artistic."
                 ),
             )
             fields["export_method"] = select_input(
@@ -390,7 +412,8 @@ def skeleton_visualization_settings(
             if bool(fields["use_default_simplification"].value):
                 fields["skeleton_mesh_simplification"].set_value(
                     _default_analysis_simplification(
-                        dataset_provider() if dataset_provider else None
+                        dataset_provider() if dataset_provider else None,
+                        fields["neuprint_skeleton_pipeline"].value,
                     )
                 )
 
@@ -406,6 +429,17 @@ def skeleton_visualization_settings(
             fields["skeleton_mesh_simplification"].set_enabled(
                 not is_line and not bool(fields["use_default_simplification"].value)
             )
+            if not cache_default_state["user_changed"]:
+                pipeline = str(
+                    fields["neuprint_skeleton_pipeline"].value or "fine"
+                ).strip().lower()
+                default_cache = pipeline not in {"fast", "artistic"}
+                if fields["cache_neurons"].value != default_cache:
+                    cache_default_state["updating"] = True
+                    try:
+                        fields["cache_neurons"].set_value(default_cache)
+                    finally:
+                        cache_default_state["updating"] = False
 
         def on_default_simplification_change(event):
             # Re-selecting the default should immediately show the current
@@ -418,6 +452,14 @@ def skeleton_visualization_settings(
             on_default_simplification_change
         )
         fields["skeleton_mode"].on_value_change(refresh_simplification_controls)
+        def on_pipeline_change(_event):
+            # Keep the displayed value synchronized with the selected method
+            # while the user is using the method default.  A custom value is
+            # deliberately preserved until the user re-enables the default.
+            refresh_default_simplification()
+            refresh_simplification_controls()
+
+        fields["neuprint_skeleton_pipeline"].on_value_change(on_pipeline_change)
         for watcher in dataset_watchers or ():
             watcher.on_value_change(refresh_default_simplification)
             watcher.on_value_change(refresh_simplification_controls)

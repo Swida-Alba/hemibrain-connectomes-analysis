@@ -99,6 +99,8 @@ def create_find_homologs_tab():
                     top_n_label="Visualize Top N Candidates",
                     top_n_hint="Number of top homolog candidates to render as 3D skeletons.",
                     default_visualize_by="type",
+                    default_skeleton_mode="line",
+                    show_high_quality_warning=True,
                     dataset_provider=lambda: [
                         source_dataset.value,
                         target_dataset.value,

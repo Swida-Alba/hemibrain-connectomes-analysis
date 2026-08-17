@@ -1,11 +1,11 @@
-"""Unit tests for the NeuPrint FAFB-format transform + mesh cache.
+"""Unit tests for the NeuPrint FAFB-format transform + transient mesh path.
 
 Covers `VisualizeSkeleton` helpers added for the NeuPrint tube pipeline:
 - `_resolved_skeleton_radius_style`
 - `_fafb_style_radius` (tip taper, soma cap, branchpoint preservation)
 - `_fafb_style_neuprint_skeleton` (smooth + resample + radius)
-- `_load_cached_neuprint_meshes` / `_save_cached_neuprint_meshes` gating
-  and round-trip
+- the retired `_load_cached_neuprint_meshes` / `_save_cached_neuprint_meshes`
+  compatibility seams
 """
 import pickle
 import sys
@@ -28,6 +28,7 @@ class FakeClient:
 
     def __init__(self, *args, **kwargs):
         self.dataset = kwargs.get("dataset", "hemibrain:v1.2.1")
+        self.all_rois = set()
 
 
 def make_chain(n_nodes=60, spacing=100.0):
@@ -44,6 +45,13 @@ def make_chain(n_nodes=60, spacing=100.0):
     nrn.soma = None
     nrn.id = 42
     return nrn
+
+
+def batch_body_ids(batch):
+    """Read IDs from either the legacy DataFrame or bound criteria input."""
+    if isinstance(batch, pd.DataFrame):
+        return batch["bodyId"].tolist()
+    return np.asarray(batch.bodyId).tolist()
 
 
 def build_vs(tmp_path, dataset="hemibrain:v1.2.1", pipeline=None):
@@ -66,34 +74,36 @@ def build_vs(tmp_path, dataset="hemibrain:v1.2.1", pipeline=None):
 
 
 class TestNeuprintPipeline:
-    def test_default_pipeline_is_fast(self, tmp_path):
+    def test_default_pipeline_is_fine(self, tmp_path):
         vs = build_vs(tmp_path)
-        assert vs.neuprint_skeleton_pipeline == "fast"
-        assert vs._resolved_neuprint_skeleton_pipeline() == "direct"
+        assert vs.neuprint_skeleton_pipeline == "fine"
+        assert vs._resolved_neuprint_skeleton_pipeline() == "fine"
 
     def test_user_facing_pipeline_aliases_resolve(self, tmp_path):
         assert build_vs(tmp_path, pipeline="fast")._resolved_neuprint_skeleton_pipeline() == "direct"
-        assert build_vs(tmp_path, pipeline="fine")._resolved_neuprint_skeleton_pipeline() == "fine_opt"
-        assert build_vs(tmp_path, pipeline="fine_opt")._resolved_neuprint_skeleton_pipeline() == "fine_opt"
-        assert build_vs(tmp_path, pipeline="fine_opt1")._resolved_neuprint_skeleton_pipeline() == "fine_opt1"
+        assert build_vs(tmp_path, pipeline="fine")._resolved_neuprint_skeleton_pipeline() == "fine"
+        assert build_vs(tmp_path, pipeline="artistic")._resolved_neuprint_skeleton_pipeline() == "artistic"
+        assert build_vs(tmp_path, pipeline="fine_opt")._resolved_neuprint_skeleton_pipeline() == "fine"
+        assert build_vs(tmp_path, pipeline="fine_opt1")._resolved_neuprint_skeleton_pipeline() == "artistic"
         assert build_vs(tmp_path, pipeline="direct")._resolved_neuprint_skeleton_pipeline() == "direct"
-        assert build_vs(tmp_path, pipeline="fafb")._resolved_neuprint_skeleton_pipeline() == "fine_opt"
+        assert build_vs(tmp_path, pipeline="fafb")._resolved_neuprint_skeleton_pipeline() == "fine"
 
-    def test_fine_opt_defaults_to_mesh_cache_level(self, tmp_path):
-        assert build_vs(tmp_path / "fine_opt", pipeline="fine_opt").skeleton_mesh_simplification == pytest.approx(0.95)
-        assert build_vs(tmp_path / "fine_opt1", pipeline="fine_opt1").skeleton_mesh_simplification == pytest.approx(0.95)
+    def test_fine_methods_default_to_mesh_cache_level(self, tmp_path):
+        assert build_vs(tmp_path / "fine", pipeline="fine").skeleton_mesh_simplification == pytest.approx(0.95)
+        assert build_vs(tmp_path / "artistic", pipeline="artistic").skeleton_mesh_simplification == pytest.approx(0.95)
 
-    def test_fine_opt1_fetches_bounded_batches_in_requested_order(
+    def test_artistic_fetches_bounded_batches_in_requested_order(
             self, tmp_path, monkeypatch):
-        vs = build_vs(tmp_path, pipeline="fine_opt1")
+        vs = build_vs(tmp_path, pipeline="artistic")
         vs.NEUPRINT_FETCH_BATCH_SIZE = 2
         vs.NEUPRINT_FETCH_MAX_THREADS = 3
         calls = []
 
         def fake_fetch(batch, **kwargs):
-            calls.append((batch["bodyId"].tolist(), dict(kwargs)))
+            body_ids = batch_body_ids(batch)
+            calls.append((body_ids, dict(kwargs)))
             neurons = []
-            for body_id in batch["bodyId"].tolist():
+            for body_id in body_ids:
                 neuron = make_chain(n_nodes=5)
                 neuron.id = body_id
                 neurons.append(neuron)
@@ -115,6 +125,105 @@ class TestNeuprintPipeline:
         assert [neuron.id for neuron in fetched] == [12211, 12517, 12737]
         assert all(kwargs["parallel"] is True for _, kwargs in calls)
         assert [kwargs["max_threads"] for _, kwargs in calls] == [2, 1]
+        assert all(kwargs["client"] is vs.client for _, kwargs in calls)
+
+    def test_batched_fetch_reports_progress(self, tmp_path, monkeypatch):
+        vs = build_vs(tmp_path, pipeline="fine")
+        vs.verbose = True
+        vs.NEUPRINT_FETCH_BATCH_SIZE = 2
+        progress_instances = []
+
+        class FakeProgress:
+            def __init__(self, *args, **kwargs):
+                self.total = kwargs.get("total")
+                self.updates = []
+                self.descriptions = []
+                self.postfixes = []
+                self.closed = False
+                progress_instances.append(self)
+
+            def update(self, count):
+                self.updates.append(count)
+
+            def reset(self, total=None):
+                self.total = total
+
+            def set_description(self, value):
+                self.descriptions.append(value)
+
+            def set_postfix_str(self, value):
+                self.postfixes.append(value)
+
+            def close(self):
+                self.closed = True
+
+            @staticmethod
+            def write(*args, **kwargs):
+                return None
+
+        def fake_fetch(batch, **kwargs):
+            neurons = []
+            for body_id in batch_body_ids(batch):
+                neuron = make_chain(n_nodes=5)
+                neuron.id = int(body_id)
+                neurons.append(neuron)
+            return navis.NeuronList(neurons)
+
+        monkeypatch.setattr(visualize_skeleton_module.tqdm, "write", lambda *args, **kwargs: None, raising=False)
+        monkeypatch.setattr(visualize_skeleton_module, "tqdm", FakeProgress)
+        monkeypatch.setattr(
+            visualize_skeleton_module.neu, "fetch_skeletons", fake_fetch)
+
+        vs._fetch_neuprint_skeletons_batched(
+            [12211, 12517, 12737],
+            {"with_synapses": False, "missing_swc": "warn"},
+        )
+
+        assert len(progress_instances) == 1
+        progress = progress_instances[0]
+        assert progress.total == 3
+        assert progress.updates == [2, 1, 1, 1, 1]
+        assert progress.postfixes[:2] == ["batch 1/2", "batch 2/2"]
+        assert progress.descriptions[0] == "Vectorizing fetched skeletons"
+        assert progress.descriptions[-1] == "Vector cache complete"
+        assert progress.closed is True
+
+    def test_fast_first_render_uses_the_simp90_cache_representation(
+            self, tmp_path, monkeypatch):
+        vs = build_vs(tmp_path, pipeline="fast")
+        vs.skeleton_mode = "tube"
+        vs.skeleton_mesh_simplification = 0.9
+        raw = make_chain(n_nodes=200)
+        raw.id = 12211
+
+        def fake_fetch(batch, **kwargs):
+            result = raw.copy()
+            result.id = 12211
+            return navis.NeuronList([result])
+
+        decimation_calls = []
+        monkeypatch.setattr(
+            visualize_skeleton_module.neu, "fetch_skeletons", fake_fetch)
+        monkeypatch.setattr(
+            vs,
+            "_simplify_mesh_for_neuprint_pipeline",
+            lambda *args: decimation_calls.append(True) or args[0],
+        )
+
+        prepared, _ = vs._prepare_neuprint_skeletons_for_render(
+            [12211], False, False, {})
+
+        cache_file = (
+            Path(tmp_path) / "cache" / "hemibrain_v1_2_1" / "skeletons"
+            / "12211.pkl"
+        )
+        with open(cache_file, "rb") as handle:
+            cached = pickle.load(handle)
+        assert len(cached.nodes) < len(raw.nodes)
+        assert 12211 in prepared
+        # At exactly simp90, the fast path converts the cached skeleton to a
+        # mesh without applying a second render-time reduction.
+        assert decimation_calls == []
 
     def test_render_preprocessing_aggregates_layers_before_fetch(
             self, tmp_path, monkeypatch):
@@ -129,9 +238,10 @@ class TestNeuprintPipeline:
         calls = []
 
         def fake_fetch(batch, **kwargs):
-            calls.append(batch["bodyId"].tolist())
+            body_ids = batch_body_ids(batch)
+            calls.append(body_ids)
             neurons = []
-            for body_id in batch["bodyId"].tolist():
+            for body_id in body_ids:
                 neuron = make_chain(n_nodes=5)
                 neuron.id = body_id
                 neurons.append(neuron)
@@ -153,39 +263,91 @@ class TestNeuprintPipeline:
         assert list(prepared) == [101, 202, 303]
         assert prepared_mesh is False
 
-    def test_fine_opt1_line_mode_still_forces_direct(self, tmp_path):
-        vs = build_vs(tmp_path, pipeline="fine_opt1")
+    def test_render_preprocessing_retries_transport_error(
+            self, tmp_path, monkeypatch):
+        """A connection-level NeuPrint error does not abort every layer."""
+        vs = build_vs(tmp_path, pipeline="fast")
+        vs.skeleton_mode = "line"
+        vs.cache_neurons = False
+        attempts = []
+
+        def flaky_fetch(body_ids, fetch_kwargs=None):
+            attempts.append(list(body_ids["bodyId"]))
+            if len(attempts) == 1:
+                # neuprint-python's wrapped requests error has no response
+                # body and therefore omits the word "connection".
+                raise RuntimeError(
+                    "Error accessing POST "
+                    "https://neuprint.janelia.org/api/custom/custom"
+                )
+            neuron = make_chain(n_nodes=5)
+            neuron.id = 404
+            return navis.NeuronList([neuron])
+
+        monkeypatch.setattr(vs, "_fetch_neuprint_skeletons_batched", flaky_fetch)
+        monkeypatch.setattr(visualize_skeleton_module.time, "sleep", lambda *_: None)
+
+        prepared, prepared_mesh = vs._prepare_neuprint_skeletons_for_render(
+            [404],
+            use_neuprint_fine_pipeline=False,
+            use_neuprint_mesh_cache=False,
+            neuprint_mesh_cache={},
+        )
+
+        assert attempts == [[404], [404]]
+        assert list(prepared) == [404]
+        assert prepared_mesh is False
+
+    def test_matching_default_client_is_retained(self, tmp_path, monkeypatch):
+        """A matching process-wide client is passed explicitly to navis."""
+        matching = FakeClient(dataset="hemibrain:v1.2.1")
+        monkeypatch.setattr("neuprint.default_client", lambda: matching)
+        vs = VisualizeSkeleton(
+            dataset="hemibrain:v1.2.1",
+            neuron_layers=["aMe12"],
+            client=None,
+            verbose=False,
+            output_dir=str(tmp_path),
+            include_timestamp=False,
+            cache_neurons=False,
+            data_folder=str(tmp_path),
+            script_path=str(tmp_path),
+        )
+        assert vs.client is matching
+
+    def test_artistic_line_mode_still_forces_direct(self, tmp_path):
+        vs = build_vs(tmp_path, pipeline="artistic")
         vs.skeleton_mode = "line"
         assert vs._resolved_neuprint_skeleton_pipeline() == "direct"
         assert vs._uses_neuprint_fine_pipeline() is False
         assert vs._uses_neuprint_fine_optimized_pipeline() is False
 
-    def test_fine_opt1_dispatches_vertex_clustering(self, tmp_path, monkeypatch):
+    def test_artistic_dispatches_vertex_clustering(self, tmp_path, monkeypatch):
         import trimesh
 
         mesh = trimesh.creation.icosphere(subdivisions=2, radius=10)
-        fine_opt1 = build_vs(tmp_path / "fine_opt1", pipeline="fine_opt1")
-        fine_opt1.skeleton_mode = "tube"
-        fine_opt1.NEUPRINT_FINE_OPT1_CLUSTER_SEARCH_STEPS = 2
-        clustered = fine_opt1._simplify_mesh_vertex_clustering(mesh, 80)
+        artistic = build_vs(tmp_path / "artistic", pipeline="artistic")
+        artistic.skeleton_mode = "tube"
+        artistic.NEUPRINT_FINE_OPT1_CLUSTER_SEARCH_STEPS = 2
+        clustered = artistic._simplify_mesh_vertex_clustering(mesh, 80)
         assert 0 < len(clustered.faces) < len(mesh.faces)
 
         calls = []
         monkeypatch.setattr(
-            fine_opt1,
+            artistic,
             "_simplify_mesh_vertex_clustering",
             lambda *_args: calls.append("cluster") or mesh,
         )
-        assert fine_opt1._simplify_mesh_for_neuprint_pipeline(mesh, 80) is mesh
+        assert artistic._simplify_mesh_for_neuprint_pipeline(mesh, 80) is mesh
         assert calls == ["cluster"]
 
-        fine_opt = build_vs(tmp_path / "fine_opt", pipeline="fine_opt")
+        fine = build_vs(tmp_path / "fine", pipeline="fine")
         monkeypatch.setattr(
-            fine_opt,
+            fine,
             "_simplify_mesh_open3d",
             lambda *_args: calls.append("qem") or mesh,
         )
-        assert fine_opt._simplify_mesh_for_neuprint_pipeline(mesh, 80) is mesh
+        assert fine._simplify_mesh_for_neuprint_pipeline(mesh, 80) is mesh
         assert calls[-1] == "qem"
 
     def test_shared_online_fetch_ids_cover_all_methods_and_cache_rules(
@@ -214,7 +376,7 @@ class TestNeuprintPipeline:
 
         # Both fine method names use the shared path and therefore request
         # every body not already represented by the transformed mesh cache.
-        for pipeline in ("fine_opt", "fine_opt1"):
+        for pipeline in ("fine", "artistic"):
             fine = build_vs(tmp_path / pipeline, pipeline=pipeline)
             fine.neuron_dfs = [body_df]
             assert fine._get_neuprint_online_fetch_ids(
@@ -236,7 +398,7 @@ class TestNeuprintPipeline:
         ) == [202]
 
     def test_line_mode_forces_direct_pipeline_and_skips_fine_path(self, tmp_path):
-        vs = build_vs(tmp_path, pipeline="fine_opt")
+        vs = build_vs(tmp_path, pipeline="fine")
         vs.skeleton_mode = "line"
 
         assert vs._resolved_neuprint_skeleton_pipeline() == "direct"
@@ -336,6 +498,25 @@ class TestFafbStyleNeuprintSkeleton:
         edges = vs._neuron_edge_lengths(out)
         assert np.median(edges) < 40.0
 
+    def test_hides_nested_navis_progress_and_restores_setting(
+            self, tmp_path, monkeypatch):
+        vs = build_vs(tmp_path)
+        vs.verbose = 'full'
+        n = make_chain(n_nodes=20, spacing=100.0)
+        previous = navis.config.pbar_hide
+        observed = []
+
+        def fake_smooth(neuron, **kwargs):
+            observed.append(navis.config.pbar_hide)
+            return neuron
+
+        monkeypatch.setattr(
+            visualize_skeleton_module.navis, 'smooth_skeleton', fake_smooth)
+        vs._fafb_style_neuprint_skeleton(n)
+
+        assert observed == [True]
+        assert navis.config.pbar_hide is previous
+
     def test_radius_profile_applied(self, tmp_path):
         vs = build_vs(tmp_path)
         n = make_chain()
@@ -344,23 +525,23 @@ class TestFafbStyleNeuprintSkeleton:
         assert r.max() > 32.0  # base multiplier applied
         assert r.min() < 32.0  # tip taper applied
 
-    def test_fine_opt_preserves_unoptimized_reference_profile(self, tmp_path):
-        vs = build_vs(tmp_path / "fine_opt", pipeline="fine_opt")
+    def test_fine_preserves_unoptimized_reference_profile(self, tmp_path):
+        vs = build_vs(tmp_path / "fine", pipeline="fine")
         n = make_chain(n_nodes=80, spacing=100.0)
 
         reference = vs._fafb_style_neuprint_skeleton(n, optimized=False)
-        fine_opt = vs._fafb_style_neuprint_skeleton(n, optimized=True)
+        fine = vs._fafb_style_neuprint_skeleton(n, optimized=True)
 
-        assert len(fine_opt.nodes) == len(reference.nodes)
+        assert len(fine.nodes) == len(reference.nodes)
         np.testing.assert_allclose(
-            fine_opt.nodes[["x", "y", "z", "radius"]].to_numpy(dtype=float),
+            fine.nodes[["x", "y", "z", "radius"]].to_numpy(dtype=float),
             reference.nodes[["x", "y", "z", "radius"]].to_numpy(dtype=float),
             rtol=1e-6,
             atol=1e-6,
         )
 
-    def test_constant_radius_skips_profile_and_keeps_fine_opt_path(self, tmp_path):
-        vs = build_vs(tmp_path, pipeline="fine_opt")
+    def test_constant_radius_skips_profile_and_keeps_fine_path(self, tmp_path):
+        vs = build_vs(tmp_path, pipeline="fine")
         vs.skeleton_radius_style = "constant"
         n = make_chain(n_nodes=80, spacing=100.0)
         out = vs._fafb_style_neuprint_skeleton(n)
@@ -384,22 +565,25 @@ class TestNeuprintMeshCache:
         return mn
 
     def test_save_and_load_roundtrip(self, tmp_path):
-        vs = build_vs(tmp_path, pipeline="fine_opt")
+        vs = build_vs(tmp_path, pipeline="fine")
         vs.skeleton_mesh_simplification = 0.95
         vs._save_cached_neuprint_meshes({101: self._make_mesh(101)})
         loaded, missing = vs._load_cached_neuprint_meshes([101, 202])
-        assert missing == [202]
-        assert 101 in loaded
-        assert loaded[101].id == 101
+        assert loaded == {}
+        assert missing == [101, 202]
+        assert not list(
+            (Path(tmp_path) / "cache" / "hemibrain_v1_2_1" / "skeletons")
+            .glob("NEUPRINT_simp95*/*.pkl")
+        )
 
     def test_gated_below_cache_level(self, tmp_path):
-        vs = build_vs(tmp_path, pipeline="fine_opt")
+        vs = build_vs(tmp_path, pipeline="fine")
         vs.skeleton_mesh_simplification = 0.5
         loaded, missing = vs._load_cached_neuprint_meshes([101])
         assert loaded == {} and missing == [101]
 
     def test_gated_for_flywire_dataset(self, tmp_path):
-        vs = build_vs(tmp_path, pipeline="fine_opt")
+        vs = build_vs(tmp_path, pipeline="fine")
         vs.dataset = "flywire_FAFB_v783"
         vs.skeleton_mesh_simplification = 0.95
         vs._save_cached_neuprint_meshes({101: self._make_mesh(101)})
@@ -407,16 +591,16 @@ class TestNeuprintMeshCache:
         assert loaded == {} and missing == [101]
 
     def test_cache_key(self, tmp_path):
-        vs = build_vs(tmp_path, pipeline="fine_opt")
+        vs = build_vs(tmp_path, pipeline="fine")
         assert vs._get_neuprint_mesh_cache_key() == "NEUPRINT_simp95"
 
-    def test_fine_opt1_cache_key_isolated_from_qem_cache(self, tmp_path):
-        vs = build_vs(tmp_path, pipeline="fine_opt1")
+    def test_artistic_cache_key_isolated_from_qem_cache(self, tmp_path):
+        vs = build_vs(tmp_path, pipeline="artistic")
         assert vs._get_neuprint_mesh_cache_key() == (
             "NEUPRINT_simp95_vertexcluster"
         )
 
     def test_constant_radius_uses_separate_cache_key(self, tmp_path):
-        vs = build_vs(tmp_path, pipeline="fine_opt")
+        vs = build_vs(tmp_path, pipeline="fine")
         vs.skeleton_radius_style = "constant"
         assert vs._get_neuprint_mesh_cache_key() == "NEUPRINT_simp95_radiusconstant"

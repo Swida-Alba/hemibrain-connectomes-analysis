@@ -46,6 +46,9 @@ def test_analysis_skeleton_simplification_defaults_use_the_analysis_level():
     assert default_analysis_skeleton_mesh_simplification("hemibrain:v1.2.1") == 0.98
     assert default_analysis_skeleton_mesh_simplification("flywire_FAFB_v783") == 0.98
     assert default_analysis_skeleton_mesh_simplification("FAFB:v783") == 0.98
+    assert default_analysis_skeleton_mesh_simplification(
+        "male-cns:v1.0", "fast"
+    ) == 0.90
 
 
 def test_visualization_warning_notes_record_effective_simplification(tmp_path):
@@ -65,22 +68,28 @@ def test_visualization_warning_notes_record_effective_simplification(tmp_path):
 
 def test_html_simplification_warning_uses_dataset_specific_thresholds():
     assert VisualizeSkeleton._skeleton_simplification_warning(
-        "male-cns:v1.0", "neuprint", "tube", 0.90
+        "male-cns:v1.0", "neuprint", "tube", 0.95
     ) is None
     assert VisualizeSkeleton._skeleton_simplification_warning(
-        "male-cns:v1.0", "neuprint", "tube", 0.901
-    )["threshold"] == 0.90
-    assert VisualizeSkeleton._skeleton_simplification_warning(
-        "male-cns:v1.0", "neuprint", "tube", 0.95, "fine_opt"
-    ) is None
-    assert VisualizeSkeleton._skeleton_simplification_warning(
-        "male-cns:v1.0", "neuprint", "tube", 0.951, "fine_opt"
+        "male-cns:v1.0", "neuprint", "tube", 0.951
     )["threshold"] == 0.95
     assert VisualizeSkeleton._skeleton_simplification_warning(
-        "male-cns:v1.0", "neuprint", "tube", 0.95, "fine_opt1"
+        "male-cns:v1.0", "neuprint", "tube", 0.90, "fast"
     ) is None
     assert VisualizeSkeleton._skeleton_simplification_warning(
-        "male-cns:v1.0", "neuprint", "tube", 0.951, "fine_opt1"
+        "male-cns:v1.0", "neuprint", "tube", 0.901, "fast"
+    )["threshold"] == 0.90
+    assert VisualizeSkeleton._skeleton_simplification_warning(
+        "male-cns:v1.0", "neuprint", "tube", 0.95, "fine"
+    ) is None
+    assert VisualizeSkeleton._skeleton_simplification_warning(
+        "male-cns:v1.0", "neuprint", "tube", 0.951, "fine"
+    )["threshold"] == 0.95
+    assert VisualizeSkeleton._skeleton_simplification_warning(
+        "male-cns:v1.0", "neuprint", "tube", 0.95, "artistic"
+    ) is None
+    assert VisualizeSkeleton._skeleton_simplification_warning(
+        "male-cns:v1.0", "neuprint", "tube", 0.951, "artistic"
     )["threshold"] == 0.95
 
     assert VisualizeSkeleton._skeleton_simplification_warning(
@@ -116,6 +125,7 @@ def test_html_writer_embeds_plotly_runtime_and_injects_warning(tmp_path):
     visualizer.dataset = "male-cns:v1.0"
     visualizer.client_type = "neuprint"
     visualizer.skeleton_mode = "tube"
+    visualizer.neuprint_skeleton_pipeline = "fast"
     visualizer.skeleton_mesh_simplification = 0.95
     visualizer._vprint = lambda *args, **kwargs: None
 
@@ -131,7 +141,7 @@ def test_html_writer_embeds_plotly_runtime_and_injects_warning(tmp_path):
     assert html.index("drocat-skeleton-simplification-warning") > html.index("<body>")
 
 
-def test_fine_opt_html_warning_starts_above_simp95(tmp_path):
+def test_fine_html_warning_starts_above_simp95(tmp_path):
     class FakeFigure:
         def write_html(self, path, **kwargs):
             Path(path).write_text(
@@ -143,29 +153,30 @@ def test_fine_opt_html_warning_starts_above_simp95(tmp_path):
     visualizer.dataset = "male-cns:v1.0"
     visualizer.client_type = "neuprint"
     visualizer.skeleton_mode = "tube"
-    visualizer.neuprint_skeleton_pipeline = "fine_opt"
+    visualizer.neuprint_skeleton_pipeline = "fine"
     visualizer.skeleton_mesh_simplification = 0.95
     visualizer._vprint = lambda *args, **kwargs: None
 
-    exact_path = tmp_path / "fine_opt_simp95.html"
+    exact_path = tmp_path / "fine_simp95.html"
     visualizer._write_plotly_html(FakeFigure(), str(exact_path))
     assert "drocat-skeleton-simplification-warning" not in exact_path.read_text(
         encoding="utf-8"
     )
 
     visualizer.skeleton_mesh_simplification = 0.951
-    high_path = tmp_path / "fine_opt_simp951.html"
+    high_path = tmp_path / "fine_simp951.html"
     visualizer._write_plotly_html(FakeFigure(), str(high_path))
     html = high_path.read_text(encoding="utf-8")
     assert "drocat-skeleton-simplification-warning" in html
-    assert "fixed simp95 transformed mesh cache" in html
+    assert "rebuild the FAFB-style tube mesh" in html
+    assert "raw .swc.gz source" in html
 
 
-def test_user_warning_notes_record_fine_opt_threshold(tmp_path):
+def test_user_warning_notes_record_fine_threshold(tmp_path):
     visualizer = object.__new__(VisualizeSkeleton)
     visualizer.dataset = "male-cns:v1.0"
     visualizer.skeleton_mode = "tube"
-    visualizer.neuprint_skeleton_pipeline = "fine_opt"
+    visualizer.neuprint_skeleton_pipeline = "fine"
     visualizer.skeleton_mesh_simplification = 0.95
     visualizer.save_folder = str(tmp_path)
     visualizer._vprint = lambda *args, **kwargs: None
@@ -173,7 +184,7 @@ def test_user_warning_notes_record_fine_opt_threshold(tmp_path):
     visualizer._write_user_warning_notes()
 
     notes = (tmp_path / "user_warning_notes.txt").read_text(encoding="utf-8")
-    assert "neuprint_skeleton_pipeline=fine_opt" in notes
+    assert "neuprint_skeleton_pipeline=fine" in notes
     assert "in-page warning threshold >0.95" in notes
 
 

@@ -540,9 +540,9 @@ class TestRunner:
         # morphological mode controls
         for label in ("Query Neuron(s)", "Level", "Method", "Metric",
                       "Candidate Cap", "Candidate Source",
-                      "ROI Filter", "Visualize Top N Types / Neurons", "Visualize By",
-                      "Download All Skeletons"):
+                      "ROI Filter", "Visualize Top N Types / Neurons", "Visualize By"):
             assert label in labels, f"missing morphological control: {label}"
+        assert "Download All Skeletons" not in labels
         # connection-profile mode controls (relocated loose knobs)
         for label in ("Query Neuron (type or bodyId)", "Min Shared Partners",
                       "Candidate Prune %", "Top K Partners",
@@ -650,9 +650,11 @@ class TestRunner:
             el for el in client.elements.values()
             if getattr(el, "_props", {}).get("label") == "Simplification Method"
         )
-        assert method.enabled is True
-        mode.value = "line"
+        # Analysis tabs default to line mode; tube/fine is an explicit
+        # high-quality opt-in.
+        assert mode.value == "line"
         assert method.enabled is False
+        assert method.value == "fine"
         assert default_control.enabled is False
         assert mesh.enabled is False
         mode.value = "tube"
@@ -2189,6 +2191,14 @@ class TestDatasetService:
             getattr(el, "text", None) == "Idle"
             for el in client.elements.values()
         )
+        assert any(
+            getattr(el, "_props", {}).get("label") == "Skeleton cache"
+            for el in client.elements.values()
+        )
+        assert any(
+            getattr(el, "text", None) == "Download All Skeletons"
+            for el in client.elements.values()
+        )
 
     def test_settings_shows_availability_timestamp_and_shared_mapping_panel(
         self, tmp_path, monkeypatch
@@ -2741,8 +2751,9 @@ class TestTabs:
 
         assert method.enabled is True
         assert [option["label"] for option in method._props["options"]] == [
-            "fast", "fine_opt", "fine_opt1"
+            "fast", "fine", "artistic"
         ]
+        assert method.value == "fast"
         dataset.value = "flywire_FAFB_v783"
         assert method.enabled is False
         dataset.value = "male-cns:v1.0"
@@ -2779,6 +2790,21 @@ class TestTabs:
         assert method.enabled is True
         assert default_control.enabled is True
         assert mesh.enabled is False
+        assert mesh.value == 0.90
+
+        method.value = "fast"
+        assert mesh.value == 0.90
+        method.value = "fine"
+        assert mesh.value == 0.95
+
+        # A user-entered value is not overwritten by method toggles while the
+        # default checkbox is disabled.
+        default_control.value = False
+        mesh.value = 0.75
+        method.value = "fast"
+        assert mesh.value == 0.75
+        default_control.value = True
+        assert mesh.value == 0.90
 
         mode.value = "line"
         assert method.enabled is False
@@ -2788,6 +2814,10 @@ class TestTabs:
         mode.value = "tube"
         assert method.enabled is True
         assert default_control.enabled is True
+        method.value = "fast"
+        assert mesh.value == 0.90
+        method.value = "fine"
+        assert mesh.value == 0.95
         default_control.value = False
         assert mesh.enabled is True
 
