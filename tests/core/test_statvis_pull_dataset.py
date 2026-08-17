@@ -127,6 +127,9 @@ class TestPullDatasetChunked:
         bar = _FakeTqdm.instances[0]
         assert bar.kwargs['total'] == 4500
         assert bar.kwargs['desc'] == 'Downloading neuron list'
+        # NeuronBridge and dataset-pull output share stdout so the UI runner
+        # cannot reorder a message between a bar's clear and redraw.
+        assert bar.kwargs['file'] is sys.stdout
         assert bar.updates == [2000, 2000, 500]
         assert (tmp_path / 'ds_neuron_df.csv').exists()
         assert (tmp_path / 'ds_roi_count_df.parquet').exists()

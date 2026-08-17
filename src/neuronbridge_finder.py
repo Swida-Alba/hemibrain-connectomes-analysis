@@ -508,11 +508,13 @@ class NeuronBridgeFinder:
             if HAS_TQDM:
                 try:
                     from tqdm import tqdm
-                    tqdm.write(msg, end=end)
+                    # Progress bars in this module use stdout so the UI
+                    # runner receives messages and bar redraws in order.
+                    tqdm.write(msg, end=end, file=sys.stdout)
                 except:
-                    print(msg, end=end)
+                    print(msg, end=end, flush=True)
             else:
-                print(msg, end=end)
+                print(msg, end=end, flush=True)
 
     def _progress(self, step: int, total: int, label: str = ""):
         """Emit a structured step-progress event consumed by the web UI.
@@ -527,7 +529,7 @@ class NeuronBridgeFinder:
             if HAS_TQDM:
                 try:
                     from tqdm import tqdm
-                    tqdm.write(msg)
+                    tqdm.write(msg, file=sys.stdout)
                     return
                 except Exception:
                     pass
@@ -1655,7 +1657,8 @@ class NeuronBridgeFinder:
                 desc="   🔍 Collecting neurons per line", 
                 unit="line",
                 bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
-                ncols=100
+                ncols=100,
+                file=sys.stdout,
             )
         else:
             iterator = lines
@@ -2096,7 +2099,8 @@ class NeuronBridgeFinder:
                 desc="   🧬 Building expression matrix", 
                 unit="line",
                 bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
-                ncols=100
+                ncols=100,
+                file=sys.stdout,
             )
         else:
             iterator = lines
@@ -4202,7 +4206,8 @@ class NeuronBridgeFinder:
                     bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
                     ncols=110,
                     position=0,
-                    leave=False
+                    leave=False,
+                    file=sys.stdout,
                 )
                 for future in pbar_cache:
                     try:
@@ -5401,7 +5406,8 @@ class NeuronBridgeFinder:
                             unit="img",
                             leave=False,
                             bar_format='  {desc}: {percentage:3.0f}%|{bar:20}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
-                            ncols=90
+                            ncols=90,
+                            file=sys.stdout,
                         )
                     else:
                         iterator = as_completed(futures)
@@ -5437,7 +5443,8 @@ class NeuronBridgeFinder:
                         unit="img",
                         leave=False,
                         bar_format='  {desc}: {percentage:3.0f}%|{bar:20}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
-                        ncols=90
+                        ncols=90,
+                        file=sys.stdout,
                     )
                 else:
                     image_iterator = lm_images
@@ -5979,7 +5986,8 @@ class NeuronBridgeFinder:
                             bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
                             ncols=110,
                             position=0,
-                            leave=False
+                            leave=False,
+                            file=sys.stdout,
                         )
                         
                         for future in pbar_cache:
@@ -6017,7 +6025,8 @@ class NeuronBridgeFinder:
                             bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
                             ncols=110,
                             position=0,
-                            leave=False
+                            leave=False,
+                            file=sys.stdout,
                         )
                         
                         for future in pbar:
@@ -6043,7 +6052,8 @@ class NeuronBridgeFinder:
                         bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
                         ncols=110,
                         position=0,
-                        leave=False
+                        leave=False,
+                        file=sys.stdout,
                     )
                     
                     for body_info in pbar:
@@ -7552,7 +7562,8 @@ class NeuronBridgeFinder:
                 bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
                 ncols=110,
                 position=0,
-                leave=False
+                leave=False,
+                file=sys.stdout,
             )
             
             for line_name in cache_pbar:
@@ -7637,7 +7648,8 @@ class NeuronBridgeFinder:
                                 bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
                                 ncols=110,
                                 position=0,
-                                leave=False
+                                leave=False,
+                                file=sys.stdout,
                             )
                         else:
                             iterator = as_completed(futures)
@@ -7678,7 +7690,8 @@ class NeuronBridgeFinder:
                         bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
                         ncols=110,
                         position=0,
-                        leave=False
+                        leave=False,
+                        file=sys.stdout,
                     )
                     
                     for line_name in fetch_pbar:
@@ -8973,7 +8986,8 @@ class NeuronBridgeFinder:
                 bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
                 ncols=110,
                 position=0,
-                leave=False
+                leave=False,
+                file=sys.stdout,
             )
             
             for q in cache_pbar:
@@ -9038,7 +9052,8 @@ class NeuronBridgeFinder:
                     bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
                     ncols=110,
                     position=0,
-                    leave=False
+                    leave=False,
+                    file=sys.stdout,
                 )
                 
                 for q in fetch_pbar:
@@ -9621,7 +9636,13 @@ class NeuronBridgeFinder:
         
         scan_pbar = None
         if HAS_TQDM and verbose:
-            scan_pbar = tqdm(total=len(lines), desc="  Scanning", unit="line", leave=False)
+            scan_pbar = tqdm(
+                total=len(lines),
+                desc="  Scanning",
+                unit="line",
+                leave=False,
+                file=sys.stdout,
+            )
         
         scan_workers = min(self.max_workers or os.cpu_count() or 8, max(1, len(lines)))
         with ThreadPoolExecutor(max_workers=scan_workers) as executor:
@@ -9680,7 +9701,12 @@ class NeuronBridgeFinder:
         
         pbar = None
         if HAS_TQDM and verbose:
-            pbar = tqdm(total=len(download_tasks), desc="  Downloading", unit="file")
+            pbar = tqdm(
+                total=len(download_tasks),
+                desc="  Downloading",
+                unit="file",
+                file=sys.stdout,
+            )
         
         # Use ThreadPoolExecutor for parallel downloads
         # Use all available CPU cores for maximum throughput
@@ -10260,7 +10286,13 @@ class NeuronBridgeFinder:
         # Create a scanning progress bar
         scan_pbar = None
         if HAS_TQDM and verbose:
-            scan_pbar = tqdm(total=len(lines), desc="  Scanning", unit="line", leave=False)
+            scan_pbar = tqdm(
+                total=len(lines),
+                desc="  Scanning",
+                unit="line",
+                leave=False,
+                file=sys.stdout,
+            )
         
         # Use ThreadPoolExecutor for parallel scanning
         # Use the finder's max_workers (capped by the number of lines)
@@ -10314,7 +10346,12 @@ class NeuronBridgeFinder:
         # Create a single progress bar for all files
         pbar = None
         if HAS_TQDM and verbose:
-            pbar = tqdm(total=total_file_count, desc="  Downloading", unit="file")
+            pbar = tqdm(
+                total=total_file_count,
+                desc="  Downloading",
+                unit="file",
+                file=sys.stdout,
+            )
         
         def download_line_files(line_info):
             """Download files for a single line."""

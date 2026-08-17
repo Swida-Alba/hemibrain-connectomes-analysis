@@ -32,6 +32,47 @@ from tqdm import tqdm
 
 # FlyWire client support removed
 
+
+def _tqdm_print(*args, **kwargs):
+    """Write a message without tearing an active progress bar.
+
+    The UI runner captures stdout and stderr independently. ``tqdm`` bars
+    normally use stderr, while ordinary ``print`` calls use stdout; a message
+    written between a bar's clear and redraw can therefore arrive out of
+    order in the live log. ``tqdm.write`` performs the clear/write/refresh
+    sequence under tqdm's lock, so keep dataset-pull messages on the same
+    stdout stream as the NeuronBridge bars.
+
+    The fallback keeps the helper compatible with the lightweight tqdm fakes
+    used by tests and with environments where tqdm is replaced by a callable.
+    """
+    writer = getattr(tqdm, "write", None)
+    if writer is None:
+        print(*args, **kwargs)
+        return
+
+    sep = kwargs.pop("sep", " ")
+    end = kwargs.pop("end", "\n")
+    file = kwargs.pop("file", sys.stdout)
+    flush = kwargs.pop("flush", False)
+    message = sep.join(str(arg) for arg in args)
+
+    if end == "\n":
+        # tqdm.write clears active bars and refreshes them after the message.
+        writer(message, file=file, end=end)
+        if flush:
+            file.flush()
+        return
+
+    # Preserve print(..., end=...) for the few progress-adjacent status
+    # messages that intentionally stay on one line.
+    external_write_mode = getattr(tqdm, "external_write_mode", None)
+    if external_write_mode is None:
+        print(message, end=end, file=file, flush=flush)
+        return
+    with external_write_mode(file=file):
+        print(message, end=end, file=file, flush=flush)
+
 # ============================================================================
 # Local HTML/JS escaping helpers for the deprecated local heatmap template.
 # The canonical implementation lives in vispath_pkg.shared_controls; these
@@ -1383,7 +1424,7 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch
         max_retries=5,
         retry_delay=5.0,
         description='Neuron list query',
-        on_retry=lambda attempt, exc: print(
+        on_retry=lambda attempt, exc: _tqdm_print(
             f'⚠️ Server not responding (neuron list) — reconnecting, attempt {attempt}/5...'),
         verbose=True,
     )
@@ -1394,7 +1435,16 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch
     neuron_frames = []
     roi_frames = []
     n_batches = (total + batch_size - 1) // batch_size
-    progress = tqdm(total=total, desc='Downloading neuron list', unit='neuron', leave=False)
+    # Keep this bar on stdout, alongside NeuronBridgeFinder._vprint().  The
+    # UI runner can then preserve the clear/write/refresh sequence as one
+    # ordered stream instead of racing stdout against stderr.
+    progress = tqdm(
+        total=total,
+        desc='Downloading neuron list',
+        unit='neuron',
+        leave=False,
+        file=sys.stdout,
+    )
     try:
         for i in range(0, total, batch_size):
             batch_num = i // batch_size + 1
@@ -1410,13 +1460,15 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch
                     max_retries=5,
                     retry_delay=5.0,
                     description=f'Neuron batch {batch_num}/{n_batches}',
-                    on_retry=lambda attempt, exc, b=batch_num: print(
+                    on_retry=lambda attempt, exc, b=batch_num: _tqdm_print(
                         f'⚠️ Server not responding (neuron batch {b}/{n_batches}) '
                         f'— reconnecting, attempt {attempt}/5...'),
                     verbose=True,
                 )
             except (APITimeoutError, APIRetryExhaustedError) as e:
-                print(f'⚠️ Neuron batch {batch_num}/{n_batches} failed after retries: {e}')
+                _tqdm_print(
+                    f'⚠️ Neuron batch {batch_num}/{n_batches} failed after retries: {e}'
+                )
                 continue  # keep going with the remaining batches
             if ndf is not None and not ndf.empty:
                 neuron_frames.append(ndf)
@@ -1447,8 +1499,8 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch
     if omitNoneType:
         # delete rows with type is empty
         neuron_df = neuron_df[neuron_df['type'].notna()]
-    print(f'Pulled {len(neuron_df)} neurons from {dataset}')
-    print('Writing to',save_path, end='...')
+    _tqdm_print(f'Pulled {len(neuron_df)} neurons from {dataset}')
+    _tqdm_print('Writing to', save_path, end='...')
     # write neuron table as csv; the ROI-count table is numeric long-form
     # (bodyId/roi/count columns), so a zstd parquet is ~5x smaller than the
     # equivalent CSV and loads without schema inference
@@ -1469,7 +1521,7 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch
     meta_file = meta_path + '_metadata.json'
     with open(meta_file, 'w', encoding='utf-8') as mf:
         json.dump(metadata, mf, indent=2, default=str)
-    print('Done! (metadata saved to', meta_file + ')')
+    _tqdm_print('Done! (metadata saved to', meta_file + ')')
 
 def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=None, client=None, verbose=True, search_columns='auto', search_info_sink=None):
     '''get neurons locally from a given dataset
