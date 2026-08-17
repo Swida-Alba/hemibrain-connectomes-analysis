@@ -46,6 +46,8 @@ _PROGRESS_LINE_RE = re.compile(
     r"^\s*(?:"
     r".*?\d+%\|.*\|\s*\d+/\d+\s*\[.*\]"   # with total (n/N + %)
     r"|"
+    r".*?:\s*[\d,]+\s*/\s*[\d,]+\s+\([^)]*%\)\s*\[[^\]]*\]"  # LineProgress (n/N + %)
+    r"|"
     r".*?:\s*\d+(?:\.\d+)?(?:path|it|file)s?\s*\[[^\]]*\]"  # unit counter
     r")\s*$"
 )
@@ -103,6 +105,16 @@ class _OutputSplitter:
                 else:
                     refreshed = True
             yield from self._classify(segment, refreshed)
+
+        # LineProgress deliberately emits a carriage-return-only update and
+        # does not append a newline. If this is the first update (or the
+        # update is the only data in the current pipe read), there is no next
+        # delimiter yet, so the normal loop above would hold it until the
+        # next refresh. Forward complete progress bars immediately so the UI
+        # can show progress while the next pathfinding item is expensive.
+        if self._pending.strip() and _PROGRESS_LINE_RE.match(self._pending):
+            segment, self._pending = self._pending, ""
+            yield from self._classify(segment, True)
 
     def flush(self):
         if self._pending.strip():

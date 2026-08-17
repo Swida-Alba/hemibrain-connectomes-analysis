@@ -219,6 +219,18 @@ class TestRunner:
         assert _progress_bar_name("Processing paths: 13369202path [00:28, ...]") == \
             "Processing paths"
 
+    def test_output_splitter_emits_lineprogress_without_waiting_for_refresh(self):
+        """LineProgress's first CR-only update reaches the UI immediately."""
+        from ui.runner import _OutputSplitter
+
+        splitter = _OutputSplitter()
+        parts = list(splitter.feed(
+            "\rL1 BuildMemo: 0/145273 (0.0%) [00:00<?, 0.0it/s]"
+        ))
+        assert parts == [
+            ("L1 BuildMemo: 0/145273 (0.0%) [00:00<?, 0.0it/s]", True)
+        ]
+
     def test_generate_find_path_script(self):
         from ui.runner import ScriptRunner
         sr = ScriptRunner()

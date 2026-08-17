@@ -47,6 +47,10 @@ class LineProgress:
         self._postfix = ''
         self._closed = False
         LineProgress._active.append(self)
+        # Show the initial state immediately. The first memoized DFS state can
+        # be expensive, and without this refresh the log window appears idle
+        # until that state finishes.
+        self._refresh(force=True)
 
     # -- tqdm-compatible API ------------------------------------------------
     def __iter__(self):
@@ -1401,4 +1405,3 @@ class _NodeView:
 
 
 DiGraph = FastGraph
-
