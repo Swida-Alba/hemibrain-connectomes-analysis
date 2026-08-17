@@ -134,6 +134,7 @@ py-modules = [
     "flylight_downloader",
     "inter_dataset_preliminary",
     "neuronbridge_client",
+    "neuronbridge_cache",
     "neuronbridge_finder",
     "statvis",
     "statvis_polars",

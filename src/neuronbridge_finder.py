@@ -13,7 +13,7 @@ Key features:
 - Multi-dataset support (hemibrain, male-cns, FlyWire, etc.)
 - Automatic dataset detection from NeuronBridge image metadata
 - Caching of API results to reduce redundant calls
-- CSV export/import for offline analysis
+- Compressed Parquet caching with legacy CSV read compatibility
 
 Dependencies:
 - requests (via the bundled lightweight NeuronBridge client)
@@ -152,6 +152,11 @@ try:
     from .neuronbridge_client import Client as NBClient
 except ImportError:
     from neuronbridge_client import Client as NBClient
+
+try:
+    from .neuronbridge_cache import NeuronBridgeParquetCache
+except ImportError:
+    from neuronbridge_cache import NeuronBridgeParquetCache
 
 NEURONBRIDGE_AVAILABLE = True
 
@@ -428,6 +433,7 @@ class NeuronBridgeFinder:
     _warning_collector: List[str] = field(init=False, repr=False, default_factory=list)
     _cache_lock: threading.Lock = field(init=False, repr=False, default_factory=threading.Lock)
     _cache_index: Dict[str, set] = field(init=False, repr=False, default_factory=dict)  # {cache_type: set of cache_keys}
+    _parquet_cache: Any = field(init=False, repr=False, default=None)
     
     def __post_init__(self):
         """Initialize the finder after dataclass initialization."""
@@ -469,11 +475,17 @@ class NeuronBridgeFinder:
         # Create cache folder if needed
         if self.use_cache:
             os.makedirs(self.cache_folder, exist_ok=True)
-            # Build cache index for fast lookups
-            self._build_cache_index()
         
         # Initialize client
         self._init_client()
+
+        if self.use_cache:
+            self._get_parquet_cache().ensure_manifest(
+                getattr(self._client, 'version', None)
+            )
+            # Build cache index for fast lookups after both legacy CSV and new
+            # Parquet locations are known.
+            self._build_cache_index()
     
     def _vprint(self, msg: str, end: str = '\n', force: bool = False):
         """
@@ -520,6 +532,17 @@ class NeuronBridgeFinder:
                 except Exception:
                     pass
             print(msg, flush=True)
+
+    def _get_parquet_cache(self) -> NeuronBridgeParquetCache:
+        """Return the lazy Parquet cache store for this Finder instance."""
+        cache = getattr(self, '_parquet_cache', None)
+        if cache is None:
+            cache = NeuronBridgeParquetCache(
+                self.cache_folder,
+                version=getattr(getattr(self, '_client', None), 'version', None),
+            )
+            self._parquet_cache = cache
+        return cache
     
     def _build_cache_index(self):
         """
@@ -539,15 +562,25 @@ class NeuronBridgeFinder:
             return
         
         try:
-            # Get list of all CSV files in cache folder
-            cache_files = [f for f in os.listdir(self.cache_folder) 
-                          if f.endswith('.csv') and os.path.isfile(os.path.join(self.cache_folder, f))]
+            # Include the legacy flat CSV files and the new Parquet id tables.
+            cache_files = []
+            cache_root = Path(self.cache_folder)
+            current_parquet_root = self._get_parquet_cache().root
+            for path in cache_root.rglob('*'):
+                if not path.is_file() or path.suffix not in {'.csv', '.parquet'}:
+                    continue
+                # Do not let a previous NeuronBridge API version make the
+                # current-version in-memory index report a false cache hit.
+                if path.suffix == '.parquet' and current_parquet_root not in path.parents:
+                    continue
+                cache_files.append(path)
             
             # Parse each filename and build index
             # Format: {cache_type}_{identifier}.csv
-            for filename in cache_files:
-                # Remove .csv extension
-                cache_key = filename[:-4]
+            for cache_path in cache_files:
+                filename = cache_path.name
+                # Remove the file extension (.csv or .parquet)
+                cache_key = cache_path.stem
                 
                 # Extract cache_type (everything before the first underscore + identifier separator)
                 # Files are named like: id_to_lines_12345_cds_male-cns_v0.9_Brain_all.csv
@@ -589,10 +622,16 @@ class NeuronBridgeFinder:
         bool
             True if the entry is in the cache index
         """
+        # Direct checks cover newly-created entries even if another worker
+        # saved them after the startup index was built.
+        if os.path.exists(self._get_cache_path(cache_type, identifier)):
+            return True
+        legacy_path = self._get_legacy_cache_path(cache_type, identifier)
+        if os.path.exists(legacy_path):
+            return True
+
         if not self._cache_index:
-            # Fallback to file check if no index
-            cache_path = self._get_cache_path(cache_type, identifier)
-            return os.path.exists(cache_path)
+            return False
         
         safe_id = str(identifier).replace('/', '_').replace(':', '_')
         cache_key = f"{cache_type}_{safe_id}"
@@ -4075,7 +4114,14 @@ class NeuronBridgeFinder:
         return match
     
     def _get_cache_path(self, cache_type: str, identifier: str) -> str:
-        """Get the cache file path for a given type and identifier."""
+        """Get the path used by the new cache format."""
+        if cache_type == 'id_to_lines':
+            return str(self._get_parquet_cache().id_path(identifier))
+        safe_id = str(identifier).replace('/', '_').replace(':', '_')
+        return os.path.join(self.cache_folder, f"{cache_type}_{safe_id}.parquet")
+
+    def _get_legacy_cache_path(self, cache_type: str, identifier: str) -> str:
+        """Get the old flat CSV path, retained as a read-only fallback."""
         safe_id = str(identifier).replace('/', '_').replace(':', '_')
         return os.path.join(self.cache_folder, f"{cache_type}_{safe_id}.csv")
     
@@ -4084,26 +4130,28 @@ class NeuronBridgeFinder:
         if not self.use_cache:
             return None
         
-        # Fast check using in-memory index
         if not self._is_cached(cache_type, identifier):
             return None
-        
+
         cache_path = self._get_cache_path(cache_type, identifier)
-        # Reading is thread-safe - no lock needed for file reads
-        if os.path.exists(cache_path):
+        legacy_path = self._get_legacy_cache_path(cache_type, identifier)
+        # Reading is thread-safe - no lock needed for file reads.  Try the new
+        # Parquet path first, then the legacy CSV path.
+        for candidate in (cache_path, legacy_path):
+            if not os.path.exists(candidate):
+                continue
             try:
-                # Always use Polars for CSV reading - it's faster even for small files
-                # Only convert to pandas at the final output boundary
-                if HAS_POLARS:
-                    df = pl.read_csv(cache_path).to_pandas()
+                if candidate.endswith('.parquet'):
+                    df = pd.read_parquet(candidate)
+                elif HAS_POLARS:
+                    df = pl.read_csv(candidate).to_pandas()
                 else:
-                    df = pd.read_csv(cache_path)
-                # Only print cache loads when not in batch mode (verbose individual loads suppressed)
+                    df = pd.read_csv(candidate)
                 if not self._batch_mode:
-                    self._vprint(f"  ⏩ Loaded from cache: {cache_path}")
+                    self._vprint(f"  ⏩ Loaded from cache: {candidate}")
                 return df
             except Exception:
-                return None
+                continue
         return None
     
     def _load_from_cache_polars(self, cache_type: str, identifier: str) -> Optional['pl.DataFrame']:
@@ -4111,16 +4159,20 @@ class NeuronBridgeFinder:
         if not self.use_cache or not HAS_POLARS:
             return None
         
-        # Fast check using in-memory index
         if not self._is_cached(cache_type, identifier):
             return None
-        
+
         cache_path = self._get_cache_path(cache_type, identifier)
-        if os.path.exists(cache_path):
+        legacy_path = self._get_legacy_cache_path(cache_type, identifier)
+        for candidate in (cache_path, legacy_path):
+            if not os.path.exists(candidate):
+                continue
             try:
-                return pl.read_csv(cache_path)
+                if candidate.endswith('.parquet'):
+                    return pl.read_parquet(candidate)
+                return pl.read_csv(candidate)
             except Exception:
-                return None
+                continue
         return None
     
     def _load_cached_neurons_bulk_polars(
@@ -4244,28 +4296,33 @@ class NeuronBridgeFinder:
         return pl.DataFrame(), []
     
     def _save_to_cache(self, cache_type: str, identifier: str, df: pd.DataFrame):
-        """Save results to cache. Thread-safe. Uses Polars for fast I/O."""
+        """Save a directional cache table as compressed Parquet.
+
+        Line-level result tables are deliberately not persisted anymore: they
+        duplicate the per-image records and make ``top_n`` part of the cache
+        state.  ``line_to_neuron`` remains supported as a legacy read path.
+        """
         if not self.use_cache or df.empty:
             return
-        
+
+        if cache_type == 'line_to_neuron':
+            return
+
         cache_path = self._get_cache_path(cache_type, identifier)
         with self._cache_lock:
             try:
-                # Use Polars for much faster CSV writing
-                if HAS_POLARS:
-                    # Ensure consistent column types for Polars conversion
-                    df_to_save = df.copy()
-                    for col in ['source_bodyId', 'bodyId']:
-                        if col in df_to_save.columns:
-                            df_to_save[col] = df_to_save[col].astype(str)
-                    pl.from_pandas(df_to_save).write_csv(cache_path)
+                if cache_type == 'id_to_lines':
+                    saved_path = self._get_parquet_cache().save_id(identifier, df)
                 else:
-                    df.to_csv(cache_path, index=False)
+                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                    df.to_parquet(cache_path, index=False, compression='zstd')
+                    saved_path = cache_path
                 # Update in-memory index
-                self._add_to_cache_index(cache_type, identifier)
+                if saved_path:
+                    self._add_to_cache_index(cache_type, identifier)
                 # Only print cache saves when not in batch mode
                 if not self._batch_mode:
-                    self._vprint(f"  💾 Saved to cache: {cache_path}")
+                    self._vprint(f"  💾 Saved to cache: {saved_path}")
             except Exception as e:
                 warnings.warn(f"Failed to save cache: {e}")
     
@@ -4288,10 +4345,14 @@ class NeuronBridgeFinder:
         return cache_dir
     
     def _get_image_cache_path(self, image_id: str, match_type: str) -> str:
-        """Get cache file path for a specific LM image and match type."""
+        """Get the new Parquet path for a specific LM image and match type."""
+        self._get_image_cache_dir()  # retain the mapping directory for legacy metadata
+        return str(self._get_parquet_cache().image_path(str(image_id), match_type))
+
+    def _get_legacy_image_cache_path(self, image_id: str, match_type: str) -> str:
+        """Get the old per-image CSV path for read-only compatibility."""
         safe_id = str(image_id).replace('/', '_').replace(':', '_')
-        cache_dir = self._get_image_cache_dir()
-        return os.path.join(cache_dir, f"{match_type}_{safe_id}.csv")
+        return os.path.join(self._get_image_cache_dir(), f"{match_type}_{safe_id}.csv")
     
     def _get_line_mapping_path(self) -> str:
         """Get the path to the line-image mapping file."""
@@ -4418,13 +4479,19 @@ class NeuronBridgeFinder:
         cache_dir = self._get_image_cache_dir()
         mapping = self._load_line_mapping()
         
-        # Scan all cache files
-        for filename in os.listdir(cache_dir):
-            if not filename.endswith('.csv'):
+        # Scan legacy CSVs and new Parquet image tables.  The mapping is a
+        # small compatibility/index artifact; the Parquet files are the data.
+        cache_paths = []
+        for root in (Path(cache_dir), self._get_parquet_cache().image_dir):
+            if root.exists():
+                cache_paths.extend(path for path in root.glob('*') if path.is_file())
+
+        for cache_path in cache_paths:
+            if cache_path.suffix not in {'.csv', '.parquet'}:
                 continue
-            
-            # Parse filename: {match_type}_{image_id}.csv
-            parts = filename[:-4].split('_', 1)  # Remove .csv and split
+
+            # Parse filename: {match_type}_{image_id}.csv|parquet
+            parts = cache_path.stem.split('_', 1)
             if len(parts) != 2:
                 continue
             
@@ -4471,11 +4538,16 @@ class NeuronBridgeFinder:
             return None
         
         cache_path = self._get_image_cache_path(image_id, match_type)
-        if os.path.exists(cache_path):
+        legacy_path = self._get_legacy_image_cache_path(image_id, match_type)
+        for candidate in (cache_path, legacy_path):
+            if not os.path.exists(candidate):
+                continue
             try:
-                return pd.read_csv(cache_path)
+                if candidate.endswith('.parquet'):
+                    return pd.read_parquet(candidate)
+                return pd.read_csv(candidate)
             except Exception:
-                return None
+                continue
         return None
     
     def _save_image_cache(
@@ -4499,17 +4571,19 @@ class NeuronBridgeFinder:
         line_name : str, optional
             The line name for updating the mapping
         """
-        if not self.use_cache or not matches:
+        if not self.use_cache or not matches or match_type == 'both':
             return
-        
-        cache_path = self._get_image_cache_path(image_id, match_type)
+
         try:
             df = pd.DataFrame(matches)
-            df.to_csv(cache_path, index=False)
+            cache_path = self._get_parquet_cache().save_image(
+                str(image_id), match_type, df
+            )
             
             # Update mapping with cached type info
-            if line_name:
+            if line_name and cache_path:
                 mapping = self._load_line_mapping()
+                image_id = str(image_id)
                 if image_id not in mapping.get("images", {}):
                     mapping["images"][image_id] = {
                         "line": line_name,
@@ -4589,11 +4663,9 @@ class NeuronBridgeFinder:
         """
         Get matches for an LM image, using cache if available.
         
-        Handles 'both' match_type specially:
-        - If 'both' cache exists, use it
-        - If only 'cds' cached, use it and fetch 'pppm', then combine and save as 'both'
-        - If only 'pppm' cached, use it and fetch 'cds', then combine and save as 'both'
-        - If neither cached, fetch both and save as 'both'
+        Handles 'both' match_type specially by loading/fetching the two raw
+        algorithm tables and combining them in memory.  No derived ``both``
+        table is written.
         
         Parameters
         ----------
@@ -4630,12 +4702,6 @@ class NeuronBridgeFinder:
                 self._save_image_cache(image_id_str, match_type, matches, line_name)
             return matches, False, False
         
-        # Handle 'both' match_type with upgrade logic
-        # Check if 'both' cache already exists
-        both_cache = self._load_image_cache(image_id_str, 'both')
-        if both_cache is not None and not both_cache.empty:
-            return both_cache.to_dict('records'), True, False
-        
         # Check existing cds and pppm caches
         cds_cache = self._load_image_cache(image_id_str, 'cds')
         pppm_cache = self._load_image_cache(image_id_str, 'pppm')
@@ -4666,10 +4732,6 @@ class NeuronBridgeFinder:
         # Combine CDS and PPPM matches
         all_matches = cds_matches + pppm_matches
         
-        # Save as 'both' cache for future use
-        if all_matches:
-            self._save_image_cache(image_id_str, 'both', all_matches, line_name)
-        
         # Determine cache status
         all_from_cache = cds_from_cache and pppm_from_cache
         partial_cache = cds_from_cache or pppm_from_cache
@@ -4677,83 +4739,183 @@ class NeuronBridgeFinder:
         return all_matches, all_from_cache, partial_cache
     
     def migrate_cache_to_image_format(self, dry_run: bool = False) -> Dict[str, int]:
+        """Backward-compatible name for :meth:`migrate_cache_to_parquet`."""
+        return self.migrate_cache_to_parquet(dry_run=dry_run)
+
+    def migrate_cache_to_parquet(
+        self,
+        dry_run: bool = False,
+        remove_legacy: bool = False,
+    ) -> Dict[str, int]:
+        """Convert legacy CSV cache records to the compact Parquet layout.
+
+        The migration is explicit so simply upgrading DROCAT never rewrites or
+        deletes a user's cache.  ``remove_legacy=True`` removes only files that
+        were successfully converted; the default leaves CSVs in place as a
+        rollback/read-only fallback.
+
+        ``both`` is expanded into raw CDS and PPPM records when the source has
+        the component scores.  Legacy per-image ``both`` files that are exact
+        CDS copies are treated as CDS records, which matches the historical
+        cache contents and avoids creating another duplicate table.
         """
-        Migrate existing line_to_neuron cache files to new image-based format.
-        
-        Reads existing cache files, extracts per-image results, and saves them
-        to the new image_cache directory.
-        
-        Parameters
-        ----------
-        dry_run : bool
-            If True, only count files without actually migrating
-            
-        Returns
-        -------
-        dict
-            Statistics: {'files_processed', 'images_extracted', 'errors'}
-        """
-        stats = {'files_processed': 0, 'images_extracted': 0, 'errors': 0}
-        
-        # Find all line_to_neuron cache files
-        cache_files = [f for f in os.listdir(self.cache_folder) 
-                       if f.startswith('line_to_neuron_') and f.endswith('.csv')]
-        
-        self._vprint(f"📦 Found {len(cache_files)} line_to_neuron cache files to migrate")
-        
-        for cache_file in cache_files:
-            try:
-                cache_path = os.path.join(self.cache_folder, cache_file)
-                df = pd.read_csv(cache_path)
-                
-                if df.empty or 'lm_sample' not in df.columns:
-                    continue
-                
-                # Extract match_type from the data or filename
-                if 'match_type' in df.columns:
-                    file_match_types = df['match_type'].unique()
-                else:
-                    # Try to extract from filename (e.g., line_to_neuron_VT037867_cds_Brain_5.csv)
-                    parts = cache_file.replace('.csv', '').split('_')
-                    if 'cds' in parts:
-                        file_match_types = ['cds']
-                    elif 'pppm' in parts:
-                        file_match_types = ['pppm']
-                    else:
-                        file_match_types = ['cds']  # Default
-                    df['match_type'] = file_match_types[0]
-                
-                # Group by lm_sample and match_type
-                for (lm_sample, match_type), group_df in df.groupby(['lm_sample', 'match_type']):
-                    if pd.isna(lm_sample):
+        stats = {
+            'files_processed': 0,
+            'images_extracted': 0,
+            'id_files_converted': 0,
+            'legacy_removed': 0,
+            'errors': 0,
+        }
+        cache_root = Path(self.cache_folder)
+        parquet_cache = self._get_parquet_cache()
+        if self.use_cache and not dry_run:
+            parquet_cache.ensure_manifest(getattr(self._client, 'version', None))
+
+        def as_image_id(value: Any) -> Optional[str]:
+            if pd.isna(value):
+                return None
+            if isinstance(value, float) and value.is_integer():
+                return str(int(value))
+            return str(value)
+
+        def algorithm_frames(frame: pd.DataFrame, default: str) -> List[Tuple[str, pd.DataFrame]]:
+            """Return raw algorithm frames, expanding derived ``both`` rows."""
+            frame = frame.copy()
+            if 'match_type' not in frame.columns:
+                frame['match_type'] = default
+            frame['match_type'] = frame['match_type'].fillna(default).astype(str).str.lower()
+            output: List[Tuple[str, pd.DataFrame]] = []
+            for algorithm in ('cds', 'pppm'):
+                rows = frame[frame['match_type'] == algorithm].copy()
+                if not rows.empty:
+                    rows['match_type'] = algorithm
+                    output.append((algorithm, rows))
+
+            both = frame[frame['match_type'] == 'both'].copy()
+            if not both.empty:
+                for algorithm, score_column in (
+                    ('cds', 'cds_score'),
+                    ('pppm', 'pppm_score'),
+                ):
+                    if score_column not in both.columns:
                         continue
-                    
-                    image_id = str(int(lm_sample) if isinstance(lm_sample, float) else lm_sample)
-                    
-                    if not dry_run:
-                        # Check if already migrated
-                        existing = self._load_image_cache(image_id, match_type)
-                        if existing is not None:
-                            stats['images_extracted'] += 1
+                    rows = both.copy()
+                    rows['score'] = pd.to_numeric(rows[score_column], errors='coerce')
+                    rows = rows[rows['score'].notna()]
+                    if not rows.empty:
+                        rows['match_type'] = algorithm
+                        output.append((algorithm, rows))
+            return output
+
+        def save_image_frame(image_id: str, algorithm: str, frame: pd.DataFrame) -> None:
+            if dry_run:
+                stats['images_extracted'] += 1
+                return
+            path = parquet_cache.save_image(image_id, algorithm, frame)
+            if path is not None:
+                stats['images_extracted'] += 1
+
+        # Convert old per-image CSVs first.  These are already close to the
+        # canonical shape and can be merged into an existing Parquet file.
+        image_csvs = [
+            path for path in (cache_root / 'image_cache').glob('*.csv')
+            if path.name != 'line_image_mapping.json'
+        ] if (cache_root / 'image_cache').exists() else []
+        for path in image_csvs:
+            try:
+                frame = pd.read_csv(path)
+                stem_parts = path.stem.split('_', 1)
+                default = stem_parts[0] if stem_parts and stem_parts[0] in ('cds', 'pppm') else 'cds'
+                file_image_id = stem_parts[1] if len(stem_parts) == 2 else ''
+                converted = False
+                for algorithm, algorithm_df in algorithm_frames(frame, default):
+                    if 'lm_sample' not in algorithm_df.columns:
+                        algorithm_df['lm_sample'] = file_image_id
+                    for lm_sample, group in algorithm_df.groupby('lm_sample', dropna=True):
+                        image_id = as_image_id(lm_sample) or file_image_id
+                        if not image_id:
                             continue
-                        
-                        # Save to image cache
-                        matches = group_df.to_dict('records')
-                        self._save_image_cache(image_id, match_type, matches)
-                    
-                    stats['images_extracted'] += 1
-                
+                        save_image_frame(image_id, algorithm, group)
+                        converted = True
                 stats['files_processed'] += 1
-                
-            except Exception as e:
+                if converted and remove_legacy and not dry_run:
+                    path.unlink()
+                    stats['legacy_removed'] += 1
+            except Exception as exc:
                 stats['errors'] += 1
-                self._vprint(f"  ⚠️ Error processing {cache_file}: {e}")
-        
+                self._vprint(f"  ⚠️ Error converting {path.name}: {exc}")
+
+        # Convert old line snapshots.  They are intentionally not recreated;
+        # their per-image rows become the source of future line queries.
+        line_csvs = list(cache_root.glob('line_to_neuron_*.csv')) if cache_root.exists() else []
+        for path in line_csvs:
+            try:
+                frame = pd.read_csv(path)
+                if 'lm_sample' not in frame.columns:
+                    continue
+                converted = False
+                for algorithm, algorithm_df in algorithm_frames(frame, 'cds'):
+                    for lm_sample, group in algorithm_df.groupby('lm_sample', dropna=True):
+                        image_id = as_image_id(lm_sample)
+                        if not image_id:
+                            continue
+                        save_image_frame(image_id, algorithm, group)
+                        converted = True
+                stats['files_processed'] += 1
+                if converted and remove_legacy and not dry_run:
+                    path.unlink()
+                    stats['legacy_removed'] += 1
+            except Exception as exc:
+                stats['errors'] += 1
+                self._vprint(f"  ⚠️ Error converting {path.name}: {exc}")
+
+        # Convert directional EM->LM snapshots.  The old filename encodes
+        # dataset + region + max-image settings; only the dataset survives in
+        # the canonical key because the other settings do not affect EM data.
+        id_csvs = list(cache_root.glob('id_to_lines_*.csv')) if cache_root.exists() else []
+        id_pattern = re.compile(r'^id_to_lines_(\d+)_(cds|pppm|both)(?:_(.*))?$')
+        for path in id_csvs:
+            try:
+                match = id_pattern.match(path.stem)
+                if not match:
+                    continue
+                body_id, file_algorithm, suffix = match.groups()
+                dataset_key = 'any'
+                if suffix:
+                    parts = suffix.split('_')
+                    # Current legacy keys end in <region>_<max_images>.
+                    if len(parts) >= 3 and parts[-2] in ('Brain', 'VNC', 'All'):
+                        dataset_key = '_'.join(parts[:-2]) or 'any'
+                    else:
+                        dataset_key = '_'.join(parts) or 'any'
+                frame = pd.read_csv(path)
+                converted = False
+                for algorithm, algorithm_df in algorithm_frames(frame, file_algorithm):
+                    identifier = f"{body_id}_{algorithm}_{dataset_key}"
+                    if not dry_run and parquet_cache.save_id(identifier, algorithm_df) is not None:
+                        converted = True
+                    elif dry_run and not algorithm_df.empty:
+                        converted = True
+                stats['files_processed'] += 1
+                if converted:
+                    stats['id_files_converted'] += 1
+                if converted and remove_legacy and not dry_run:
+                    path.unlink()
+                    stats['legacy_removed'] += 1
+            except Exception as exc:
+                stats['errors'] += 1
+                self._vprint(f"  ⚠️ Error converting {path.name}: {exc}")
+
+        if not dry_run:
+            self.sync_mapping_from_cache_files()
         action = "Would migrate" if dry_run else "Migrated"
-        self._vprint(f"✓ {action} {stats['images_extracted']} images from {stats['files_processed']} files")
-        if stats['errors'] > 0:
+        self._vprint(
+            f"✓ {action} {stats['files_processed']} CSV files "
+            f"({stats['id_files_converted']} id tables, "
+            f"{stats['images_extracted']} image tables)"
+        )
+        if stats['errors']:
             self._vprint(f"  ⚠️ {stats['errors']} files had errors")
-        
         return stats
     
     def _get_em_image_for_dataset(
@@ -5037,7 +5199,8 @@ class NeuronBridgeFinder:
         self, 
         body_id: int, 
         match_type: Optional[str] = None,
-        expected_dataset: Optional[str] = None
+        expected_dataset: Optional[str] = None,
+        raw: bool = False
     ) -> List[Dict[str, Any]]:
         """
         Get LM matches for an EM body ID.
@@ -5052,6 +5215,10 @@ class NeuronBridgeFinder:
         expected_dataset : str, optional
             Expected dataset name (e.g., 'male-cns:v0.9').
             If provided, will filter EM images to match this dataset.
+        raw : bool
+            If True, return the CDS/PPPM rows before derived combined-rank
+            reduction.  This is used so ``both`` can be reconstructed from
+            the two canonical algorithm caches instead of being cached again.
             
         Returns
         -------
@@ -5142,6 +5309,9 @@ class NeuronBridgeFinder:
             # Only warn if both failed when match_type='both'
             if match_type == 'both' and cds_failed and pppm_failed:
                 self._vprint(f"  ⚠️ Both CDS and PPPM matches failed for body ID {body_id}")
+
+            if raw:
+                return all_matches
             
             # Sort results based on match_type
             if match_type == 'both' and all_matches:
@@ -5520,8 +5690,20 @@ class NeuronBridgeFinder:
         """
         Build the cache key for id_to_lines lookups.
         
-        This allows checking if a body ID is cached without loading the data.
+        Region and max-image settings are intentionally excluded.  The EM
+        lookup does not use either setting, so including them only created
+        byte-for-byte duplicate files.
         """
+        ds_key = expected_dataset if expected_dataset else 'any'
+        return f"{body_id}_{match_type}_{ds_key}"
+
+    def _get_legacy_id_to_lines_cache_key(
+        self,
+        body_id: int,
+        match_type: str,
+        expected_dataset: Optional[str] = None,
+    ) -> str:
+        """Build the former key used only for CSV read compatibility."""
         ds_key = expected_dataset.replace(':', '_') if expected_dataset else 'any'
         region_key = self.region if self.region else 'all'
         max_imgs_key = self.max_api_images_per_line if self.max_api_images_per_line > 0 else 'all'
@@ -5563,18 +5745,66 @@ class NeuronBridgeFinder:
         
         self._vprint(f"🔍 Searching for lines matching body ID: {body_id}")
         
-        # Check cache using helper method
+        # Check the canonical Parquet key first.  If it is not present, try
+        # the exact legacy key so existing CSV caches remain usable without
+        # silently copying them into the new location.
         cache_key = self._get_id_to_lines_cache_key(body_id, match_type, expected_dataset)
         cached = self._load_from_cache('id_to_lines', cache_key)
+        if cached is None:
+            legacy_key = self._get_legacy_id_to_lines_cache_key(
+                body_id, match_type, expected_dataset
+            )
+            if legacy_key != cache_key:
+                cached = self._load_from_cache('id_to_lines', legacy_key)
         if cached is not None:
             return cached
-        
-        # Fetch from API with expected dataset
-        matches = self._get_em_matches(
-            body_id, 
-            match_type=match_type, 
-            expected_dataset=expected_dataset
-        )
+
+        if match_type == 'both':
+            # Keep only raw CDS/PPPM tables on disk.  The combined ranking is
+            # deterministic and cheap to derive at query time.
+            raw_matches: List[Dict[str, Any]] = []
+            missing_types = []
+            for algorithm in ('cds', 'pppm'):
+                algorithm_key = self._get_id_to_lines_cache_key(
+                    body_id, algorithm, expected_dataset
+                )
+                algorithm_cached = self._load_from_cache('id_to_lines', algorithm_key)
+                if algorithm_cached is None:
+                    legacy_algorithm_key = self._get_legacy_id_to_lines_cache_key(
+                        body_id, algorithm, expected_dataset
+                    )
+                    if legacy_algorithm_key != algorithm_key:
+                        algorithm_cached = self._load_from_cache(
+                            'id_to_lines', legacy_algorithm_key
+                        )
+                if algorithm_cached is not None:
+                    raw_matches.extend(algorithm_cached.to_dict('records'))
+                else:
+                    missing_types.append(algorithm)
+
+            for algorithm in missing_types:
+                algorithm_matches = self._get_em_matches(
+                    body_id,
+                    match_type=algorithm,
+                    expected_dataset=expected_dataset,
+                )
+                if algorithm_matches:
+                    algorithm_df = pd.DataFrame(algorithm_matches)
+                    self._save_to_cache(
+                        'id_to_lines',
+                        self._get_id_to_lines_cache_key(body_id, algorithm, expected_dataset),
+                        algorithm_df,
+                    )
+                    raw_matches.extend(algorithm_matches)
+
+            matches = self._sort_matches_by_rank(raw_matches, key_field='line')
+        else:
+            # Fetch from API with expected dataset
+            matches = self._get_em_matches(
+                body_id,
+                match_type=match_type,
+                expected_dataset=expected_dataset,
+            )
         
         if not matches:
             self._vprint(f"  ℹ️ No matches found for body ID {body_id}")
@@ -5585,8 +5815,10 @@ class NeuronBridgeFinder:
         
         df = pd.DataFrame(matches)
         
-        # Cache results
-        self._save_to_cache('id_to_lines', cache_key, df)
+        # Cache only single-algorithm raw rows.  ``both`` is always derived
+        # from those two tables and is never persisted.
+        if match_type != 'both':
+            self._save_to_cache('id_to_lines', cache_key, df)
         
         self._vprint(f"  ✓ Found {len(df)} matches")
         
@@ -5976,19 +6208,10 @@ class NeuronBridgeFinder:
         if not in_progress_context:
             self._vprint(f"🔍 Searching for neurons matching line: {line_name}")
         
-        # Check cache - include all relevant parameters
-        region_key = self.region if self.region else 'all'
-        max_imgs_key = self.max_api_images_per_line if self.max_api_images_per_line > 0 else 'all'
-        cache_key = f"{line_name}_{match_type}_{region_key}_{max_imgs_key}"
-        cached = self._load_from_cache('line_to_neuron', cache_key)
-        if cached is not None:
-            # Indicate cache hit in verbose mode
-            if self.verbose and not any(c in str(self._vprint.__code__) for c in ['silent', 'quiet']):
-                # Only print if not suppressed by progress bar
-                pass  # Progress bar will show cache status
-            return cached
-        
-        # Fetch from API (matches are already enriched with dataset info)
+        # Fetch from the per-image cache (matches are already enriched with
+        # dataset info).  A line-level result is deliberately not cached:
+        # ``top_n`` is a presentation limit and must never poison a later
+        # request for all matches.
         matches = self._get_lm_matches(line_name, match_type=match_type)
         
         if not matches:
@@ -6012,9 +6235,6 @@ class NeuronBridgeFinder:
         # Apply top_n limit if specified
         if top_n > 0 and len(df) > top_n:
             df = df.head(top_n)
-        
-        # Cache results
-        self._save_to_cache('line_to_neuron', cache_key, df)
         
         self._vprint(f"  ✓ Found {len(df)} matches")
         
@@ -7352,17 +7572,12 @@ class NeuronBridgeFinder:
             )
             
             for line_name in cache_pbar:
-                # Check cache status
-                region_key = self.region if self.region else 'all'
-                max_imgs_key = self.max_api_images_per_line if self.max_api_images_per_line > 0 else 'all'
-                cache_key = f"{line_name}_{match_type}_{region_key}_{max_imgs_key}"
-                cached_data = self._load_from_cache('line_to_neuron', cache_key)
-                
-                if cached_data is not None:
-                    cached_lines.append((line_name, cached_data))
-                    cache_pbar.set_postfix_str(f"✓ {line_name}")
-                else:
-                    uncached_lines.append(line_name)
+                # Line-level snapshots are no longer authoritative: they
+                # duplicate image records and can encode a stale top_n.  The
+                # line_to_neuron call below will reuse the per-image Parquet
+                # records instead.
+                uncached_lines.append(line_name)
+                cache_pbar.set_postfix_str(f"↗ {line_name}")
             
             cache_pbar.close()
             
@@ -8782,7 +8997,9 @@ class NeuronBridgeFinder:
                 try:
                     body_id = int(q)
                     is_body_id = True
-                    cache_key = f"{body_id}_{match_type}"
+                    cache_key = self._get_id_to_lines_cache_key(
+                        body_id, match_type, expected_dataset=None
+                    )
                     cached_data = self._load_from_cache('id_to_lines', cache_key)
                     query_name = str(body_id)
                 except (ValueError, TypeError):
@@ -9214,25 +9431,44 @@ class NeuronBridgeFinder:
         Parameters
         ----------
         cache_type : str, optional
-            Type of cache to clear: 'id_to_lines', 'line_to_neuron', or None (all).
+            Type of cache to clear: 'id_to_lines', 'line_to_neuron',
+            'image_cache', or None (all).
         """
         if not os.path.exists(self.cache_folder):
             return
-        
-        import glob
-        
-        if cache_type:
-            pattern = os.path.join(self.cache_folder, f"{cache_type}_*.csv")
+
+        root = Path(self.cache_folder)
+        files: List[Path] = []
+        if cache_type is None:
+            # Only cache-owned files are selected; unrelated files in a
+            # caller-provided cache folder are left untouched.
+            files.extend(path for path in root.glob('*.csv') if path.is_file())
+            files.extend(path for path in (root / 'image_cache').glob('*.csv') if path.is_file())
+            parquet_root = root / 'parquet'
+            files.extend(path for path in parquet_root.rglob('*.parquet') if path.is_file())
+            files.extend(path for path in parquet_root.rglob('manifest.json') if path.is_file())
+            mapping = Path(self._get_line_mapping_path())
+            if mapping.exists():
+                files.append(mapping)
+        elif cache_type == 'image_cache':
+            files.extend(path for path in (root / 'image_cache').glob('*.csv') if path.is_file())
+            files.extend(path for path in (root / 'parquet').glob('*/image_cache/*.parquet') if path.is_file())
+            mapping = Path(self._get_line_mapping_path())
+            if mapping.exists():
+                files.append(mapping)
         else:
-            pattern = os.path.join(self.cache_folder, "*.csv")
-        
-        files = glob.glob(pattern)
-        for f in files:
+            files.extend(path for path in root.glob(f'{cache_type}_*.csv') if path.is_file())
+            files.extend(path for path in root.glob(f'{cache_type}_*.parquet') if path.is_file())
+            if cache_type == 'id_to_lines':
+                files.extend(path for path in (root / 'parquet').glob('*/id_to_lines/*.parquet') if path.is_file())
+
+        for path in files:
             try:
-                os.remove(f)
+                path.unlink()
             except Exception:
                 pass
-        
+
+        self._build_cache_index()
         self._vprint(f"🗑️ Cleared {len(files)} cached files")
     
     # =========================================================================
