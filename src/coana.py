@@ -411,6 +411,32 @@ def _format_decimal_for_folder(value):
     return str(value)
 
 
+def load_flywire_merged_connections(conn_file: str) -> 'pd.DataFrame':
+    """Read a ``*_merged_connections`` table (parquet or CSV) for FlyWire.
+
+    Returns a pandas frame with the engine's column names (``bodyId_pre``,
+    ``bodyId_post``, ``weight``, optional ``roi``/``nt_type``) and root IDs
+    as strings, matching what the CSV path produced: the converters store
+    the IDs as strings in the parquet too, so both formats agree.
+    """
+    import pandas as pd
+
+    if conn_file.endswith('.parquet'):
+        df = pd.read_parquet(conn_file)
+    else:
+        df = pd.read_csv(conn_file, dtype={'pre_root_id': str, 'post_root_id': str},
+                         encoding='utf-8')
+    df = df.rename(columns={
+        'pre_root_id': 'bodyId_pre',
+        'post_root_id': 'bodyId_post',
+        'syn_count': 'weight',
+    })
+    for col in ('bodyId_pre', 'bodyId_post'):
+        if col in df.columns:
+            df[col] = df[col].astype(str)
+    return df
+
+
 @dataclass
 class FindNeuronConnection:
     '''
@@ -2147,9 +2173,9 @@ class FindNeuronConnection:
         )
         
         neuron_csv = dataset_path + '_neuron_df.csv'
-        roi_csv = dataset_path + '_roi_count_df.csv'
-        
-        if not os.path.exists(neuron_csv) or not os.path.exists(roi_csv):
+        roi_table = sv.roi_count_table_path(dataset_path)
+
+        if not os.path.exists(neuron_csv) or not os.path.exists(roi_table):
             self._vprint(f'\n📥 Downloading the full neuron list (including type=None) for cache enrichment...', level='always')
             self._vprint(f'   This is a one-time download (progress bar below).', level='always')
             # Ensure we have a valid client for THIS dataset (not a different one from global default)
@@ -2157,7 +2183,7 @@ class FindNeuronConnection:
             try:
                 # Pull complete dataset with omitNoneType=False
                 sv.pull_dataset(self.dataset, save_path=dataset_path, omitNoneType=False)
-                self._vprint(f'✅ Complete dataset saved to: {dataset_path}_*.csv', level='always')
+                self._vprint(f'✅ Complete dataset saved to: {dataset_path}_neuron_df.csv / _roi_count_df.parquet', level='always')
             except Exception as e:
                 self._vprint(f'⚠️ Warning: Failed to download complete dataset: {e}', level='always')
                 self._vprint(f'   Cache enrichment may fail for neurons without types.', level='always')
@@ -2687,29 +2713,35 @@ class FindNeuronConnection:
         
         db_path = self._get_connection_db_path()
         
-        # Special handling for FlyWire: Import from CSV if cache missing
+        # Special handling for FlyWire: Import from the merged-connections
+        # table (parquet preferred, CSV from older conversions) if cache missing
         if not os.path.exists(db_path) and self.client_type == 'flywire':
-            self._vprint(f'  ⏳ FlyWire cache missing. Importing from local CSV...', level='full')
-            
+            self._vprint(f'  ⏳ FlyWire cache missing. Importing from local merged-connections table...', level='full')
+
             csv_path = None
             dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
             dataset_dir = os.path.join(self.script_path, 'datasets', dataset_safe)
-            
+
             import glob
-            merged_candidates = glob.glob(os.path.join(dataset_dir, "*_merged_connections.csv"))
-            if merged_candidates:
-                csv_path = merged_candidates[0]
-            
+            for pattern in ("*_merged_connections.parquet", "*_merged_connections.csv"):
+                merged_candidates = glob.glob(os.path.join(dataset_dir, pattern))
+                if merged_candidates:
+                    csv_path = merged_candidates[0]
+                    break
+
             if csv_path and os.path.exists(csv_path):
                 try:
                     self._vprint(f'  ⏳ Reading {csv_path} (this may take a while)...', level='full')
-                    # Use Polars to read CSV
-                    # Don't restrict dtypes on read - this can cause columns to be dropped
-                    # Use infer_schema_length to properly detect column types from more rows
-                    df = pl.read_csv(
-                        csv_path, 
-                        infer_schema_length=10000
-                    )
+                    # Use Polars to read the table; don't restrict dtypes on
+                    # read - this can cause columns to be dropped. The IDs are
+                    # normalized to Utf8 further below for both formats.
+                    if csv_path.endswith('.parquet'):
+                        df = pl.read_parquet(csv_path)
+                    else:
+                        df = pl.read_csv(
+                            csv_path,
+                            infer_schema_length=10000
+                        )
                     
                     column_map = {
                         'pre_root_id': 'bodyId_pre',
@@ -4550,12 +4582,7 @@ class FindNeuronConnection:
                                     and self._fafb_local_conn_cache[0] == conn_mtime):
                                 full_conn = self._fafb_local_conn_cache[1]
                             else:
-                                full_conn = self._read_csv(conn_file, dtype={'pre_root_id': str, 'post_root_id': str})
-                                full_conn = full_conn.rename(columns={
-                                    'pre_root_id': 'bodyId_pre',
-                                    'post_root_id': 'bodyId_post',
-                                    'syn_count': 'weight'
-                                })
+                                full_conn = load_flywire_merged_connections(conn_file)
                                 self._fafb_local_conn_cache = (conn_mtime, full_conn)
                             
                             # Filter by upstream (copy: cached frame is shared)
@@ -5978,16 +6005,8 @@ class FindNeuronConnection:
                     
                     # Load and filter - use cached full_conn if available
                     if not hasattr(self, '_bulk_conn_cache') or self._bulk_conn_cache is None:
-                        self._bulk_conn_cache = self._read_csv(
-                            conn_file, 
-                            dtype={'pre_root_id': str, 'post_root_id': str}
-                        )
-                        self._bulk_conn_cache = self._bulk_conn_cache.rename(columns={
-                            'pre_root_id': 'bodyId_pre',
-                            'post_root_id': 'bodyId_post',
-                            'syn_count': 'weight'
-                        })
-                    
+                        self._bulk_conn_cache = load_flywire_merged_connections(conn_file)
+
                     upstream_strs = set(str(x) for x in upstream_bodyIds)
                     result = self._bulk_conn_cache[
                         self._bulk_conn_cache['bodyId_pre'].isin(upstream_strs)

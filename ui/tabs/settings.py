@@ -507,7 +507,7 @@ def create_settings_tab():
                     <p>Alternatively, select <code>flywire_FAFB_v783</code> in a tool and run it; the first run invokes the same local preparation automatically.</p>
 
                     <p class="mt-3 font-bold" style="color:#145cff">4. Verify before running analysis</p>
-                    <p>The dataset root should contain generated files named <code>flywire_FAFB_v783_allneurons_neuron_df.parquet</code> (and CSV) and <code>flywire_FAFB_v783_merged_connections.parquet</code> (and CSV). Click <b>Refresh</b> above and look for <b>✓ local</b>.</p>
+                    <p>The dataset root should contain generated files named <code>flywire_FAFB_v783_allneurons_neuron_df.parquet</code> (and CSV) and <code>flywire_FAFB_v783_merged_connections.parquet</code>. Click <b>Refresh</b> above and look for <b>✓ local</b>.</p>
                     <p style="color:#b45309"><b>A CAVE token is not a substitute for these local tables.</b> It is only needed for CAVE API fetching or skeleton fallback; local converted tables and a local skeleton ZIP can be used without it.</p>
                 </div>
                 """)
@@ -534,7 +534,7 @@ python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter impor
                     <p>Alternatively, select the matching BANC identifier in a tool and run it; preparation is invoked automatically.</p>
 
                     <p class="mt-3 font-bold" style="color:#145cff">4. Verify before running analysis</p>
-                    <p>The selected dataset root should contain <code>&lt;dataset&gt;_allneurons_neuron_df.parquet</code> (and CSV) and <code>&lt;dataset&gt;_merged_connections.parquet</code> (and CSV). Click <b>Refresh</b> above and look for <b>✓ local</b>.</p>
+                    <p>The selected dataset root should contain <code>&lt;dataset&gt;_allneurons_neuron_df.parquet</code> (and CSV) and <code>&lt;dataset&gt;_merged_connections.parquet</code>. Click <b>Refresh</b> above and look for <b>✓ local</b>.</p>
                     <p style="color:#b45309"><b>BANC skeleton visualization and <code>force_API_fetching</code> are unsupported.</b> Pathfinding, network visualization, and tabular analysis use the converted local files.</p>
                 </div>
                 """)

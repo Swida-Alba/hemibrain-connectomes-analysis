@@ -153,6 +153,14 @@
   <ul>
     <li><b>Cache Neurons/Synapses</b>: faster repeat renders.</li>
     <li><b>Smooth Skeleton</b>, <b>Show Soma</b>, <b>Show Connectors</b>.</li>
+    <li><b>Simplification Method</b> (NeuPrint tube mode): <code>fast</code>
+      keeps the original direct path; <code>fine_opt</code> uses the
+      FAFB-style transformed mesh; all methods use batched parallel online
+      skeleton fetching across layers, with <code>fine_opt1</code> retained as
+      the explicit optimized fine name. The selector and simplification
+      controls are disabled for FlyWire/FAFB datasets and for line mode.</li>
+    <li><b>Mesh Simplification</b>: defaults to 95% faces removed in this tab;
+      line mode does not apply mesh simplification.</li>
     <li><b>Export Method</b>: webdriver (fast, needs Chrome 109+) or kaleido
       (stable fallback). <b>Export Scale</b> and <b>Export Views</b>.</li>
     <li><b>Individual Profiles</b>: PDF/PPTX per neuron, with images per page
@@ -166,8 +174,8 @@
     and the layer names:</p>
   <pre><code>{output_dir}/plot-3d_MCNS_aMe12_SMP238_PPL101_20260815_151243/
     aMe12_SMP238_PPL101.html            - interactive 3D scene
-    aMe12_SMP238_PPL101_neuron_info.xlsx - per-layer metadata (neuron_df{i},
-                                          roi_count_df{i} sheets)
+    aMe12_SMP238_PPL101_neuron_info.csv - merged neuron metadata with a
+                                          viz_layer column
     parameters.txt                      - exact parameters of the run
     user_warning_notes.txt              - notes/warnings of the run</code></pre>
   <p class="small">With <b>Export Views</b> on, PNG screenshots

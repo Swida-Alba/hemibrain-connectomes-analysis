@@ -178,7 +178,7 @@ def process_neurons_to_parquet(read_path, save_path, save_csv_path=None, enrichm
         print(f"  ⚠️ Error processing neurons: {e}")
         return False
 
-def process_connections_to_parquet(read_path, save_path, save_csv_path=None):
+def process_connections_to_parquet(read_path, save_path):
     """
     Process connections.csv.gz into merged_connections parquet format.
     Logic matches coana.py _prepare_flywire_data.
@@ -227,14 +227,10 @@ def process_connections_to_parquet(read_path, save_path, save_csv_path=None):
         # Sort by pre, post
         print("  Sorting connections...")
         df = df.sort_values(['bodyId_pre', 'bodyId_post'])
-        
+
         print(f"  Saving to Parquet: {save_path}...")
         df.to_parquet(save_path, index=False, compression='snappy')
-        
-        if save_csv_path:
-            print(f"  Saving to CSV: {save_csv_path}...")
-            df.to_csv(save_csv_path, index=False)
-        
+
         file_size_mb = os.path.getsize(save_path) / (1024 * 1024)
         print(f"  ✓ Conversion complete. Output size: {file_size_mb:.2f} MB")
         return True
@@ -540,7 +536,6 @@ def ensure_flywire_data(dataset_name, dataset_dir):
     neuron_pq = os.path.join(dataset_dir, f"{dataset_name}_allneurons_neuron_df.parquet")
     neuron_csv = os.path.join(dataset_dir, f"{dataset_name}_allneurons_neuron_df.csv")
     conn_pq = os.path.join(dataset_dir, f"{dataset_name}_merged_connections.parquet")
-    conn_csv = os.path.join(dataset_dir, f"{dataset_name}_merged_connections.csv")
     syn_pq = os.path.join(dataset_dir, f"{dataset_name}_synapse_table.parquet")
     sk_zip_dst = os.path.join(dataset_dir, "sk_lod1_783_healed.zip")
 
@@ -599,7 +594,7 @@ def ensure_flywire_data(dataset_name, dataset_dir):
                 conn_raw = os.path.join(downloads_dir, "connections.csv.gz")
 
         if os.path.exists(conn_raw):
-            if not process_connections_to_parquet(conn_raw, conn_pq, save_csv_path=conn_csv):
+            if not process_connections_to_parquet(conn_raw, conn_pq):
                 all_critical_present = False
         else:
             print(f"  ❌ Missing required file: connections_princeton_no_threshold.csv.gz")

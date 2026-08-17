@@ -36,7 +36,7 @@ from ..components.palette_picker import (
     notify_empty_custom_palettes,
 )
 from ..components.edge_list_editor import edge_list_editor
-from ..dataset_service import is_banc_dataset
+from ..dataset_service import is_banc_dataset, is_flywire_dataset
 
 
 def _flatten_neuron_layers(neuron_layers) -> list:
@@ -323,16 +323,29 @@ def create_skeleton_tab():
                         hint="Show synaptic connector markers.",
                     )
                 with ui.row().classes("gap-4"):
+                    simplification_method = select_input(
+                        "Simplification Method",
+                        ["fast", "fine_opt", "fine_opt1"],
+                        "fast",
+                        hint=(
+                            "NeuPrint tube rendering: 'fast' uses the original "
+                            "direct simplification; 'fine_opt' smooths/resamples "
+                            "with the accelerated FAFB radius profile; "
+                            "all methods use batched parallel online fetching "
+                            "across layers ('fine_opt1' retains the explicit "
+                            "optimized fine name). "
+                            "Disabled for FlyWire/FAFB and line mode."
+                        ),
+                    )
                     default_simplification = checkbox_input(
                         "Use Default Mesh Simplification", True,
-                        hint="Use the dataset default (0.9 faces removed for NeuPrint, "
-                             "0.95 for FlyWire). Uncheck to set the value below.",
+                        hint="Use the Skeleton tab default: 0.95 faces removed. "
+                             "Uncheck to set the value below.",
                     )
                     mesh_simplification = number_input(
-                        "Mesh Simplification (faces removed)", 0.9, 0.0, 0.99, 0.05,
+                        "Mesh Simplification (faces removed)", 0.95, 0.0, 0.99, 0.05,
                         hint="Fraction of tube-mesh faces REMOVED for rendering: "
-                             "0.9 = keep 10% (NeuPrint default), 0.95 = keep 5% "
-                             "(FlyWire default). Higher = faster/coarser, lower = "
+                             "0.95 = keep 5%. Higher = faster/coarser, lower = "
                              "more detailed but slower.",
                     )
                     mesh_simplification.set_enabled(False)
@@ -404,12 +417,22 @@ def create_skeleton_tab():
                     "(all layers combined), 'layer' = one profile per layer / custom group."
                 ).classes("text-caption drocat-muted")
 
-        def _sync_simplification_enabled():
-            mesh_simplification.set_enabled(not default_simplification.value)
+        def _sync_simplification_controls():
+            is_line = skeleton_mode.value == "line"
+            mesh_simplification.set_enabled(
+                not is_line and not default_simplification.value
+            )
+            default_simplification.set_enabled(not is_line)
+            simplification_method.set_enabled(
+                not is_line and not is_flywire_dataset(str(dataset.value or ""))
+            )
 
         default_simplification.on_value_change(
-            lambda _e: _sync_simplification_enabled()
+            lambda _e: _sync_simplification_controls()
         )
+        skeleton_mode.on_value_change(lambda _e: _sync_simplification_controls())
+        dataset.on_value_change(lambda _e: _sync_simplification_controls())
+        _sync_simplification_controls()
 
         # ------------------------------------------------------------------
         # ROI Selection Mode: 'detailed' swaps the pulldown option list for
@@ -605,8 +628,9 @@ def create_skeleton_tab():
             "export_views": export_views.value,
             "show_fig": show_fig.value,
             "brain_mesh_color": brain_mesh_picker.get_value(),
+            "neuprint_skeleton_pipeline": simplification_method.value,
             "skeleton_mesh_simplification": (
-                None if default_simplification.value
+                0.95 if default_simplification.value
                 else float(mesh_simplification.value)
             ),
         }

@@ -79,9 +79,30 @@ def dataset_paths(dataset: str,
     return dataset_dir, dataset_dir / f"{folder}_allneurons"
 
 
-def roi_count_csv_path(dataset: str, project_root: Optional[str] = None) -> Path:
+def roi_count_table_path(dataset: str, project_root: Optional[str] = None) -> Path:
+    """Path of the dataset's ROI-count table: parquet when present, else CSV.
+
+    ``pull_dataset`` writes ``_roi_count_df.parquet`` (zstd); CSVs from older
+    pulls remain a valid source, so callers resolve whichever exists.
+    """
     _, prefix = dataset_paths(dataset, project_root)
+    parquet = Path(str(prefix) + "_roi_count_df.parquet")
+    if parquet.exists():
+        return parquet
     return Path(str(prefix) + "_roi_count_df.csv")
+
+
+# Backwards-compatible alias for the CSV-era name.
+roi_count_csv_path = roi_count_table_path
+
+
+def read_roi_count_columns(path: Path, columns: Sequence[str]):
+    """Read selected columns of an ROI-count table (parquet or CSV)."""
+    import polars as pl
+
+    if path.suffix == ".parquet":
+        return pl.read_parquet(path, columns=list(columns))
+    return pl.read_csv(path, columns=list(columns), infer_schema_length=10000)
 
 
 def metadata_json_path(dataset: str, project_root: Optional[str] = None) -> Path:
@@ -120,13 +141,13 @@ def validate_primary_rois(rois: Sequence[str], dataset: str,
     import polars as pl
 
     root = _project_root(project_root)
-    rc_path = roi_count_csv_path(dataset, str(root))
+    rc_path = roi_count_table_path(dataset, str(root))
     nd_path = root / "datasets" / _dataset_folder(dataset) / \
         f"{_dataset_folder(dataset)}_allneurons_neuron_df.csv"
     if not rc_path.exists() or not nd_path.exists():
         return False
     try:
-        rc = pl.read_csv(rc_path, columns=["bodyId", "roi", "pre"])
+        rc = read_roi_count_columns(rc_path, ("bodyId", "roi", "pre"))
         rc = rc.filter(pl.col("roi").is_in(list(rois)))
         sums = rc.group_by("bodyId").agg(pl.col("pre").sum().alias("sum_pre"))
         nd = pl.read_csv(nd_path, columns=["bodyId", "pre"])
@@ -161,8 +182,8 @@ def backfill_dataset_metadata(dataset: str,
     root = _project_root(project_root)
     _, prefix = dataset_paths(dataset, str(root))
     neuron_csv = Path(str(prefix) + "_neuron_df.csv")
-    roi_csv = Path(str(prefix) + "_roi_count_df.csv")
-    if not neuron_csv.exists() or not roi_csv.exists():
+    roi_table = roi_count_table_path(dataset, str(root))
+    if not neuron_csv.exists() or not roi_table.exists():
         return None
     try:
         from statvis import _build_dataset_metadata
@@ -170,9 +191,14 @@ def backfill_dataset_metadata(dataset: str,
         neuron_df = pd.read_csv(
             neuron_csv, usecols=lambda c: c in ("bodyId", "type", "pre", "post")
         )
-        roi_count_df = pd.read_csv(
-            roi_csv, usecols=lambda c: c in ("bodyId", "roi", "pre", "post")
-        )
+        if roi_table.suffix == ".parquet":
+            roi_count_df = pd.read_parquet(
+                roi_table, columns=["bodyId", "roi", "pre", "post"]
+            )
+        else:
+            roi_count_df = pd.read_csv(
+                roi_table, usecols=lambda c: c in ("bodyId", "roi", "pre", "post")
+            )
         from neuprint import Client
         try:
             from utils.token_manager import token_manager
@@ -255,7 +281,7 @@ class RoiProfileStore:
 
         payload = {
             "version": ROI_PROFILE_CACHE_VERSION,
-            "roi_csv": _stat(roi_count_csv_path(self.dataset, str(self.root))),
+            "roi_csv": _stat(roi_count_table_path(self.dataset, str(self.root))),
             "metadata": _stat(metadata_json_path(self.dataset, str(self.root))),
             "rois": hashlib.sha256(
                 "\n".join(sorted(rois)).encode("utf-8")
@@ -321,11 +347,11 @@ class RoiProfileStore:
         return rois
 
     def build(self) -> "RoiProfileStore":
-        """Build the matrices from the ROI-count CSV and cache them."""
+        """Build the matrices from the ROI-count table and cache them."""
         import polars as pl
 
-        csv = roi_count_csv_path(self.dataset, str(self.root))
-        if not csv.exists():
+        table = roi_count_table_path(self.dataset, str(self.root))
+        if not table.exists():
             if any(k in self.dataset.lower() for k in ("flywire", "fafb", "banc")):
                 # FlyWire datasets have no per-ROI synapse count table at
                 # all (the ROI screen is NeuPrint-only); "pull/prepare" can
@@ -337,14 +363,13 @@ class RoiProfileStore:
                     "partners) or 'cache' (full vector-cache search) instead."
                 )
             raise RoiScreeningUnavailable(
-                f"No ROI-count table for {self.dataset} (expected {csv}). "
+                f"No ROI-count table for {self.dataset} (expected {table}). "
                 "Pull/prepare the dataset first, or use Candidate Source "
                 "'profile'/'cache'."
             )
         rois = self._resolve_primary_rois()
 
-        rc = pl.read_csv(csv, columns=["bodyId", "roi", "pre", "post"],
-                         infer_schema_length=10000)
+        rc = read_roi_count_columns(table, ("bodyId", "roi", "pre", "post"))
         present = set(rc["roi"].unique().to_list())
         kept = [r for r in rois if r in present]
         dropped = len(rois) - len(kept)
@@ -353,7 +378,7 @@ class RoiProfileStore:
                       "ROI table (kept as zero columns).")
         if not kept:
             raise RoiScreeningUnavailable(
-                f"None of the primary ROIs of {self.dataset} appear in {csv}."
+                f"None of the primary ROIs of {self.dataset} appear in {table}."
             )
 
         body_ids = np.sort(rc["bodyId"].unique().to_numpy()).astype(np.int64)

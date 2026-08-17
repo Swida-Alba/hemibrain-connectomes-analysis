@@ -27,14 +27,19 @@ Pulled NeuPrint datasets are stored under `datasets/<dataset>/` with a
     male-cns, accounted for ~90% of the CSV size.  `statvis.pull_dataset`
     drops them via `drop_roi_cols=True`; pass `drop_roi_cols=False` to keep
     the raw columns locally.
-*   **`<dataset>_allneurons_roi_count_df.csv`**: Long-form per-ROI synapse
+*   **`<dataset>_allneurons_roi_count_df.parquet`**: Long-form per-ROI synapse
     counts (one row per bodyId × ROI, plus a computed `NotPrimary` row per
-    neuron).  This is the source of truth for ROI data; the three dropped
+    neuron), stored as a zstd parquet (~6x smaller than the CSV it replaced).
+    This is the source of truth for ROI data; the three dropped
     columns are fully derivable from it:
     *   `inputRois` = ROIs where `post > 0`
     *   `outputRois` = ROIs where `pre > 0`
     *   `roiInfo` = per-bodyId pivot of `pre`/`post`/`downstream`/`upstream`,
         with `synweight = post + downstream`
+
+    Readers (`statvis.roi_count_table_path`, `roi_screening`) also accept a
+    legacy `<dataset>_allneurons_roi_count_df.csv` from older pulls;
+    `scripts/ConvertRoiCountToParquet.py` migrates existing CSVs.
 
 
 ## Related Documentation
@@ -147,8 +152,9 @@ Example: `plot-3d_MCNS_aMe12_SMP238_PPL101_20260815_151243/` (layer names joined
 
 ### Key Output Files
 *   **`{layer_names}.html`**: The interactive 3D visualization. Open in a web browser to view neurons, synapses, and ROIs.
-*   **`{layer_names}_neuron_info.xlsx`**: Excel workbook with per-layer sheets:
-    *   `neuron_df{i}` / `roi_count_df{i}`: Neuron metadata and per-ROI synapse counts for layer *i*.
+*   **`{layer_names}_neuron_info.csv`**: One merged neuron metadata table for
+    all visualization layers. The `viz_layer` column identifies the
+    user-facing layer name for each row; ROI-count data is not exported.
 *   **`parameters.txt`**: Visualization parameters (colors, alphas, modes, backend, etc.)
 *   **`user_warning_notes.txt`**: Notes/warnings collected during rendering
 *   When `export_views=True` (or a view list) or `export_video=True` is requested, PNG screenshots and/or videos/GIFs are written into the same folder.

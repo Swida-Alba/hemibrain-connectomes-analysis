@@ -89,9 +89,9 @@ class TestPullDatasetChunked:
 
         return fake_fetch
 
-    def test_downloads_in_chunks_with_progress_and_writes_csvs(self, tmp_path, monkeypatch):
+    def test_downloads_in_chunks_with_progress_and_writes_tables(self, tmp_path, monkeypatch):
         """4500 neurons are fetched in chunks of 2000 (3 calls), a progress
-        bar tracks the total, and both CSVs are written."""
+        bar tracks the total, and the neuron CSV + ROI parquet are written."""
         import time as _time
         monkeypatch.setattr(_time, 'sleep', lambda s: None)
 
@@ -115,6 +115,8 @@ class TestPullDatasetChunked:
         self._patch_retry(monkeypatch)
         calls = []
         out = tmp_path / 'ds'
+        # A stale CSV from an older pull must be replaced by the parquet.
+        (tmp_path / 'ds_roi_count_df.csv').write_text('bodyId,roi,pre,post\n')
         statvis.pull_dataset(
             'fake:v1', save_path=str(out),
             client=_FakeClient(n_ids=4500),
@@ -127,12 +129,15 @@ class TestPullDatasetChunked:
         assert bar.kwargs['desc'] == 'Downloading neuron list'
         assert bar.updates == [2000, 2000, 500]
         assert (tmp_path / 'ds_neuron_df.csv').exists()
-        assert (tmp_path / 'ds_roi_count_df.csv').exists()
+        assert (tmp_path / 'ds_roi_count_df.parquet').exists()
+        assert not (tmp_path / 'ds_roi_count_df.csv').exists()
+        roi = pd.read_parquet(tmp_path / 'ds_roi_count_df.parquet')
+        assert list(roi.columns) == ['bodyId', 'type', 'instance']
         # Per-neuron ROI columns are dropped before saving: the data lives
-        # long-form in ds_roi_count_df.csv.
+        # long-form in ds_roi_count_df.parquet.
         saved = pd.read_csv(tmp_path / 'ds_neuron_df.csv', index_col=0)
         assert not {'roiInfo', 'inputRois', 'outputRois'} & set(saved.columns)
-        # Metadata sidecar is written next to the CSVs.
+        # Metadata sidecar is written next to the tables.
         meta = json.load(open(tmp_path / 'ds_metadata.json'))
         assert meta['neuron_counts']['total'] == 4500
         assert meta['dataset'] == 'fake:v1'

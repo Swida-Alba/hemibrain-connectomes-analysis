@@ -18,13 +18,14 @@ PRIMARY = ["A(L)", "A(R)", "M"]   # two hemis + one midline ROI
 
 
 def write_roi_dataset(tmp_path, dataset, counts, neuron_df=None,
-                      metadata_rois=None):
+                      metadata_rois=None, fmt="csv"):
     """Write a minimal local dataset (ROI table, neuron table, sidecar).
 
     ``counts``: {bodyId: {"post": {roi: n}, "pre": {roi: n}}}. The neuron
     table's pre/post totals are the ROI sums, so the primary list is a real
     partition. ``metadata_rois`` overrides the sidecar's roi_list (to test
-    hierarchical/invalid lists).
+    hierarchical/invalid lists). ``fmt`` picks the ROI-table format
+    ("csv" = the legacy layout, "parquet" = what pull_dataset writes now).
     """
     folder = rois._dataset_folder(dataset)
     base = tmp_path / "datasets" / folder
@@ -45,8 +46,13 @@ def write_roi_dataset(tmp_path, dataset, counts, neuron_df=None,
             "pre": sum(pre_map.values()),
             "post": sum(post_map.values()),
         })
-    pd.DataFrame(rows).to_csv(base / f"{folder}_allneurons_roi_count_df.csv",
-                              index=False)
+    roi_table = pd.DataFrame(rows)
+    if fmt == "parquet":
+        roi_table.to_parquet(base / f"{folder}_allneurons_roi_count_df.parquet",
+                             index=False)
+    else:
+        roi_table.to_csv(base / f"{folder}_allneurons_roi_count_df.csv",
+                         index=False)
     if neuron_df is not None:
         neuron_rows = neuron_df
     pd.DataFrame(neuron_rows).to_csv(
@@ -59,7 +65,7 @@ def write_roi_dataset(tmp_path, dataset, counts, neuron_df=None,
     return base
 
 
-def twin_fixture(tmp_path, dataset="np:v1"):
+def twin_fixture(tmp_path, dataset="np:v1", fmt="csv"):
     """A mirrored twin pair, a same-hemisphere decoy and a zero neuron."""
     return write_roi_dataset(tmp_path, dataset, {
         # query (right hemisphere) and its contralateral twin
@@ -72,7 +78,7 @@ def twin_fixture(tmp_path, dataset="np:v1"):
             "type": "D", "instance": "D_R"},
         # no synapses at all: never a candidate
         4: {"post": {}, "pre": {}, "type": "Z", "instance": "Z"},
-    })
+    }, fmt=fmt)
 
 
 def hierarchical_fixture(tmp_path, dataset="np:v1"):
@@ -121,6 +127,58 @@ class TestValidation:
 
     def test_load_primary_rois_missing(self, tmp_path):
         assert rois.load_primary_rois("np:v1", str(tmp_path)) is None
+
+
+class TestParquetRoiTable:
+    """pull_dataset writes _roi_count_df.parquet; every reader must resolve
+    parquet first and fall back to a legacy CSV."""
+
+    def test_table_path_prefers_parquet_over_csv(self, tmp_path):
+        twin_fixture(tmp_path, fmt="parquet")
+        # a legacy CSV coexists: the parquet wins
+        folder = tmp_path / "datasets" / "np_v1"
+        (folder / "np_v1_allneurons_roi_count_df.csv").write_text(
+            "bodyId,roi,pre,post\n")
+        path = rois.roi_count_table_path("np:v1", str(tmp_path))
+        assert path.suffix == ".parquet"
+
+    def test_table_path_falls_back_to_csv(self, tmp_path):
+        twin_fixture(tmp_path)  # csv fixture
+        assert rois.roi_count_table_path(
+            "np:v1", str(tmp_path)).suffix == ".csv"
+
+    def test_validate_primary_rois_from_parquet(self, tmp_path):
+        twin_fixture(tmp_path, fmt="parquet")
+        assert rois.validate_primary_rois(PRIMARY, "np:v1", str(tmp_path))
+
+    def test_store_builds_and_screens_from_parquet(self, tmp_path):
+        twin_fixture(tmp_path, fmt="parquet")
+        store = rois.RoiProfileStore("np:v1", project_root=str(tmp_path))
+        store.ensure()
+        assert int(store.screen([1]).iloc[0]["bodyId"]) == 2
+
+    def test_backfill_reads_parquet_table(self, tmp_path, monkeypatch):
+        """backfill_dataset_metadata loads the ROI table without a server:
+        point _build_dataset_metadata at a stub and check the frames."""
+        twin_fixture(tmp_path, fmt="parquet")
+        sidecar = tmp_path / "datasets" / "np_v1" / "np_v1_metadata.json"
+        sidecar.unlink()
+
+        captured = {}
+
+        def fake_build(dataset, neuron_df, roi_count_df, client=None):
+            captured["roi"] = roi_count_df
+            return {"dataset": dataset,
+                    "roi_coverage": {"roi_list": PRIMARY}}
+
+        import statvis
+        monkeypatch.setattr(statvis, "_build_dataset_metadata", fake_build)
+        import neuprint
+        monkeypatch.setattr(neuprint, "Client", lambda *a, **k: None)
+        meta = rois.backfill_dataset_metadata("np:v1", str(tmp_path))
+        assert meta is not None
+        assert sidecar.exists()
+        assert set(captured["roi"]["roi"]) <= set(PRIMARY)
 
 
 class TestRoiProfileStore:

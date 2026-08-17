@@ -20,19 +20,23 @@ from .common import (
     select_input,
 )
 from .palette_picker import color_swatch_picker, palette_editor
+from ..dataset_service import is_flywire_dataset
 
 
 def _default_analysis_simplification(dataset_value: Any) -> float:
-    """Return the visible analysis default for one or more datasets."""
+    """Return the visible default for analysis-generated visualizations."""
+
+    return 0.98
+
+
+def _contains_flywire_dataset(dataset_value: Any) -> bool:
+    """Return whether one or more selected datasets are FlyWire/FAFB."""
 
     if isinstance(dataset_value, (list, tuple, set)):
         dataset_names = dataset_value
     else:
         dataset_names = [dataset_value]
-    normalized = [str(name or "").lower() for name in dataset_names]
-    if any("fafb" in name or "flywire_fafb" in name for name in normalized):
-        return 0.98
-    return 0.95
+    return any(is_flywire_dataset(str(name or "")) for name in dataset_names)
 
 
 @dataclass
@@ -325,8 +329,21 @@ def skeleton_visualization_settings(
                 "Default Simplification",
                 True,
                 hint=(
-                    "Use the analysis default: 0.95 for NeuPrint datasets or "
-                    "0.98 for FlyWire FAFB."
+                    "Use the analysis default: 0.98 faces removed. The dedicated "
+                    "Skeleton tab uses 0.95."
+                ),
+            )
+            fields["neuprint_skeleton_pipeline"] = select_input(
+                "Simplification Method",
+                ["fast", "fine_opt", "fine_opt1"],
+                "fast",
+                hint=(
+                    "NeuPrint tube rendering: 'fast' uses the original direct "
+                    "simplification; 'fine_opt' smooths/resamples and uses "
+                    "the accelerated FAFB radius profile; all methods use "
+                    "batched parallel online fetching ('fine_opt1' retains "
+                    "the explicit optimized fine name). Disabled for "
+                    "FlyWire/FAFB and line mode."
                 ),
             )
             fields["skeleton_mesh_simplification"] = number_input(
@@ -339,8 +356,7 @@ def skeleton_visualization_settings(
                 0.05,
                 hint=(
                     "Fraction of skeleton-mesh faces removed (higher is coarser). "
-                    "The displayed default follows the selected dataset: 0.95 "
-                    "for NeuPrint or 0.98 for FlyWire FAFB."
+                    "Analysis visualizations default to 0.98."
                 ),
             )
             fields["export_method"] = select_input(
@@ -378,22 +394,34 @@ def skeleton_visualization_settings(
                     )
                 )
 
-        def on_default_simplification_change(event):
-            fields["skeleton_mesh_simplification"].set_enabled(
-                not bool(event.value)
+        def refresh_simplification_controls(_event=None):
+            is_line = fields["skeleton_mode"].value == "line"
+            is_flywire = _contains_flywire_dataset(
+                dataset_provider() if dataset_provider else None
             )
+            fields["neuprint_skeleton_pipeline"].set_enabled(
+                not is_line and not is_flywire
+            )
+            fields["use_default_simplification"].set_enabled(not is_line)
+            fields["skeleton_mesh_simplification"].set_enabled(
+                not is_line and not bool(fields["use_default_simplification"].value)
+            )
+
+        def on_default_simplification_change(event):
             # Re-selecting the default should immediately show the current
             # dataset-aware value instead of leaving the previous custom value.
             if bool(event.value):
                 refresh_default_simplification()
+            refresh_simplification_controls()
 
         fields["use_default_simplification"].on_value_change(
             on_default_simplification_change
         )
-        fields["skeleton_mesh_simplification"].set_enabled(False)
-
+        fields["skeleton_mode"].on_value_change(refresh_simplification_controls)
         for watcher in dataset_watchers or ():
             watcher.on_value_change(refresh_default_simplification)
+            watcher.on_value_change(refresh_simplification_controls)
+        refresh_simplification_controls()
 
     # Keep the returned object useful in tests and for callers that want to
     # style or position the expansion beside a checkbox.

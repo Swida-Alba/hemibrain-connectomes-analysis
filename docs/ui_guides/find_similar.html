@@ -48,7 +48,8 @@
       use the <b>ROI-distribution screen</b>: every neuron of the dataset is
       ranked by cosine similarity of its input/output synapse distributions
       over the dataset's <b>primary ROIs</b> (from
-      <code>{dataset}_allneurons_roi_count_df.csv</code>), comparing both
+      <code>{dataset}_allneurons_roi_count_df.parquet</code>, or the
+      legacy CSV from older pulls), comparing both
       orientations across the midline (bilateral mirror) so contralateral
       homologs match. This reaches <b>every</b> neuron — the connectivity
       screen below can never find neurons without shared partners (~8% of

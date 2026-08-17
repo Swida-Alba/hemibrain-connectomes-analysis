@@ -38,12 +38,12 @@ def test_homolog_visualization_settings_override_renderer_defaults():
     assert options["brain_mesh"] == "none"
     assert options["skeleton_mode"] == "line"
     assert options["show_fig"] is True
-    assert options["skeleton_mesh_simplification"] == 0.95
+    assert options["skeleton_mesh_simplification"] == 0.98
 
 
-def test_analysis_skeleton_simplification_defaults_are_dataset_aware():
-    assert default_analysis_skeleton_mesh_simplification("male-cns:v1.0") == 0.95
-    assert default_analysis_skeleton_mesh_simplification("hemibrain:v1.2.1") == 0.95
+def test_analysis_skeleton_simplification_defaults_use_the_analysis_level():
+    assert default_analysis_skeleton_mesh_simplification("male-cns:v1.0") == 0.98
+    assert default_analysis_skeleton_mesh_simplification("hemibrain:v1.2.1") == 0.98
     assert default_analysis_skeleton_mesh_simplification("flywire_FAFB_v783") == 0.98
     assert default_analysis_skeleton_mesh_simplification("FAFB:v783") == 0.98
 
@@ -70,6 +70,18 @@ def test_html_simplification_warning_uses_dataset_specific_thresholds():
     assert VisualizeSkeleton._skeleton_simplification_warning(
         "male-cns:v1.0", "neuprint", "tube", 0.901
     )["threshold"] == 0.90
+    assert VisualizeSkeleton._skeleton_simplification_warning(
+        "male-cns:v1.0", "neuprint", "tube", 0.95, "fine_opt"
+    ) is None
+    assert VisualizeSkeleton._skeleton_simplification_warning(
+        "male-cns:v1.0", "neuprint", "tube", 0.951, "fine_opt"
+    )["threshold"] == 0.95
+    assert VisualizeSkeleton._skeleton_simplification_warning(
+        "male-cns:v1.0", "neuprint", "tube", 0.95, "fine_opt1"
+    ) is None
+    assert VisualizeSkeleton._skeleton_simplification_warning(
+        "male-cns:v1.0", "neuprint", "tube", 0.951, "fine_opt1"
+    )["threshold"] == 0.95
 
     assert VisualizeSkeleton._skeleton_simplification_warning(
         "flywire_FAFB_v783", "flywire", "tube", 0.95
@@ -117,6 +129,52 @@ def test_html_writer_embeds_plotly_runtime_and_injects_warning(tmp_path):
     assert "skeleton_mesh_simplification=0.950" in html
     assert "fixed simp90 skeleton cache" in html
     assert html.index("drocat-skeleton-simplification-warning") > html.index("<body>")
+
+
+def test_fine_opt_html_warning_starts_above_simp95(tmp_path):
+    class FakeFigure:
+        def write_html(self, path, **kwargs):
+            Path(path).write_text(
+                "<html><head></head><body><div id='figure'></div></body></html>",
+                encoding="utf-8",
+            )
+
+    visualizer = object.__new__(VisualizeSkeleton)
+    visualizer.dataset = "male-cns:v1.0"
+    visualizer.client_type = "neuprint"
+    visualizer.skeleton_mode = "tube"
+    visualizer.neuprint_skeleton_pipeline = "fine_opt"
+    visualizer.skeleton_mesh_simplification = 0.95
+    visualizer._vprint = lambda *args, **kwargs: None
+
+    exact_path = tmp_path / "fine_opt_simp95.html"
+    visualizer._write_plotly_html(FakeFigure(), str(exact_path))
+    assert "drocat-skeleton-simplification-warning" not in exact_path.read_text(
+        encoding="utf-8"
+    )
+
+    visualizer.skeleton_mesh_simplification = 0.951
+    high_path = tmp_path / "fine_opt_simp951.html"
+    visualizer._write_plotly_html(FakeFigure(), str(high_path))
+    html = high_path.read_text(encoding="utf-8")
+    assert "drocat-skeleton-simplification-warning" in html
+    assert "fixed simp95 transformed mesh cache" in html
+
+
+def test_user_warning_notes_record_fine_opt_threshold(tmp_path):
+    visualizer = object.__new__(VisualizeSkeleton)
+    visualizer.dataset = "male-cns:v1.0"
+    visualizer.skeleton_mode = "tube"
+    visualizer.neuprint_skeleton_pipeline = "fine_opt"
+    visualizer.skeleton_mesh_simplification = 0.95
+    visualizer.save_folder = str(tmp_path)
+    visualizer._vprint = lambda *args, **kwargs: None
+
+    visualizer._write_user_warning_notes()
+
+    notes = (tmp_path / "user_warning_notes.txt").read_text(encoding="utf-8")
+    assert "neuprint_skeleton_pipeline=fine_opt" in notes
+    assert "in-page warning threshold >0.95" in notes
 
 
 def test_real_skeleton_html_is_portable_without_plotly_sidecar(tmp_path):

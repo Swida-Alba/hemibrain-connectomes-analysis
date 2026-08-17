@@ -1598,14 +1598,26 @@ class ComparisonAnalyzer:
         total_pre = int(neuron_df[pre_col].sum()) if pre_col else 0
         total_post = int(neuron_df[post_col].sum()) if post_col else 0
         
-        # Check for ROI data
+        # Check for ROI data (parquet from current pulls, CSV from older ones)
         roi_file = os.path.join(dataset_path, f'{safe_name}_allneurons_roi_count_df.csv')
+        roi_parquet = os.path.join(dataset_path, f'{safe_name}_allneurons_roi_count_df.parquet')
         roi_counts = {}
         rois = []
-        
-        if os.path.exists(roi_file):
+
+        roi_df = None
+        if os.path.exists(roi_parquet):
+            try:
+                roi_df = pd.read_parquet(roi_parquet)
+            except:
+                pass
+        if roi_df is None and os.path.exists(roi_file):
             try:
                 roi_df = self._read_csv(roi_file)
+            except:
+                pass
+
+        if roi_df is not None:
+            try:
                 # Get ROI columns (usually all except bodyId)
                 roi_cols = [c for c in roi_df.columns if c not in ['bodyId', 'Unnamed: 0']]
                 rois = roi_cols

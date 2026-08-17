@@ -120,9 +120,9 @@ Actual connection data with stable hash-based filenames.
 ```
 datasets/
   optic-lobe_v1_1_allneurons_neuron_df.csv    ← For cache enrichment (ALL neurons)
-  optic-lobe_v1_1_allneurons_roi_count_df.csv
+  optic-lobe_v1_1_allneurons_roi_count_df.parquet
   optic-lobe_v1_1_alltypes_neuron_df.csv      ← For user queries (typed neurons only)
-  optic-lobe_v1_1_alltypes_roi_count_df.csv
+  optic-lobe_v1_1_alltypes_roi_count_df.parquet
 ```
 
 ---

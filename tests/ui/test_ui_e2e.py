@@ -566,7 +566,7 @@ class TestRunner:
         assert by_label["Visualize Top N Types / Neurons"].value == DEFAULTS["morph_visualize_top_n"]
         assert by_label["Visualize Top N Candidates"].value == 5
         assert by_label["Visualize By"].value == DEFAULTS["morph_visualize_by"]
-        assert by_label["Mesh Simplification"].value == 0.95
+        assert by_label["Mesh Simplification"].value == 0.98
         assert any(
             getattr(el, "_props", {}).get("label") == "Advanced Visualization"
             for el in client.elements.values()
@@ -591,8 +591,8 @@ class TestRunner:
             for el in client.elements.values()
         )
 
-    def test_analysis_visualization_simplification_follows_dataset(self):
-        """The advanced panel displays the same dataset-aware default that
+    def test_analysis_visualization_simplification_uses_analysis_default(self):
+        """The advanced panel displays the same analysis default that
         the analysis backend will use, without overwriting custom values."""
         from nicegui import Client
         from nicegui.page import page
@@ -630,7 +630,7 @@ class TestRunner:
             if getattr(el, "_props", {}).get("label") == "Mesh Simplification"
         )
 
-        assert mesh.value == 0.95
+        assert mesh.value == 0.98
         dataset.value = "flywire_FAFB_v783"
         assert mesh.value == 0.98
 
@@ -640,7 +640,24 @@ class TestRunner:
         assert mesh.value == 0.75
 
         default_control.value = True
-        assert mesh.value == 0.95
+        assert mesh.value == 0.98
+
+        mode = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Skeleton Mode"
+        )
+        method = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Simplification Method"
+        )
+        assert method.enabled is True
+        mode.value = "line"
+        assert method.enabled is False
+        assert default_control.enabled is False
+        assert mesh.enabled is False
+        mode.value = "tube"
+        assert method.enabled is True
+        assert default_control.enabled is True
 
     def test_similar_tools_generate_runner_scripts(self):
         """The runner generates scripts for both Similar tools."""
@@ -2698,6 +2715,77 @@ class TestTabs:
         ]
         assert any(el.get_value() == "Category10" for el in editors)
         assert any(el.get_value() == "Dark2" for el in editors)
+
+    def test_skeleton_tab_disables_neuprint_method_for_flywire(self):
+        """The NeuPrint-only method selector is inactive for FlyWire/FAFB."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.visualization import create_skeleton_tab
+
+        client = Client(page("/skeleton-method-dataset-gating"))
+        with client:
+            create_skeleton_tab()
+
+        dataset = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Dataset"
+        )
+        method = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Simplification Method"
+        )
+
+        assert method.enabled is True
+        assert [option["label"] for option in method._props["options"]] == [
+            "fast", "fine_opt", "fine_opt1"
+        ]
+        dataset.value = "flywire_FAFB_v783"
+        assert method.enabled is False
+        dataset.value = "male-cns:v1.0"
+        assert method.enabled is True
+
+    def test_skeleton_tab_disables_simplification_controls_for_line_mode(self):
+        """Line rendering bypasses both method and mesh simplification."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.visualization import create_skeleton_tab
+
+        client = Client(page("/skeleton-line-simplification-gating"))
+        with client:
+            create_skeleton_tab()
+
+        mode = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Skeleton Mode"
+        )
+        method = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Simplification Method"
+        )
+        default_control = next(
+            el for el in client.elements.values()
+            if getattr(el, "text", "") == "Use Default Mesh Simplification"
+        )
+        mesh = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") ==
+            "Mesh Simplification (faces removed)"
+        )
+
+        assert method.enabled is True
+        assert default_control.enabled is True
+        assert mesh.enabled is False
+
+        mode.value = "line"
+        assert method.enabled is False
+        assert default_control.enabled is False
+        assert mesh.enabled is False
+
+        mode.value = "tube"
+        assert method.enabled is True
+        assert default_control.enabled is True
+        default_control.value = False
+        assert mesh.enabled is True
 
     def test_skeleton_tab_export_and_grouping_controls(self):
         """The 3D Skeleton tab exposes the drag-and-drop layer tree editor,

@@ -7273,7 +7273,7 @@ class NeuronBridgeFinder:
                 # Set skeleton_mesh_simplification based on dataset when the
                 # user leaves the shared control at its default. Analysis
                 # renders use more simplification than the dedicated Skeleton
-                # tab: 0.95 for NeuPrint and 0.98 for FlyWire/FAFB.
+                # tab: 0.98 for all datasets.
                 skeleton_simplification = (
                     default_analysis_skeleton_mesh_simplification(dataset)
                 )
@@ -7358,6 +7358,7 @@ class NeuronBridgeFinder:
                     'synapse_alpha', 'synapse_colors', 'mesh_roi',
                     'mesh_color', 'mesh_alpha', 'brain_mesh_color',
                     'vnc_mesh_color',
+                    'neuprint_skeleton_pipeline',
                     'output_format',
                 ):
                     if key in viz_settings:

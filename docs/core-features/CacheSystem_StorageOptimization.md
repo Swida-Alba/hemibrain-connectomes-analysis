@@ -19,9 +19,9 @@ When you first use a dataset **with caching enabled**, the system downloads **AL
 ```
 datasets/
   optic-lobe_v1_1_allneurons_neuron_df.csv    ← ALL neurons (including type=None)
-  optic-lobe_v1_1_allneurons_roi_count_df.csv
+  optic-lobe_v1_1_allneurons_roi_count_df.parquet
   optic-lobe_v1_1_alltypes_neuron_df.csv      ← Only typed neurons (for user queries)
-  optic-lobe_v1_1_alltypes_roi_count_df.csv
+  optic-lobe_v1_1_alltypes_roi_count_df.parquet
 ```
 
 **Important:** The cache system uses the `_allneurons` files (with `type=None` neurons included) for enrichment, ensuring all connections can be enriched even if they involve untyped neurons.

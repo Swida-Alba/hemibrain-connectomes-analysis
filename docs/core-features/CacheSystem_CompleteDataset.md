@@ -119,9 +119,9 @@ def _ensure_complete_dataset(self):
     )
     
     neuron_csv = dataset_path + '_neuron_df.csv'
-    roi_csv = dataset_path + '_roi_count_df.csv'
-    
-    if not os.path.exists(neuron_csv) or not os.path.exists(roi_csv):
+    roi_table = sv.roi_count_table_path(dataset_path)
+
+    if not os.path.exists(neuron_csv) or not os.path.exists(roi_table):
         print(f'\n📥 Complete dataset not found, downloading ALL neurons (including type=None)...')
         print(f'   This is a one-time download for cache enrichment.')
         
