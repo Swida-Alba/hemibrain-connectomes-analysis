@@ -15,6 +15,8 @@ from ui.tabs.flylight import (  # noqa: E402
     _fetch_lines,
     _parse_lines,
     CATEGORY_OPTIONS,
+    DEFAULT_FLAT_STRUCTURE,
+    DEFAULT_IMAGE_SUMMARY,
     FORMAT_OPTIONS,
     IMAGE_TYPE_OPTIONS,
     REGION_OPTIONS,
@@ -47,6 +49,10 @@ class TestParseLines:
 
 
 class TestRunnerIntegration:
+    def test_download_defaults(self):
+        assert DEFAULT_FLAT_STRUCTURE is True
+        assert DEFAULT_IMAGE_SUMMARY == "pdf"
+
     def test_registry_entry(self):
         tool = TOOL_REGISTRY["flylight_download"]
         assert tool["label"] == "FlyLight Image Download"
@@ -70,7 +76,8 @@ class TestRunnerIntegration:
                 "line_name": ["R10A06", "VT037867"],
                 "output_dir": "/tmp/out",
                 "max_files": 6,
-                "generate_summary": None,
+                "flat_structure": DEFAULT_FLAT_STRUCTURE,
+                "generate_summary": DEFAULT_IMAGE_SUMMARY,
                 "summary_images_per_page": (3, 2),
             },
         )
@@ -80,7 +87,8 @@ class TestRunnerIntegration:
         assert "formats=['png', 'jpg']" in script
         assert "line_name=['R10A06', 'VT037867']" in script
         assert "output_dir='/tmp/out'" in script
-        assert 'generate_summary=None' in script
+        assert "flat_structure=True" in script
+        assert "generate_summary='pdf'" in script
         assert "summary_images_per_page=(3, 2)" in script
         assert 'print("[DROCAT] Done.")' in script
 

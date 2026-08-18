@@ -13,6 +13,8 @@ FORMAT_OPTIONS = ["png", "jpg", "h5j", "lsm", "mp4", "json"]
 IMAGE_TYPE_OPTIONS = ["mip", "cdm", "aligned", "metadata", "translation"]
 CATEGORY_OPTIONS = ["GAL4/LEXA", "SplitGAL4", "MCFO", "RawImages", "All"]
 REGION_OPTIONS = ["Brain", "VNC", "All"]
+DEFAULT_FLAT_STRUCTURE = True
+DEFAULT_IMAGE_SUMMARY = "pdf"
 
 
 def _parse_lines(value: str) -> list:
@@ -141,7 +143,7 @@ def create_flylight_tab():
                 )
             with param_grid(3):
                 flat_structure = checkbox_input(
-                    "Flat Folder Structure", False,
+                    "Flat Folder Structure", DEFAULT_FLAT_STRUCTURE,
                     hint="Save files directly instead of preserving the S3 key structure.",
                 )
                 add_timestamp = checkbox_input(
@@ -149,7 +151,7 @@ def create_flylight_tab():
                     hint="Append a timestamp to the output folder name.",
                 )
                 summary = select_input(
-                    "Image Summary", ["none", "pdf", "pptx", "pdf + pptx"], "none",
+                    "Image Summary", ["none", "pdf", "pptx", "pdf + pptx"], DEFAULT_IMAGE_SUMMARY,
                     hint="Generate a PDF/PPTX contact sheet of the downloaded images.",
                 )
             with param_grid(2):

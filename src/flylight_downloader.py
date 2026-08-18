@@ -511,12 +511,14 @@ class FlyLightDownloader:
     simple_mode: bool = True  # Apply filename filtering to reduce download volume
     auto_discover: bool = True  # Auto-discover collections from S3 bucket
     simple_mode_min_files: int = 2  # Minimum files to return per line when simple_mode filters all
+    automatic_fallback: bool = True  # Try MCFO, then RawImages when primary categories have no matches
     
     # Internal state
     _s3_client: Any = field(default=None, repr=False, init=False)
     _file_cache: Dict[str, List[FlyLightFile]] = field(default_factory=dict, repr=False, init=False)
     _vt_sample_cache: Dict[str, List[VTSampleInfo]] = field(default_factory=dict, repr=False, init=False)
     _resolved_collections: List[str] = field(default=None, repr=False, init=False)
+    _fallback_downloader_cache: Dict[str, Any] = field(default_factory=dict, repr=False, init=False)
     
     def __post_init__(self):
         """Initialize S3 client and normalize parameters."""
@@ -648,6 +650,81 @@ class FlyLightDownloader:
         - ## = two digits
         """
         return bool(re.match(r'^R\d{2}[A-Z]\d{2}$', line_name, re.IGNORECASE))
+
+    def _requested_category_keys(self) -> set:
+        """Return normalized collection-category names for the current query.
+
+        R-lines are served by a mixture of CGI and S3 endpoints, so their
+        category handling cannot rely on the generic S3 collection loop alone.
+        Keep the normalization here in one place so category-specific R-line
+        lookups do not accidentally return GAL4 images for a Split-GAL4 query.
+        """
+        if self.collection_category is None:
+            if self.collections is None:
+                return {'ALL'}
+            categories = self.collections
+        else:
+            categories = (
+                self.collection_category
+                if isinstance(self.collection_category, list)
+                else [self.collection_category]
+            )
+
+        normalized = set()
+        for category in categories:
+            normalized.add(
+                str(category).upper().replace('-', '').replace('_', '')
+                .replace(' ', '').replace('/', '')
+            )
+        return normalized
+
+    def _automatic_fallback_categories(self) -> List[str]:
+        """Return fallback categories for an exhausted primary-category query.
+
+        A direct FlyLight download that explicitly asks for GAL4/LexA and/or
+        Split-GAL4 should still find MCFO and raw products when those primary
+        collections are empty. Explicit MCFO/RawImages/All queries already
+        include their intended sources, so they must not recurse into this
+        fallback path.
+        """
+        if (
+            not self.automatic_fallback
+            or self.collection_category is None
+            or self.collections is not None
+        ):
+            return []
+
+        requested = self._requested_category_keys()
+        primary_categories = {'GAL4LEXA', 'GAL4', 'LEXA', 'SPLITGAL4'}
+        if not requested or 'ALL' in requested or not requested.issubset(primary_categories):
+            return []
+
+        return ['MCFO', 'RawImages']
+
+    def _get_fallback_downloader(self, category: str) -> "FlyLightDownloader":
+        """Create a quiet, non-recursive downloader for one fallback category."""
+        if category not in self._fallback_downloader_cache:
+            fallback = FlyLightDownloader(
+                output_dir=self.output_dir,
+                collection_category=category,
+                formats=list(self.formats),
+                image_types=list(self.image_types),
+                region=self.region,
+                max_workers=self.max_workers,
+                verbose=False,
+                use_boto3=False,
+                include_vt_lines=self.include_vt_lines,
+                simple_mode=self.simple_mode,
+                auto_discover=False,
+                simple_mode_min_files=self.simple_mode_min_files,
+                automatic_fallback=False,
+            )
+            # Reuse the parent S3 client so the fallback does not create a
+            # second connection or change the selected access method.
+            fallback._s3_client = self._s3_client
+            self._fallback_downloader_cache[category] = fallback
+
+        return self._fallback_downloader_cache[category]
     
     def _parse_vt_page(self, line_name: str) -> tuple[List[VTSampleInfo], str]:
         """
@@ -870,19 +947,17 @@ class FlyLightDownloader:
         self._log(f"   Found {len(files)} files from flweb.janelia.org")
         return files
     
-    def _get_vt_mcfo_files(self, line_name: str) -> List[FlyLightFile]:
+    def _get_gen1_mcfo_files(self, line_name: str) -> List[FlyLightFile]:
         """
-        Get MCFO images for a VT line from gen1mcfo.janelia.org.
+        Get Gen1 MCFO images for a driver line from gen1mcfo.janelia.org.
         
-        VT lines have MCFO (Multi-Color Flip-Out) data that is viewable at
-        gen1mcfo.janelia.org. The actual images are hosted in the S3 bucket
-        (janelia-flylight-imagery) under 'Gen1 MCFO' and 'Annotator Gen1 MCFO'
-        collections, but for VT lines, the images may not be discoverable via
-        direct S3 listing. This method parses the gen1mcfo viewer page to find
-        all available S3 image URLs.
+        Both VT and R lines can have MCFO data on the viewer page. The actual
+        images are hosted in the S3 bucket (janelia-flylight-imagery) under
+        ``Gen1 MCFO`` and ``Annotator Gen1 MCFO`` collections, but the viewer
+        is the most reliable way to discover the image keys for a line.
         
         Args:
-            line_name: VT line name (e.g., 'VT000770')
+            line_name: Driver line name (e.g., 'VT000770' or 'R96A08')
             
         Returns:
             List of FlyLightFile objects from the Gen1 MCFO collection on S3
@@ -890,11 +965,11 @@ class FlyLightDownloader:
         import ssl
         files = []
         
-        # Try multiple endpoints - gen1mcfo.janelia.org may have SSL issues
-        # flweb.janelia.org serves the same content and is more reliable
+        # Try both hosts. The flweb mirror is useful when the dedicated
+        # gen1mcfo host has a transient TLS problem.
         endpoints = [
-            f"https://flweb.janelia.org/cgi-bin/view_gen1mcfo_imagery.cgi?line={line_name}",
-            f"{GEN1_MCFO_VIEW_CGI}?line={line_name}",
+            f"{GEN1_MCFO_VIEW_CGI}?line={urllib.parse.quote(str(line_name), safe='')}",
+            f"https://flweb.janelia.org/cgi-bin/view_gen1mcfo_imagery.cgi?line={urllib.parse.quote(str(line_name), safe='')}",
         ]
         
         html = None
@@ -919,10 +994,12 @@ class FlyLightDownloader:
         # Pattern: src="https://s3.amazonaws.com/janelia-flylight-imagery/Gen1+MCFO/VT000770/..."
         # Also: "Annotator+Gen1+MCFO" collection
         
-        # Find all S3 image URLs (PNG and JPG)
+        # Find all S3 image URLs (PNG and JPG). The page currently uses
+        # ``s3.amazonaws.com`` URLs with ``+`` for spaces, but accept the
+        # regional host too so a page-side URL change does not break fallback.
         s3_pattern = re.compile(
-            r'https://s3\.amazonaws\.com/janelia-flylight-imagery/'
-            r'((?:Gen1\+MCFO|Annotator\+Gen1\+MCFO)/[^"\'?]+\.(?:png|jpg))',
+            r'https://(?:s3\.amazonaws\.com|s3-[^./]+\.amazonaws\.com)/janelia-flylight-imagery/'
+            r'((?:Gen1\+MCFO|Annotator\+Gen1\+MCFO)/[^"\'?]+\.(?:png|jpe?g))',
             re.IGNORECASE
         )
         
@@ -930,8 +1007,8 @@ class FlyLightDownloader:
         seen_keys = set()
         
         for key in matches:
-            # Normalize key (URL decode the + signs)
-            key = key.replace('+', ' ')
+            # Normalize the URL path (the viewer uses + for spaces).
+            key = urllib.parse.unquote_plus(key)
             
             # Skip duplicates
             if key in seen_keys:
@@ -954,13 +1031,20 @@ class FlyLightDownloader:
                 collection=collection,
                 line_name=line_name,
                 source='s3',  # These are S3-hosted files
-                http_url=f"https://s3.amazonaws.com/janelia-flylight-imagery/{key.replace(' ', '+')}"
+                http_url=(
+                    f"https://s3.amazonaws.com/{FLYLIGHT_BUCKET}/"
+                    f"{urllib.parse.quote(key, safe='/')}"
+                )
             ))
         
         if files:
             self._log(f"   📦 Found {len(files)} Gen1 MCFO images for {line_name}")
         
         return files
+
+    # Backward-compatible name used by older callers and documentation.
+    def _get_vt_mcfo_files(self, line_name: str) -> List[FlyLightFile]:
+        return self._get_gen1_mcfo_files(line_name)
     
     def _verify_vt_file_exists(self, file: FlyLightFile) -> bool:
         """Check if a VT file URL is accessible."""
@@ -1236,7 +1320,7 @@ class FlyLightDownloader:
             elif include_mcfo:
                 # MCFO only - skip GAL4
                 self._log(f"   Category filter: MCFO only (no GAL4)")
-                all_files = self._get_vt_mcfo_files(line_name)
+                all_files = self._get_gen1_mcfo_files(line_name)
                 self._log(f"   Found {len(all_files)} MCFO files from gen1mcfo.janelia.org")
             else:
                 # No matching category - return empty
@@ -1244,29 +1328,97 @@ class FlyLightDownloader:
                 all_files = []
         # Check if this is an R-line - use HTTP viewer for expression patterns
         elif self._is_r_line(line_name):
-            self._log(f"   Detected R-line (GMR collection) - searching flweb.janelia.org...")
-            
-            # Get expression pattern images from flweb.janelia.org
-            http_files = self._get_r_line_files(line_name)
-            all_files.extend(http_files)
-            
-            # Also search S3 for CDM images (Color Depth MIPs) from Gen1 collection
+            requested_categories = self._requested_category_keys()
+            search_all = 'ALL' in requested_categories
+            requested_collection_names = {
+                str(category).lower() for category in requested_categories
+            }
+
+            # ``collection_category`` normally contains normalized category
+            # names, while explicit ``collections`` contains S3 folder names.
+            # Support both forms without making an R-line query leak files
+            # from a different collection category.
+            include_gal4 = (
+                search_all
+                or bool(requested_categories & {'GAL4LEXA', 'GAL4', 'LEXA'})
+                or any(
+                    'gen1' in collection and 'mcfo' not in collection
+                    for collection in requested_collection_names
+                )
+            )
+            include_mcfo = (
+                search_all
+                or 'MCFO' in requested_categories
+                or any('mcfo' in collection for collection in requested_collection_names)
+            )
+            include_raw = search_all or 'RAWIMAGES' in requested_categories
+
+            # Keep the ordered fallback categories independent: GAL4/LexA
+            # calls this branch first, then MCFO and RawImages are requested
+            # by their own downloader instances when needed.
+            if include_gal4:
+                self._log(f"   Detected R-line (GMR collection) - searching flweb.janelia.org...")
+
+                # Get expression pattern images from flweb.janelia.org.
+                all_files.extend(self._get_r_line_files(line_name))
+
+            # Gen1 GAL4/LexA R-lines expose CDM files below Gen1/CDM/<line>.
             self._log(f"   Also searching S3 for CDM images...")
             collections_to_search = self._resolved_collections or FLYLIGHT_COLLECTIONS
-            for collection in collections_to_search:
-                if 'Gen1' in collection:  # Only search Gen1 collections for R-lines
-                    self._log(f"   Searching {collection}...")
-                    
-                    # Try CDM path: Collection/CDM/LineName/
-                    prefix_cdm = f"{collection}/CDM/{line_name}/"
+            if include_gal4:
+                for collection in collections_to_search:
+                    collection_lower = collection.lower()
+                    if 'gen1' in collection_lower and 'mcfo' not in collection_lower:
+                        self._log(f"   Searching {collection}...")
+
+                        prefix_cdm = f"{collection}/CDM/{line_name}/"
+                        if self._s3_client:
+                            files = self._list_bucket_boto3(prefix_cdm)
+                        else:
+                            files = self._list_bucket_http(prefix_cdm)
+
+                        if files:
+                            all_files.extend(files)
+                            self._log(f"   Found {len(files)} CDM files in {collection}")
+
+            # The Gen1 MCFO CGI is the authoritative discovery path for R-line
+            # MCFO data (for example R96A08). It returns direct S3 image URLs,
+            # even when the normal GAL4/Split-GAL4 collections are empty.
+            if include_mcfo:
+                self._log(f"   Searching Gen1 MCFO viewer for {line_name}...")
+                mcfo_files = self._get_gen1_mcfo_files(line_name)
+                seen_keys = {file.key for file in all_files}
+                for file in mcfo_files:
+                    if file.key not in seen_keys:
+                        all_files.append(file)
+                        seen_keys.add(file.key)
+
+            # RawImages uses the direct collection/line layout. Keep this
+            # separate from MCFO so callers can enforce MCFO → RawImages
+            # fallback order.
+            if include_raw:
+                for collection in collections_to_search:
+                    collection_lower = collection.lower()
+                    if 'mcfo' not in collection_lower:
+                        continue
+
+                    self._log(f"   Searching {collection} for raw files...")
+                    prefix = f"{collection}/{line_name}/"
                     if self._s3_client:
-                        files = self._list_bucket_boto3(prefix_cdm)
+                        files = self._list_bucket_boto3(prefix)
                     else:
-                        files = self._list_bucket_http(prefix_cdm)
-                    
-                    if files:
-                        all_files.extend(files)
-                        self._log(f"   Found {len(files)} CDM files in {collection}")
+                        files = self._list_bucket_http(prefix)
+
+                    seen_keys = {file.key for file in all_files}
+                    for file in files:
+                        if file.key not in seen_keys:
+                            all_files.append(file)
+                            seen_keys.add(file.key)
+
+            # Do not query the flweb CGI or Gen1 GAL4 collection for an
+            # R-line when only Split-GAL4/RawImages was requested.
+            if not include_gal4 and not include_mcfo and not include_raw:
+                self._log(f"   ⚠️ No R-line source matches the requested categories")
         else:
             # Search S3 bucket for Split-GAL4, SS-lines, etc.
             collections_to_search = self._resolved_collections or FLYLIGHT_COLLECTIONS
@@ -1416,10 +1568,37 @@ class FlyLightDownloader:
         # Collect files from all lines, tracking per-line for fallback
         from collections import defaultdict
         files_by_line_pre_simple = defaultdict(list)  # Before simple_mode filter
-        
+        fallback_categories = self._automatic_fallback_categories()
+
         for name in line_names:
             all_files = self.list_files(name)
             filtered = [f for f in all_files if self._matches_filters(f)]
+
+            if not filtered and fallback_categories:
+                requested = self.collection_category
+                if isinstance(requested, list):
+                    requested_label = ', '.join(str(category) for category in requested)
+                else:
+                    requested_label = str(requested)
+                self._log(
+                    f"   ℹ️ No files from {requested_label} for '{name}'; "
+                    "trying MCFO → RawImages fallback..."
+                )
+
+                for fallback_category in fallback_categories:
+                    fallback_downloader = self._get_fallback_downloader(fallback_category)
+                    fallback_files = fallback_downloader.get_filtered_files(
+                        name,
+                        apply_simple_mode=False,
+                    )
+                    if fallback_files:
+                        filtered = fallback_files
+                        self._log(
+                            f"   ✅ Found {len(filtered)} matching files in "
+                            f"{fallback_category} fallback for '{name}'"
+                        )
+                        break
+
             self._log(f"   {len(filtered)} files match format/type filters for '{name}'")
             files_by_line_pre_simple[name] = filtered
         

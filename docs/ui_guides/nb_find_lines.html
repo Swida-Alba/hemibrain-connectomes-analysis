@@ -48,13 +48,14 @@
 
   <h2>Image download options</h2>
   <ul>
-    <li><b>Download Images</b> from NeuronBridge and/or <b>From FlyLight</b>.</li>
+    <li><b>Download Images</b> from NeuronBridge and/or <b>From FlyLight</b>.
+      FlyLight misses automatically fall back to NeuronBridge.</li>
     <li><b>Image Formats</b>: png/jpg (NeuronBridge); h5j/mp4/json added for
       FlyLight.</li>
     <li><b>Image Types</b>: cdm/mip, aligned, translation, metadata.</li>
     <li><b>Max Images / Line</b>: download cap per line.</li>
-    <li><b>FlyLight Collections</b>: searched in priority order; MCFO is the
-      automatic fallback.</li>
+    <li><b>FlyLight Collections</b>: searched in priority order; missing lines
+      automatically fall back to MCFO, RawImages, then NeuronBridge.</li>
     <li><b>Simple Mode</b>: fewer representative files.</li>
     <li><b>Organize by Region</b>: Brain/VNC subfolders.</li>
     <li><b>PDF Summary</b> layout and background color.</li>
