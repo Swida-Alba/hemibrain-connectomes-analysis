@@ -2521,6 +2521,46 @@ class TestDatasetService:
         pinned.fields["skeleton_mode"].set_value("tube")
         assert pinned.fields["cache_neurons"].value is False
 
+    def test_analysis_opt_in_defaults_stay_off_without_override(self, tmp_path, monkeypatch):
+        """Show Figure / Export Views keep their historical opt-in False state
+        in analysis tabs unless the user explicitly saved an override; the
+        skeleton tab's built-in True must not leak in."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.skeleton_visualization_settings import (
+            skeleton_visualization_settings,
+        )
+        import ui.config as cfg_mod
+
+        monkeypatch.setattr(cfg_mod, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+
+        client = Client(page("/optin-no-override"))
+        with client:
+            panel = skeleton_visualization_settings()
+        assert panel.fields["show_fig"].value is False
+        assert panel.fields["export_views"].value is False
+
+        cfg_mod.set_user_default("show_fig_skeleton", True)
+        cfg_mod.set_user_default("export_views", True)
+        client2 = Client(page("/optin-override"))
+        with client2:
+            panel2 = skeleton_visualization_settings()
+        assert panel2.fields["show_fig"].value is True
+        assert panel2.fields["export_views"].value is True
+
+        # An invalid stored override behaves like no override at all.
+        cfg_mod.save_local_config({
+            cfg_mod.USER_DEFAULTS_KEY: {
+                "show_fig_skeleton": "yes",
+                "export_views": 3,
+            }
+        })
+        client3 = Client(page("/optin-invalid"))
+        with client3:
+            panel3 = skeleton_visualization_settings()
+        assert panel3.fields["show_fig"].value is False
+        assert panel3.fields["export_views"].value is False
+
     def test_settings_token_status_is_non_sensitive(self):
         from ui.tabs.settings import _token_status
 

@@ -178,8 +178,15 @@ def get_user_defaults() -> dict:
 
 
 def has_user_default(key: str) -> bool:
-    """Whether the user saved a custom default for *key*."""
-    return key in get_user_defaults()
+    """Whether the user saved a valid custom default for *key*.
+
+    Invalid stored values coerce to nothing and behave like the built-in
+    default, so they must not count as a saved override either.
+    """
+    overrides = get_user_defaults()
+    if key not in overrides:
+        return False
+    return _coerce_user_default(key, overrides[key]) is not None
 
 
 def _coerce_user_default(key: str, value):

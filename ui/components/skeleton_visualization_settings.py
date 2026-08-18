@@ -133,7 +133,7 @@ def skeleton_visualization_settings(
     default_brain_mesh: Optional[str] = None,
     default_skeleton_mode: Optional[str] = None,
     show_high_quality_warning: bool = False,
-    default_neuron_alpha: float = 0.2,
+    default_neuron_alpha: float = 0.3,
     default_show_fig: Optional[bool] = None,
     default_export_views: Optional[bool] = None,
     default_export_method: str = "webdriver",
@@ -153,10 +153,21 @@ def skeleton_visualization_settings(
         """Use the caller override when given, else the saved user default."""
         return param if param is not None else get_user_default(key)
 
+    def _fallback_opt_in(param, key):
+        """Opt-in controls keep their historical off state unless the user
+        explicitly saved an override; the built-in skeleton-tab defaults
+        (True) must not leak into analysis tabs.
+        """
+        if param is not None:
+            return param
+        if has_user_default(key):
+            return get_user_default(key)
+        return False
+
     skeleton_mode_default = _fallback(default_skeleton_mode, "analysis_skeleton_mode")
     brain_mesh_default = _fallback(default_brain_mesh, "brain_mesh")
-    show_fig_default = _fallback(default_show_fig, "show_fig_skeleton")
-    export_views_default = _fallback(default_export_views, "export_views")
+    show_fig_default = _fallback_opt_in(default_show_fig, "show_fig_skeleton")
+    export_views_default = _fallback_opt_in(default_export_views, "export_views")
 
     with ui.expansion(
         "Advanced Visualization",

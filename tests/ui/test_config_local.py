@@ -206,6 +206,17 @@ class TestUserDefaults:
         assert cfg.get_user_default("min_synapse_num") == cfg.DEFAULTS["min_synapse_num"]
         assert cfg.get_user_default("skeleton_mode") == cfg.DEFAULTS["skeleton_mode"]
         assert cfg.get_user_default("use_cache") == cfg.DEFAULTS["use_cache"]
+        # Invalid stored values coerce to nothing, so they must not count
+        # as saved overrides (e.g. they must not gate the cache auto-flip).
+        assert cfg.has_user_default("min_synapse_num") is False
+        assert cfg.has_user_default("skeleton_mode") is False
+        assert cfg.has_user_default("use_cache") is False
+
+    def test_has_user_default_true_only_for_valid_override(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        assert cfg.has_user_default("min_synapse_num") is False
+        cfg.set_user_default("min_synapse_num", 9)
+        assert cfg.has_user_default("min_synapse_num") is True
 
     def test_reset_single_keeps_others(self, monkeypatch, tmp_path):
         monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")

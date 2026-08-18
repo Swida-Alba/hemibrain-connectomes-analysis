@@ -11,6 +11,7 @@ enabled even when line mode disables the NeuPrint method selector.
 import sys
 from pathlib import Path
 
+import pytest
 from nicegui import Client
 from nicegui.page import page
 
@@ -18,12 +19,20 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+import ui.config as _cfg  # noqa: E402
 from ui.components.skeleton_visualization_settings import (  # noqa: E402
     skeleton_visualization_settings,
 )
 from ui.tabs.find_similar import create_find_similar_tab  # noqa: E402
 from ui.tabs.nb_find_neuron import create_nb_find_neuron_tab  # noqa: E402
 from ui.tabs.visualization import create_skeleton_tab  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolate_user_defaults(tmp_path, monkeypatch):
+    """These tests assert built-in defaults; keep real saved overrides in
+    ui/local_config.json from leaking into the assertions."""
+    monkeypatch.setattr(_cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
 
 
 def _labeled(client):
