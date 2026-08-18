@@ -3,7 +3,7 @@
 from nicegui import run, ui
 
 from ..components.common import (
-    checkbox_input, dir_input, multi_select_input, number_input,
+    checkbox_input, dir_input, multi_select_input, neuron_list_input, number_input,
     param_grid, section_header, select_input, tool_page,
 )
 from ..components.output_panel import OutputPanel
@@ -18,6 +18,15 @@ REGION_OPTIONS = ["Brain", "VNC", "All"]
 def _parse_lines(value: str) -> list:
     """Split a comma-separated driver-line string into a clean list."""
     return [name.strip() for name in (value or "").split(",") if name.strip()]
+
+
+def _line_values(lines_input) -> list:
+    """Return the committed driver-line chips from the shared list input."""
+    return [
+        str(name).strip()
+        for name in lines_input.get_value()[1]
+        if str(name).strip()
+    ]
 
 
 def _build_downloader(
@@ -79,12 +88,15 @@ def create_flylight_tab():
     with form_col:
         with ui.card().classes("w-full drocat-card"):
             section_header("Driver Lines", "route")
-            lines_input = ui.input(
+            lines_input = neuron_list_input(
                 label="Driver line name(s)",
-                placeholder="e.g. R10A06, VT037867, SS00731",
-            ).classes("w-full drocat-input").tooltip(
-                "Comma-separated. R-lines (Gen1 GAL4) and SS-lines (Split-GAL4) "
-                "come from the S3 bucket, VT lines from the HTTP CDN (auto-detected)."
+                show_filter=False,
+                show_upload=False,
+                hint=(
+                    "Type a driver line name and press Enter or leave the field "
+                    "to add it as a chip. R-lines (Gen1 GAL4) and SS-lines "
+                    "(Split-GAL4) come from S3; VT lines use the HTTP CDN."
+                ),
             )
             output_dir = dir_input(scope="flylight")
 
@@ -182,10 +194,7 @@ def create_flylight_tab():
         output_panel.create(run_label="Download Images", run_icon="download")
 
     def _add_line(name: str):
-        names = _parse_lines(lines_input.value)
-        if name not in names:
-            names.append(name)
-        lines_input.value = ", ".join(names)
+        lines_input.add_values([name])
 
     async def do_search():
         pattern = search_input.value.strip()
@@ -216,7 +225,7 @@ def create_flylight_tab():
             search_btn.text = "Search Lines"
 
     async def do_list():
-        line_names = _parse_lines(lines_input.value)
+        line_names = _line_values(lines_input)
         if not line_names:
             ui.notify("Enter at least one driver line first", type="warning")
             return
@@ -251,15 +260,21 @@ def create_flylight_tab():
             list_btn.text = "List Files"
 
     async def run_download():
-        line_names = _parse_lines(lines_input.value)
+        line_names = _line_values(lines_input)
         if not line_names:
             ui.notify("Enter at least one driver line first", type="warning")
+            return
+
+        selected_output_dir = str(output_dir.value or "").strip()
+        if not selected_output_dir:
+            ui.notify("Choose an output directory first", type="warning")
             return
 
         output_panel.clear()
         output_panel.set_running(True)
 
         constructor_params = {
+            "output_dir": selected_output_dir,
             "formats": formats.value or ["png"],
             "image_types": image_types.value or ["mip"],
             "region": region.value,
@@ -277,7 +292,7 @@ def create_flylight_tab():
 
         method_params = {
             "line_name": line_names,
-            "output_dir": output_dir.value,
+            "output_dir": selected_output_dir,
             "max_files": int(max_files.value) if max_files.value else None,
             "flat_structure": flat_structure.value,
             "add_timestamp": add_timestamp.value,
@@ -288,7 +303,7 @@ def create_flylight_tab():
         result = await output_panel.run(
             runner, "flylight_download", constructor_params, "download",
             method_params=method_params,
-            output_dir=output_dir.value,
+            output_dir=selected_output_dir,
         )
 
         # A completed download means the driver lines existed on FlyLight;
@@ -303,7 +318,9 @@ def create_flylight_tab():
             "Completed" if result["returncode"] == 0 else "Failed",
             "green" if result["returncode"] == 0 else "red",
         )
-        output_panel.show_files(result["files"], result.get("output_folder") or output_dir.value)
+        output_panel.show_files(
+            result["files"], result.get("output_folder") or selected_output_dir
+        )
 
     output_panel.run_button.on_click(run_download)
     output_panel.cancel_button.on_click(runner.cancel)

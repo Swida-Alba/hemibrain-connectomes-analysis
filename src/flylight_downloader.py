@@ -1683,6 +1683,10 @@ class FlyLightDownloader:
             output_path = Path(output_dir or self.output_dir)
         
         output_path.mkdir(parents=True, exist_ok=True)
+        # The UI runner uses this marker to identify the per-run folder under
+        # the user-selected output directory. Without it, the results panel
+        # cannot distinguish this run from older sibling folders.
+        self._log(f"📁 Output folder: {output_path}")
         downloaded = []
         self._progress(3, total_steps, "Downloading selected images")
         
