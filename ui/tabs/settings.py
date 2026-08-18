@@ -363,7 +363,7 @@ def create_settings_tab():
                 with ui.row().classes("items-center gap-2"):
                     ui.label("NeuPrint Token (Required for all NeuPrint datasets)").classes("text-caption font-bold")
                     neuprint_status = ui.label(_token_status(token_state["neuprint"])).classes("text-caption drocat-muted")
-                ui.html("Get it from <a href='https://neuprint.janelia.org/account' target='_blank' style='color:#145cff'>neuprint.janelia.org/account</a>").classes("text-caption drocat-muted")
+                ui.html("Get it from <a href='https://neuprint.janelia.org/account' target='_blank' style='color:var(--drocat-cobalt)'>neuprint.janelia.org/account</a>").classes("text-caption drocat-muted")
 
             neuprint_token = ui.input(
                 label="NeuPrint Token",
@@ -379,7 +379,7 @@ def create_settings_tab():
                 with ui.row().classes("items-center gap-2"):
                     ui.label("CAVE Token (for FlyWire CAVE API features)").classes("text-caption font-bold drocat-warn")
                     cave_status = ui.label(_token_status(token_state["cave"])).classes("text-caption drocat-muted")
-                ui.html("Get it from <a href='https://codex.flywire.ai/auth_token' target='_blank' style='color:#145cff'>codex.flywire.ai/auth_token</a>").classes("text-caption drocat-muted")
+                ui.html("Get it from <a href='https://codex.flywire.ai/auth_token' target='_blank' style='color:var(--drocat-cobalt)'>codex.flywire.ai/auth_token</a>").classes("text-caption drocat-muted")
                 ui.label("Local converted FlyWire tables work without this token. A CAVE token is needed only when a workflow fetches data or skeletons through the CAVE API; it never replaces the required local files.").classes("text-caption drocat-warn")
 
             cave_token = ui.input(
@@ -691,17 +691,17 @@ def create_settings_tab():
 
             with ui.expansion("NeuPrint Datasets (hemibrain, male-cns, optic-lobe, manc)", icon="cloud").classes("w-full"):
                 ui.html("""
-                <div style="color:#0b1f3a" class="text-sm">
+                <div style="color:var(--drocat-navy)" class="text-sm">
                     <p><b>NeuPrint datasets are fetched automatically from the server.</b> No manual download required.</p>
                     <ol class="list-decimal ml-4 mt-2">
-                        <li>Get your NeuPrint token from <a href="https://neuprint.janelia.org/account" target="_blank" style="color:#145cff">neuprint.janelia.org/account</a></li>
+                        <li>Get your NeuPrint token from <a href="https://neuprint.janelia.org/account" target="_blank" style="color:var(--drocat-cobalt)">neuprint.janelia.org/account</a></li>
                         <li>Enter the token in the API Tokens section above</li>
                         <li>Click "Save Tokens"</li>
                         <li>Click "Test NeuPrint" to verify the connection</li>
                         <li>Datasets will appear in all tool tabs automatically</li>
                     </ol>
-                    <p class="mt-2" style="color:#667085">Available NeuPrint datasets:</p>
-                    <ul class="list-disc ml-4" style="color:#667085">
+                    <p class="mt-2" style="color:var(--drocat-muted)">Available NeuPrint datasets:</p>
+                    <ul class="list-disc ml-4" style="color:var(--drocat-muted)">
                         <li>hemibrain:v1.2.1 - Adult fly brain (central)</li>
                         <li>male-cns:v1.0 - Full male CNS (latest)</li>
                         <li>male-cns:v0.9 - Full male CNS</li>
@@ -713,13 +713,13 @@ def create_settings_tab():
 
             with ui.expansion("FlyWire FAFB v783 · strict local preparation", icon="download").classes("w-full"):
                 ui.html("""
-                <div style="color:#0b1f3a" class="text-sm">
-                    <p style="color:#b45309"><b>Follow the converter layout exactly.</b> Download the raw Codex files; do not rename them to a generated <code>*_allneurons_*</code> filename and do not place raw files in the dataset root.</p>
+                <div style="color:var(--drocat-navy)" class="text-sm">
+                    <p style="color:var(--drocat-warn)"><b>Follow the converter layout exactly.</b> Download the raw Codex files; do not rename them to a generated <code>*_allneurons_*</code> filename and do not place raw files in the dataset root.</p>
 
-                    <p class="mt-3 font-bold" style="color:#145cff">1. Create the input folder</p>
+                    <p class="mt-3 font-bold" style="color:var(--drocat-cobalt)">1. Create the input folder</p>
                     <p>From the project root, create <code>datasets/flywire_FAFB_v783/downloads/</code>. Keep the original <code>.csv.gz</code> filenames in this folder.</p>
 
-                    <p class="mt-3 font-bold" style="color:#145cff">2. Put these raw files in <code>downloads/</code></p>
+                    <p class="mt-3 font-bold" style="color:var(--drocat-cobalt)">2. Put these raw files in <code>downloads/</code></p>
                     <p><b>Required for local pathfinding and connection analysis:</b></p>
                     <ul class="list-disc ml-4">
                         <li><code>classification.csv.gz</code></li>
@@ -732,25 +732,25 @@ def create_settings_tab():
                     </ul>
                     <p><b>Optional visualization inputs:</b> <code>fafb_v783_princeton_synapse_table.csv.gz</code> for a local synapse table and <code>sk_lod1_783_healed.zip</code> for local skeletons. The converter discovers matching synapse/skeleton filenames and moves the skeleton ZIP to the dataset root.</p>
 
-                    <p class="mt-3 font-bold" style="color:#145cff">3. Convert the files</p>
+                    <p class="mt-3 font-bold" style="color:var(--drocat-cobalt)">3. Convert the files</p>
                     <pre style="white-space:pre-wrap"><code>python src/FAFB_file_converter.py</code></pre>
                     <p>Alternatively, select <code>flywire_FAFB_v783</code> in a tool and run it; the first run invokes the same local preparation automatically.</p>
 
-                    <p class="mt-3 font-bold" style="color:#145cff">4. Verify before running analysis</p>
+                    <p class="mt-3 font-bold" style="color:var(--drocat-cobalt)">4. Verify before running analysis</p>
                     <p>The dataset root should contain generated files named <code>flywire_FAFB_v783_allneurons_neuron_df.parquet</code> (and CSV) and <code>flywire_FAFB_v783_merged_connections.parquet</code>. Click <b>Refresh</b> above and look for <b>✓ local</b>.</p>
-                    <p style="color:#b45309"><b>A CAVE token is not a substitute for these local tables.</b> It is only needed for CAVE API fetching or skeleton fallback; local converted tables and a local skeleton ZIP can be used without it.</p>
+                    <p style="color:var(--drocat-warn)"><b>A CAVE token is not a substitute for these local tables.</b> It is only needed for CAVE API fetching or skeleton fallback; local converted tables and a local skeleton ZIP can be used without it.</p>
                 </div>
                 """)
 
             with ui.expansion("FlyWire BANC v888 / v626 · strict local preparation", icon="download").classes("w-full"):
                 ui.html("""
-                <div style="color:#0b1f3a" class="text-sm">
-                    <p style="color:#b45309"><b>BANC is local-file only in this toolkit.</b> A CAVE token does not enable BANC API fetching; use the matching local dataset folder and raw files below.</p>
+                <div style="color:var(--drocat-navy)" class="text-sm">
+                    <p style="color:var(--drocat-warn)"><b>BANC is local-file only in this toolkit.</b> A CAVE token does not enable BANC API fetching; use the matching local dataset folder and raw files below.</p>
 
-                    <p class="mt-3 font-bold" style="color:#145cff">1. Choose one exact dataset identifier</p>
+                    <p class="mt-3 font-bold" style="color:var(--drocat-cobalt)">1. Choose one exact dataset identifier</p>
                     <p>Use either <code>flywire_BANC_v888</code> or <code>flywire_BANC_v626</code>. Never mix files from one version into the other version's folder.</p>
 
-                    <p class="mt-3 font-bold" style="color:#145cff">2. Create the input folder and copy the raw files</p>
+                    <p class="mt-3 font-bold" style="color:var(--drocat-cobalt)">2. Create the input folder and copy the raw files</p>
                     <p>For the selected identifier, create <code>datasets/&lt;dataset&gt;/downloads/</code> and keep these exact Codex filenames:</p>
                     <ul class="list-disc ml-4">
                         <li><code>neurons.csv.gz</code></li>
@@ -758,14 +758,14 @@ def create_settings_tab():
                     </ul>
                     <p>Do not save a manually renamed <code>*_allneurons_neuron_df.csv</code> in the root; that is a generated output, not an input.</p>
 
-                    <p class="mt-3 font-bold" style="color:#145cff">3. Convert the files</p>
+                    <p class="mt-3 font-bold" style="color:var(--drocat-cobalt)">3. Convert the files</p>
                     <pre style="white-space:pre-wrap"><code>python src/BANC_file_converter.py                 # v626 default
 python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter import ensure_banc_data; d='flywire_BANC_v888'; ensure_banc_data(d, 'datasets/' + d)"</code></pre>
                     <p>Alternatively, select the matching BANC identifier in a tool and run it; preparation is invoked automatically.</p>
 
-                    <p class="mt-3 font-bold" style="color:#145cff">4. Verify before running analysis</p>
+                    <p class="mt-3 font-bold" style="color:var(--drocat-cobalt)">4. Verify before running analysis</p>
                     <p>The selected dataset root should contain <code>&lt;dataset&gt;_allneurons_neuron_df.parquet</code> (and CSV) and <code>&lt;dataset&gt;_merged_connections.parquet</code>. Click <b>Refresh</b> above and look for <b>✓ local</b>.</p>
-                    <p style="color:#b45309"><b>BANC skeleton visualization and <code>force_API_fetching</code> are unsupported.</b> Pathfinding, network visualization, and tabular analysis use the converted local files.</p>
+                    <p style="color:var(--drocat-warn)"><b>BANC skeleton visualization and <code>force_API_fetching</code> are unsupported.</b> Pathfinding, network visualization, and tabular analysis use the converted local files.</p>
                 </div>
                 """)
 
