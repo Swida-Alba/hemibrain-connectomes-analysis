@@ -75,10 +75,10 @@ def build_vs(tmp_path, dataset="hemibrain:v1.2.1", pipeline=None):
 
 
 class TestNeuprintPipeline:
-    def test_default_pipeline_is_fine(self, tmp_path):
+    def test_default_pipeline_is_fast(self, tmp_path):
         vs = build_vs(tmp_path)
-        assert vs.neuprint_skeleton_pipeline == "fine"
-        assert vs._resolved_neuprint_skeleton_pipeline() == "fine"
+        assert vs.neuprint_skeleton_pipeline == "fast"
+        assert vs._resolved_neuprint_skeleton_pipeline() == "direct"
 
     def test_user_facing_pipeline_aliases_resolve(self, tmp_path):
         assert build_vs(tmp_path, pipeline="fast")._resolved_neuprint_skeleton_pipeline() == "direct"
@@ -272,7 +272,7 @@ class TestNeuprintPipeline:
         vs.cache_neurons = False
         attempts = []
 
-        def flaky_fetch(body_ids, fetch_kwargs=None):
+        def flaky_fetch(body_ids, fetch_kwargs=None, persist=True):
             attempts.append(list(body_ids["bodyId"]))
             if len(attempts) == 1:
                 # neuprint-python's wrapped requests error has no response

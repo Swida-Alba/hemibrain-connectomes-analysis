@@ -39,6 +39,24 @@ def make_neuron(name):
     return neuron
 
 
+def make_chain_neuron(n_nodes=2000, body_id="42"):
+    """Straight chain TreeNeuron large enough for the node-reduction stage."""
+    types = ["root"] + ["slab"] * max(0, n_nodes - 2) + ["end"]
+    neuron = navis.TreeNeuron(pd.DataFrame({
+        "node_id": np.arange(n_nodes, dtype=np.int64),
+        "parent_id": np.array([-1] + list(range(n_nodes - 1)),
+                               dtype=np.int64),
+        "x": np.arange(n_nodes, dtype=float) * 1000.0,
+        "y": np.zeros(n_nodes),
+        "z": np.zeros(n_nodes),
+        "radius": np.ones(n_nodes),
+        "type": types[:n_nodes],
+    }))
+    neuron.soma = None
+    neuron.id = body_id
+    return neuron
+
+
 def make_mesh(body_id=42):
     vertices = np.array([
         (0.0, 0.0, 0.0),
@@ -154,3 +172,56 @@ def test_fafb_visualizer_extrusion_repair_forces_mesh_refresh(
     assert calls[0][0] == [42]
     assert calls[0][1]["use_cache"] is True
     assert calls[0][1]["force_refresh"] is True
+
+
+def _stub_fafb_layer_visualizer(mode):
+    """Visualizer stub whose _vprint records the FAFB layer stage stream."""
+    visualizer = object.__new__(VisualizeSkeleton)
+    visualizer.skeleton_mode = mode
+    visualizer.skeleton_mesh_simplification = 0.95
+    visualizer.soma_mesh_simplification = 0.80
+    visualizer.soma_region_radius = 20.0
+    messages = []
+    visualizer._vprint = lambda msg, *args, **kwargs: messages.append(msg)
+    visualizer._simplify_mesh_fafb_fine = (
+        lambda trimesh_obj, target_faces: trimesh_obj)
+    return visualizer, messages
+
+
+def test_fafb_fast_tube_stages_reduce_then_tube_then_decimate():
+    """Fast tube emits node reduction strictly before tube meshing and
+    surface decimation."""
+    visualizer, messages = _stub_fafb_layer_visualizer("tube")
+    neuron = make_chain_neuron(2000)
+
+    out, done = visualizer._process_fafb_layer(
+        navis.NeuronList([neuron]), [], "fast", False,
+        render_mesh_cache={})
+
+    assert done is True
+    assert isinstance(out[0], navis.MeshNeuron)
+    joined = "".join(messages)
+    assert "🔽 reduce nodes 42 2000→" in joined
+    assert "🧪 tube mesh 42" in joined
+    assert "⚡ decimate 42" in joined
+    assert (joined.index("🔽 reduce nodes") < joined.index("🧪 tube mesh")
+            < joined.index("⚡ decimate"))
+
+
+def test_fafb_line_mode_never_emits_tube_or_mesh_stages():
+    """Line rendering emits node reduction only; tube/mesh stages are
+    absent from the progress stream."""
+    visualizer, messages = _stub_fafb_layer_visualizer("line")
+    neuron = make_chain_neuron(2000)
+
+    out, done = visualizer._process_fafb_layer(
+        navis.NeuronList([neuron]), [], "fast", False,
+        render_mesh_cache={})
+
+    assert done is False
+    assert isinstance(out[0], navis.TreeNeuron)
+    joined = "".join(messages)
+    assert "🔽 reduce nodes 42 2000→" in joined
+    assert "🧪 tube mesh" not in joined
+    assert "⚡ decimate" not in joined
+    assert "🧱 mesh source" not in joined

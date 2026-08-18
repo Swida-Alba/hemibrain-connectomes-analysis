@@ -1,0 +1,134 @@
+"""UI regression tests for subcaller skeleton-visualization defaults.
+
+Similarity (morphological + connection-profile panels) and NeuronBridge
+analysis panels default to line mode with the fast pipeline, while the
+dedicated Skeleton tab keeps its independent tube/fast configuration.
+Explicit tube overrides on the shared component are preserved, and the
+FlyWire branch of the cache-default logic keeps the prepared mesh cache
+enabled even when line mode disables the NeuPrint method selector.
+"""
+
+import sys
+from pathlib import Path
+
+from nicegui import Client
+from nicegui.page import page
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from ui.components.skeleton_visualization_settings import (  # noqa: E402
+    skeleton_visualization_settings,
+)
+from ui.tabs.find_similar import create_find_similar_tab  # noqa: E402
+from ui.tabs.nb_find_neuron import create_nb_find_neuron_tab  # noqa: E402
+from ui.tabs.visualization import create_skeleton_tab  # noqa: E402
+
+
+def _labeled(client):
+    return {
+        element._props.get("label"): element
+        for element in client.elements.values()
+        if getattr(element, "_props", {}).get("label")
+    }
+
+
+def _checkbox_by_text(client, text):
+    return next(
+        element for element in client.elements.values()
+        if getattr(element, "text", "") == text
+    )
+
+
+def _build(factory, url):
+    client = Client(page(url))
+    with client:
+        factory()
+    return client, _labeled(client)
+
+
+def test_similarity_panels_default_to_line_with_fast_pipeline():
+    """Both Similarity editors start in line mode with the fast method."""
+    client, by_label = _build(
+        create_find_similar_tab, "/similar-subcaller-line-defaults")
+
+    modes = [
+        element.value for element in client.elements.values()
+        if getattr(element, "_props", {}).get("label") == "Skeleton Mode"
+    ]
+    methods = [
+        element for element in client.elements.values()
+        if getattr(element, "_props", {}).get("label") == "Simplification Method"
+    ]
+    # Morphological panel + connection-profile panel.
+    assert len(modes) == 2
+    assert modes == ["line", "line"]
+    assert [method.value for method in methods] == ["fast", "fast"]
+    # Line mode disables the NeuPrint-only method selector.
+    assert all(method.enabled is False for method in methods)
+
+
+def test_neuronbridge_panel_defaults_to_line_with_fast_pipeline():
+    client, by_label = _build(
+        create_nb_find_neuron_tab, "/nb-subcaller-line-defaults")
+
+    mode = by_label["Skeleton Mode"]
+    method = by_label["Simplification Method"]
+    assert mode.value == "line"
+    assert method.value == "fast"
+    assert method.enabled is False
+
+
+def test_dedicated_skeleton_tab_keeps_independent_tube_default():
+    """The Skeleton tab does not inherit the analysis line default."""
+    client, by_label = _build(create_skeleton_tab, "/skeleton-tab-defaults")
+
+    assert by_label["Skeleton Mode"].value == "tube"
+    assert by_label["Simplification Method"].value == "fast"
+    # NeuPrint tube mode leaves the method selector enabled.
+    assert by_label["Simplification Method"].enabled is True
+
+
+def test_explicit_tube_override_preserved():
+    """Callers can still opt into tube mode via the shared component."""
+    client, by_label = _build(
+        lambda: skeleton_visualization_settings(default_skeleton_mode="tube"),
+        "/subcaller-tube-override",
+    )
+
+    assert by_label["Skeleton Mode"].value == "tube"
+    assert by_label["Simplification Method"].value == "fast"
+    assert by_label["Simplification Method"].enabled is True
+
+
+def test_flywire_keeps_prepared_mesh_cache_default_in_line_mode():
+    """FAFB analysis renders keep the prepared mesh cache default even
+    though the disabled NeuPrint method selector starts at fast."""
+    client, by_label = _build(
+        lambda: skeleton_visualization_settings(
+            default_skeleton_mode="line",
+            dataset_provider=lambda: "flywire_FAFB_v783",
+        ),
+        "/subcaller-flywire-cache-default",
+    )
+
+    assert by_label["Skeleton Mode"].value == "line"
+    assert by_label["Simplification Method"].value == "fast"
+    assert by_label["Simplification Method"].enabled is False
+    assert _checkbox_by_text(client, "Cache Neurons").value is True
+
+
+def test_neuprint_fast_pipeline_disables_cache_by_default():
+    """NeuPrint fast renders start uncached (strict use_cache policy);
+    the fine pipeline keeps the shared raw cache default."""
+    client, by_label = _build(
+        lambda: skeleton_visualization_settings(
+            default_skeleton_mode="tube",
+            dataset_provider=lambda: "male-cns:v1.0",
+        ),
+        "/subcaller-neuprint-fast-cache-default",
+    )
+
+    assert by_label["Simplification Method"].value == "fast"
+    assert _checkbox_by_text(client, "Cache Neurons").value is False

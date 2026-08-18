@@ -358,11 +358,12 @@ def skeleton_visualization_settings(
             fields["neuprint_skeleton_pipeline"] = select_input(
                 "Simplification Method",
                 ["fast", "fine", "artistic"],
-                "fine",
+                "fast",
                 hint=(
-                    "NeuPrint tube rendering: 'fast' uses direct simp90 "
-                    "simplification; 'fine' smooths/resamples and uses "
-                    "the accelerated FAFB radius profile; 'artistic' uses "
+                    "NeuPrint tube rendering: 'fast' (default) uses direct "
+                    "simp90 simplification plus the FAFB fast node-reduction "
+                    "stage; 'fine' smooths/resamples and uses the "
+                    "accelerated FAFB radius profile; 'artistic' uses "
                     "vertex-cluster mesh decimation. All methods use "
                     "batched parallel online fetching. Disabled for "
                     "FlyWire/FAFB and line mode."
@@ -433,9 +434,15 @@ def skeleton_visualization_settings(
             )
             if not cache_default_state["user_changed"]:
                 pipeline = str(
-                    fields["neuprint_skeleton_pipeline"].value or "fine"
+                    fields["neuprint_skeleton_pipeline"].value or "fast"
                 ).strip().lower()
-                default_cache = pipeline not in {"fast", "artistic"}
+                # FAFB's disabled method selector starts at ``fast``, but
+                # its prepared mesh cache should still be the default for
+                # analysis renders (mirrors the Skeleton tab).
+                default_cache = (
+                    True if is_flywire
+                    else pipeline not in {"fast", "artistic"}
+                )
                 if fields["cache_neurons"].value != default_cache:
                     cache_default_state["updating"] = True
                     try:

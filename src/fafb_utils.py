@@ -314,12 +314,17 @@ def _extrusion_worker(task, simplification=0.95):
 
 
 def flag_extrusions(project_root, dataset_folder, skeletons, verbose=False,
-                    log=None, simplification=0.95, n_workers=0):
+                    log=None, simplification=0.95, n_workers=0,
+                    use_cache=True):
     """Extrusion check with cached results; returns flagged body ids (int).
 
     ``skeletons`` maps bodyId -> TreeNeuron. Previously checked neurons are
     served from ``extrusion_check_results.parquet``; new results are
     persisted so the analysis runs once per neuron.
+
+    ``use_cache=False`` runs the check fully in memory: the parquet cache
+    is neither read nor written, so callers with caching disabled leave
+    ``extrusion_check_results.parquet`` untouched.
 
     Unchecked neurons are analyzed in a parallel batch (process pool,
     ``n_workers``; 0 = auto up to 8). Platforms/sandboxes where the pool
@@ -344,7 +349,8 @@ def flag_extrusions(project_root, dataset_folder, skeletons, verbose=False,
     }
     skeletons = normalized_skeletons
 
-    cache = load_extrusion_check_cache(project_root, dataset_folder)
+    cache = (load_extrusion_check_cache(project_root, dataset_folder)
+             if use_cache else {})
     flagged = [int(b) for b in skeletons if cache.get(str(b), False)]
     to_check = [int(b) for b in skeletons if str(b) not in cache]
     if not to_check:
@@ -416,7 +422,8 @@ def flag_extrusions(project_root, dataset_folder, skeletons, verbose=False,
             pbar.set_postfix_str(f"{bid}")
 
     pbar.close()
-    save_extrusion_check_cache(project_root, dataset_folder, new_results)
+    if use_cache:
+        save_extrusion_check_cache(project_root, dataset_folder, new_results)
     if flagged:
         _report(f"Extrusion check: {len(flagged)} neuron(s) flagged for "
                 "API replacement.")

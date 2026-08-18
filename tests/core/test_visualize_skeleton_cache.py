@@ -166,6 +166,50 @@ class TestFlywireCacheUntouched:
         assert not (cache_dir / "API_cache").exists()
 
 
+class TestStrictNoCachePolicy:
+    def test_prepare_with_cache_neurons_false_skips_raw_cache_and_persist(
+            self, tmp_path, monkeypatch):
+        """cache_neurons=False: no shared raw-cache read, online fetches
+        receive persist=False, and nothing is written by the prepare phase."""
+        vs = build_vs(tmp_path, cache_neurons=False)
+        vs.skeleton_mode = "line"
+        vs.show_connectors = False
+        vs.skeleton_mesh_simplification = 0.0
+
+        # The shared raw cache must never be consulted.
+        monkeypatch.setattr(
+            "morphology.find_similar_raw_cache",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError(
+                    "cache_neurons=False read the shared raw cache")),
+        )
+        fetch_kwargs_seen = {}
+        neuron = make_neuron(120)
+        neuron.id = 101
+
+        def fake_batched(fetch_df, fetch_kwargs, persist=True):
+            fetch_kwargs_seen["persist"] = persist
+            return [neuron]
+
+        vs._fetch_neuprint_skeletons_batched = fake_batched
+        vs._persist_fetched_neuprint_skeletons = (
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError(
+                    "cache_neurons=False persisted fetched skeletons")))
+
+        prepared, prepared_mesh = vs._prepare_neuprint_skeletons_for_render(
+            [101], use_neuprint_fine_pipeline=False,
+            use_neuprint_mesh_cache=False, neuprint_mesh_cache={})
+
+        assert fetch_kwargs_seen == {"persist": False}
+        assert 101 in prepared
+        assert prepared_mesh is False
+        # The line render product is the in-memory 50% reduction; the
+        # canonical fetched source is untouched.
+        assert prepared[101].n_nodes < neuron.n_nodes
+        assert neuron.n_nodes == 120
+
+
 class TestCustomLayerGrouping:
     """layer_map_csv: rows sharing a 'layer' value become ONE group (one
     legend entry in 'layer' mode, one individual profile)."""

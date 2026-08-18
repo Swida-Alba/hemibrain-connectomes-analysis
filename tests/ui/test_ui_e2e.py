@@ -578,7 +578,8 @@ class TestRunner:
         assert by_label["Visualize Top N Types / Neurons"].value == DEFAULTS["morph_visualize_top_n"]
         assert by_label["Visualize Top N Candidates"].value == 5
         assert by_label["Visualize By"].value == DEFAULTS["morph_visualize_by"]
-        assert by_label["Mesh Simplification"].value == 0.98
+        # Analysis panels now default to the fast pipeline (0.90 removal).
+        assert by_label["Mesh Simplification"].value == 0.90
         assert any(
             getattr(el, "_props", {}).get("label") == "Advanced Visualization"
             for el in client.elements.values()
@@ -642,7 +643,9 @@ class TestRunner:
             if getattr(el, "_props", {}).get("label") == "Mesh Simplification"
         )
 
-        assert mesh.value == 0.98
+        # The fast pipeline is now the analysis default: 0.90 removal for
+        # NeuPrint renders, 0.98 for the FAFB family.
+        assert mesh.value == 0.90
         dataset.value = "flywire_FAFB_v783"
         assert mesh.value == 0.98
 
@@ -652,7 +655,7 @@ class TestRunner:
         assert mesh.value == 0.75
 
         default_control.value = True
-        assert mesh.value == 0.98
+        assert mesh.value == 0.90
 
         mode = next(
             el for el in client.elements.values()
@@ -662,11 +665,11 @@ class TestRunner:
             el for el in client.elements.values()
             if getattr(el, "_props", {}).get("label") == "Simplification Method"
         )
-        # Analysis tabs default to line mode; tube/fine is an explicit
-        # high-quality opt-in.
+        # Analysis tabs default to line mode with the fast pipeline;
+        # tube/fine is an explicit high-quality opt-in.
         assert mode.value == "line"
         assert method.enabled is False
-        assert method.value == "fine"
+        assert method.value == "fast"
         assert default_control.enabled is False
         assert mesh.enabled is False
         mode.value = "tube"

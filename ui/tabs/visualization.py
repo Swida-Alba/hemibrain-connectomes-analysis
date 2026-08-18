@@ -348,12 +348,14 @@ def create_skeleton_tab():
                         ["fast", "fine", "artistic"],
                         "fast",
                         hint=(
-                            "NeuPrint tube rendering: 'fast' uses direct simp90 "
-                            "simplification; 'fine' smooths/resamples with the "
-                            "accelerated FAFB radius profile; 'artistic' uses "
-                            "vertex-cluster mesh decimation. All methods use "
-                            "batched parallel online fetching. "
-                            "Disabled for FlyWire/FAFB and line mode."
+                            "NeuPrint tube rendering: 'fast' (default) uses "
+                            "direct simp90 simplification plus the FAFB fast "
+                            "node-reduction stage; 'fine' smooths/resamples "
+                            "with the accelerated FAFB radius profile; "
+                            "'artistic' uses vertex-cluster mesh decimation. "
+                            "All methods use batched parallel online "
+                            "fetching. Disabled for FlyWire/FAFB and line "
+                            "mode."
                         ),
                     )
                     default_simplification = checkbox_input(

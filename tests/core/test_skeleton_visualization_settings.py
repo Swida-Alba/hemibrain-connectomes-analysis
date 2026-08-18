@@ -117,12 +117,14 @@ def test_visualization_warning_notes_record_effective_simplification(tmp_path):
 
 
 def test_html_simplification_warning_uses_dataset_specific_thresholds():
+    # The default pipeline is now fast: NeuPrint warns above 0.90 unless
+    # a fine/artistic pipeline is explicitly selected.
     assert VisualizeSkeleton._skeleton_simplification_warning(
-        "male-cns:v1.0", "neuprint", "tube", 0.95
+        "male-cns:v1.0", "neuprint", "tube", 0.90
     ) is None
     assert VisualizeSkeleton._skeleton_simplification_warning(
-        "male-cns:v1.0", "neuprint", "tube", 0.951
-    )["threshold"] == 0.95
+        "male-cns:v1.0", "neuprint", "tube", 0.901
+    )["threshold"] == 0.90
     assert VisualizeSkeleton._skeleton_simplification_warning(
         "male-cns:v1.0", "neuprint", "tube", 0.90, "fast"
     ) is None
@@ -189,6 +191,73 @@ def test_html_writer_embeds_plotly_runtime_and_injects_warning(tmp_path):
     assert "skeleton_mesh_simplification=0.950" in html
     assert "fixed simp90 skeleton cache" in html
     assert html.index("drocat-skeleton-simplification-warning") > html.index("<body>")
+
+
+def test_line_mode_html_raises_export_pipeline_warning(tmp_path):
+    """Every line-mode page carries the high-quality export-pipeline warning."""
+
+    class FakeFigure:
+        def write_html(self, path, **kwargs):
+            Path(path).write_text(
+                "<html><head></head><body><div id='figure'></div></body></html>",
+                encoding="utf-8",
+            )
+
+    visualizer = object.__new__(VisualizeSkeleton)
+    visualizer.dataset = "male-cns:v1.0"
+    visualizer.client_type = "neuprint"
+    visualizer.skeleton_mode = "line"
+    visualizer.neuprint_skeleton_pipeline = "fast"
+    visualizer.skeleton_mesh_simplification = 0.99
+    visualizer._vprint = lambda *args, **kwargs: None
+
+    path = tmp_path / "line_mode.html"
+    visualizer._write_plotly_html(FakeFigure(), str(path))
+
+    html = path.read_text(encoding="utf-8")
+    assert "drocat-line-mode-export-warning" in html
+    assert "Line-mode skeleton rendering" in html
+    assert "high-quality export pipeline" in html
+    assert html.index("drocat-line-mode-export-warning") > html.index("<body>")
+    # The tube-surface simplification warning does not apply to lines.
+    assert "drocat-skeleton-simplification-warning" not in html
+
+
+def test_tube_mode_html_omits_line_mode_export_warning(tmp_path):
+    class FakeFigure:
+        def write_html(self, path, **kwargs):
+            Path(path).write_text(
+                "<html><head></head><body><div id='figure'></div></body></html>",
+                encoding="utf-8",
+            )
+
+    visualizer = object.__new__(VisualizeSkeleton)
+    visualizer.dataset = "male-cns:v1.0"
+    visualizer.client_type = "neuprint"
+    visualizer.skeleton_mode = "tube"
+    visualizer.neuprint_skeleton_pipeline = "fast"
+    visualizer.skeleton_mesh_simplification = 0.90
+    visualizer._vprint = lambda *args, **kwargs: None
+
+    path = tmp_path / "tube_mode.html"
+    visualizer._write_plotly_html(FakeFigure(), str(path))
+
+    html = path.read_text(encoding="utf-8")
+    assert "drocat-line-mode-export-warning" not in html
+
+
+def test_user_warning_notes_record_line_mode_export_warning(tmp_path):
+    visualizer = object.__new__(VisualizeSkeleton)
+    visualizer.dataset = "flywire_FAFB_v783"
+    visualizer.skeleton_mode = "line"
+    visualizer.skeleton_mesh_simplification = 0.98
+    visualizer.save_folder = str(tmp_path)
+    visualizer._vprint = lambda *args, **kwargs: None
+
+    visualizer._write_user_warning_notes()
+
+    notes = (tmp_path / "user_warning_notes.txt").read_text(encoding="utf-8")
+    assert "in-page export-pipeline warning raised for line mode" in notes
 
 
 def test_fine_html_warning_starts_above_simp95(tmp_path):

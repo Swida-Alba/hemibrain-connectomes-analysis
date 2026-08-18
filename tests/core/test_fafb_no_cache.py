@@ -166,3 +166,62 @@ def test_polars_enrichment_casts_empty_global_denominator_numeric():
     assert conn_enriched["connection_ratio"].dtype == pl.Float64
     assert conn_enriched["connection_ratio"].to_list() == [1.0]
     assert conn_type["connection_ratio"].to_list() == [1.0]
+
+
+def _extrusion_neuron():
+    import navis
+
+    return navis.TreeNeuron(pd.DataFrame({
+        "node_id": [0], "parent_id": [-1],
+        "x": [0.0], "y": [0.0], "z": [0.0],
+        "radius": [1.0], "type": ["root"],
+    }))
+
+
+def test_flag_extrusions_use_cache_false_skips_parquet(monkeypatch, tmp_path):
+    """use_cache=False runs extrusion detection in-memory only and never
+    touches extrusion_check_results.parquet (strict use_cache policy)."""
+    from fafb_utils import flag_extrusions
+
+    monkeypatch.setattr(
+        "fafb_utils.load_extrusion_check_cache",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("use_cache=False read the extrusion parquet")),
+    )
+    monkeypatch.setattr(
+        "fafb_utils.save_extrusion_check_cache",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("use_cache=False wrote the extrusion parquet")),
+    )
+    monkeypatch.setattr(
+        "fafb_utils.detect_extrusion",
+        lambda neuron, simplification=0.95: True,
+    )
+
+    flagged = flag_extrusions(
+        str(tmp_path), "flywire_FAFB_v783", {"101": _extrusion_neuron()},
+        use_cache=False, n_workers=0)
+
+    assert flagged == [101]
+
+
+def test_flag_extrusions_use_cache_true_serves_known_results(
+        monkeypatch, tmp_path):
+    """Cached extrusion results are served without re-running detection."""
+    from fafb_utils import flag_extrusions
+
+    monkeypatch.setattr(
+        "fafb_utils.load_extrusion_check_cache",
+        lambda *a, **k: {"101": True},
+    )
+    monkeypatch.setattr(
+        "fafb_utils.detect_extrusion",
+        lambda neuron, simplification=0.95: (_ for _ in ()).throw(
+            AssertionError("cached result was re-detected")),
+    )
+
+    flagged = flag_extrusions(
+        str(tmp_path), "flywire_FAFB_v783", {"101": _extrusion_neuron()},
+        use_cache=True, n_workers=0)
+
+    assert flagged == [101]
