@@ -549,6 +549,44 @@ class TestUnifiedBuilders:
         assert n1 == n2 == 2
         assert out1.read_text() == out2.read_text()
 
+    def test_csv_exports_keep_synapse_counts_integer_valued(self, tmp_path):
+        """Counts stay integer-formatted while ratio/probability fields stay decimal."""
+        from coana import FindNeuronConnection
+        from statvis import process_paths_streaming as sv_stream
+
+        # Exercise the shared edge-table CSV writer with an upstream Float64
+        # weight column, which is the original 5.0/6.0 failure mode.
+        finder = object.__new__(FindNeuronConnection)
+        edge_path = tmp_path / 'edges.csv'
+        edge_df = pl.DataFrame({
+            'type_pre': ['A'],
+            'type_post': ['X'],
+            'weight': [5.0],
+            'connection_ratio': [0.25],
+            'traversal_probability': [0.75],
+        })
+        finder._save_df_to_csv_polars(edge_df, str(edge_path))
+        edge_text = edge_path.read_text()
+        assert '5.0' not in edge_text
+        edge_read = pl.read_csv(edge_path)
+        assert edge_read.schema['weight'] == pl.Int64
+        assert edge_read['weight'].to_list() == [5]
+        assert edge_read['connection_ratio'].to_list() == pytest.approx([0.25])
+
+        # Exercise the streaming path writer, including the list-valued
+        # ``weights`` field and scalar ``min_weight`` field.
+        path_path = tmp_path / 'paths.csv'
+        conn_float = _enriched_type_table().with_columns(
+            pl.col('weight').cast(pl.Float64)
+        )
+        assert sv_stream(
+            iter([['A', 'X', 'Y']]), conn_float, ['Y'], str(path_path), verbose=False
+        ) == 1
+        path_read = pl.read_csv(path_path)
+        assert path_read['weights'].to_list() == ['[15, 3]']
+        assert path_read['min_weight'].to_list() == [3]
+        assert '15.0' not in path_path.read_text()
+
 
 # ---------------------------------------------------------------------------
 # Path-level metrics

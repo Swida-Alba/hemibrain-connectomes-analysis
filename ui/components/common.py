@@ -643,6 +643,7 @@ def neuron_list_input(
         return f"{unit_label}{'s' if count != 1 else ''}"
 
     uploaded_neurons: List = []
+    value_change_callbacks: List[Callable[[], None]] = []
     chip_list_expanded = {"value": False}
 
     async def handle_upload(e):
@@ -884,6 +885,13 @@ def neuron_list_input(
         count_badge.text = f"{count} {_unit(count)}"
         count_badge.props(f"color={'primary' if count else 'grey-6'}")
         expand_button.set_visibility(bool(chip_input.value))
+        for callback in list(value_change_callbacks):
+            try:
+                callback()
+            except Exception:
+                # A page-level advisory must not break the shared input when
+                # a consumer is torn down during a tab switch.
+                pass
 
     def toggle_chip_list() -> None:
         """Toggle the compact three-row view of the chip editor."""
@@ -1658,6 +1666,13 @@ def neuron_list_input(
     container.uploaded_neurons = uploaded_neurons
     container.suggest_menu = suggest_menu
     container.neuron_index_link = viewer_link
+
+    def add_value_change_listener(callback: Callable[[], None]) -> None:
+        """Register a callback for chip, upload, viewer, or clear changes."""
+        if callable(callback) and callback not in value_change_callbacks:
+            value_change_callbacks.append(callback)
+
+    container.add_value_change_listener = add_value_change_listener
 
     def add_values(values) -> List:
         """Merge *values* into the chip list (programmatic append)."""

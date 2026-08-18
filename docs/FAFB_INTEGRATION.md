@@ -190,9 +190,12 @@ vs.plot_neurons()
 1. When loading skeletons from ZIP, each is converted to a simplified mesh
 2. Edge length analysis detects abnormal "spiky" geometry (edge ratio > 10x median)
 3. Problematic neurons are automatically fetched fresh from CAVE API
-4. **Extrusion check results are cached** in `cache/{dataset}/extrusion_check_results.parquet`
-5. On subsequent runs, only new neurons are checked (previously checked neurons use cached results)
-6. Fixed neurons are cached in `cache/{dataset}/API_cache/skeletons/` for future use
+4. If a CAVE fetch fails, the long parent→child edge is mapped back to the local
+   tree and only that child subtree is pruned when the cut is safe
+5. **Extrusion check results are cached** in `cache/{dataset}/extrusion_check_results.parquet`
+6. On subsequent runs, only new neurons are checked (previously checked neurons use cached results)
+7. CAVE replacements are cached; local fallback repairs remain in memory and do not
+   overwrite the canonical raw skeleton
 
 **Performance notes:**
 - First run may take longer due to mesh analysis for extrusion detection
@@ -333,4 +336,4 @@ result = VisualizeSkeleton.detect_mesh_extrusions(
 *   **Root IDs**: FAFB root IDs are very large integers. The system handles them as strings internally to avoid precision loss, but you can pass them as integers in your scripts.
 *   **Caching**: The caching system currently produces warnings for FAFB IDs due to their size, but this does not affect the analysis results.
 *   **Skeletons**: Skeleton visualization requires either the `sk_lod1_783_healed.zip` file or CAVE API access (via `force_API_fetching=True`). VisualizeSkeleton always prioritizes API-cached skeletons over ZIP data.
-*   **Extrusion Issues**: The downloaded `sk_lod1_783_healed.zip` may contain neurons with extrusion artifacts (mesh errors appearing as spikes). Use `VisualizeSkeleton.fix_fafb_extrusions([bodyId1, bodyId2, ...])` to fetch fresh skeletons for problematic neurons. Once cached, they will be automatically used instead of ZIP versions.
+*   **Extrusion Issues**: The downloaded `sk_lod1_783_healed.zip` may contain neurons with extrusion artifacts (mesh errors appearing as spikes). Use `VisualizeSkeleton.fix_fafb_extrusions([bodyId1, bodyId2, ...])` to fetch fresh meshes for problematic neurons. If CAVE is unavailable during automatic repair, the visualizer prunes a safely localized bad node subtree in memory without overwriting the raw ZIP/cache source.

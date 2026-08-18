@@ -90,8 +90,27 @@ class TestNeuprintPipeline:
         assert build_vs(tmp_path, pipeline="fafb")._resolved_neuprint_skeleton_pipeline() == "fine"
 
     def test_fine_methods_default_to_mesh_cache_level(self, tmp_path):
+        assert build_vs(tmp_path / "fast", pipeline="fast").skeleton_mesh_simplification == pytest.approx(0.90)
         assert build_vs(tmp_path / "fine", pipeline="fine").skeleton_mesh_simplification == pytest.approx(0.95)
         assert build_vs(tmp_path / "artistic", pipeline="artistic").skeleton_mesh_simplification == pytest.approx(0.95)
+
+    def test_fafb_pipeline_defaults_follow_selected_method(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            visualize_skeleton_module.FAFB_file_converter,
+            "ensure_flywire_data",
+            lambda *args, **kwargs: True,
+        )
+        assert build_vs(
+            tmp_path / "fafb-fast",
+            dataset="flywire_FAFB_v783",
+            pipeline="fast",
+        ).skeleton_mesh_simplification == pytest.approx(0.90)
+        assert build_vs(
+            tmp_path / "fafb-fine",
+            dataset="flywire_FAFB_v783",
+            pipeline="fine",
+        ).skeleton_mesh_simplification == pytest.approx(0.95)
 
     def test_artistic_fetches_bounded_batches_in_requested_order(
             self, tmp_path, monkeypatch):

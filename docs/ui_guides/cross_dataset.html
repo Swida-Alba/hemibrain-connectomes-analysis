@@ -43,8 +43,8 @@
   <h2>Parameters</h2>
   <table>
     <tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr>
-    <tr><td>Path Enumeration</td><td>all</td><td><code>all</code>: every path within the layer limit (FindAllPath). <code>shortest</code>: only the per-(source, target) minimum-hop paths (FindShortestPath); discovery stops early once all targets are found, and Max Intermediate Layers <code>0</code> means unlimited depth.</td></tr>
-    <tr><td>Max Intermediate Layers</td><td>2</td><td>Path depth for path mode. In shortest mode an optional safety cap: 0 = unlimited.</td></tr>
+    <tr><td>Path Enumeration</td><td>all</td><td><code>all</code>: every path within the layer limit (FindAllPath). <code>shortest</code>: only the per-(source bodyId, target bodyId) minimum-hop paths (FindShortestPath), using target-rooted incoming discovery.</td></tr>
+    <tr><td>Max Intermediate Layers</td><td>2</td><td>Path depth for path mode. In shortest mode, 0 = direct connections only; a positive value caps paths at layers + 1 hops. A capped result is shortest only within the explored graph.</td></tr>
     <tr><td>Top Edges in Analysis Reports</td><td>500</td><td>Limits top-edge comparison/overlap results, edge/path presence-matrix rows, and path-presence data used by comparison summary plots; it does not trim pathfinding or set the per-visualization drawn-edge cap</td></tr>
     <tr><td>Edge Limit – BodyIds</td><td>1,000,000</td><td>Trims the bodyId discovery graph before pathfinding for deep searches (Layers &ge; 3); 0 = no graph trimming, while a positive cap can change path results</td></tr>
     <tr><td>Visualization Edge Limit</td><td>500</td><td>Caps edges drawn in each network/Sankey/heatmap visualization; it does not alter fetched connections or pathfinding</td></tr>

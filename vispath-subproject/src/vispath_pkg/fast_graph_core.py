@@ -1250,6 +1250,134 @@ class FastGraph:
                 except Exception:
                     pass
 
+    def find_paths_shortest_backward(self, targets, sources, cutoff=None,
+                                     verbose=False, target_cutoffs=None):
+        """Enumerate shortest paths by walking backward from each target.
+
+        This is the target-rooted counterpart of :meth:`find_paths_shortest`.
+        The distance pass still runs over the lazy reverse index, but path
+        reconstruction starts at the target and follows only reverse-DAG
+        branches that contain one of the requested source nodes.  Branches
+        that cannot end at a requested source are never expanded, which is
+        important when a target has a large incoming fan-in but only a small
+        subset of sources is in scope.
+
+        Returned paths retain the normal source-to-target orientation.  A
+        source that is itself a target is excluded at zero hops, matching the
+        sibling shortest enumerator's convention.
+
+        ``target_cutoffs`` optionally maps each target to its own maximum hop
+        depth.  This is used by target-rooted discovery: a target first found
+        at depth ``d`` must not later emit a source-target path longer than
+        ``d`` merely because another source was found farther upstream.
+        """
+        from collections import deque
+
+        target_set = set(t for t in targets if t in self.adj)
+        source_list = [s for s in dict.fromkeys(sources) if s in self.adj]
+        source_set = set(source_list)
+        if not target_set or not source_set:
+            return
+
+        radj = self._ensure_radj()
+        target_iter = sorted(target_set, key=str)
+        if verbose:
+            target_iter = LineProgress(target_iter,
+                                       desc='Backward shortest paths',
+                                       leave=False)
+
+        total_paths = 0
+        for target in target_iter:
+            target_cutoff = cutoff
+            if target_cutoffs is not None:
+                configured = target_cutoffs.get(target)
+                if configured is None:
+                    configured = target_cutoffs.get(str(target))
+                if configured is not None:
+                    target_cutoff = max(0, int(configured))
+
+            # Reverse BFS: dist[node] is the hop count from node to target.
+            dist = {target: 0}
+            queue = deque([target])
+            while queue:
+                node = queue.popleft()
+                node_dist = dist[node]
+                if target_cutoff is not None and node_dist >= target_cutoff:
+                    continue
+                next_dist = node_dist + 1
+                for predecessor in radj.get(node, ()):
+                    if predecessor not in dist:
+                        dist[predecessor] = next_dist
+                        queue.append(predecessor)
+
+            # Mark only nodes on a shortest-DAG branch that reaches a
+            # requested source.  Processing distances from farthest to
+            # nearest avoids recursive traversal and keeps unrelated incoming
+            # branches out of reconstruction entirely.
+            valid_nodes = {
+                source for source in source_set
+                if source != target
+                and source in dist
+                and (target_cutoff is None
+                     or dist[source] <= target_cutoff)
+            }
+            by_distance = sorted(dist.items(), key=lambda item: item[1],
+                                 reverse=True)
+            for node, node_dist in by_distance:
+                if node in valid_nodes:
+                    continue
+                if any(
+                    dist.get(predecessor) == node_dist + 1
+                    and predecessor in valid_nodes
+                    for predecessor in radj.get(node, ())
+                ):
+                    valid_nodes.add(node)
+
+            if target not in valid_nodes:
+                if verbose:
+                    try:
+                        target_iter.set_postfix(paths=f"{total_paths:,}",
+                                                refresh=True)
+                    except Exception:
+                        pass
+                continue
+
+            # Iterative DFS on the reverse shortest-path DAG.  ``path_rev``
+            # is target -> ... -> source and is reversed only when yielded.
+            stack = [(target, [target], iter(radj.get(target, ()) ))]
+            while stack:
+                node, path_rev, predecessor_iter = stack[-1]
+                node_dist = dist[node]
+                advanced = False
+                for predecessor in predecessor_iter:
+                    if dist.get(predecessor) != node_dist + 1:
+                        continue
+                    if predecessor not in valid_nodes:
+                        continue
+                    candidate = path_rev + [predecessor]
+                    if predecessor in source_set and predecessor != target:
+                        yield list(reversed(candidate))
+                        total_paths += 1
+                    # A requested source can also be an intermediate node
+                    # for another requested source.  Emit its own pair, but
+                    # keep walking upstream so that source2 -> source1 ->
+                    # target is not lost when both source IDs are enrolled.
+                    stack.append(
+                        (predecessor, candidate,
+                         iter(radj.get(predecessor, ())))
+                    )
+                    advanced = True
+                    break
+                if not advanced:
+                    stack.pop()
+
+            if verbose:
+                try:
+                    target_iter.set_postfix(paths=f"{total_paths:,}",
+                                            refresh=True)
+                except Exception:
+                    pass
+
     def find_paths_bidirectional_bfs(self, sources, targets, cutoff, verbose=False):
         """
         Bidirectional BFS (Layer-based) pathfinding.

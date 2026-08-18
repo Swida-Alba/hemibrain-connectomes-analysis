@@ -354,15 +354,16 @@ def create_skeleton_tab():
                             "with the accelerated FAFB radius profile; "
                             "'artistic' uses vertex-cluster mesh decimation. "
                             "All methods use batched parallel online "
-                            "fetching. Disabled for FlyWire/FAFB and line "
-                            "mode."
+                            "fetching and are available for NeuPrint and "
+                            "FlyWire/FAFB tube renders; line mode bypasses "
+                            "the method."
                         ),
                     )
                     default_simplification = checkbox_input(
                         "Use Default Mesh Simplification", True,
                         hint="Use the method default: fast removes 0.90 of faces; "
-                             "fine/artistic remove 0.95. FAFB uses 0.95 in this "
-                             "tab. Uncheck to set the value below.",
+                             "fine/artistic remove 0.95 for NeuPrint and "
+                             "FlyWire/FAFB. Uncheck to set the value below.",
                     )
                     mesh_simplification = number_input(
                         "Mesh Simplification (faces removed)",
@@ -457,12 +458,12 @@ def create_skeleton_tab():
             )
             default_simplification.set_enabled(not is_line)
             simplification_method.set_enabled(
-                not is_line and not is_flywire_dataset(str(dataset.value or ""))
+                not is_line
             )
             if not cache_default_state["user_changed"]:
-                # FAFB's disabled method selector historically starts at
-                # ``fast``. Its dedicated 95% target should still use the
-                # prepared mesh cache by default.
+                # FAFB's method selector starts at ``fast`` and remains
+                # selectable; its fast/fine default follows the selected
+                # method while cache eligibility is handled independently.
                 default_cache = (
                     True if is_flywire_dataset(str(dataset.value or ""))
                     else pipeline not in {"fast", "artistic"}

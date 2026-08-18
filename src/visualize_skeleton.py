@@ -63,11 +63,13 @@ FAFB-Specific Features
 ----------------------
 For FlyWire/FAFB datasets, the system includes:
 - **Soma-aware mesh simplification**: Preserves cell body detail
-  (skeleton_mesh_simplification=0.95, soma_mesh_simplification=0.8)
+  (fast skeleton_mesh_simplification=0.90; fine/artistic=0.95;
+  soma_mesh_simplification=0.8)
 - **Automatic extrusion detection**: Identifies and replaces distorted skeletons
   (auto_fix_extrusions=True by default)
 - **Parquet-based caching**: Efficient storage of extrusion check results
-- **API fallback**: Fetches fresh skeletons from CAVE API when needed
+- **API fallback**: Fetches fresh meshes from CAVE API when needed, with a
+  local branch-pruning fallback when an affected tree cannot be replaced
 
 Performance Notes
 -----------------
@@ -1537,8 +1539,8 @@ class VisualizeSkeleton:
     
     skeleton_mesh_simplification : float, optional
         Mesh simplification factor (0.0-1.0). Higher = more simplification.
-        Default: 0.95 for the dedicated Skeleton tab and fine NeuPrint
-        renders. The direct/fast path uses 0.9 as its render-time target.
+        Default: 0.90 for the fast/direct pipeline and 0.95 for fine/artistic
+        renders in both the dedicated Skeleton tab and analysis renderers.
         Example: 0.95 removes 95% of faces, keeping 5%.
     
     soma_mesh_simplification : float, default=0.8
@@ -2223,9 +2225,9 @@ class VisualizeSkeleton:
     Higher values reduce file size but may lose detail.
     
     Default:
-    - FAFB/FlyWire: 0.95 (remove 95% of faces - high detail meshes)
-    - NeuPrint ``fine``/``artistic``: 0.95 (the transient fine-render target)
-    - NeuPrint ``fast``: 0.90 (the transient direct-render target)
+    - ``fast``/direct: 0.90 (remove 90% of faces)
+    - ``fine``/``artistic``: 0.95 (remove 95% of faces)
+      for both NeuPrint and FAFB/FlyWire tube renders
     
     Recommended: 0.5 - 0.95 for large populations.
     
@@ -2415,7 +2417,10 @@ class VisualizeSkeleton:
     \n
     True: When loading skeletons from ZIP, automatically check for extrusion artifacts\n
           (spiky protrusions from aggressive mesh simplification). If detected, fetch\n
-          fresh meshes from CAVE API to replace them. Results are cached for future use.\n
+          fresh meshes from CAVE API to replace them. If CAVE is unavailable,\n
+          prune only a safely diagnosed local extrusion branch in memory.\n
+          Results are cached for future use; derived local repairs are not\n
+          written as raw data.\n
           This is the default to ensure visual quality.\n
     False: Skip extrusion detection. Faster but may show distorted neurons.\n
     \n
@@ -4029,7 +4034,7 @@ class VisualizeSkeleton:
             navis.config.pbar_hide = previous
 
     def _xform_neurons_safe(self, neuron_vols, source, target, layer_label='layer',
-                            progress_bar=None):
+                            progress_bar=None, compact_progress=False):
         """
         Transform neurons one at a time with explicit progress and per-neuron fallback.
 
@@ -4107,15 +4112,23 @@ class VisualizeSkeleton:
             if pbar is not None and hasattr(pbar, 'set_postfix_str'):
                 pbar.set_postfix_str(status, refresh=refresh)
 
-        set_status(
-            f'{layer_label}: xform 0/{total} | {n_nodes_total:,} pts | {path_label}',
-        )
+        if compact_progress:
+            set_status(f'{layer_label} (0/{total})')
+        else:
+            set_status(
+                f'{layer_label}: xform 0/{total} | '
+                f'{n_nodes_total:,} pts | {path_label}',
+            )
         try:
             for i, n in enumerate(neurons):
                 label = getattr(n, 'name', None) or str(getattr(n, 'id', i))
                 # Refresh before the potentially slow transform so a stalled
                 # neuron remains visible in the one-line progress display.
-                set_status(f'{layer_label}: xform {i}/{total} | current={label}')
+                if compact_progress:
+                    set_status(f'{layer_label} ({i}/{total})')
+                else:
+                    set_status(
+                        f'{layer_label}: xform {i}/{total} | current={label}')
                 if not isinstance(n, navis.BaseNeuron):
                     # Volumes or other non-neuron objects pass through untouched
                     xf_neurons.append(n)
@@ -4139,11 +4152,19 @@ class VisualizeSkeleton:
                 if len(failed) > 3:
                     failed_labels += ', …'
                 set_status(
-                    f'{layer_label}: xform {total}/{total} | ⚠ {len(failed)} failed',
+                    f'{layer_label} ({total}/{total})'
+                    if compact_progress else
+                    f'{layer_label}: xform {total}/{total} | '
+                    f'⚠ {len(failed)} failed',
                 )
             else:
                 elapsed = time.time() - start
-                set_status(f'{layer_label}: xform {total}/{total} | done {elapsed:.1f}s')
+                set_status(
+                    f'{layer_label} ({total}/{total})'
+                    if compact_progress else
+                    f'{layer_label}: xform {total}/{total} | '
+                    f'done {elapsed:.1f}s',
+                )
         finally:
             if owns_progress_bar:
                 pbar.close()
@@ -4718,26 +4739,24 @@ class VisualizeSkeleton:
                 self._vprint("  ℹ️  Disabling synapse caching for FlyWire/FAFB (files too large)", level='full')
                 self.cache_synapses = False
         
-        # Set the default mesh level based on dataset and pipeline if it was
-        # not specified. Fine NeuPrint renders use a 95% transient target;
-        # the legacy fast path keeps its 90% skeleton-cache default.
+        # Set the default mesh level based on the selected pipeline if it was
+        # not specified. Fast/direct renders use 90% removal; fine/artistic
+        # renders use 95%, for both NeuPrint and FlyWire/FAFB tube renders.
         if self.skeleton_mesh_simplification is None:
-            if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
-                # FAFB meshes are very high detail, use 0.95 (keep 5% of faces)
-                self.skeleton_mesh_simplification = 0.95
-                self._vprint(f"  ℹ️  Using default skeleton_mesh_simplification=0.95 for FAFB (high-detail meshes)", level='full')
-            elif self._resolved_neuprint_skeleton_pipeline() in {
-                    'fine', 'artistic'}:
-                self.skeleton_mesh_simplification = 0.95
-                self._vprint(
-                    f"  ℹ️  Using default skeleton_mesh_simplification=0.95 "
-                    f"for NeuPrint {self.neuprint_skeleton_pipeline} fine render",
-                    level='full',
-                )
+            if ('flywire' in self.dataset.lower()
+                    or 'fafb' in self.dataset.lower()):
+                pipeline = self._resolved_fafb_pipeline()
             else:
-                # NeuPrint datasets (hemibrain, male-cns, manc, optic-lobe) use 0.9
-                self.skeleton_mesh_simplification = 0.9
-                self._vprint(f"  ℹ️  Using default skeleton_mesh_simplification=0.9 for {self.dataset}", level='full')
+                pipeline = self._resolved_neuprint_skeleton_pipeline()
+            self.skeleton_mesh_simplification = (
+                0.90 if pipeline in {'fast', 'direct'} else 0.95
+            )
+            self._vprint(
+                f"  ℹ️  Using default skeleton_mesh_simplification="
+                f"{self.skeleton_mesh_simplification:.2f} for {self.dataset} "
+                f"({self.neuprint_skeleton_pipeline} pipeline)",
+                level='full',
+            )
 
         # Auto-detect version from dataset if not provided
         if self.client_type == 'flywire' and self.version is None:
@@ -5045,7 +5064,13 @@ class VisualizeSkeleton:
         
         # Use tqdm for progress bar
         from tqdm import tqdm
-        layer_iter = tqdm(range(n_layers), desc="Loading layers", disable=self.verbose != 'full')
+        # Layer metadata loading is part of setup; keep it out of the
+        # skeleton-render progress stream so rendering has one visible row.
+        layer_iter = tqdm(
+            range(n_layers),
+            desc="Loading layers",
+            disable=True,
+        )
         
         total_neurons = 0
         for i in layer_iter:
@@ -5386,7 +5411,7 @@ class VisualizeSkeleton:
         else:
             warning_note = "in-page warning threshold >0.90"
         if is_fafb_dataset:
-            pipeline_note = "neuprint_skeleton_pipeline=disabled for FlyWire/FAFB"
+            pipeline_note = f"neuprint_skeleton_pipeline={pipeline}"
         else:
             pipeline_note = f"neuprint_skeleton_pipeline={pipeline}"
         note_path = os.path.join(self.save_folder, "user_warning_notes.txt")
@@ -5706,8 +5731,8 @@ class VisualizeSkeleton:
                     zip_files = set(z.namelist())
                     
                     # Progress bar for skeleton loading
-                    pbar = tqdm(all_body_ids, desc="  Loading skeletons", 
-                               disable=self.verbose != 'full', leave=False, file=sys.stdout)
+                    # The render-wide skeleton bar is the only progress row.
+                    pbar = all_body_ids
                     
                     for bid in pbar:
                         filename = f"{bid}.swc"
@@ -5747,20 +5772,14 @@ class VisualizeSkeleton:
         dict
             Dictionary of bodyId -> bool (True if has extrusion)
         """
-        import pandas as pd
-        
-        project_root = os.path.dirname(os.path.dirname(__file__))
+        import fafb_utils
+
+        project_root = getattr(
+            self, 'script_path', os.path.dirname(os.path.dirname(__file__))
+        )
         dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
-        cache_file = os.path.join(project_root, 'cache', dataset_safe, 'extrusion_check_results.parquet')
-        
-        if os.path.exists(cache_file):
-            try:
-                df = pd.read_parquet(cache_file)
-                # Convert DataFrame to dict with bodyId as key
-                return dict(zip(df['bodyId'].astype(str), df['has_extrusion']))
-            except Exception:
-                return {}
-        return {}
+        return fafb_utils.load_extrusion_check_cache(
+            project_root, dataset_safe)
     
     def _save_extrusion_check_cache(self, results_dict):
         """Save extrusion check results to parquet cache.
@@ -5770,27 +5789,14 @@ class VisualizeSkeleton:
         results_dict : dict
             Dictionary of bodyId -> bool (True if has extrusion)
         """
-        import pandas as pd
-        
-        project_root = os.path.dirname(os.path.dirname(__file__))
+        import fafb_utils
+
+        project_root = getattr(
+            self, 'script_path', os.path.dirname(os.path.dirname(__file__))
+        )
         dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
-        cache_dir = os.path.join(project_root, 'cache', dataset_safe)
-        os.makedirs(cache_dir, exist_ok=True)
-        cache_file = os.path.join(cache_dir, 'extrusion_check_results.parquet')
-        
-        # Load existing cache and merge
-        existing = self._load_extrusion_check_cache()
-        existing.update({str(k): v for k, v in results_dict.items()})
-        
-        try:
-            # Convert to DataFrame with bodyId index for efficient lookup
-            df = pd.DataFrame([
-                {'bodyId': str(k), 'has_extrusion': v}
-                for k, v in existing.items()
-            ])
-            df.to_parquet(cache_file, index=False)
-        except Exception as e:
-            self._vprint(f'  ⚠️ Failed to save extrusion cache: {e}', level='full')
+        fafb_utils.save_extrusion_check_cache(
+            project_root, dataset_safe, results_dict)
 
     def _detect_extrusions_in_skeletons(self, skeletons_dict, simplification=0.95,
                                         use_cache=True):
@@ -5819,7 +5825,10 @@ class VisualizeSkeleton:
         )
         return flag_extrusions(
             project_root, dataset_safe, skeletons_dict,
-            verbose=bool(self.verbose),
+            # plot_skeleton owns the single render-wide progress row.  The
+            # extrusion checker must not open its own tqdm row; the summary
+            # callback still reports flagged neurons.
+            verbose=False,
             log=_vprint_simple,
             simplification=simplification,
             use_cache=use_cache,
@@ -6231,7 +6240,10 @@ class VisualizeSkeleton:
             total=len(request_df),
             desc="Fetching NeuPrint skeletons",
             unit="neuron",
-            disable=not self.verbose,
+            # Do not create a second row while plot_skeleton owns the shared
+            # render bar.  The object is still used as a lightweight counter
+            # by the raw-cache persistence callback.
+            disable=True,
             leave=False,
             file=sys.stdout,
         )
@@ -6695,7 +6707,7 @@ class VisualizeSkeleton:
             total=len(body_ids),
             desc="Preprocessing NeuPrint skeletons",
             unit="neuron",
-            disable=not self.verbose,
+            disable=True,
             leave=False,
             file=sys.stdout,
         )
@@ -7216,11 +7228,11 @@ class VisualizeSkeleton:
            caching is enabled in tube mode at/above the prepared level,
         4. CAVE API (online, no skeletonization, no SWC writes).
 
-        Bodies are classified as ``zip``, ``raw_cache``, ``mesh_cache`` or
-        ``cave``.  Cache sources (2/3) are skipped when the ``cache_neurons``
-        policy disables them; the healed ZIP is the canonical raw source and
-        stays eligible.  ``api_only`` (``force_API_fetching``) routes every
-        body straight to CAVE.
+        Bodies are classified as ``zip``, ``raw_cache``, ``mesh_cache``,
+        ``local_repaired`` or ``cave``.  Cache sources (2/3) are skipped when
+        the ``cache_neurons`` policy disables them; the healed ZIP is the
+        canonical raw source and stays eligible.  ``api_only``
+        (``force_API_fetching``) routes every body straight to CAVE.
 
         Extrusion repair runs on TreeNeuron sources only and honors the
         same ``use_cache`` policy for the parquet check results.
@@ -7229,8 +7241,9 @@ class VisualizeSkeleton:
         -------
         tuple
             (sources, skeleton_cache, mesh_cache):
-            sources: canonical bodyId -> 'zip'|'raw_cache'|'mesh_cache'|'cave'
-            skeleton_cache: canonical bodyId -> TreeNeuron (zip/raw_cache)
+            sources: canonical bodyId -> one of ``zip``, ``raw_cache``,
+                     ``local_repaired``, ``mesh_cache`` or ``cave``
+            skeleton_cache: canonical bodyId -> TreeNeuron
             mesh_cache: canonical bodyId -> MeshNeuron (mesh_cache/cave)
         """
         requested = normalize_flywire_body_ids(body_ids)
@@ -7315,15 +7328,89 @@ class VisualizeSkeleton:
                     cache_prepared=allow_mesh_cache,
                     force_refresh=True,
                 )
+                fixed_ids = set()
+                repair_statuses = {}
                 if api_fixed:
                     for key, neuron in api_fixed.items():
                         canonical = normalize_flywire_body_id(key)
+                        fixed_ids.add(canonical)
                         sources[canonical] = 'cave'
                         skeleton_cache.pop(canonical, None)
                         mesh_cache[canonical] = neuron
+                        if self.cache_neurons:
+                            repair_statuses[canonical] = 'api_repaired'
                     self._vprint(
                         f'  ✓ Replaced {len(api_fixed)} extrusion-affected '
                         f'meshes', level='simple')
+
+                # A CAVE outage, missing token, or a per-body API miss must
+                # not put the known-bad ZIP tree back into the render
+                # silently.  Keep the source local and prune only the
+                # diagnosed extrusion branch when the cut is safe.
+                failed_ids = []
+                seen_failed = set()
+                for body_id in extrusion_ids:
+                    canonical = normalize_flywire_body_id(body_id)
+                    if canonical not in fixed_ids and canonical not in seen_failed:
+                        failed_ids.append(canonical)
+                        seen_failed.add(canonical)
+                if failed_ids:
+                    from fafb_utils import repair_extruded_skeleton
+
+                    locally_repaired = 0
+                    for canonical in failed_ids:
+                        source_neuron = skeleton_cache.get(canonical)
+                        if source_neuron is None:
+                            if self.cache_neurons:
+                                repair_statuses[canonical] = 'api_failed'
+                            continue
+                        repaired, repair_stats = repair_extruded_skeleton(
+                            source_neuron)
+                        if repair_stats.get('repaired'):
+                            skeleton_cache[canonical] = repaired
+                            sources[canonical] = 'local_repaired'
+                            locally_repaired += 1
+                            if self.cache_neurons:
+                                # Keep the detection flag. A local fallback
+                                # remains retryable when CAVE is available on
+                                # a later run.
+                                repair_statuses[canonical] = 'local_fallback'
+                            self._vprint(
+                                f'  🩹 CAVE fetch failed for {canonical}; '
+                                f'pruned {repair_stats["removed_nodes"]} '
+                                f'extrusion node(s) locally',
+                                level='simple',
+                            )
+                    if locally_repaired:
+                        self._vprint(
+                            f'  🩹 Locally repaired {locally_repaired}/'
+                            f'{len(failed_ids)} extrusion-affected '
+                            f'skeleton(s)', level='simple')
+                    if locally_repaired < len(failed_ids):
+                        self._vprint(
+                            f'  ⚠️  CAVE fetch failed for '
+                            f'{len(failed_ids) - locally_repaired} '
+                            f'extrusion-affected skeleton(s); no safe local '
+                            f'branch cut was available',
+                            level='simple',
+                        )
+                    for canonical in failed_ids:
+                        repair_statuses.setdefault(canonical, 'api_failed')
+
+                if self.cache_neurons and repair_statuses:
+                    try:
+                        from fafb_utils import set_extrusion_repair_status
+
+                        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+                        set_extrusion_repair_status(
+                            self.script_path,
+                            dataset_safe,
+                            repair_statuses,
+                        )
+                    except Exception as exc:
+                        self._vprint(
+                            f'  ⚠️ Failed to save extrusion repair status: '
+                            f'{exc}', level='full')
 
         # 4. CAVE API for anything still missing.
         if remaining:
@@ -7338,7 +7425,8 @@ class VisualizeSkeleton:
             counts[source] = counts.get(source, 0) + 1
         summary = ', '.join(
             f'{counts[source]} {source}' for source in
-            ('zip', 'raw_cache', 'mesh_cache', 'cave') if source in counts)
+            ('zip', 'raw_cache', 'local_repaired', 'mesh_cache', 'cave')
+            if source in counts)
         self._vprint(f'  🗂️  FAFB sources resolved: {summary}', level='simple')
         return sources, skeleton_cache, mesh_cache
 
@@ -7428,7 +7516,8 @@ class VisualizeSkeleton:
         fetcher = CAVEDataFetcher(
             dataset=self.dataset,
             project_root=self.script_path,
-            verbose=self.verbose == 'full'
+            # Keep CAVE's per-mesh tqdm out of the render-wide bar.
+            verbose=False,
         )
         
         positions = soma_positions or self._fafb_soma_positions(requested_ids)
@@ -8011,7 +8100,8 @@ class VisualizeSkeleton:
 
     def _process_fafb_layer(self, neuron_vols, cached_mesh_neurons,
                             fafb_pipeline, use_fafb_cache,
-                            render_mesh_cache=None):
+                            render_mesh_cache=None,
+                            progress_callback=None):
         """Pipeline-driven FAFB processing for one render layer.
 
         TreeNeuron sources never write the prepared mesh cache (only CAVE
@@ -8029,9 +8119,23 @@ class VisualizeSkeleton:
 
         Returns ``(processed_neuron_vols, already_simplified)`` so the
         caller can skip the generic tube simplification block.
+
+        ``progress_callback`` is an optional callable receiving
+        ``(neuron_id, stage, done)``.  It lets the caller put the per-source
+        stage and completion count on its shared render progress bar without
+        creating a nested tqdm instance.
         """
         if render_mesh_cache is None:
             render_mesh_cache = {}
+
+        def report(neuron_id, stage, done=False):
+            if progress_callback is not None:
+                progress_callback(neuron_id, stage, done)
+
+        def stage_log(message):
+            """Keep stage details in the bar when a shared bar is active."""
+            if progress_callback is None:
+                self._vprint(message, level='full', use_tqdm=True)
 
         if self.skeleton_mode == 'tube':
             all_mesh_neurons = []
@@ -8058,11 +8162,11 @@ class VisualizeSkeleton:
                 except (TypeError, ValueError):
                     render_key = str(neuron_id)
                 if render_key in render_mesh_cache:
+                    report(neuron_id, 'cached', done=True)
                     all_mesh_neurons.append(render_mesh_cache[render_key])
                     continue
-                self._vprint(
-                    f'  🧱 mesh source (no node stage) {neuron_id}',
-                    level='full', use_tqdm=True)
+                report(neuron_id, 'mesh source')
+                stage_log(f'  🧱 mesh source (no node stage) {neuron_id}')
                 if getattr(mesh_n, 'trimesh', None) is not None:
                     n_faces = len(mesh_n.trimesh.faces)
                     if use_fafb_cache:
@@ -8083,11 +8187,10 @@ class VisualizeSkeleton:
                             100, int(n_faces * (1 - fafb_target_simp)))
                     if target_faces < n_faces:
                         try:
+                            report(neuron_id, 'decimate')
                             simplified = decimator(
                                 mesh_n.trimesh, target_faces)
-                            self._vprint(
-                                f'  ⚡ decimate {neuron_id}',
-                                level='full', use_tqdm=True)
+                            stage_log(f'  ⚡ decimate {neuron_id}')
                             new_mesh = navis.MeshNeuron(simplified)
                             new_mesh.id = (
                                 mesh_n.id
@@ -8096,6 +8199,7 @@ class VisualizeSkeleton:
                                 new_mesh.name = mesh_n.name
                             render_mesh_cache[render_key] = new_mesh
                             all_mesh_neurons.append(new_mesh)
+                            report(neuron_id, 'ready', done=True)
                             continue
                         except Exception as e:
                             self._vprint(
@@ -8104,6 +8208,7 @@ class VisualizeSkeleton:
                                 use_tqdm=True)
                 render_mesh_cache[render_key] = mesh_n
                 all_mesh_neurons.append(mesh_n)
+                report(neuron_id, 'ready', done=True)
 
             # --- TreeNeuron sources (healed ZIP / raw SWC cache).
             if neuron_vols is not None and len(neuron_vols) > 0:
@@ -8118,6 +8223,7 @@ class VisualizeSkeleton:
                     except (TypeError, ValueError):
                         render_key = str(neuron_id)
                     if render_key in render_mesh_cache:
+                        report(neuron_id, 'cached', done=True)
                         all_mesh_neurons.append(
                             render_mesh_cache[render_key])
                         continue
@@ -8135,14 +8241,14 @@ class VisualizeSkeleton:
                             # constant is the retention (25%), the
                             # module parameter is the reduction.
                             try:
+                                report(neuron_id, 'reduce nodes')
                                 work, stats = simplify_skeleton_nodes(
                                     n,
                                     1.0 - FAFB_FAST_NODE_RETENTION)
-                                self._vprint(
+                                stage_log(
                                     f'  🔽 reduce nodes {neuron_id} '
                                     f'{stats["raw_nodes"]}→'
-                                    f'{stats["achieved_nodes"]}',
-                                    level='full', use_tqdm=True)
+                                    f'{stats["achieved_nodes"]}')
                             except Exception as e:
                                 self._vprint(
                                     f'  ⚠️ node reduction failed for '
@@ -8163,19 +8269,21 @@ class VisualizeSkeleton:
                         if (hasattr(navis, 'conversion')
                                 and hasattr(navis.conversion,
                                             'tree2meshneuron')):
+                            report(neuron_id, 'tube mesh')
                             mesh_n = navis.conversion.tree2meshneuron(
                                 work,
                                 tube_points=self.SKELETON_TUBE_POINTS,
                             )
-                            self._vprint(
-                                f'  🧪 tube mesh {neuron_id}',
-                                level='full', use_tqdm=True)
+                            stage_log(f'  🧪 tube mesh {neuron_id}')
                         else:
+                            report(neuron_id, 'ready', done=True)
                             all_mesh_neurons.append(n)
                             continue
                     elif isinstance(n, navis.MeshNeuron):
+                        report(neuron_id, 'mesh source')
                         mesh_n = n
                     else:
+                        report(neuron_id, 'ready', done=True)
                         all_mesh_neurons.append(n)
                         continue
 
@@ -8185,6 +8293,7 @@ class VisualizeSkeleton:
                             if (fafb_pipeline in {'fine', 'artistic'}
                                     and use_soma_aware
                                     and soma_pos is not None):
+                                report(neuron_id, 'decimate')
                                 simplified = self._simplify_mesh_with_soma_awareness(
                                     mesh_n.trimesh,
                                     skeleton_simp=fafb_target_simp,
@@ -8197,11 +8306,10 @@ class VisualizeSkeleton:
                                 target_faces = max(
                                     100,
                                     int(n_faces * (1 - fafb_target_simp)))
+                                report(neuron_id, 'decimate')
                                 simplified = decimator(
                                     mesh_n.trimesh, target_faces)
-                            self._vprint(
-                                f'  ⚡ decimate {neuron_id}',
-                                level='full', use_tqdm=True)
+                            stage_log(f'  ⚡ decimate {neuron_id}')
                         except Exception as e:
                             self._vprint(
                                 f'  ⚠️ decimation failed for '
@@ -8214,6 +8322,7 @@ class VisualizeSkeleton:
                             mesh_n.name = n.name
                     render_mesh_cache[render_key] = mesh_n
                     all_mesh_neurons.append(mesh_n)
+                    report(neuron_id, 'ready', done=True)
 
             if all_mesh_neurons:
                 neuron_vols = navis.NeuronList(all_mesh_neurons)
@@ -8236,13 +8345,13 @@ class VisualizeSkeleton:
                     neuron_id = getattr(n, 'id', None)
                     if isinstance(n, navis.TreeNeuron):
                         try:
+                            report(neuron_id, 'reduce nodes')
                             work, stats = simplify_skeleton_nodes(
                                 n, FAFB_LINE_NODE_REDUCTION)
-                            self._vprint(
+                            stage_log(
                                 f'  🔽 reduce nodes {neuron_id} '
                                 f'{stats["raw_nodes"]}→'
-                                f'{stats["achieved_nodes"]}',
-                                level='full', use_tqdm=True)
+                                f'{stats["achieved_nodes"]}')
                             prepared_lines.append(work)
                         except Exception as e:
                             self._vprint(
@@ -8250,28 +8359,30 @@ class VisualizeSkeleton:
                                 f'{neuron_id}: {e}', level='full',
                                 use_tqdm=True)
                             prepared_lines.append(n)
+                        report(neuron_id, 'ready', done=True)
                     else:
                         prepared_lines.append(n)
+                        report(neuron_id, 'ready', done=True)
             for mesh_n in cached_mesh_neurons:
                 neuron_id = getattr(mesh_n, 'id', None)
-                self._vprint(
+                report(neuron_id, 'skeletonize')
+                stage_log(
                     f'  🦴 skeletonize mesh source {neuron_id} '
-                    f'(line mode, in-memory)', level='full',
-                    use_tqdm=True)
+                    f'(line mode, in-memory)')
                 try:
                     sk = navis.skeletonize(mesh_n)
                     work, stats = simplify_skeleton_nodes(
                         sk, FAFB_LINE_NODE_REDUCTION)
-                    self._vprint(
+                    stage_log(
                         f'  🔽 reduce nodes {neuron_id} '
                         f'{stats["raw_nodes"]}→'
-                        f'{stats["achieved_nodes"]}',
-                        level='full', use_tqdm=True)
+                        f'{stats["achieved_nodes"]}')
                     prepared_lines.append(work)
                 except Exception as e:
                     self._vprint(
                         f'  ⚠️ skeletonize failed for {neuron_id}: {e}',
                         level='full', use_tqdm=True)
+                report(neuron_id, 'ready', done=True)
             if prepared_lines:
                 neuron_vols = navis.NeuronList(prepared_lines)
             return neuron_vols, False
@@ -8412,14 +8523,40 @@ class VisualizeSkeleton:
         # Per-neuron colors from CSV are stored in self._neuron_color_overrides (bodyId -> color)
         self._type_color_map = {}  # Not used anymore - types keep layer colors
         
-        # Main progress bar for layers - always show when verbose is enabled
-        layer_pbar = tqdm(range(n_layers), desc="Processing layers", 
-                          disable=not self.verbose, leave=True, file=sys.stdout)
-        
-        for i in layer_pbar:
+        # One render-wide bar is more useful than a layer counter: a single
+        # layer can contain hundreds of neurons and otherwise remains at 0%
+        # while its mesh stages run.  FAFB processing reports each source
+        # through this bar; other datasets complete their layer's count once
+        # the already-aggregated sources have been plotted.
+        layer_pbar = tqdm(
+            total=total_skeletons,
+            desc="Processing skeletons",
+            unit="neuron",
+            disable=not self.verbose,
+            leave=True,
+            file=sys.stdout,
+        )
+        for i in range(n_layers):
             layer_name = self.layer_names[i] if i < len(self.layer_names) else f"layer_{i}"
             n_in_layer = len(self.neuron_dfs[i]) if self.neuron_dfs[i] is not None else 0
-            layer_pbar.set_postfix_str(f"{layer_name} ({n_in_layer} neurons)")
+            layer_pbar.set_postfix_str(f"{layer_name} (0/{n_in_layer})")
+            processed_this_layer = 0
+
+            def report_fafb_progress(neuron_id, stage, done=False):
+                """Refresh the single render bar for one FAFB source.
+
+                Stage names remain available to callers/tests, but they are
+                intentionally not printed.  The render bar is the only
+                progress row and shows the global ``n/N`` plus the current
+                layer-local ``n/N`` in its postfix.
+                """
+                nonlocal processed_this_layer
+                if done and processed_this_layer < n_in_layer:
+                    layer_pbar.update(1)
+                    processed_this_layer += 1
+                layer_pbar.set_postfix_str(
+                    f"{layer_name} ({processed_this_layer}/{n_in_layer})"
+                )
             
             # Determine if we need transformation
             # Use _needs_skeleton_transform() which checks for skip_transform flag (FAFB uses native coords)
@@ -8660,6 +8797,7 @@ class VisualizeSkeleton:
                     pass
                 else:
                     tqdm.write(f'  ⚠️  Failed to fetch skeletons for layer {i}: {layer_name}')
+                    layer_pbar.update(n_in_layer)
                     continue
 
             # Apply soma radius capping to prevent extrusion artifacts
@@ -8679,6 +8817,7 @@ class VisualizeSkeleton:
                         fafb_pipeline,
                         use_fafb_cache,
                         render_mesh_cache=fafb_render_mesh_cache,
+                        progress_callback=report_fafb_progress,
                     )
                 )
 
@@ -8742,8 +8881,9 @@ class VisualizeSkeleton:
                             mesh_missing_ids_set.add(int(mid))
 
                     iterator = neuron_vols if neuron_vols is not None else []
-                    if self.verbose == 'full' or self.verbose is True:
-                        iterator = tqdm(iterator, desc="Transforming meshes (FAFB-format)", leave=False)
+                    # Keep the render's shared bar as the only tqdm row.
+                    # Mesh transformation progress is reflected when the
+                    # containing layer completes below.
 
                     for n in iterator:
                         if hasattr(n, 'id') and n.id in mesh_missing_ids_set:
@@ -8891,6 +9031,7 @@ class VisualizeSkeleton:
                         target=template_info['target'],
                         layer_label=f"Layer {i} ({layer_name})",
                         progress_bar=layer_pbar,
+                        compact_progress=True,
                     )
                 except Exception as e:
                     tqdm.write(f'  ⚠️  Layer {i} transform failed: {e}')
@@ -8911,6 +9052,7 @@ class VisualizeSkeleton:
                                 target=template_info['target'],
                                 layer_label=f"Layer {i} ({layer_name}, retry)",
                                 progress_bar=layer_pbar,
+                                compact_progress=True,
                             )
                         except Exception as retry_e:
                             tqdm.write(f'  ⚠️  Transformation still failed, setting brain_mesh to "none"')
@@ -9304,6 +9446,17 @@ class VisualizeSkeleton:
                 except Exception as e:
                     self._vprint(f'⚠️  k3d plotting failed: {e}', level='full')
 
+            # FAFB source processing normally accounts for every body above.
+            # Fill any gap caused by an unavailable source or a layer with no
+            # bodyId column so the render-wide bar still reaches its total.
+            remaining = (
+                n_in_layer - processed_this_layer
+                if is_fafb else n_in_layer
+            )
+            if remaining > 0:
+                layer_pbar.update(remaining)
+
+        layer_pbar.close()
         return 0
     
     def _get_synapse_cache_path(self, pre_id, post_id):

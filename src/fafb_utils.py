@@ -202,11 +202,23 @@ def get_fafb_skeleton_parquet(data_dir):
 #                     per-neuron results cached in
 #                     ``cache/{dataset}/extrusion_check_results.parquet``,
 #   3. online fallback - extrusion-affected or missing neurons are fetched
-#                     through the CAVE API (token-gated).
+#                     through the CAVE API (token-gated),
+#   4. local repair   - if CAVE cannot repair an affected tree, remove only a
+#                     safely identified extrusion subtree in memory.
 # These helpers expose that pipeline so every consumer (e.g. NBLAST
 # dotprops building) follows the same behavior.
 
 EXTRUSION_CHECK_FILENAME = "extrusion_check_results.parquet"
+
+# ``has_extrusion`` is the detection result and must never be overwritten by
+# the outcome of a repair attempt.  The status column is deliberately kept in
+# the same parquet so an old boolean-only cache remains readable and a failed
+# CAVE repair can be retried on the next run without re-running detection.
+EXTRUSION_REPAIR_PENDING = "pending"
+EXTRUSION_REPAIR_API_REPAIRED = "api_repaired"
+EXTRUSION_REPAIR_LOCAL_FALLBACK = "local_fallback"
+EXTRUSION_REPAIR_API_FAILED = "api_failed"
+EXTRUSION_REPAIR_CLEAN = "clean"
 
 
 def extrusion_check_cache_path(project_root, dataset_folder):
@@ -228,22 +240,331 @@ def load_extrusion_check_cache(project_root, dataset_folder):
         return {}
 
 
-def save_extrusion_check_cache(project_root, dataset_folder, results):
-    """Persist new extrusion check results (best-effort)."""
+def load_extrusion_repair_status(project_root, dataset_folder):
+    """Load repair outcomes keyed by string body ID.
+
+    Older cache files do not have a ``repair_status`` column.  Their flagged
+    rows are treated as ``pending`` so they continue through the CAVE/local
+    repair path, while clean rows are treated as ``clean``.
+    """
+    path = extrusion_check_cache_path(project_root, dataset_folder)
+    if not path.exists():
+        return {}
+    try:
+        df = pd.read_parquet(path)
+        if "bodyId" not in df.columns or "has_extrusion" not in df.columns:
+            return {}
+        statuses = {}
+        has_status = "repair_status" in df.columns
+        for _, row in df.iterrows():
+            body_id = str(row["bodyId"])
+            default = (
+                EXTRUSION_REPAIR_PENDING
+                if bool(row["has_extrusion"])
+                else EXTRUSION_REPAIR_CLEAN
+            )
+            value = row["repair_status"] if has_status else default
+            if pd.isna(value) or not str(value).strip():
+                value = default
+            statuses[body_id] = str(value)
+        return statuses
+    except Exception:
+        return {}
+
+
+def _write_extrusion_cache(project_root, dataset_folder, results, statuses):
+    """Write the complete merged extrusion cache (best effort)."""
     if not results:
         return
     try:
-        import pandas as pd
-
         path = extrusion_check_cache_path(project_root, dataset_folder)
         path.parent.mkdir(parents=True, exist_ok=True)
-        df = pd.DataFrame({
-            "bodyId": [str(b) for b in results.keys()],
-            "has_extrusion": [bool(v) for v in results.values()],
-        })
-        df.to_parquet(path, index=False)
+        rows = [
+            {
+                "bodyId": str(body_id),
+                "has_extrusion": bool(results[body_id]),
+                "repair_status": str(
+                    statuses.get(
+                        body_id,
+                        EXTRUSION_REPAIR_PENDING
+                        if bool(results[body_id])
+                        else EXTRUSION_REPAIR_CLEAN,
+                    )
+                ),
+            }
+            for body_id in sorted(results, key=str)
+        ]
+        pd.DataFrame(rows).to_parquet(path, index=False)
     except Exception:
         pass
+
+
+def save_extrusion_check_cache(project_root, dataset_folder, results):
+    """Merge and persist extrusion check results (best-effort).
+
+    A run may inspect only a subset of a large healed bundle.  Merge-on-write
+    preserves prior rows and their repair status instead of making the cache
+    forget neurons checked in earlier runs.
+    """
+    if not results:
+        return
+    existing = load_extrusion_check_cache(project_root, dataset_folder)
+    statuses = load_extrusion_repair_status(project_root, dataset_folder)
+    for body_id, value in results.items():
+        key = str(body_id)
+        if isinstance(value, dict):
+            has_extrusion = bool(value.get("has_extrusion", False))
+            requested_status = value.get("repair_status")
+        else:
+            has_extrusion = bool(value)
+            requested_status = None
+        existing[key] = has_extrusion
+        if requested_status is not None:
+            statuses[key] = str(requested_status)
+        elif not has_extrusion:
+            statuses[key] = EXTRUSION_REPAIR_CLEAN
+        else:
+            # A newly detected flag has not yet been repaired.  Do not reset
+            # a status belonging to an already-cached row unless this result
+            # is genuinely new.
+            statuses.setdefault(key, EXTRUSION_REPAIR_PENDING)
+    _write_extrusion_cache(project_root, dataset_folder, existing, statuses)
+
+
+def set_extrusion_repair_status(project_root, dataset_folder, statuses):
+    """Persist repair outcomes without changing cached detection results.
+
+    ``statuses`` maps body IDs to one of the ``EXTRUSION_REPAIR_*`` values.
+    Missing detection rows are conservatively created as flagged rows, which
+    keeps a repair failure retryable rather than silently making it clean.
+    """
+    if not statuses:
+        return
+    results = load_extrusion_check_cache(project_root, dataset_folder)
+    current_statuses = load_extrusion_repair_status(
+        project_root, dataset_folder)
+    for body_id, status in statuses.items():
+        key = str(body_id)
+        results.setdefault(key, True)
+        current_statuses[key] = str(status)
+    _write_extrusion_cache(
+        project_root, dataset_folder, results, current_statuses)
+
+
+def diagnose_extrusion_nodes(neuron, ratio_threshold=10.0,
+                             absolute_threshold=50000.0):
+    """Locate skeleton edges that are plausible extrusion branches.
+
+    The normal extrusion check is mesh-based.  When its CAVE replacement is
+    unavailable, this node-level diagnosis gives the caller a conservative
+    local repair option by mapping the same long-edge signal back to the
+    source tree.  A uniformly large skeleton is not treated as locally
+    repairable: there must be a relative outlier, or an absolute spike that
+    is also at least three times the median edge length.
+
+    Returns a dictionary containing the candidate child node IDs and edge
+    statistics.  The function never mutates ``neuron``.
+    """
+    import numpy as np
+
+    nodes = getattr(neuron, "nodes", None)
+    required = {"node_id", "parent_id", "x", "y", "z"}
+    if nodes is None or not required.issubset(nodes.columns):
+        return {
+            "detected": False,
+            "candidate_child_ids": [],
+            "candidate_parent_ids": [],
+            "candidate_edge_lengths": [],
+            "median_edge_length": 0.0,
+            "max_edge_length": 0.0,
+            "edge_ratio": 0.0,
+        }
+
+    frame = nodes[["node_id", "parent_id", "x", "y", "z"]].copy()
+    coordinates = frame[["x", "y", "z"]].apply(
+        pd.to_numeric, errors="coerce"
+    ).to_numpy(dtype=float)
+    node_ids = frame["node_id"].tolist()
+    node_set = set(node_ids)
+    row_by_id = {node_id: index for index, node_id in enumerate(node_ids)}
+
+    child_ids = []
+    parent_ids = []
+    edge_lengths = []
+    for index, parent_id in enumerate(frame["parent_id"].tolist()):
+        child_id = node_ids[index]
+        if pd.isna(parent_id) or parent_id not in node_set:
+            continue
+        parent_index = row_by_id[parent_id]
+        if not (np.isfinite(coordinates[index]).all()
+                and np.isfinite(coordinates[parent_index]).all()):
+            continue
+        length = float(np.linalg.norm(
+            coordinates[index] - coordinates[parent_index]
+        ))
+        if length <= 0:
+            continue
+        child_ids.append(child_id)
+        parent_ids.append(parent_id)
+        edge_lengths.append(length)
+
+    if not edge_lengths:
+        return {
+            "detected": False,
+            "candidate_child_ids": [],
+            "candidate_parent_ids": [],
+            "candidate_edge_lengths": [],
+            "median_edge_length": 0.0,
+            "max_edge_length": 0.0,
+            "edge_ratio": 0.0,
+        }
+
+    lengths = np.asarray(edge_lengths, dtype=float)
+    median_edge = float(np.median(lengths))
+    max_edge = float(np.max(lengths))
+    edge_ratio = max_edge / median_edge if median_edge > 0 else 0.0
+    detected = bool(
+        edge_ratio > float(ratio_threshold)
+        or max_edge > float(absolute_threshold)
+    )
+    if not detected:
+        candidate_mask = np.zeros(len(lengths), dtype=bool)
+    else:
+        relative_mask = (
+            lengths > float(ratio_threshold) * median_edge
+            if median_edge > 0
+            else lengths == max_edge
+        )
+        # The mesh detector also has an absolute 50 µm guard.  Require a
+        # meaningful local contrast before using that guard to prune nodes;
+        # otherwise a normal skeleton whose whole edge scale is large could
+        # lose an arbitrary terminal half.
+        absolute_mask = (
+            (lengths > float(absolute_threshold))
+            & (lengths > 3.0 * median_edge)
+            if median_edge > 0
+            else lengths > float(absolute_threshold)
+        )
+        candidate_mask = relative_mask | absolute_mask
+
+    candidate_indices = np.flatnonzero(candidate_mask)
+    return {
+        "detected": detected,
+        "candidate_child_ids": [child_ids[index] for index in candidate_indices],
+        "candidate_parent_ids": [parent_ids[index] for index in candidate_indices],
+        "candidate_edge_lengths": [float(lengths[index]) for index in candidate_indices],
+        "median_edge_length": median_edge,
+        "max_edge_length": max_edge,
+        "edge_ratio": edge_ratio,
+    }
+
+
+def repair_extruded_skeleton(neuron, max_removed_fraction=0.50,
+                             min_remaining_nodes=2):
+    """Drop only safely localized extrusion subtrees from a TreeNeuron.
+
+    This is an in-memory fallback for a failed CAVE repair.  Candidate edges
+    come from :func:`diagnose_extrusion_nodes`; each candidate removes the
+    child and its descendants, never the parent side of the edge.  A repair
+    is skipped when it would remove more than ``max_removed_fraction`` of the
+    tree or leave fewer than ``min_remaining_nodes`` nodes.
+
+    Returns
+    -------
+    tuple
+        ``(neuron_or_repaired_copy, stats)``.  The first item is the original
+        object when no safe repair is possible.  Derived repairs are never
+        written to the raw skeleton cache.
+    """
+    import navis
+
+    diagnosis = diagnose_extrusion_nodes(neuron)
+    nodes = getattr(neuron, "nodes", None)
+    raw_count = len(nodes) if nodes is not None else 0
+    stats = {
+        **diagnosis,
+        "repaired": False,
+        "raw_nodes": raw_count,
+        "remaining_nodes": raw_count,
+        "removed_nodes": 0,
+        "removed_node_ids": [],
+    }
+    if (raw_count < int(min_remaining_nodes)
+            or not diagnosis["candidate_child_ids"]):
+        return neuron, stats
+
+    parent_map = {}
+    node_ids = set(nodes["node_id"].tolist())
+    for child_id, parent_id in zip(
+            nodes["node_id"].tolist(), nodes["parent_id"].tolist()):
+        if pd.isna(parent_id) or parent_id not in node_ids:
+            continue
+        parent_map[child_id] = parent_id
+
+    children = {}
+    for child_id, parent_id in parent_map.items():
+        children.setdefault(parent_id, []).append(child_id)
+
+    def subtree(root_id):
+        found = set()
+        pending = [root_id]
+        while pending:
+            current = pending.pop()
+            if current in found:
+                continue
+            found.add(current)
+            pending.extend(children.get(current, ()))
+        return found
+
+    candidate_rows = sorted(
+        zip(
+            diagnosis["candidate_edge_lengths"],
+            diagnosis["candidate_child_ids"],
+        ),
+        key=lambda row: row[0],
+        reverse=True,
+    )
+    removed = set()
+    accepted = []
+    max_removed = max(1, int(raw_count * float(max_removed_fraction)))
+    for edge_length, child_id in candidate_rows:
+        if child_id in removed or child_id not in parent_map:
+            continue
+        branch = subtree(child_id)
+        proposed = removed | branch
+        if len(proposed) > max_removed:
+            continue
+        if raw_count - len(proposed) < int(min_remaining_nodes):
+            continue
+        removed = proposed
+        accepted.append((child_id, float(edge_length)))
+
+    if not removed:
+        return neuron, stats
+
+    ordered_removed = sorted(
+        removed, key=lambda node_id: (type(node_id).__name__, str(node_id))
+    )
+    try:
+        repaired = navis.remove_nodes(
+            neuron, ordered_removed, inplace=False
+        )
+    except Exception:
+        return neuron, stats
+    if repaired is None or len(getattr(repaired, "nodes", ())) < int(min_remaining_nodes):
+        return neuron, stats
+
+    stats.update({
+        "repaired": True,
+        "remaining_nodes": len(repaired.nodes),
+        "removed_nodes": len(removed),
+        "removed_node_ids": ordered_removed,
+        "accepted_edges": [
+            {"child_id": child_id, "edge_length": edge_length}
+            for child_id, edge_length in accepted
+        ],
+    })
+    return repaired, stats
 
 
 def detect_extrusion(neuron, simplification=0.95, tube_points=6):

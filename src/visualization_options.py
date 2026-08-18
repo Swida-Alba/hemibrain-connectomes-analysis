@@ -16,12 +16,10 @@ def default_skeleton_tab_simplification(
         dataset: str, neuprint_skeleton_pipeline: str = "fast") -> float:
     """Return the default target for the dedicated Skeleton tab.
 
-    FAFB/FlyWire meshes use the dedicated 95% target regardless of the
-    disabled NeuPrint method selector shown in the UI. NeuPrint keeps the
-    method-specific direct/fast 90% target and fine/artistic 95% target.
+    The fast/direct pipeline removes 90% of tube-mesh faces and fine/artistic
+    pipelines remove 95%. The same method-specific defaults apply to
+    NeuPrint and FlyWire/FAFB tube renders.
     """
-    if _is_flywire_family(dataset):
-        return 0.95
     pipeline = str(neuprint_skeleton_pipeline or "fast").strip().lower()
     return 0.90 if pipeline in {"fast", "direct"} else 0.95
 
@@ -30,20 +28,8 @@ def default_analysis_skeleton_mesh_simplification(
         dataset: str, neuprint_skeleton_pipeline: str = "fine") -> float:
     """Return the default tube-mesh simplification for analysis renders.
 
-    Analysis tabs render result collections, so fine/artistic use the more
-    aggressive 98% setting.  FAFB analysis renders use 98% regardless of the
-    disabled NeuPrint selector.  The direct/fast NeuPrint path keeps its
-    fixed simp90 convention and therefore defaults to 90% removal.  The
-    dedicated Skeleton tab keeps its separate 95% fine/artistic default.
+    Analysis renders use the same method defaults as the dedicated Skeleton
+    tab: fast/direct removes 90% of faces and fine/artistic removes 95%.
     """
-
-    # Similarity and NeuronBridge renders are sub-called analysis workflows;
-    # FAFB intentionally uses a coarser 98% render target there so result
-    # collections remain responsive.
-    if _is_flywire_family(dataset):
-        return 0.98
-
     pipeline = str(neuprint_skeleton_pipeline or "fine").strip().lower()
-    if pipeline in {"fast", "direct"}:
-        return 0.90
-    return 0.98
+    return 0.90 if pipeline in {"fast", "direct"} else 0.95

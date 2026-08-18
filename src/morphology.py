@@ -4658,10 +4658,11 @@ class MorphologyComparer:
         3. extrusion test on the bundle skeletons (results cached),
         4. online fallback via the CAVE API (token-gated) for ids missing
            locally or flagged by the extrusion test. CAVE replacements are
-           prepared ``MeshNeuron`` objects cached as ``.pkl.zst`` files; they are
-           never written to the raw SWC cache.
+           prepared ``MeshNeuron`` objects cached as ``.pkl.zst`` files; when
+           CAVE cannot repair a flagged tree, a safe local extrusion branch
+           cut is attempted in memory and never written to the raw SWC cache.
         """
-        from fafb_utils import flag_extrusions
+        from fafb_utils import flag_extrusions, repair_extruded_skeleton
 
         ids = sorted({int(b) for b in body_ids})
         if not ids:
@@ -4723,9 +4724,52 @@ class MorphologyComparer:
             self._log(
                 f"FAFB: refreshing {len(extrusion_ids)} extrusion-affected "
                 "mesh(es) from the CAVE API.")
-            loaded.update(
-                self._fafb_cave_fallback(
-                    extrusion_ids, force_refresh=True))
+            cave_fixed = self._fafb_cave_fallback(
+                extrusion_ids, force_refresh=True)
+            cave_fixed = {
+                int(body_id): neuron
+                for body_id, neuron in cave_fixed.items()
+            }
+            loaded.update(cave_fixed)
+            repair_statuses = {
+                int(body_id): "api_repaired" for body_id in cave_fixed
+            }
+
+            # If CAVE returned only a partial batch (or was unavailable),
+            # prune a diagnosed local branch instead of silently retaining
+            # the known-bad source.  Repairs stay transient and are not
+            # written into the raw SWC cache.
+            for body_id in extrusion_ids:
+                body_id = int(body_id)
+                if body_id in cave_fixed:
+                    continue
+                if body_id not in loaded:
+                    repair_statuses[body_id] = "api_failed"
+                    continue
+                repaired, repair_stats = repair_extruded_skeleton(loaded[body_id])
+                if repair_stats.get("repaired"):
+                    loaded[body_id] = repaired
+                    repair_statuses[body_id] = "local_fallback"
+                    self._log(
+                        f"FAFB: CAVE fetch failed for {body_id}; pruned "
+                        f"{repair_stats['removed_nodes']} extrusion node(s) "
+                        "locally.")
+                else:
+                    self._log(
+                        f"FAFB: CAVE fetch failed for {body_id}; no safe "
+                        "local branch cut was available.")
+                    repair_statuses[body_id] = "api_failed"
+
+            # Keep detection and repair outcomes together. A local fallback
+            # remains flagged, so a subsequent run retries the CAVE request
+            # without re-running the expensive extrusion detector.
+            try:
+                from fafb_utils import set_extrusion_repair_status
+
+                set_extrusion_repair_status(
+                    str(root), folder, repair_statuses)
+            except Exception as exc:
+                self._log(f"FAFB: could not save extrusion repair status: {exc}")
         return loaded
 
     def _fafb_cave_fallback(

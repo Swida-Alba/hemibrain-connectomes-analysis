@@ -643,11 +643,11 @@ class TestRunner:
             if getattr(el, "_props", {}).get("label") == "Mesh Simplification"
         )
 
-        # The fast pipeline is now the analysis default: 0.90 removal for
-        # NeuPrint renders, 0.98 for the FAFB family.
+        # The method defaults are shared across datasets: 0.90 for fast and
+        # 0.95 for fine/artistic.
         assert mesh.value == 0.90
         dataset.value = "flywire_FAFB_v783"
-        assert mesh.value == 0.98
+        assert mesh.value == 0.90
 
         default_control.value = False
         mesh.value = 0.75
@@ -2026,6 +2026,55 @@ class TestRunner:
                 hasattr(link, "neuron_index_dialog") for link in viewer_links
             )
 
+    def test_shortest_source_type_warning_recommends_small_source_set(self):
+        """Warn in-page when Shortest Paths receives multiple source types."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.find_shortest import (
+            _has_multiple_source_type_queries,
+            create_find_shortest_tab,
+        )
+
+        assert _has_multiple_source_type_queries(["L2", "aMe12"], "auto")
+        assert _has_multiple_source_type_queries(["L2", "aMe12"], "type")
+        assert not _has_multiple_source_type_queries(["L2", "aMe12"], "bodyId")
+        assert not _has_multiple_source_type_queries([123, 456], "auto")
+        assert not _has_multiple_source_type_queries(
+            ["all_neurons", "L2"], "auto"
+        )
+
+        client = Client(page("/shortest-source-set-warning"))
+        with client:
+            create_find_shortest_tab()
+
+        source = next(
+            element for element in client.elements.values()
+            if getattr(element, "chip_input", None) is not None
+            and element.chip_input._props.get("label") == "Source Neurons"
+        )
+        warning = next(
+            element for element in client.elements.values()
+            if "small source set" in str(getattr(element, "text", ""))
+        )
+        assert "bodyId" in warning.text
+        assert "hidden" in getattr(warning, "_classes", [])
+
+        value_listener = next(
+            listener for listener in source.chip_input._event_listeners.values()
+            if listener.type == "update:modelValue"
+        )
+        source.chip_input.set_value(["L2", "aMe12"])
+        source.chip_input._handle_event(
+            {"listener_id": value_listener.id, "args": ["L2", "aMe12"]}
+        )
+        assert "hidden" not in getattr(warning, "_classes", [])
+
+        source.chip_input.set_value(["L2"])
+        source.chip_input._handle_event(
+            {"listener_id": value_listener.id, "args": ["L2"]}
+        )
+        assert "hidden" in getattr(warning, "_classes", [])
+
     def test_inter_dataset_suggestions_are_dataset_aware(self, monkeypatch):
         """The cross-dataset tab's suggestion provider receives the datasets
         selected in the tab and renders dataset-aware gray hints
@@ -2751,8 +2800,8 @@ class TestTabs:
         assert any(el.get_value() == "Category10" for el in editors)
         assert any(el.get_value() == "Dark2" for el in editors)
 
-    def test_skeleton_tab_disables_neuprint_method_for_flywire(self):
-        """The NeuPrint-only method selector is inactive for FlyWire/FAFB."""
+    def test_skeleton_tab_keeps_method_selectable_for_flywire(self):
+        """Tube-mode FlyWire/FAFB renders can choose their pipeline."""
         from nicegui import Client
         from nicegui.page import page
         from ui.tabs.visualization import create_skeleton_tab
@@ -2776,7 +2825,7 @@ class TestTabs:
         ]
         assert method.value == "fast"
         dataset.value = "flywire_FAFB_v783"
-        assert method.enabled is False
+        assert method.enabled is True
         dataset.value = "male-cns:v1.0"
         assert method.enabled is True
 

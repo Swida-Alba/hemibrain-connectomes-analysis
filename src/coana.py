@@ -524,6 +524,10 @@ class FindNeuronConnection:
         self._edgeN_limit_reached = False
         self._min_synapse_excluded = False
         self._depth_cap_reached = False
+        self._shortest_backward_active = False
+        self._shortest_scope_limited = False
+        self._shortest_bodyid_pairs_may_be_missing = False
+        self._shortest_target_hop_limits = {}
 
     def _record_search_priority_warnings(self, role, search_infos):
         """Record analysis queries resolved below the identity columns.
@@ -999,6 +1003,81 @@ class FindNeuronConnection:
             except Exception as e:
                 print(f"Warning: Could not create nt_type matrix: {e}")
 
+    _INTEGER_EXPORT_COUNT_COLUMNS = frozenset({
+        'weight',
+        'min_weight',
+        'max_weight',
+        'total_weight',
+        'total_incoming_weight',
+        'synapse_count',
+        'syn_count',
+        'synapses',
+        'total_synapses',
+    })
+
+    @staticmethod
+    def _normalize_weight_list_for_export(value):
+        """Convert integral values inside a path's weight list to ``int``."""
+        if not isinstance(value, (list, tuple, np.ndarray)):
+            return value
+
+        normalized = []
+        for item in value:
+            try:
+                numeric = float(item)
+            except (TypeError, ValueError):
+                normalized.append(item)
+                continue
+            if np.isfinite(numeric) and numeric.is_integer():
+                normalized.append(int(numeric))
+            else:
+                normalized.append(item)
+        return normalized
+
+    @classmethod
+    def _normalize_export_count_columns_pandas(cls, df):
+        """Keep semantic synapse-count columns integer-valued before export."""
+        result = df.copy()
+
+        for column in cls._INTEGER_EXPORT_COUNT_COLUMNS:
+            if column not in result.columns:
+                continue
+
+            numeric = pd.to_numeric(result[column], errors='coerce')
+            non_null = result[column].notna()
+            values = numeric[non_null].to_numpy(dtype=float)
+            if values.size == 0 or (
+                np.isfinite(values).all() and
+                np.equal(values, np.floor(values)).all()
+            ):
+                result[column] = numeric.astype('Int64')
+
+        if 'weights' in result.columns:
+            result['weights'] = result['weights'].map(
+                cls._normalize_weight_list_for_export
+            )
+        return result
+
+    @classmethod
+    def _normalize_export_count_columns_polars(cls, df):
+        """Keep semantic synapse-count columns integer-valued before export."""
+        expressions = [
+            pl.col(column).cast(pl.Int64, strict=False).alias(column)
+            for column in cls._INTEGER_EXPORT_COUNT_COLUMNS
+            if column in df.columns
+        ]
+
+        # Path builders may carry weights as a Polars list until the CSV
+        # formatting step.  Normalize list elements as well as scalar metrics.
+        if 'weights' in df.columns and isinstance(df.schema['weights'], pl.List):
+            expressions.append(
+                pl.col('weights')
+                .list.eval(pl.element().cast(pl.Int64, strict=False))
+                .alias('weights')
+            )
+
+        return df.with_columns(expressions) if expressions else df
+
     def _save_df_to_csv_polars(self, df, path, index=False):
         """Save DataFrame to CSV using Polars for speed.
         
@@ -1011,6 +1090,10 @@ class FindNeuronConnection:
         is_polars = isinstance(df, pl.DataFrame)
         
         if is_polars:
+            # Synapse counts are integer-valued even when an upstream
+            # dataframe has promoted them to Float64 (for example 5.0).
+            # Ratios and probabilities are intentionally not included here.
+            df = self._normalize_export_count_columns_polars(df)
             if df.is_empty():
                 with open(path, 'w', encoding='utf-8') as f:
                     f.write(','.join(df.columns) + '\n')
@@ -1037,12 +1120,14 @@ class FindNeuronConnection:
                 else:
                     df_to_save = df
                     
+                df_to_save = self._normalize_export_count_columns_pandas(df_to_save)
                 pl_df = pl.from_pandas(df_to_save)
+                pl_df = self._normalize_export_count_columns_polars(pl_df)
                 pl_df.write_csv(path)
             except Exception as e:
                 # Fallback to Pandas if Polars fails (e.g. object types)
                 try:
-                    df.to_csv(path, index=index, encoding='utf-8')
+                    df_to_save.to_csv(path, index=False, encoding='utf-8')
                 except Exception as e2:
                     print(f"  Error saving CSV (Polars: {e}, Pandas: {e2})", flush=True)
 
@@ -1334,6 +1419,11 @@ class FindNeuronConnection:
             except Exception as e:
                 print(f"  Error converting to Polars: {e}", flush=True)
                 return
+
+        # Weight matrices use the same semantic count contract as edge tables.
+        # This helper is also exercised as an unbound export utility by the
+        # regression tests, so do not require an initialized instance here.
+        pl_df = FindNeuronConnection._normalize_export_count_columns_polars(pl_df)
             
         # 1. Weight Matrix
         if level != 'bodyId':
@@ -5332,6 +5422,280 @@ class FindNeuronConnection:
             min_conn_ratio=self.min_ratio,
             min_traversal_prob=self.min_traversal_probability,
         )
+
+    @staticmethod
+    def _empty_path_connection_frame():
+        """Return the canonical empty frame used by path discovery."""
+        return pd.DataFrame(columns=[
+            'bodyId_pre', 'bodyId_post', 'weight', 'roi',
+            'type_pre', 'type_post', 'instance_pre', 'instance_post',
+        ])
+
+    def _finalize_path_connection_frame(self, combined):
+        """Enrich and apply the path-edge filters to a raw connection frame.
+
+        Forward discovery has this logic in ``_fetch_connections_with_cache``
+        because it also updates the upstream cache-completion index.  The
+        target-rooted shortest search can obtain rows by ``bodyId_post``
+        instead, so it needs the same post-fetch normalization without marking
+        a partial incoming query as a complete outgoing-neuron fetch.
+        """
+        if combined is None or combined.empty:
+            return self._empty_path_connection_frame()
+
+        combined = combined.copy()
+        for column in ('bodyId_pre', 'bodyId_post'):
+            if column in combined.columns:
+                combined[column] = combined[column].astype(str)
+
+        total_before_filter = len(combined)
+        combined = self._enrich_connections_with_neuron_info(combined)
+
+        if self.label_mapper and not combined.empty:
+            combined = self.label_mapper.apply_to_dataframe(combined, self.dataset)
+            if 'std_label_pre' in combined.columns:
+                mask = combined['std_label_pre'] != ''
+                combined.loc[mask, 'type_pre'] = combined.loc[mask, 'std_label_pre']
+                combined = combined.drop(columns=['std_label_pre'])
+            if 'std_label_post' in combined.columns:
+                mask = combined['std_label_post'] != ''
+                combined.loc[mask, 'type_post'] = combined.loc[mask, 'std_label_post']
+                combined = combined.drop(columns=['std_label_post'])
+
+        combined = self._apply_hemisphere_suffix_to_conn_df(combined)
+
+        if self.exclude_intra_type_connections and len(combined) > 0:
+            combined = combined[
+                combined['type_pre'] != combined['type_post']
+            ].copy()
+
+        if self.filter_by == 'type':
+            combined = self._apply_type_level_filters(
+                combined,
+                self.min_synapse_num,
+                self.min_ratio,
+                self.min_traversal_probability,
+                total_before_filter,
+                aggregate_method=self.aggregate_method,
+            )
+        else:
+            if self.min_synapse_num > 1:
+                before_count = len(combined)
+                combined = combined[
+                    combined['weight'] >= self.min_synapse_num
+                ].copy()
+                if len(combined) < before_count:
+                    self._min_synapse_excluded = True
+
+            if (
+                self.min_traversal_probability > 0
+                or self.min_ratio > 0
+            ) and len(combined) > 0:
+                combined = self._apply_bodyid_level_filters(
+                    combined,
+                    self.min_ratio,
+                    self.min_traversal_probability,
+                    total_before_filter,
+                    self.min_synapse_num,
+                )
+
+        return combined
+
+    def _fetch_incoming_connections_online(self, downstream_bodyIds):
+        """Fetch raw incoming rows for target-rooted shortest discovery."""
+        downstream_bodyIds = [str(value) for value in downstream_bodyIds]
+        if not downstream_bodyIds:
+            return self._empty_path_connection_frame()
+
+        if is_flywire_dataset(self.dataset):
+            # A cache-enabled FlyWire installation may have a complete local
+            # merged table even when the requested post IDs are not in the
+            # connection cache yet. Prefer it before contacting CAVE.
+            if self.use_cache:
+                try:
+                    import fafb_utils
+                    project_root = os.path.dirname(os.path.dirname(__file__))
+                    data_dir = resolve_flywire_dataset_dir(project_root, self.dataset)
+                    if data_dir is not None:
+                        _, conn_file = fafb_utils.prepare_flywire_data(data_dir)
+                        try:
+                            conn_mtime = os.path.getmtime(conn_file)
+                        except OSError:
+                            conn_mtime = None
+                        if (
+                            self._fafb_local_conn_cache is not None
+                            and self._fafb_local_conn_cache[0] == conn_mtime
+                        ):
+                            full_conn = self._fafb_local_conn_cache[1]
+                        else:
+                            full_conn = load_flywire_merged_connections(conn_file)
+                            self._fafb_local_conn_cache = (conn_mtime, full_conn)
+                        return full_conn[
+                            full_conn['bodyId_post'].isin(downstream_bodyIds)
+                        ].copy()
+                except Exception as exc:
+                    self._vprint(
+                        f'  ⚠️ Local FlyWire incoming lookup failed: {exc}',
+                        level='full',
+                    )
+
+            fetcher = self._get_cave_fetcher()
+            incoming = fetcher.fetch_connections(
+                [body_id_to_api_int(value) for value in downstream_bodyIds],
+                direction='post',
+                show_progress=self.verbose_mode == 'full',
+            )
+            if incoming is None or incoming.empty:
+                return self._empty_path_connection_frame()
+            incoming = incoming.rename(columns={
+                'pre_pt_root_id': 'bodyId_pre',
+                'post_pt_root_id': 'bodyId_post',
+            }).copy()
+            normalize_flywire_id_columns(
+                incoming, ['bodyId_pre', 'bodyId_post']
+            )
+            if 'roi' not in incoming.columns:
+                incoming['roi'] = 'WholeBrain'
+            return incoming
+
+        self._ensure_neuprint_client()
+        from neuprint import fetch_adjacencies
+
+        target_ints = [int(value) for value in downstream_bodyIds]
+        adjacency_kwargs = dict(getattr(self, 'kwargs_fetch', {}) or {})
+        adjacency_kwargs.pop('batch_size', None)
+        adjacency_kwargs['batch_size'] = max(1, len(target_ints))
+        _neuron_df, roi_conn_df = fetch_adjacencies(
+            sources=None,
+            targets=target_ints,
+            min_total_weight=1,
+            **adjacency_kwargs,
+        )
+        if roi_conn_df is None or roi_conn_df.empty:
+            return self._empty_path_connection_frame()
+        return roi_conn_df
+
+    def _fetch_path_connections_backward(self, downstream_bodyIds,
+                                         source_bodyIds=None):
+        """Fetch one target-rooted layer by querying incoming connections.
+
+        Cached rows are retrieved through the post-synaptic row index.  If a
+        target has no cached incoming rows, the method falls back to an online
+        incoming query unless ``cache_only`` is active.  The returned rows
+        retain the normal ``pre -> post`` orientation for graph construction.
+        """
+        requested_posts = {str(value) for value in downstream_bodyIds}
+        requested_sources = {
+            str(value)
+            for value in (source_bodyIds if source_bodyIds is not None else [])
+        }
+        if not requested_posts:
+            return self._empty_path_connection_frame()
+
+        cached_raw = self._empty_path_connection_frame()
+        if getattr(self, 'use_cache', False):
+            conn_db = self._load_connection_db()
+            row_indices = []
+            post_index = getattr(self, '_conn_index_post', None) or {}
+            for post_id in requested_posts:
+                row_indices.extend(
+                    post_index.get(post_id, [])
+                )
+            if row_indices:
+                cached_raw = conn_db[row_indices].to_pandas()
+                cached_raw['bodyId_pre'] = cached_raw['bodyId_pre'].astype(str)
+                cached_raw['bodyId_post'] = cached_raw['bodyId_post'].astype(str)
+                cached_raw = cached_raw[
+                    cached_raw['bodyId_post'].isin(requested_posts)
+                ].copy()
+
+        # The connection cache is indexed by upstream neuron.  A few cached
+        # rows for a target do not prove that the target's incoming set is
+        # complete.  Reuse it without an online supplement only when every
+        # requested source bodyId is marked downstream-complete; otherwise an
+        # incoming target query is required to avoid silently losing pairs.
+        source_cache_complete = False
+        if requested_sources and getattr(self, 'use_cache', False):
+            neuron_index = getattr(self, '_neuron_index_dict', None)
+            if neuron_index is None:
+                try:
+                    self._load_neuron_index()
+                    neuron_index = getattr(self, '_neuron_index_dict', None)
+                except Exception:
+                    neuron_index = None
+            if neuron_index:
+                cached_pre_ids = {
+                    str(body_id) for body_id in
+                    (getattr(self, '_conn_index', None) or {})
+                }
+
+                def _source_cache_entry_is_complete(source):
+                    info = neuron_index.get(source, {})
+                    if not bool(info.get('downstream_complete', False)):
+                        return False
+                    # Metadata imports can mark a neuron complete before a
+                    # connection table is available.  A positive recorded
+                    # outdegree must therefore have a matching cached row;
+                    # zero-outdegree neurons are complete without one.
+                    count = info.get('connection_count', -1)
+                    try:
+                        count = float(count)
+                    except (TypeError, ValueError):
+                        count = -1
+                    return count == 0 or source in cached_pre_ids
+
+                source_cache_complete = all(
+                    _source_cache_entry_is_complete(source)
+                    for source in requested_sources
+                )
+
+        api_raw = self._empty_path_connection_frame()
+        if not source_cache_complete and not getattr(self, 'cache_only', False):
+            try:
+                # Query all target-frontier posts, not just posts with no
+                # cached row: the cache is source-complete, not post-complete.
+                api_raw = self._fetch_incoming_connections_online(
+                    requested_posts
+                )
+                if api_raw is None or api_raw.empty:
+                    api_raw = self._empty_path_connection_frame()
+                else:
+                    api_raw = api_raw.copy()
+                    api_raw['bodyId_pre'] = api_raw['bodyId_pre'].astype(str)
+                    api_raw['bodyId_post'] = api_raw['bodyId_post'].astype(str)
+                    api_raw = api_raw[
+                        api_raw['bodyId_post'].isin(requested_posts)
+                    ].copy()
+            except Exception as exc:
+                self._vprint(
+                    f'  ⚠️ Incoming target lookup failed: {exc}',
+                    level='always',
+                )
+                self._warn_notes.append(
+                    '- [shortest target-rooted lookup] incoming connections for '
+                    'one or more target frontier neurons could not be fetched; '
+                    'some source-target bodyId pairs may be missing.'
+                )
+        elif not source_cache_complete and getattr(self, 'cache_only', False):
+            self._warn_notes.append(
+                '- [shortest target-rooted lookup] cache_only=True and incoming '
+                'rows cannot be proven complete for all enrolled source '
+                'bodyIds; some source-target bodyId pairs may be missing.'
+            )
+
+        frames = [frame for frame in (cached_raw, api_raw) if not frame.empty]
+        if not frames:
+            return self._empty_path_connection_frame()
+        combined = pd.concat(frames, ignore_index=True)
+        dedupe_columns = [
+            column for column in ('bodyId_pre', 'bodyId_post', 'roi')
+            if column in combined.columns
+        ]
+        if len(dedupe_columns) >= 2:
+            combined = combined.drop_duplicates(
+                subset=dedupe_columns, keep='last'
+            )
+        return self._finalize_path_connection_frame(combined)
     
     def _fetch_connections_with_cache(self, upstream_bodyIds, downstream_bodyIds=None, 
                                       min_weight=None, min_traversal_prob=None, min_conn_ratio=None):
@@ -8341,6 +8705,8 @@ class FindNeuronConnection:
             f.write('\n')
         # fetch connection table with caching
         print('Fetching direct connections:')
+        self.source_df['bodyId'] = self.source_df['bodyId'].astype(str)
+        self.target_df['bodyId'] = self.target_df['bodyId'].astype(str)
         source_bodyIds = self.source_df['bodyId'].tolist()
         target_bodyIds = self.target_df['bodyId'].tolist()
         
@@ -8355,10 +8721,29 @@ class FindNeuronConnection:
         
         # Filter to only keep connections within the target set
         if not self.conn_df.empty:
-            # Ensure bodyId_post is string for comparison
+            # Ensure bodyId columns are strings for comparison and export.
+            self.conn_df['bodyId_pre'] = self.conn_df['bodyId_pre'].astype(str)
             self.conn_df['bodyId_post'] = self.conn_df['bodyId_post'].astype(str)
-            target_bodyIds = [str(x) for x in target_bodyIds]
             self.conn_df = self.conn_df[self.conn_df['bodyId_post'].isin(target_bodyIds)].copy()
+
+        # Keep the resolved enrollment visible at the run root for every
+        # direct/path analysis, including the no-connection case.  ``Layer=1``
+        # records that a target has a direct source connection.
+        source_in_path_ids = set()
+        target_checked_ids = set()
+        if not self.conn_df.empty:
+            source_in_path_ids = set(self.conn_df['bodyId_pre'].astype(str))
+            target_checked_ids = set(self.conn_df['bodyId_post'].astype(str))
+        self.source_df.insert(
+            0, 'isInPath', self.source_df['bodyId'].isin(source_in_path_ids)
+        )
+        self.target_df.insert(
+            0, 'Checked', self.target_df['bodyId'].isin(target_checked_ids)
+        )
+        self.target_df.insert(
+            1, 'Layer', np.where(self.target_df['Checked'], 1, -1)
+        )
+        self._save_path_neuron_enrollment(self.direct_folder)
         if self.conn_df.empty:
             print('\033[33mNo direct connections found.\033[0m\n')
             return
@@ -9178,6 +9563,254 @@ class FindNeuronConnection:
             return pl.concat(non_empty, how='diagonal_relaxed')
         return pd.concat(non_empty, ignore_index=True)
 
+    def _discover_shortest_backward(self, source_ID, target_ID, max_hops):
+        """Discover a shortest-path graph backward from target bodyIds.
+
+        Each target owns a reverse BFS frontier.  The frontier is expanded
+        through incoming edges until all requested source bodyIds have been
+        seen for that target or ``max_hops`` is reached.  This avoids fetching
+        the full forward fan-out of uninvolved source neurons and records the
+        earliest source-to-target distance for target enrollment metadata.
+
+        The returned connection tables keep their biological ``pre -> post``
+        orientation.  Their ``conn_layer`` labels identify reverse discovery
+        depth; the path-level real-layer map is rebuilt from the actual
+        source-to-target paths later in the pipeline.
+        """
+        import polars as pl
+
+        source_set = {str(value) for value in source_ID}
+        target_ids = [str(value) for value in target_ID]
+        max_hops = max(1, int(max_hops))
+
+        all_connections = []
+        reverse_layers = [set(target_ids)]
+        all_neurons_in_network = set(target_ids)
+        frontier_by_target = {target: {target} for target in target_ids}
+        seen_by_target = {target: {target} for target in target_ids}
+        distances_by_target = {target: {target: 0} for target in target_ids}
+        edges_by_target = {target: [] for target in target_ids}
+        discovery_complete = True
+
+        for reverse_depth in range(max_hops):
+            frontier_posts = set().union(*frontier_by_target.values()) \
+                if frontier_by_target else set()
+            if not frontier_posts:
+                break
+
+            self._vprint(
+                f'Backward layer {reverse_depth + 1}: querying incoming '
+                f'connections to {len(frontier_posts):,} target-frontier '
+                'neurons...',
+                level='full',
+            )
+            conn_df = self._fetch_path_connections_backward(
+                sorted(frontier_posts),
+                source_bodyIds=source_ID,
+            )
+
+            if conn_df is None or conn_df.empty:
+                all_connections.append(pl.DataFrame())
+                frontier_by_target = {
+                    target: set() for target in frontier_by_target
+                }
+                reverse_layers.append(set())
+                break
+
+            conn_df = conn_df.copy()
+            conn_df['bodyId_pre'] = conn_df['bodyId_pre'].astype(str)
+            conn_df['bodyId_post'] = conn_df['bodyId_post'].astype(str)
+            conn_df = conn_df[
+                conn_df['bodyId_post'].isin(frontier_posts)
+            ].copy()
+
+            if conn_df.empty:
+                all_connections.append(pl.DataFrame())
+                frontier_by_target = {
+                    target: set() for target in frontier_by_target
+                }
+                reverse_layers.append(set())
+                break
+
+            conn_pl = pl.from_pandas(conn_df).with_columns(
+                pl.lit(f'{reverse_depth}->{reverse_depth + 1}').alias(
+                    'conn_layer'
+                )
+            )
+            all_connections.append(conn_pl)
+
+            next_frontier_by_target = {}
+            next_reverse_layer = set()
+            for target, current_posts in frontier_by_target.items():
+                if not current_posts:
+                    next_frontier_by_target[target] = set()
+                    continue
+
+                target_rows = conn_df[
+                    conn_df['bodyId_post'].isin(current_posts)
+                ]
+                if not target_rows.empty:
+                    # Keep the rows associated with this target's reverse
+                    # search.  The same frontier neuron can be shared by
+                    # several targets, so a final per-target shortest-DAG
+                    # filter is needed before the graph is built.
+                    edges_by_target[target].append(target_rows.copy())
+                predecessors = set(target_rows['bodyId_pre'].unique())
+                next_frontier = set()
+                for predecessor in predecessors:
+                    if predecessor in seen_by_target[target]:
+                        continue
+                    seen_by_target[target].add(predecessor)
+                    distances_by_target[target][predecessor] = reverse_depth + 1
+                    next_frontier.add(predecessor)
+
+                # Once every requested source has been encountered for this
+                # target, deeper incoming branches cannot improve any of
+                # those source-target distances. Other targets continue their
+                # own reverse BFS independently.
+                found_sources = {
+                    source for source in source_set
+                    if source != target and source in seen_by_target[target]
+                }
+                required_sources = source_set - {target}
+                if required_sources and found_sources >= required_sources:
+                    next_frontier = set()
+
+                next_frontier_by_target[target] = next_frontier
+                next_reverse_layer.update(next_frontier)
+
+            frontier_by_target = next_frontier_by_target
+            all_neurons_in_network.update(next_reverse_layer)
+            reverse_layers.append(next_reverse_layer)
+
+            if not any(frontier_by_target.values()):
+                break
+        else:
+            # The loop exhausted the configured reverse depth while at least
+            # one target still had an active frontier.
+            if any(frontier_by_target.values()):
+                discovery_complete = False
+
+        target_layers = {}
+        targets_found = []
+        for target in target_ids:
+            source_distances = [
+                distances_by_target[target][source]
+                for source in source_set
+                if source != target
+                and source in distances_by_target[target]
+            ]
+            if source_distances:
+                target_layers[target] = min(source_distances)
+                targets_found.append(target)
+
+        # Retain only edges on a shortest-DAG branch from a requested source
+        # to a discovered target.  A raw incoming query necessarily returns
+        # all presynaptic branches of each target frontier; without this
+        # pass, uninvolved source branches would still inflate the graph and
+        # could appear in the visualization even though they cannot produce a
+        # requested source-target path.
+        valid_edges = set()
+        valid_nodes = set()
+        for target in targets_found:
+            target_edges = edges_by_target[target]
+            if not target_edges:
+                continue
+            # Discovery may continue farther upstream for another requested
+            # source, but this target's shortest result is bounded by the
+            # first source distance at which it was found.  Apply that
+            # target-specific cap before building the shortest DAG; otherwise
+            # each source-target pair could still receive a longer branch.
+            target_hop_limit = target_layers[target]
+            target_edge_df = pd.concat(target_edges, ignore_index=True)
+            reverse_predecessors = {}
+            for pre, post in zip(
+                    target_edge_df['bodyId_pre'],
+                    target_edge_df['bodyId_post']):
+                pre = str(pre)
+                post = str(post)
+                if (
+                    pre in distances_by_target[target]
+                    and post in distances_by_target[target]
+                    and distances_by_target[target][pre] <= target_hop_limit
+                    and distances_by_target[target][post] <= target_hop_limit
+                    and distances_by_target[target][pre]
+                    == distances_by_target[target][post] + 1
+                ):
+                    reverse_predecessors.setdefault(post, set()).add(pre)
+
+            source_nodes = {
+                source for source in source_set
+                if source != target
+                and source in distances_by_target[target]
+                and distances_by_target[target][source] <= target_hop_limit
+            }
+            keep_nodes = set(source_nodes)
+            for node, node_distance in sorted(
+                    distances_by_target[target].items(),
+                    key=lambda item: item[1], reverse=True):
+                if node_distance > target_hop_limit:
+                    continue
+                if node in keep_nodes:
+                    continue
+                if any(
+                    predecessor in keep_nodes
+                    for predecessor in reverse_predecessors.get(node, ())
+                ):
+                    keep_nodes.add(node)
+
+            if target in keep_nodes:
+                valid_nodes.update(keep_nodes)
+                for post, predecessors in reverse_predecessors.items():
+                    if post not in keep_nodes:
+                        continue
+                    for pre in predecessors:
+                        if pre in keep_nodes:
+                            valid_edges.add((pre, post))
+
+        if valid_edges:
+            valid_edge_frame = pl.DataFrame(
+                list(valid_edges),
+                schema=['bodyId_pre', 'bodyId_post'],
+                orient='row',
+            )
+            filtered_connections = []
+            for connection_frame in all_connections:
+                if connection_frame.is_empty():
+                    filtered_connections.append(connection_frame)
+                else:
+                    filtered_connections.append(
+                        connection_frame.join(
+                            valid_edge_frame,
+                            on=['bodyId_pre', 'bodyId_post'],
+                            how='semi',
+                        )
+                    )
+            all_connections = filtered_connections
+        else:
+            all_connections = [
+                connection_frame.clear()
+                for connection_frame in all_connections
+            ]
+
+        valid_nodes.update(targets_found)
+        filtered_reverse_layers = [
+            set(layer) & valid_nodes for layer in reverse_layers
+        ]
+
+        # ``all_neurons_in_network`` is intentionally the source-relevant
+        # shortest-DAG set, not the union of every source bodyId or every raw
+        # reverse-reachable branch. This is what keeps uninvolved sources out
+        # of the graph and enrollment report.
+        return {
+            'all_connections': all_connections,
+            'layer_neurons': filtered_reverse_layers,
+            'all_neurons_in_network': valid_nodes,
+            'targets_found': targets_found,
+            'target_layers': target_layers,
+            'complete': discovery_complete,
+        }
+
     def _derive_type_paths_from_bodyid_paths(self, all_paths, node_label,
                                              kept_type_edges, source_types,
                                              target_types, verbose=False):
@@ -9226,6 +9859,31 @@ class FindNeuronConnection:
                 out.append(list(seq))
         return out
 
+    @staticmethod
+    def _keep_shortest_bodyid_paths(all_paths):
+        """Keep shortest paths independently for every bodyId source-target pair.
+
+        A global length cutoff is incorrect when targets are discovered at
+        different distances: it can retain a longer alternative to a close
+        target while also discarding a valid shortest route to a farther
+        target.  The pair key deliberately includes both endpoints so the
+        type-level aggregation receives only exact bodyId-level shortest paths.
+        """
+        shortest_distance = {}
+        for path in all_paths:
+            if not path:
+                continue
+            pair = (path[0], path[-1])
+            distance = len(path) - 1
+            previous = shortest_distance.get(pair)
+            if previous is None or distance < previous:
+                shortest_distance[pair] = distance
+
+        return [
+            path for path in all_paths
+            if path and shortest_distance.get((path[0], path[-1])) == len(path) - 1
+        ]
+
     def _write_user_warning_notes(self, folder):
         """
         Write user_warning_notes.txt at the run folder root listing every
@@ -9271,6 +9929,32 @@ class FindNeuronConnection:
                 f'- [depth] max_interlayer={self.max_interlayer}: paths longer than '
                 f'{self.max_interlayer} interlayers were never searched; deep paths '
                 f'are absent from the outputs.'
+            )
+        if getattr(self, '_shortest_backward_active', False):
+            notes.append(
+                '- [shortest bodyId enrollment] Shortest Paths uses the default '
+                'target-rooted search: it starts at each target and follows only '
+                'branches that reach an enrolled source bodyId. Some requested '
+                'source-target bodyId pairs may be absent when they do not pass '
+                'the active filters/depth, and distinct enrolled pairs can be '
+                'collapsed when they map to the same type sequence. The '
+                'type-level table is therefore not one row per bodyId pair. '
+                'Review the root-level '
+                'source_neurons.csv and target_neurons.csv; their isInPath, '
+                'Checked, and Layer columns record enrollment. To inspect '
+                'specific bodyId pairs, run Shortest Paths with bodyId output '
+                'enabled (Skip BodyId off). To enumerate all paths within a '
+                'specified depth, use Complete Paths.'
+            )
+        if getattr(self, '_shortest_scope_limited', False):
+            notes.append(
+                '- [shortest explored-graph scope] Reported shortest paths are '
+                'shortest only within the explored, threshold-filtered bodyId '
+                'graph. A path whose length exceeds the explored discovery '
+                'layers is only a solution under the current graph and is not '
+                'proven globally shortest. Increase Max Intermediate Layers '
+                'for a deeper search, or use Complete Paths under the desired '
+                'depth.'
             )
         if getattr(self, 'separate_hemispheres', False):
             notes.append(
@@ -9332,6 +10016,35 @@ class FindNeuronConnection:
                          f'user_warning_notes.txt in the run folder', level='always')
         except OSError as e:
             self._vprint(f'  Warning: could not write user_warning_notes.txt: {e}', level='full')
+
+    def _save_path_neuron_enrollment(self, folder):
+        """Save resolved source/target enrollment metadata at run root.
+
+        These two files are intentionally outside ``data_details`` so they
+        are immediately visible beside the primary path output.  The frames
+        include the complete resolved neuron metadata plus the run status
+        columns: ``isInPath`` for sources and ``Checked``/``Layer`` for
+        targets.
+        """
+        os.makedirs(folder, exist_ok=True)
+        source_df = self.source_df.copy()
+        target_df = self.target_df.copy()
+        if 'isInPath' not in source_df.columns:
+            source_df.insert(0, 'isInPath', False)
+        if 'Checked' not in target_df.columns:
+            target_df.insert(0, 'Checked', False)
+        if 'Layer' not in target_df.columns:
+            target_df.insert(1, 'Layer', -1)
+
+        source_path = os.path.join(folder, 'source_neurons.csv')
+        target_path = os.path.join(folder, 'target_neurons.csv')
+        self._save_df_to_csv_polars(source_df, source_path)
+        self._save_df_to_csv_polars(target_df, target_path)
+        self._vprint(
+            f'  ✓ Saved neuron enrollment details: {source_path}, {target_path}',
+            level='full',
+        )
+        return source_path, target_path
 
     def _record_viz_edge_trim(self, vp):
         """Mirror the Visualization Edge Limit trim state to the per-run
@@ -9586,14 +10299,13 @@ class FindNeuronConnection:
         
         # Save main file with type-level data
         print('Saving type-level path info...')
+        self._save_path_neuron_enrollment(self.path_folder)
         if self.output_format == 'csv':
             # Create data_details subfolder
             csv_folder = os.path.join(self.path_folder, 'data_details')
             os.makedirs(csv_folder, exist_ok=True)
             self._vprint(f'  💾 Saving data as CSV files to: {csv_folder}', level='simple')
             self._save_df_to_csv_polars(self.parameter_df, os.path.join(csv_folder, 'parameters.csv'))
-            self._save_df_to_csv_polars(self.source_df, os.path.join(csv_folder, 'source_neurons.csv'))
-            self._save_df_to_csv_polars(self.target_df, os.path.join(csv_folder, 'target_neurons.csv'))
             # Save combined neurons CSV with group column
             self._create_combined_neurons_csv(self.source_df, self.target_df, conn_inpath, csv_folder)
             self._save_df_to_csv_polars(totalweight_df, os.path.join(csv_folder, 'total_weight_layer.csv'))
@@ -10342,20 +11054,21 @@ class FindNeuronConnection:
 
         Differences from FindAllPath (the rest of the pipeline is shared):
 
-        - Depth: ``max_interlayer`` is an EXACT depth bound: paths are
-          capped at ``max_interlayer + 1`` edges (0 = direct connections
-          only; the default UI value is 8). Layer discovery stops early as
-          soon as every target has been discovered (BFS discovery order
-          makes the first-appearance layer the exact shortest distance, so
-          deeper layers cannot change any result). For effectively
-          unlimited search set a high, unreachable number (e.g. 99):
-          simple paths cannot exceed the neuron count, so the bound is
-          never hit in practice.
-        - Enumeration: fixed backward-BFS-distance-guided DFS
-          (``FastGraph.find_paths_shortest``); the pathfinding-algorithm
-          selector does not apply. Shortest enumeration is polynomial, so
-          the combinatorial-explosion warning/limits of FindAllPath are
-          unnecessary.
+        - Discovery: shortest mode is target-rooted by default. It fetches
+          incoming edges from each target frontier and reconstructs only
+          branches that reach requested source bodyIds, so uninvolved source
+          fan-out is not built into the search graph.
+        - Depth: ``max_interlayer`` is an EXACT explored-graph bound: paths
+          are capped at ``max_interlayer + 1`` edges (0 = direct connections
+          only). A returned path is shortest within the explored,
+          threshold-filtered graph; if the graph is depth-limited, a longer
+          returned path is not proof of a globally shortest route. Increase
+          the bound for a deeper search.
+        - Enumeration: target-rooted backward BFS plus source-aware guided
+          DFS (``FastGraph.find_paths_shortest_backward``); the
+          pathfinding-algorithm selector does not apply. Shortest enumeration
+          is polynomial, so the combinatorial-explosion warning/limits of
+          FindAllPath are unnecessary.
         - BodyId edge limit: OFF by default in shortest mode (0 = no
           trimming). Trimming keeps pair reachability but not shortest
           distances, so enabling it can inflate reported distances (noted
@@ -10383,7 +11096,7 @@ class FindNeuronConnection:
         and FindShortestPath (``path_mode='shortest'``).
 
         Phases: 1) layer-by-layer connection discovery (cache-aware,
-        shortest mode stops when all targets are discovered), 2) target
+        shortest mode uses target-rooted incoming discovery), 2) target
         identification, 3) path enumeration ('all': selectable algorithm
         within max_interlayer; 'shortest': all per-pair minimum-hop
         paths), then enrichment, type-path derivation, saving and
@@ -10393,6 +11106,8 @@ class FindNeuronConnection:
         
         # Reset status columns if they exist (to allow sequential calls)
         self._reset_temp_columns()
+        backward_shortest = path_mode == 'shortest'
+        self._shortest_backward_active = backward_shortest
         
         # Check if source or target dataframes are empty
         if self.source_df.empty:
@@ -10516,7 +11231,13 @@ class FindNeuronConnection:
             self.exclude_intra_type_connections,
         )
         
-        cached_data = _FINDALLPATH_GRAPH_CACHE.get(cache_key) if use_graph_cache else None
+        # Shortest mode now owns a target-rooted discovery direction.  Do not
+        # reuse the legacy forward graph-cache entries: their layer tables are
+        # not interchangeable with incoming, target-rooted tables.
+        cached_data = (
+            _FINDALLPATH_GRAPH_CACHE.get(cache_key)
+            if use_graph_cache and not backward_shortest else None
+        )
         use_cached_graph = False
         extend_cached_graph = False
         
@@ -10628,6 +11349,47 @@ class FindNeuronConnection:
             'Discovering connections until targets are found' if path_mode == 'shortest'
             else 'Discovering connections layer by layer',
         )
+        if backward_shortest:
+            if self.verbose_mode == 'simple':
+                self._vprint(
+                    '\nPhase 1: Target-rooted backward discovery...',
+                    level='simple',
+                )
+            elif self.verbose_mode == 'full':
+                self._vprint(
+                    f'\n=== PHASE 1: Target-rooted backward discovery '
+                    f'(up to {self.max_interlayer + 1} hops) ===',
+                    level='full',
+                )
+                self._vprint(
+                    'Only incoming branches that can reach requested source '
+                    'bodyIds are reconstructed.',
+                    level='full',
+                )
+
+            backward_result = self._discover_shortest_backward(
+                source_ID, target_ID, self.max_interlayer + 1
+            )
+            all_connections = backward_result['all_connections']
+            all_connections_filtered = all_connections
+            layer_neurons = backward_result['layer_neurons']
+            all_neurons_in_network = backward_result[
+                'all_neurons_in_network'
+            ]
+            discovery_complete = backward_result['complete']
+            self._shortest_target_layers = backward_result['target_layers']
+            self._shortest_target_hop_limits = dict(
+                backward_result['target_layers']
+            )
+            self._shortest_targets_found = backward_result['targets_found']
+            self._depth_cap_reached = not discovery_complete
+            self._shortest_scope_limited = not discovery_complete
+
+            # ``use_cached_graph`` is set only to bypass the legacy
+            # source-rooted phase below. The connection cache remains active
+            # inside _fetch_path_connections_backward.
+            use_cached_graph = True
+
         if not use_cached_graph:
             if self.verbose_mode == 'simple':
                 self._vprint(f'\nPhase 1: Fetching all network layers...', level='simple')
@@ -10758,7 +11520,13 @@ class FindNeuronConnection:
             all_connections_filtered = all_connections
         else:
             # Using cached data - all_connections_filtered was already set above
-            self._vprint(f'Phase 1: Skipped (using cached graph)', level='simple')
+            if backward_shortest:
+                self._vprint(
+                    'Phase 1: Completed target-rooted backward discovery',
+                    level='simple',
+                )
+            else:
+                self._vprint(f'Phase 1: Skipped (using cached graph)', level='simple')
             self._vprint(f'  Cached neurons in network: {len(all_neurons_in_network)}', level='full')
             self._vprint(f'  Cached layers: {len(layer_neurons)}', level='full')
 
@@ -10768,10 +11536,18 @@ class FindNeuronConnection:
         # deeper paths may exist but were never searched. A run that stopped
         # because all targets were found or the frontier dried up is
         # complete — the bound never bit — and needs no depth warning.
-        self._depth_cap_reached = (
-            not discovery_complete
-            and bool(layer_neurons) and bool(layer_neurons[-1])
-        )
+        if backward_shortest:
+            # The backward discovery records whether any target frontier was
+            # still active when the explicit hop bound expired.  Its
+            # source-aware filtering may remove that frontier from
+            # ``layer_neurons`` when no target was reached, so do not infer
+            # the flag from the filtered layers.
+            self._depth_cap_reached = not discovery_complete
+        else:
+            self._depth_cap_reached = (
+                not discovery_complete
+                and bool(layer_neurons) and bool(layer_neurons[-1])
+            )
         if self._depth_cap_reached:
             self._vprint(
                 f'  ⚠️  Depth cap reached: the frontier was still alive at '
@@ -10790,19 +11566,42 @@ class FindNeuronConnection:
         self.target_df.insert(loc=0, column='Checked', value=False)
         self.target_df.insert(loc=1, column='Layer', value=-1)
         
-        # Check which targets are in the network (vectorized: avoids row-wise
-        # .at access, which was O(targets x layers) with slow scalar lookups)
-        first_layer_of = {}
-        for layer_idx, layer_set in enumerate(layer_neurons):
-            for neuron_id in layer_set:
-                if neuron_id not in first_layer_of:
-                    first_layer_of[neuron_id] = layer_idx
-        
-        checked_mask = self.target_df['bodyId'].isin(all_neurons_in_network)
-        self.target_df.loc[checked_mask, 'Checked'] = True
-        mapped_layers = self.target_df.loc[checked_mask, 'bodyId'].map(first_layer_of)
-        self.target_df.loc[checked_mask, 'Layer'] = mapped_layers.fillna(-1).astype(int)
-        targets_found = self.target_df.loc[checked_mask, 'bodyId'].tolist()
+        # Check which targets are enrolled in the explored graph. In the
+        # target-rooted shortest mode, a target is enrolled only when at least
+        # one requested source bodyId reached it; the reverse BFS stores its
+        # minimum source-to-target distance directly. The forward/all-path
+        # modes retain their historical first-discovery-layer calculation.
+        if backward_shortest:
+            target_layers = getattr(self, '_shortest_target_layers', {})
+            checked_mask = self.target_df['bodyId'].isin(
+                list(target_layers)
+            )
+            self.target_df.loc[checked_mask, 'Checked'] = True
+            self.target_df.loc[checked_mask, 'Layer'] = (
+                self.target_df.loc[checked_mask, 'bodyId']
+                .map(target_layers)
+                .fillna(-1)
+                .astype(int)
+            )
+            targets_found = [
+                target for target in self.target_df.loc[
+                    checked_mask, 'bodyId'
+                ].tolist()
+            ]
+        else:
+            # Vectorized: avoids row-wise .at access, which was O(targets x
+            # layers) with slow scalar lookups.
+            first_layer_of = {}
+            for layer_idx, layer_set in enumerate(layer_neurons):
+                for neuron_id in layer_set:
+                    if neuron_id not in first_layer_of:
+                        first_layer_of[neuron_id] = layer_idx
+
+            checked_mask = self.target_df['bodyId'].isin(all_neurons_in_network)
+            self.target_df.loc[checked_mask, 'Checked'] = True
+            mapped_layers = self.target_df.loc[checked_mask, 'bodyId'].map(first_layer_of)
+            self.target_df.loc[checked_mask, 'Layer'] = mapped_layers.fillna(-1).astype(int)
+            targets_found = self.target_df.loc[checked_mask, 'bodyId'].tolist()
         
         targetNum = len(self.target_df)
         targetNum_checked = len(targets_found)
@@ -10814,6 +11613,8 @@ class FindNeuronConnection:
         
         if targetNum_checked == 0:
             self._vprint('\033[33mNo target neurons found in the searched network. Cannot construct paths.\033[0m', level='always')
+            self._save_path_neuron_enrollment(self.allpath_folder)
+            self._write_user_warning_notes(self.allpath_folder)
             self._progress(5, 5, 'Finishing (no targets found in the network)')
             return
         
@@ -10861,14 +11662,16 @@ class FindNeuronConnection:
             self._vprint(f'\n=== PHASE 3: Finding all paths from sources to targets ===', level='full')
             self._vprint('Using graph-based pathfinding to handle reciprocal connections...', level='full')
         
-        # Create INITIAL real layer mapping (neuron ID -> discovery layer)
-        # Targets will be updated later based on their actual appearance in paths
+        # Create INITIAL real layer mapping (neuron ID -> discovery layer).
+        # Backward shortest discovery uses reverse layers, so its forward
+        # source-to-target layer map is rebuilt from the actual paths below.
         real_layer_map_bodyId = {}
-        for layer_idx, layer_set in enumerate(layer_neurons):
-            for neuron_id in layer_set:
-                # Use earliest layer if neuron appears in multiple layers
-                if neuron_id not in real_layer_map_bodyId:
-                    real_layer_map_bodyId[neuron_id] = layer_idx
+        if not backward_shortest:
+            for layer_idx, layer_set in enumerate(layer_neurons):
+                for neuron_id in layer_set:
+                    # Use earliest layer if neuron appears in multiple layers
+                    if neuron_id not in real_layer_map_bodyId:
+                        real_layer_map_bodyId[neuron_id] = layer_idx
         
         self._vprint(f'Created initial real layer map for {len(real_layer_map_bodyId)} neurons', level='full')
         self._vprint(f'  Note: Target real layers will be updated after pathfinding completes', level='full')
@@ -10976,13 +11779,17 @@ class FindNeuronConnection:
             if self.verbose_mode == 'simple':
                 self._vprint(f'Finding shortest paths...', level='simple')
             elif self.verbose_mode == 'full':
-                self._vprint(f'Using shortest-path enumeration (backward BFS distances '
-                             f'+ guided DFS, capped at {self.max_interlayer + 1} edges)...', level='full')
-            
-            path_gen = G.find_paths_shortest(
-                source_ID, targets_found,
+                self._vprint(f'Using target-rooted shortest-path enumeration '
+                             f'(backward BFS + source-aware guided DFS, capped at '
+                             f'{self.max_interlayer + 1} edges)...', level='full')
+
+            path_gen = G.find_paths_shortest_backward(
+                targets_found, source_ID,
                 self.max_interlayer + 1,
                 verbose=(self.verbose_mode in ['simple', 'full']),
+                target_cutoffs=getattr(
+                    self, '_shortest_target_hop_limits', {}
+                ),
             )
         
         elif algo == 'Bidirectional':
@@ -11046,9 +11853,48 @@ class FindNeuronConnection:
         if path_gen:
             path_iter = path_gen
 
-            for p in path_iter:
-                path_count += 1
-                all_paths.append(p)  # Collect path
+            # The shortest enumerator is already distance-guided, but enforce
+            # the semantic contract at the shared pipeline boundary as well.
+            # This protects type aggregation and bodyId exports from any
+            # generator/cache path that might contain a longer alternative.
+            all_paths = list(path_iter)
+            raw_path_count = len(all_paths)
+            if path_mode == 'shortest':
+                all_paths = self._keep_shortest_bodyid_paths(all_paths)
+                if len(all_paths) != raw_path_count:
+                    self._vprint(
+                        f'  Shortest bodyId filter: kept {len(all_paths):,} of '
+                        f'{raw_path_count:,} paths after applying the minimum '
+                        f'hop count per exact source-target pair',
+                        level='full',
+                    )
+
+                if backward_shortest:
+                    # Reverse discovery layers are not forward path layers.
+                    # Build the enrollment map from the actual emitted paths
+                    # so source/target CSVs and visualization metadata use
+                    # biologically oriented layer numbers.
+                    for path in all_paths:
+                        for layer_idx, neuron_id in enumerate(path):
+                            real_layer_map_bodyId.setdefault(
+                                str(neuron_id), layer_idx
+                            )
+
+                    explored_layers = len(
+                        [table for table in all_connections
+                         if not table.is_empty()]
+                    )
+                    self._shortest_scope_limited = (
+                        getattr(self, '_shortest_scope_limited', False)
+                        or self._depth_cap_reached
+                        or any(
+                            len(path) - 1 > explored_layers
+                            for path in all_paths
+                        )
+                    )
+
+            path_count = len(all_paths)
+            for p in all_paths:
                 s = p[0]
                 t = p[-1]
                 pairs_with_paths_dict[(s, t)] = True
@@ -11235,26 +12081,36 @@ class FindNeuronConnection:
         # Build neuron_layers structure for visualization (based on actual path data)
         # Group neurons by their earliest appearance layer in valid paths
         neuron_layers = []
-        for layer_idx in range(len(all_connections) + 1):
-            layer_label_in = f'{layer_idx-1}->{layer_idx}' if layer_idx > 0 else None
-            layer_label_out = f'{layer_idx}->{layer_idx+1}'
-            
-            neurons_in_layer = set()
-            
-            if layer_idx == 0:
-                # Layer 0: source neurons that are in paths
-                neurons_in_layer = set(source_ID) & neurons_in_paths
-            else:
-                # Neurons that appear as targets in this layer's incoming connections
-                if len(conn_inpath) > 0 and layer_label_in in conn_inpath['conn_layer'].unique().to_list():
-                    incoming = conn_inpath.filter(pl.col('conn_layer') == layer_label_in)
-                    neurons_in_layer = set(incoming['bodyId_post'].unique().to_list())
-            
-            if len(neurons_in_layer) > 0:
+        if backward_shortest:
+            max_path_nodes = max((len(path) for path in all_paths), default=1)
+            for layer_idx in range(max_path_nodes):
+                neurons_in_layer = {
+                    path[layer_idx]
+                    for path in all_paths
+                    if len(path) > layer_idx
+                }
                 neuron_layers.append(np.array(list(neurons_in_layer)))
-            elif layer_idx == 0:
-                # Always include layer 0 even if empty
-                neuron_layers.append(np.array([]))
+        else:
+            for layer_idx in range(len(all_connections) + 1):
+                layer_label_in = f'{layer_idx-1}->{layer_idx}' if layer_idx > 0 else None
+                layer_label_out = f'{layer_idx}->{layer_idx+1}'
+
+                neurons_in_layer = set()
+
+                if layer_idx == 0:
+                    # Layer 0: source neurons that are in paths
+                    neurons_in_layer = set(source_ID) & neurons_in_paths
+                else:
+                    # Neurons that appear as targets in this layer's incoming connections
+                    if len(conn_inpath) > 0 and layer_label_in in conn_inpath['conn_layer'].unique().to_list():
+                        incoming = conn_inpath.filter(pl.col('conn_layer') == layer_label_in)
+                        neurons_in_layer = set(incoming['bodyId_post'].unique().to_list())
+
+                if len(neurons_in_layer) > 0:
+                    neuron_layers.append(np.array(list(neurons_in_layer)))
+                elif layer_idx == 0:
+                    # Always include layer 0 even if empty
+                    neuron_layers.append(np.array([]))
         
         # Ensure we have at least source layer
         if len(neuron_layers) == 0:
@@ -11306,7 +12162,7 @@ class FindNeuronConnection:
         if not conn_types.is_empty():
             conn_types = conn_types.sort(['conn_layer','traversal_probability','weight'], descending=[False,True,True])
 
-        totalweight_df = pl.DataFrame(list(weight_layers.items()), schema={'conn_layer': pl.Utf8, 'weight': pl.Float64}, orient="row")
+        totalweight_df = pl.DataFrame(list(weight_layers.items()), schema={'conn_layer': pl.Utf8, 'weight': pl.Int64}, orient="row")
         if not totalweight_df.is_empty():
             totalweight_df = totalweight_df.sort('conn_layer')
         
@@ -11406,13 +12262,20 @@ class FindNeuronConnection:
 
         # Mark which source neurons are in paths to targets
         if len(conn_inpath) > 0:
-            # Polars syntax
-            source_inpath = conn_inpath.filter(pl.col('conn_layer') == '0->1')['bodyId_pre'].unique().to_list()
+            # Use path endpoints rather than discovery-table labels. In the
+            # target-rooted shortest mode conn_layer records reverse fetch
+            # depth, so the target-incoming table is not necessarily the
+            # source's forward layer 0->1 table.
+            source_inpath = sorted({
+                str(path[0]) for path in all_paths if path
+            })
             if 'isInPath' in self.source_df.columns:
                 self.source_df['isInPath'] = False
             else:
                 self.source_df.insert(loc=0,column='isInPath',value=False)
             self.source_df.loc[self.source_df.bodyId.isin(source_inpath),'isInPath'] = True
+        elif 'isInPath' not in self.source_df.columns:
+            self.source_df.insert(loc=0, column='isInPath', value=False)
         
         # Print statistics about paths
         self._vprint(f'\nPath Network Statistics (source to target):', level='full')
@@ -11536,9 +12399,8 @@ class FindNeuronConnection:
             os.makedirs(csv_folder, exist_ok=True)
             
             # Save parameters and source/target info even without paths
+            self._save_path_neuron_enrollment(self.allpath_folder)
             self._save_df_to_csv_polars(self.parameter_df, os.path.join(csv_folder, 'parameters.csv'))
-            self._save_df_to_csv_polars(self.source_df, os.path.join(csv_folder, 'source_neurons.csv'))
-            self._save_df_to_csv_polars(self.target_df, os.path.join(csv_folder, 'target_neurons.csv'))
             
             # Save combined neurons CSV (will be empty for intermediate since no paths)
             self._create_combined_neurons_csv(self.source_df, self.target_df, conn_inpath, csv_folder)
@@ -11556,6 +12418,7 @@ class FindNeuronConnection:
                 self._save_df_to_csv_polars(empty_conn, os.path.join(csv_folder, 'connection_type.csv'))
             
             self._vprint(f'  ✓ Saved to: {csv_folder}/', level='full')
+            self._write_user_warning_notes(self.allpath_folder)
             return
         
         self._progress(4, 5, 'Enriching and saving path results')
@@ -11755,6 +12618,7 @@ class FindNeuronConnection:
         # Determine if using CSV or Excel based on output_format or data size
         EXCEL_ROW_LIMIT = 1_048_576
         use_csv = (self.output_format == 'csv') or (len(conn_types) >= EXCEL_ROW_LIMIT * 0.9)
+        self._save_path_neuron_enrollment(self.allpath_folder)
         
         # print(f"  Format check: output_format='{self.output_format}', rows={len(conn_types):,}, use_csv={use_csv}", flush=True)
         
@@ -11777,13 +12641,6 @@ class FindNeuronConnection:
             
             # print("    - parameters.csv", flush=True)
             self._save_df_to_csv_polars(self.parameter_df, os.path.join(csv_folder, 'parameters.csv'))
-            
-            # print("    - source_neurons.csv", flush=True)
-            # Use reset_index() to preserve index as in pandas to_csv(index=True)
-            self._save_df_to_csv_polars(self.source_df, os.path.join(csv_folder, 'source_neurons.csv'), index=True)
-            
-            # print("    - target_neurons.csv", flush=True)
-            self._save_df_to_csv_polars(self.target_df, os.path.join(csv_folder, 'target_neurons.csv'), index=True)
             
             # Save combined neurons CSV with group column
             self._create_combined_neurons_csv(self.source_df, self.target_df, conn_inpath, csv_folder)
@@ -12073,28 +12930,14 @@ class FindNeuronConnection:
         )
         self._vprint(f'  Derived {len(type_paths_to_save):,} unique type-level paths '
                      f'from {len(all_paths):,} bodyId paths', level='full')
-        
-        if path_mode == 'shortest' and type_paths_to_save:
-            # Different bodyId instances of a target type can sit at
-            # different distances, so the derivation yields per-instance
-            # shortest type sequences. At the type level the tool reports
-            # the per-(source type, target type) minimum length only —
-            # all ties kept, longer per-instance routes dropped.
-            best_len_by_pair = {}
-            for seq in type_paths_to_save:
-                key = (seq[0], seq[-1])
-                length = len(seq) - 1
-                if key not in best_len_by_pair or length < best_len_by_pair[key]:
-                    best_len_by_pair[key] = length
-            before = len(type_paths_to_save)
-            type_paths_to_save = [
-                seq for seq in type_paths_to_save
-                if len(seq) - 1 == best_len_by_pair[(seq[0], seq[-1])]
-            ]
-            if len(type_paths_to_save) != before:
-                self._vprint(f'  Shortest mode: kept {len(type_paths_to_save):,} of '
-                             f'{before:,} type paths (per-type-pair minimum length; '
-                             f'ties kept)', level='full')
+
+        # Do not apply a second shortest-path reduction after mapping bodyId
+        # paths to types.  BodyId shortest paths are defined per exact
+        # source/target pair, and different target instances of the same type
+        # can legitimately have different minimum-hop lengths.  Keeping only
+        # the shortest (source type, target type) sequence would hide those
+        # target-involved paths and make the type-level result look shorter
+        # than the population of queried targets actually is.
         
         if type_paths_to_save:
             # Stream directly to CSV to avoid OOM; the builder verifies every

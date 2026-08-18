@@ -3,12 +3,24 @@
 ## Overview
 The `FindAllPath()` method finds **all paths** from source neurons to target neurons within the specified `max_interlayer`, keeping paths of different lengths while filtering out connections that don't lead to any target neurons.
 
-## Key Differences from FindPath()
+## Key Differences from FindPath() and FindShortestPath()
 
 ### FindPath()
-- Stops searching when **all** target neurons are found
-- Returns only the **shortest paths** to each target neuron
-- May miss longer alternative paths
+- Legacy forward layer-by-layer path routine.
+- Stops discovery when all targets are found or the configured depth is
+  reached, then enumerates paths in the discovered graph.
+- Use `FindShortestPath()` when minimum-hop semantics are required.
+
+### FindShortestPath()
+- Starts from each target and follows incoming connections backward.
+- Keeps the shortest paths independently for every exact
+  `(source bodyId, target bodyId)` pair, including tied shortest paths.
+- Aggregates the retained bodyId paths to type-level path rows afterward;
+  it does not choose one minimum path for an entire type pair.
+- The root-level `source_neurons.csv` and `target_neurons.csv` record source
+  and target enrollment. The `user_warning_notes.txt` file explains when
+  bodyId pairs may be hidden by type aggregation or when the depth bound
+  prevents a global shortest-path claim.
 
 ### FindAllPath()
 - Continues searching through **all layers** up to `max_interlayer`
@@ -18,13 +30,23 @@ The `FindAllPath()` method finds **all paths** from source neurons to target neu
 
 ## Algorithm
 
-### Phase 1: Forward Search (Exploration)
+### FindAllPath Phase 1: Forward Search (Exploration)
 1. Starting from source neurons, explore all downstream connections
 2. Continue for all layers up to `max_interlayer`
 3. Track which target neurons are found at each layer
 4. Store all discovered connections in `conn_layers`
 
-### Phase 2: Backward Filtering (Path Extraction)
+### FindShortestPath Phase 1: Target-rooted Search
+1. Start at each requested target bodyId.
+2. Query incoming connections layer by layer, stopping separately when the
+   enrolled source bodyIds for that target have been reached or the exact
+   hop bound is exhausted.
+3. Retain only edges on shortest-DAG branches that reach requested sources;
+   incoming branches from uninvolved sources are excluded.
+4. Enumerate all tied shortest bodyId paths, then derive type-level paths from
+   those concrete paths.
+
+### FindAllPath Phase 2: Backward Filtering (Path Extraction)
 1. Identify all target neurons found at any layer
 2. Backtrack through layers to identify neurons that are part of paths to targets
 3. Keep only connections where **both** pre- and post-synaptic neurons are in paths to targets
@@ -33,24 +55,31 @@ The `FindAllPath()` method finds **all paths** from source neurons to target neu
    - **All alternative paths**: Multiple routes to the same target
    - **Convergent and divergent patterns**: One-to-many and many-to-one connections
 
-### Why This Approach Works
+### Why These Approaches Work
 - **Forward search**: Ensures we explore all possible connections within the layer limit
 - **Backward filtering**: Removes branches that don't lead anywhere (dead ends)
-- **Result**: All paths from source to target, with no dead-end branches
+- **Target-rooted shortest search**: Avoids building the fan-out of sources that
+  cannot participate in a requested target path.
+- **Result**: Complete paths or exact per-bodyId shortest paths, depending on
+  the selected method, with no uninvolved branches in the shortest graph.
 
 ## Output Structure
 
 ### Excel File Sheets
 1. **parameters**: Analysis parameters
-2. **source_neurons**: Information about source neurons
-3. **target_neurons**: Information about target neurons (with Layer column showing where found)
+2. **source_neurons.csv** / **target_neurons.csv** at the run root: resolved
+   enrollment details (`isInPath`, `Checked`, and `Layer`)
+3. **source_neurons** / **target_neurons** sheets in Excel outputs
 4. **total_weight_layer**: Total synaptic weight per layer
 5. **connection_info**: All connections in paths (by bodyId)
 6. **connection_type**: All connections in paths (by type)
 7. **path_type**: All paths to targets (by neuron type)
 8. **path_type_excluded**: Paths excluded by keyword filter
-9. **path_bodyId**: All paths to targets (by bodyId) - if find_bodyId_path=True
+9. **path_bodyId**: All paths to targets (by bodyId) - if bodyId output is enabled
 10. **layer_X**: Neuron information for each intermediate layer
+
+For CSV runs, connection tables and supporting files are under
+`data_details/`; the two enrollment CSVs remain at the run root.
 
 ### Sankey Diagrams
 - **Sankey_type_allpaths_snp{N}.html**: Shows all paths by neuron type
@@ -94,10 +123,11 @@ Target neurons by layer:
 3. **Alternative pathway discovery**: Finding backup routes or parallel pathways
 4. **Network motif analysis**: Identifying patterns like feedforward loops, convergence, divergence
 
-### When to Use FindPath() Instead
-1. **Efficiency focus**: You only care about the shortest/most direct connections
-2. **Large networks**: When computational resources are limited
-3. **Single-layer targets**: When targets are all expected at the same distance
+### When to Use FindShortestPath()
+1. **Efficiency focus**: You only care about minimum-hop connections
+2. **Large networks**: Target-rooted discovery avoids uninvolved source fan-out
+3. **Exact pair analysis**: You need the shortest paths for each concrete
+   source/target bodyId pair
 
 ## Example Scenario
 
@@ -106,7 +136,11 @@ Suppose you have:
 - Target: MBON output neurons
 - max_interlayer: 3
 
-**FindPath()** would stop as soon as it finds all MBON neurons, even if some are at Layer 1. It would miss longer paths.
+**FindShortestPath()** would search backward from each MBON target and keep
+the shortest path(s) separately for each source/target bodyId pair. If only
+the type-level CSV is inspected, multiple target instances can collapse to the
+same type sequence; use the bodyId output and the root enrollment files to
+inspect the concrete pairs.
 
 **FindAllPath()** would:
 1. Search through all 3 layers
@@ -121,6 +155,9 @@ Result: Complete picture of all PPL1→MBON pathways within 3 layers.
 ### Required
 - Source neurons and target neurons must be initialized
 - At least one target neuron must be found in the search
+- For a globally reliable shortest-path result, increase the explored depth
+  until the target-rooted search is not depth-capped. Otherwise the result is
+  shortest only within the explored, threshold-filtered graph.
 
 ### Optional
 - `find_bodyId_path=True`: Also generate bodyId-level paths (can be very large)

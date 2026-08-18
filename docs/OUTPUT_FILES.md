@@ -62,6 +62,13 @@ Pulled NeuPrint datasets are stored under `datasets/<dataset>/` with a
 
 The `FindNeuronConnection` class (in `src/coana.py`) is the core pathfinding engine. `FindAllPath` ("Complete Paths" tab) and `FindShortestPath` ("Shortest Paths" tab) share the same output layout.
 
+Shortest Paths performs target-rooted backward discovery. It keeps shortest
+paths per exact `(source bodyId, target bodyId)` pair, then derives the
+type-level rows from those bodyId paths. If the type-level output is used,
+check the root enrollment files for the exact source/target membership. When
+the depth bound truncates discovery, the reported paths are shortest only in
+the explored, threshold-filtered graph; see `user_warning_notes.txt`.
+
 ### Folder Structure
 
 `find-paths-complete_{ABBREV}_{source}_to_{target}_L{max_interlayer}w{min_weight}r{min_ratio}p{min_prob}_{ts}/`
@@ -82,10 +89,19 @@ Example: `find-paths-complete_MCNS_aMe12_to_PPL101_L1w3r0p0_20260815_142520/`
     *   `nt_types`: Neurotransmitter types along the path
 *   **`all_attributes.json`**: Serialized run attributes.
 
+#### Enrollment Files (run root)
+
+*   **`source_neurons.csv`**: Resolved source neurons, including `isInPath`.
+*   **`target_neurons.csv`**: Resolved target neurons, including `Checked` and
+    `Layer`.
+
+Synapse-count fields (`weight`, `weights`, `min_weight`, and total-weight
+fields) are exported as integers (`5`, not `5.0`). Ratio and probability
+fields remain decimal-valued.
+
 #### Supporting Data (`data_details/`)
 *   **`conn_mat_type_weight.csv` / `conn_mat_type_ratio.csv` / `conn_mat_type_prob.csv` / `conn_mat_type_nt.csv`**: Type-level weight / ratio / traversal-probability / neurotransmitter matrices
 *   **`connection_type.csv`**: Edges aggregated by type pair — columns `type_pre`, `type_post`, `weight`, `connection_ratio`, `traversal_probability`, `block_probability`, `nt_type`
-*   **`source_neurons.csv` / `target_neurons.csv`**: Resolved source / target neuron metadata
 *   **`neurons_included.csv`**: All neurons participating in the found connections
 *   **`total_weight_layer.csv`**: Total weight per intermediate layer
 *   **`parameters.csv`**: Parameters of the run

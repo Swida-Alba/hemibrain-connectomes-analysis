@@ -225,3 +225,26 @@ def test_fafb_line_mode_never_emits_tube_or_mesh_stages():
     assert "🧪 tube mesh" not in joined
     assert "⚡ decimate" not in joined
     assert "🧱 mesh source" not in joined
+
+
+def test_fafb_progress_callback_reports_stages_and_completion():
+    """FAFB sources update the shared render bar without nesting tqdm bars."""
+    visualizer, _ = _stub_fafb_layer_visualizer("tube")
+    events = []
+
+    visualizer._process_fafb_layer(
+        navis.NeuronList([make_chain_neuron(2000)]),
+        [make_mesh(99)],
+        "fast",
+        False,
+        render_mesh_cache={},
+        progress_callback=lambda neuron_id, stage, done: events.append(
+            (neuron_id, stage, done)),
+    )
+
+    completed = [event for event in events if event[2]]
+    assert {event[0] for event in completed} == {"42", 99}
+    assert any(event[0] == "42" and event[1] == "reduce nodes"
+               for event in events)
+    assert any(event[0] == "42" and event[1] == "tube mesh"
+               for event in events)

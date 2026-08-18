@@ -34,6 +34,19 @@ def make_tree(body_id):
     return neuron
 
 
+def make_spiky_tree(body_id):
+    neuron = navis.TreeNeuron(pd.DataFrame({
+        "node_id": np.array([0, 1, 2, 3, 4], dtype=np.int64),
+        "parent_id": np.array([-1, 0, 1, 1, 3], dtype=np.int64),
+        "x": np.array([0.0, 1.0, 2.0, 100.0, 101.0]),
+        "y": np.zeros(5),
+        "z": np.zeros(5),
+        "radius": np.ones(5),
+    }))
+    neuron.id = body_id
+    return neuron
+
+
 def make_mesh(body_id):
     vertices = np.array([
         (0.0, 0.0, 0.0), (100.0, 0.0, 0.0),
@@ -227,4 +240,21 @@ class TestExtrusionRepair:
         assert set(mesh_cache) == {"6"}
         # Repair requests force a fresh fetch.
         assert resolver.calls["api"][0][0] == ["6"]
+        assert resolver.calls["api"][0][1]["force_refresh"] is True
+
+    def test_failed_cave_repair_prunes_local_extrusion_branch(self):
+        resolver = RecordingResolver(
+            zip_hits={"7": make_spiky_tree("7")},
+        )
+        resolver.visualizer.auto_fix_extrusions = True
+        resolver.visualizer._detect_extrusions_in_skeletons = (
+            lambda skeletons, **kwargs: ["7"])
+
+        sources, skeleton_cache, mesh_cache = resolver.resolve(
+            [7], allow_mesh_cache=True)
+
+        assert sources == {"7": "local_repaired"}
+        assert mesh_cache == {}
+        assert set(skeleton_cache["7"].nodes["node_id"]) == {0, 1, 2}
+        assert resolver.calls["api"][0][0] == ["7"]
         assert resolver.calls["api"][0][1]["force_refresh"] is True

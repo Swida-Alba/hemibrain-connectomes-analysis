@@ -5580,7 +5580,7 @@ def build_path_dataframe_from_paths(paths, conn_data, targets, real_layer_map=No
             p = metrics.get('traversal_probability', 0)
             r = metrics.get('connection_ratio', 0)
             
-            weights.append(w)
+            weights.append(_integer_synapse_count(w))
             probs.append(p)
             ratios.append(r)
             
@@ -5639,6 +5639,22 @@ def build_path_dataframe_from_paths(paths, conn_data, targets, real_layer_map=No
             rows.append(row)
             
     return pd.DataFrame(rows)
+
+
+def _integer_synapse_count(value):
+    """Return integral synapse counts as Python ``int`` values.
+
+    Connection tables can arrive through pandas as ``5.0`` even though the
+    underlying synapse count is integral.  Keep genuinely non-integral values
+    unchanged so formatting does not hide malformed input data.
+    """
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return value
+    if np.isfinite(numeric) and numeric.is_integer():
+        return int(numeric)
+    return value
 
 # =============================================================================
 # Unified streaming path writer (Polars implementation, moved from
@@ -7194,8 +7210,12 @@ def prepare_connection_data(conn_data, level='type'):
         pl.col(tgt_col).cast(pl.Utf8).alias('tgt')
     ])
     
-    # Define aggregations
-    aggs = [pl.col('weight').sum().alias('weight')]
+    # Define aggregations. Synapse counts are integral even when an upstream
+    # pandas/Polars conversion represents them as 5.0, so normalize the
+    # semantic count column before summing and writing path metrics.
+    aggs = [
+        pl.col('weight').cast(pl.Int64, strict=False).sum().alias('weight')
+    ]
     
     if 'traversal_probability' in df.columns:
         aggs.append(pl.col('traversal_probability').mean().alias('traversal_probability'))
@@ -7263,7 +7283,7 @@ def process_batch_polars(paths_batch, df_conn, level='type', keyword_in_path_to_
     has_nt = 'nt_type' in df_joined.columns
     
     df_joined = df_joined.with_columns([
-        pl.col('weight').fill_null(0),
+        pl.col('weight').fill_null(0).cast(pl.Int64, strict=False),
         pl.col('traversal_probability').fill_null(0),
         pl.col('connection_ratio').fill_null(0)
     ])
@@ -7691,7 +7711,9 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
     # connection weights are numeric.
     if 'weight' in conn_df.columns:
         conn_df = conn_df.with_columns(
-            pl.col('weight').cast(pl.Float64, strict=False).alias('weight')
+            # Synapse counts are integer-valued. Keep that semantic dtype so
+            # edge CSVs, path metrics, and weight matrices do not emit 5.0.
+            pl.col('weight').cast(pl.Int64, strict=False).alias('weight')
         )
 
     # Check if connection_ratio already exists and has valid values (from coana.py global calculation)

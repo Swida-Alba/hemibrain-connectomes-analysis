@@ -1,6 +1,7 @@
 # Why FindAllPath Finds Paths at the bodyId Level First
 
-Design rationale for the discovery-first pipeline in `FindAllPath`:
+Design rationale for the discovery-first pipeline in `FindAllPath` and
+`FindShortestPath`:
 
 > The type-level results are **derived from** discovered bodyId-level paths —
 > never computed independently of them. Aggregating all per-bodyId pairs
@@ -11,7 +12,8 @@ Design rationale for the discovery-first pipeline in `FindAllPath`:
 ## 1. The pipeline (current design)
 
 ```
-per-bodyId pair tables (layer by layer, from the source neurons)
+per-bodyId pair tables (forward layers for Complete Paths;
+                         target-rooted incoming layers for Shortest Paths)
    │
    │ 1. pan-graph edge limit (path-integrity trim: reachability filter +
    │    source/target reservation + adaptive dead-end refill)
@@ -42,10 +44,44 @@ conn_types — type-level edges, every one backed by a real bodyId path
    cap, applied when drawing)
 ```
 
+## Shortest discovery is target-rooted
+
+`FindShortestPath` does not use the Complete Paths forward source fan-out as
+its default discovery graph. For each queried target, it performs a reverse
+BFS through incoming connections until the enrolled source bodyIds have been
+reached or the configured hop bound is exhausted. A source bodyId that cannot
+reach any queried target is never part of the shortest graph. Before graph
+construction, incoming rows are filtered to the shortest-DAG branches that
+actually connect a requested source to a discovered target.
+
+The target's earliest discovery layer is the minimum over the source bodyIds
+that reach it. It must not be used as a global cutoff: another source can have
+a longer shortest path to that same target. Shortest filtering is therefore
+performed on exact `(source bodyId, target bodyId)` endpoints before mapping
+paths to types.
+
+When `skip_bodyId=True`, multiple bodyId pairs can collapse to the same type
+sequence. The type CSV intentionally deduplicates that sequence, so the run
+writes an enrollment warning and root-level `source_neurons.csv` and
+`target_neurons.csv`. Use Shortest Paths with bodyId output enabled for exact
+pairs, or Complete Paths for all paths within a chosen depth.
+
+If the reverse BFS reaches the hop limit while a frontier is still active,
+the result is shortest only within the explored, threshold-filtered graph.
+A path found at that boundary is a constrained solution, not a proof of a
+global shortest route. This condition is recorded in `user_warning_notes.txt`.
+
 Every step after the discovery consumes only pairs that were **observed on
 an actual bodyId path**. The type-level output in step 5 is a *summary* of
 the discovery — the unique type sequences of the discovered bodyId paths —
-not an independent source of truth.
+not an independent source of truth. In shortest mode, the pipeline first
+enforces the minimum hop count independently for every exact
+`(source bodyId, target bodyId)` pair. It then maps those filtered paths to
+types; it does not apply a global distal-target cutoff or a second
+per-type-pair minimum. Thus a longer type sequence is retained only when it is
+the shortest path for a different target instance. Identical type sequences
+remain one type-level row; use the bodyId path output when the exact instance
+pair must remain visible.
 
 ### Why the type-level paths are derived, not re-searched
 

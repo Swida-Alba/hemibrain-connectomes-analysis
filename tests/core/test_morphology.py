@@ -862,7 +862,7 @@ class TestVisualizeTopResults:
         assert vs.kwargs["skip_synapse"] is True
         assert vs.kwargs["show_fig"] is False
         assert vs.kwargs["saveas"] == morph._dataset_folder("test:v1")
-        assert vs.kwargs["skeleton_mesh_simplification"] == 0.98
+        assert vs.kwargs["skeleton_mesh_simplification"] == 0.95
 
     def test_type_level_excludes_intra_reference_row(self, tmp_path, monkeypatch):
         """The intra-type reference row (rank 1) must never be rendered."""

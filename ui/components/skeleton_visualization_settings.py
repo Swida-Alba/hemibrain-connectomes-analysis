@@ -350,9 +350,8 @@ def skeleton_visualization_settings(
                 True,
                 hint=(
                     "Use the method default: fast removes 0.90 of faces; "
-                    "fine/artistic remove 0.98 in analysis renders. FAFB "
-                    "analysis renders use 0.98; the dedicated Skeleton tab "
-                    "uses 0.95."
+                    "fine/artistic remove 0.95 in analysis and dedicated "
+                    "Skeleton renders."
                 ),
             )
             fields["neuprint_skeleton_pipeline"] = select_input(
@@ -365,8 +364,9 @@ def skeleton_visualization_settings(
                     "stage; 'fine' smooths/resamples and uses the "
                     "accelerated FAFB radius profile; 'artistic' uses "
                     "vertex-cluster mesh decimation. All methods use "
-                    "batched parallel online fetching. Disabled for "
-                    "FlyWire/FAFB and line mode."
+                    "batched parallel online fetching and are available for "
+                    "NeuPrint and FlyWire/FAFB tube renders; line mode "
+                    "bypasses the method."
                 ),
             )
             fields["skeleton_mesh_simplification"] = number_input(
@@ -380,8 +380,7 @@ def skeleton_visualization_settings(
                 0.05,
                 hint=(
                     "Fraction of skeleton-mesh faces removed (higher is coarser). "
-                    "Analysis defaults are 0.90 for NeuPrint fast and 0.98 "
-                    "for analysis fine/FAFB renders."
+                    "Defaults are 0.90 for fast and 0.95 for fine/artistic."
                 ),
             )
             fields["export_method"] = select_input(
@@ -425,9 +424,7 @@ def skeleton_visualization_settings(
             is_flywire = _contains_flywire_dataset(
                 dataset_provider() if dataset_provider else None
             )
-            fields["neuprint_skeleton_pipeline"].set_enabled(
-                not is_line and not is_flywire
-            )
+            fields["neuprint_skeleton_pipeline"].set_enabled(not is_line)
             fields["use_default_simplification"].set_enabled(not is_line)
             fields["skeleton_mesh_simplification"].set_enabled(
                 not is_line and not bool(fields["use_default_simplification"].value)
@@ -436,9 +433,8 @@ def skeleton_visualization_settings(
                 pipeline = str(
                     fields["neuprint_skeleton_pipeline"].value or "fast"
                 ).strip().lower()
-                # FAFB's disabled method selector starts at ``fast``, but
-                # its prepared mesh cache should still be the default for
-                # analysis renders (mirrors the Skeleton tab).
+                # FAFB's method selector is active for tube renders, while
+                # the prepared mesh cache remains the default source policy.
                 default_cache = (
                     True if is_flywire
                     else pipeline not in {"fast", "artistic"}

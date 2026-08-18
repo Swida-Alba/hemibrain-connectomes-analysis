@@ -16,7 +16,8 @@
   <p class="lede">
     Find only the shortest (minimum hop-count) paths between source and
     target neuron groups. For every reachable pair, all tied shortest paths
-    are kept. Runs on the full Find All Paths pipeline (discovery,
+    are kept. Discovery starts from target neurons and follows incoming
+    branches to enrolled source bodyIds. Runs on the full Find All Paths pipeline (discovery,
     enrichment, outputs, visualization) with shortest-only enumeration.
   </p>
 
@@ -28,6 +29,14 @@
       <code>DN1p</code>).</li>
     <li>Click <b>Shortest Paths</b>.</li>
   </ol>
+
+  <div class="callout warn">
+    <b>Use a small source set:</b> if Source Neurons contains more than one
+    type/name query, the page warns that each query can expand to many source
+    bodyIds and enlarge the target-rooted search. Prefer one source type or
+    query. Use explicit bodyIds with bodyId output enabled when exact
+    source-target pairs are needed.
+  </div>
 
   <h2>All-neurons queries (<code>all_neurons</code>)</h2>
   <p>Typing the special chip <code>all_neurons</code> as the <b>source or
@@ -53,22 +62,21 @@
 
   <h2>Depth cap (default: 2 intermediate layers)</h2>
   <ul>
-    <li><b>Max Intermediate Layers (optional) = 0</b> means unlimited search depth.
-      Layer discovery is a BFS and stops as soon as every target has been
-      discovered — a target's first-discovery layer is its exact shortest
-      hop distance, so deeper layers cannot change any result.</li>
+    <li><b>Max Intermediate Layers (optional) = 0</b> means direct connections
+      only. For a positive value <code>M</code>, paths are capped at
+      <code>M + 1</code> hops.</li>
     <li>The default is 2, matching the Find All Paths tab. Increase it when a
-      query needs deeper intermediate layers; there is no artificial upper
-      bound on the integer value.</li>
-    <li>Set <b>Max Intermediate Layers &gt; 0</b> only as a safety cap when targets may
-      be unreachable (worst case: the whole forward cone of the sources is
-      fetched).</li>
+      query needs deeper intermediate layers. Backward discovery continues
+      until the enrolled source bodyIds are reached or this bound is hit.</li>
+    <li>If the bound truncates an active frontier, results are shortest only
+      within the explored, threshold-filtered graph. A path at that boundary
+      is a constrained solution, not proof of a globally shortest route.</li>
   </ul>
 
   <h2>Parameters</h2>
   <table>
     <tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr>
-    <tr><td>Max Intermediate Layers (optional)</td><td>2</td><td>0 = unlimited depth; &gt;0 caps path length at <i>layers + 1</i> edges</td></tr>
+    <tr><td>Max Intermediate Layers (optional)</td><td>2</td><td>0 = direct only; &gt;0 caps path length at <i>layers + 1</i> edges</td></tr>
     <tr><td>Min Synapse Count</td><td>3</td><td>Minimum edge weight</td></tr>
     <tr><td>Min Connection Ratio</td><td>0.0</td><td>Minimum weight/post ratio</td></tr>
     <tr><td>Min Traversal Prob.</td><td>0.0</td><td>Traversal probability threshold</td></tr>
@@ -95,6 +103,15 @@
     <code>user_warning_notes.txt</code>).
   </div>
 
+  <h2>BodyId enrollment</h2>
+  <p>When type-level output is used, several exact bodyId pairs can collapse
+    to one type sequence. The run records this caveat in
+    <code>user_warning_notes.txt</code>. Check the root-level
+    <code>source_neurons.csv</code> (<code>isInPath</code>) and
+    <code>target_neurons.csv</code> (<code>Checked</code>, <code>Layer</code>).
+    Run Shortest Paths with <b>Skip BodyId</b> off for specific bodyId pairs,
+    or use <b>Complete Paths</b> to enumerate all paths under a chosen depth.</p>
+
   <h2>Advanced options</h2>
   <ul>
     <li><b>Keywords to Exclude from Paths</b> — same semantics as Find All Paths.</li>
@@ -111,14 +128,15 @@
   <p>Same layout as Find All Paths (see the Complete Paths guide):</p>
   <pre><code>{output_dir}/find-paths-shortest_MCNS_aMe12_to_PPL101_L1w3r0p0_20260815_142717/
   aMe12_to_PPL101_allpaths_type.csv  # shortest paths (same columns)
+  source_neurons.csv, target_neurons.csv  # enrollment/status details
   all_attributes.json
   parameters.txt, user_warning_notes.txt
-  data_details/          # matrices, connection_type.csv, neuron lists, parameters.csv
+  data_details/          # matrices, connection_type.csv, parameters.csv
   visualization/         # Network / Sankey / Heatmap HTML + visualization_data/ inputs
   hemisphere_symmetry/...  # when Symmetry Analysis is on
   find_reciprocal/...      # when Find Reciprocal Connections is on</code></pre>
-  <p><code>Lmax</code> in the folder name means the search ran with
-    unlimited depth. With <b>Skip BodyId</b> off, bodyId-level tables
+  <p><code>Lmax</code> records the exact bound used for the run; <code>L99</code>
+    is simply a practical high bound. With <b>Skip BodyId</b> off, bodyId-level tables
     (<code>..._allpaths_bodyId.csv</code>) are written next to the type-level
     ones. The full reference is in <code>docs/OUTPUT_FILES.md</code>.</p>
 </main>

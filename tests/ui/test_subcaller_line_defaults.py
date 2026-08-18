@@ -65,7 +65,7 @@ def test_similarity_panels_default_to_line_with_fast_pipeline():
     assert len(modes) == 2
     assert modes == ["line", "line"]
     assert [method.value for method in methods] == ["fast", "fast"]
-    # Line mode disables the NeuPrint-only method selector.
+    # Line mode bypasses the pipeline selector.
     assert all(method.enabled is False for method in methods)
 
 
@@ -104,7 +104,7 @@ def test_explicit_tube_override_preserved():
 
 def test_flywire_keeps_prepared_mesh_cache_default_in_line_mode():
     """FAFB analysis renders keep the prepared mesh cache default even
-    though the disabled NeuPrint method selector starts at fast."""
+    though line mode bypasses the method selector."""
     client, by_label = _build(
         lambda: skeleton_visualization_settings(
             default_skeleton_mode="line",
@@ -117,6 +117,20 @@ def test_flywire_keeps_prepared_mesh_cache_default_in_line_mode():
     assert by_label["Simplification Method"].value == "fast"
     assert by_label["Simplification Method"].enabled is False
     assert _checkbox_by_text(client, "Cache Neurons").value is True
+
+
+def test_flywire_tube_keeps_method_selector_enabled():
+    """Tube-mode FAFB renders expose fast/fine/artistic selection."""
+    client, by_label = _build(
+        lambda: skeleton_visualization_settings(
+            default_skeleton_mode="tube",
+            dataset_provider=lambda: "flywire_FAFB_v783",
+        ),
+        "/subcaller-flywire-tube-method",
+    )
+
+    assert by_label["Skeleton Mode"].value == "tube"
+    assert by_label["Simplification Method"].enabled is True
 
 
 def test_neuprint_fast_pipeline_disables_cache_by_default():

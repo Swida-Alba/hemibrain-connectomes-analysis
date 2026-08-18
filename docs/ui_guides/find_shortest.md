@@ -10,22 +10,47 @@ outputs, visualization) with shortest-only enumeration.
 - For every reachable (source, target) pair, the minimum-hop paths under the
   search criteria (Min Synapse Count / Min Connection Ratio / Min Traversal
   Prob.) are returned. **All tied shortest paths are kept**, each once.
+- Discovery is target-rooted by default: the search starts at each target,
+  follows incoming edges, and reconstructs only reverse branches that reach
+  an enrolled source bodyId. This avoids building the full fan-out of source
+  neurons that cannot contribute to a requested target.
+- The bodyId-level minimum is enforced per exact `(source bodyId, target
+  bodyId)` pair before any type aggregation. A longer path to a close target
+  is therefore removed even when another target has a longer valid shortest
+  path; this is not a single global path-length cutoff.
+- Those filtered paths are then mapped to neuron types. All distinct
+  target-involved type sequences backed by the bodyId shortest paths are
+  retained, including longer sequences when they are shortest for a different
+  target instance. If multiple bodyId pairs produce the identical type
+  sequence, the type table represents that sequence once; enable bodyId output
+  to distinguish the individual pairs.
 - Distances are hop counts on the threshold-filtered graph (synapse weights
   are edge attributes, not path costs).
 
-## Depth cap (default: 2 intermediate layers)
+## Source-set recommendation
 
-- **Max Intermediate Layers (optional) = 0** means unlimited search depth. Layer
-  discovery is a BFS and stops as soon as *every* target has been
-  discovered: a target's first-discovery layer is its exact shortest hop
-  distance, so deeper layers cannot change any result. This keeps an
-  "unlimited" search cheap in practice.
-- The default is 2, matching the Find All Paths tab. Increase it when a
-  query needs deeper intermediate layers; there is no artificial upper
-  bound on the integer value.
-- Set `Max Intermediate Layers > 0` only as a safety cap for queries where targets may be
-  unreachable (the worst case then fetches the whole forward cone of the
-  sources).
+If the source field contains more than one type/name query, the page shows a
+warning because each query can expand to many source bodyIds and enlarge the
+target-rooted search. Prefer a small source set, ideally one source type or
+query. Use explicit bodyId inputs and keep bodyId output enabled when exact
+source-target pairs are needed.
+
+## Depth cap and shortest-path guarantee
+
+- **Max Intermediate Layers = 0** means direct connections only.
+- For a positive value `M`, paths are capped at `M + 1` hops. Increase `M`
+  when a query needs deeper intermediate layers; a high value such as 99 is
+  effectively unlimited for practical connectome queries.
+- Backward discovery continues for each target until its enrolled source
+  bodyIds have been reached or the hop bound is exhausted. A target's first
+  appearance is only the minimum distance from *some* source; it is not a
+  global cutoff for every source-target pair. Therefore a path longer than
+  the nearest target distance can still be the shortest path for a different
+  source bodyId.
+- When the depth bound truncates discovery, results are shortest only within
+  the explored, threshold-filtered graph. A returned path at that boundary is
+  a solution under the current graph, not proof of a globally shortest route;
+  the run records this caveat in `user_warning_notes.txt`.
 
 ## Why there is no algorithm selector
 
@@ -55,10 +80,21 @@ Visualization Edge Limit only caps the number of edges drawn in each
 network, heatmap, or Sankey view. It does not trim the fetched graph and
 does not change shortest-path discovery.
 
+## BodyId enrollment and recommended follow-up
+
+With type-level output, multiple exact bodyId pairs can map to the same type
+sequence and are intentionally represented by one type-level row. The run
+warns that source-target bodyId pairs may be lost in this aggregation. Check
+the root-level `source_neurons.csv` (`isInPath`) and `target_neurons.csv`
+(`Checked`, `Layer`) for enrollment details.
+
+- To inspect specific source-target bodyId pairs, run Shortest Paths with
+  **Skip BodyId** off.
+- To enumerate all paths within a specified depth, run **Complete Paths**.
+
 ## Everything else matches Find All Paths
 
-Graph cache (depth-aware; shallow caches are extended instead of rebuilt),
-early network preview, keyword exclusion, custom grouping, hemisphere
+Connection cache reuse, keyword exclusion, custom grouping, hemisphere
 options (separate L/R, conserved-edge filter, symmetry analysis),
 reciprocal enrichment, CSV/XLSX outputs, and the final
 network/Sankey/heatmap visualizations.
@@ -87,15 +123,17 @@ Same layout as Find All Paths (see the Complete Paths guide):
 ```
 {output_dir}/find-paths-shortest_MCNS_aMe12_to_PPL101_L1w3r0p0_20260815_142717/
   aMe12_to_PPL101_allpaths_type.csv  # shortest paths (same columns as Find All Paths)
+  source_neurons.csv, target_neurons.csv  # enrollment/status details
   all_attributes.json
   parameters.txt, user_warning_notes.txt
-  data_details/                      # matrices, connection_type.csv, neuron lists, parameters.csv
+  data_details/                      # matrices, connection_type.csv, parameters.csv
   visualization/                     # Network / Sankey / Heatmap HTML + visualization_data/ inputs
   hemisphere_symmetry/...            # when Symmetry Analysis is on
   find_reciprocal/...                # when Find Reciprocal Connections is on
 ```
 
-`Lmax` in the folder name means the search ran with unlimited depth.
+`Lmax` records the exact `Max Intermediate Layers` bound used for the run;
+`L99` is a practical high-bound choice, not a special unlimited value.
 
 With **Skip BodyId** off, bodyId-level tables (`..._allpaths_bodyId.csv`) are
 written next to the type-level ones. The full reference is in

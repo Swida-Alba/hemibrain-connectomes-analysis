@@ -161,11 +161,10 @@
       is the FAFB-style transform rebuilt from the shared raw
       <code>.swc.gz</code> cache; fine meshes are not persisted. <code>artistic</code>
       uses vertex-cluster mesh decimation. All methods
-      use batched parallel online skeleton fetching across layers. The selector and simplification
-      controls are disabled for FlyWire/FAFB datasets and for line mode.</li>
+      use batched parallel online skeleton fetching across layers. The selector is available
+      for NeuPrint and FlyWire/FAFB tube renders; line mode bypasses it.</li>
     <li><b>Mesh Simplification</b>: defaults to 90% faces removed for fast and
-      95% for fine/artistic in this tab. FAFB/FlyWire uses 95% regardless of
-      the disabled NeuPrint method selector;
+      95% for fine/artistic in this tab, including FAFB/FlyWire;
       line mode does not apply mesh simplification.</li>
     <li><b>Export Method</b>: webdriver (fast, needs Chrome 109+) or kaleido
       (stable fallback). <b>Export Scale</b> and <b>Export Views</b>.</li>

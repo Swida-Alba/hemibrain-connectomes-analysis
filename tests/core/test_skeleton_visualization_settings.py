@@ -39,28 +39,31 @@ def test_homolog_visualization_settings_override_renderer_defaults():
     assert options["brain_mesh"] == "none"
     assert options["skeleton_mode"] == "line"
     assert options["show_fig"] is True
-    assert options["skeleton_mesh_simplification"] == 0.98
+    assert options["skeleton_mesh_simplification"] == 0.95
 
 
-def test_analysis_skeleton_simplification_defaults_use_the_analysis_level():
-    assert default_analysis_skeleton_mesh_simplification("male-cns:v1.0") == 0.98
-    assert default_analysis_skeleton_mesh_simplification("hemibrain:v1.2.1") == 0.98
-    assert default_analysis_skeleton_mesh_simplification("flywire_FAFB_v783") == 0.98
-    assert default_analysis_skeleton_mesh_simplification("FAFB:v783") == 0.98
+def test_analysis_skeleton_simplification_defaults_follow_pipeline():
+    assert default_analysis_skeleton_mesh_simplification("male-cns:v1.0") == 0.95
+    assert default_analysis_skeleton_mesh_simplification("hemibrain:v1.2.1") == 0.95
+    assert default_analysis_skeleton_mesh_simplification("flywire_FAFB_v783") == 0.95
+    assert default_analysis_skeleton_mesh_simplification("FAFB:v783") == 0.95
     assert default_analysis_skeleton_mesh_simplification(
         "male-cns:v1.0", "fast"
     ) == 0.90
     assert default_analysis_skeleton_mesh_simplification(
         "flywire_FAFB_v783", "fast"
-    ) == 0.98
+    ) == 0.90
 
 
-def test_dedicated_skeleton_tab_uses_95_percent_for_fafb():
+def test_dedicated_skeleton_tab_defaults_follow_pipeline_for_fafb():
     assert default_skeleton_tab_simplification(
         "flywire_FAFB_v783", "fast"
-    ) == 0.95
+    ) == 0.90
     assert default_skeleton_tab_simplification(
         "FAFB:v783", "fine"
+    ) == 0.95
+    assert default_skeleton_tab_simplification(
+        "flywire_FAFB_v783", "artistic"
     ) == 0.95
     assert default_skeleton_tab_simplification(
         "male-cns:v1.0", "fast"

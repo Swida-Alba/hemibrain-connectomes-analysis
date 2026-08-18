@@ -18,6 +18,31 @@ from ..runner import ScriptRunner
 from ..type_suggestions import dataset_suggestions
 
 
+def _has_multiple_source_type_queries(values, search_columns="auto"):
+    """Return whether a Shortest Paths source query is a large type set.
+
+    The UI accepts both type/name queries and bodyIds in the same chip field.
+    Numeric values are therefore treated as explicit bodyIds and do not raise
+    this advisory.  ``auto`` is intentionally included because it is the
+    default search scope and most users enter neuron types without changing
+    the advanced selector first.
+    """
+    scope = str(search_columns or "auto").strip().casefold()
+    if scope not in {"auto", "type"}:
+        return False
+    if uses_all_neurons_token(values):
+        # ``all_neurons`` is a special single-side mode; any other chips are
+        # ignored by the execution path and should not trigger this advisory.
+        return False
+
+    query_values = []
+    for value in values or []:
+        text = str(value or "").strip()
+        if text and not text.isdigit():
+            query_values.append(text)
+    return len(dict.fromkeys(query_values)) > 1
+
+
 def create_find_shortest_tab():
     """Create the Shortest Paths tab UI."""
     runner = ScriptRunner()
@@ -69,6 +94,14 @@ def create_find_shortest_tab():
                 suggestions=_type_suggest,
                 available_neurons=lambda: dataset.value if dataset is not None else "",
             ).classes("drocat-fixed-neuron-input")
+            source_type_warning = ui.label(
+                "⚠️ Shortest Paths works best with a small source set. Multiple "
+                "source type queries can expand to many bodyIds and make the "
+                "target-rooted search larger and harder to interpret. Prefer a "
+                "single source type/query, or enable bodyId output for exact "
+                "source-target pairs."
+            ).classes("text-caption text-amber-8")
+            source_type_warning.set_visibility(False)
             ui.label(
                 "Tip: type 'all_neurons' as the only chip of one side to load every "
                 "neuron in the dataset and fetch all adjacent neurons at your "
@@ -232,6 +265,24 @@ def create_find_shortest_tab():
             separate_hemi.on_value_change(lambda _e: _sync_hemisphere_options())
             _sync_hemisphere_options()
 
+    def _update_source_type_warning(_event=None):
+        """Keep the source-size advisory visible while the query is edited."""
+        _mode, values = source_input.get_value()
+        scope = search_columns.value if search_columns is not None else "auto"
+        source_type_warning.set_visibility(
+            _has_multiple_source_type_queries(values, scope)
+        )
+
+    # The shared input callback covers Enter, removal, upload/viewer
+    # synchronization, clear, and blur-committed text.  The filter/search
+    # scope can also turn a query into an explicit type search, so refresh on
+    # those selectors as well.
+    source_input.add_value_change_listener(_update_source_type_warning)
+    if source_input.filter_mode is not None:
+        source_input.filter_mode.on_value_change(_update_source_type_warning)
+    search_columns.on_value_change(_update_source_type_warning)
+    _update_source_type_warning()
+
     with results_col:
         output_panel.create(run_label="Shortest Paths", run_icon="alt_route")
 
@@ -239,6 +290,9 @@ def create_find_shortest_tab():
         # Get values from neuron_list_input (returns (mode, list))
         src_mode, src_neurons = source_input.get_value()
         tgt_mode, tgt_neurons = target_input.get_value()
+        # Uploads are also included in get_value(); refresh once at execution
+        # time so the advisory is correct even if the file picker was used.
+        _update_source_type_warning()
 
         # 'all_neurons' is a special token: it loads the full neuron set on
         # that side (fetch all adjacent neurons at the given thresholds),
