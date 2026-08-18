@@ -9,19 +9,28 @@ from ..config import (
     APP_DOCS_URL,
     APP_GITHUB_URL,
     APP_VERSION,
+    DEFAULT_SETTING_GROUPS,
+    DEFAULT_SETTING_SPECS,
     PROJECT_ROOT,
     clear_tab_output_overrides,
     get_auto_suggest_enabled,
     get_default_output_dir,
+    get_user_default,
+    reset_user_defaults,
     set_auto_suggest_enabled,
     set_default_output_dir,
+    set_user_default,
 )
 from ..components.common import (
+    checkbox_input,
     dataset_multi_selector,
     dataset_status_card,
     dir_input,
+    number_input,
+    param_grid,
     refresh_dataset_selector_statuses,
     section_header,
+    select_input,
     sync_output_dir_fields,
 )
 from ..components.custom_grouper import to_canonical_dict
@@ -466,6 +475,115 @@ def create_settings_tab():
                     ui.notify("Failed to save the setting", type="negative")
 
             auto_suggest_cb.on_value_change(_toggle_auto_suggest)
+
+        # Default Settings (persistent defaults for the one-time tab controls)
+        with ui.card().classes("w-full drocat-card"):
+            section_header("Default Settings", "settings_suggest")
+            ui.label(
+                "Tool-tab selections remain one-time; these defaults are applied "
+                "every time a tab loads. Save to persist them across sessions; "
+                "Reset restores the built-in values."
+            ).classes("text-caption drocat-muted")
+
+            default_controls = {}
+
+            def _render_default_control(key):
+                spec = DEFAULT_SETTING_SPECS[key]
+                value = get_user_default(key)
+                if spec["kind"] == "bool":
+                    return checkbox_input(
+                        spec["label"], value, hint=spec.get("hint", ""),
+                    )
+                if spec["kind"] == "select":
+                    return select_input(
+                        spec["label"], spec["options"], value,
+                        hint=spec.get("hint", ""),
+                    )
+                return number_input(
+                    spec["label"], value,
+                    spec.get("min", 0), spec.get("max"),
+                    spec.get("step", 1),
+                    hint=spec.get("hint", ""),
+                )
+
+            for group_id, group_title in DEFAULT_SETTING_GROUPS:
+                group_keys = [
+                    key for key, spec in DEFAULT_SETTING_SPECS.items()
+                    if spec["group"] == group_id
+                ]
+                if not group_keys:
+                    continue
+                ui.label(group_title).classes("drocat-mini-label")
+                bool_keys = [
+                    key for key in group_keys
+                    if DEFAULT_SETTING_SPECS[key]["kind"] == "bool"
+                ]
+                other_keys = [key for key in group_keys if key not in bool_keys]
+                if bool_keys:
+                    with ui.row().classes("gap-4").style("flex-wrap: wrap"):
+                        for key in bool_keys:
+                            default_controls[key] = _render_default_control(key)
+                if other_keys:
+                    with param_grid(3):
+                        for key in other_keys:
+                            default_controls[key] = _render_default_control(key)
+
+            def _collect_default_values():
+                """Read and coerce every control value; None on invalid input."""
+                values = {}
+                for key, ctrl in default_controls.items():
+                    spec = DEFAULT_SETTING_SPECS[key]
+                    value = ctrl.value
+                    if spec["kind"] == "bool":
+                        value = bool(value)
+                    elif spec["kind"] == "int":
+                        try:
+                            value = int(value)
+                        except (TypeError, ValueError):
+                            return None, spec["label"]
+                    elif spec["kind"] == "float":
+                        try:
+                            value = float(value)
+                        except (TypeError, ValueError):
+                            return None, spec["label"]
+                    values[key] = value
+                return values, None
+
+            def save_defaults():
+                values, invalid_label = _collect_default_values()
+                if invalid_label is not None:
+                    ui.notify(
+                        f"Enter a valid number for {invalid_label}",
+                        type="warning",
+                    )
+                    return
+                for key, value in values.items():
+                    if not set_user_default(key, value):
+                        ui.notify(
+                            f"Invalid value for {DEFAULT_SETTING_SPECS[key]['label']}",
+                            type="negative",
+                        )
+                        return
+                ui.notify(
+                    f"Defaults saved ({len(values)} settings)",
+                    type="positive",
+                )
+
+            def reset_defaults():
+                reset_user_defaults()
+                for key, ctrl in default_controls.items():
+                    ctrl.set_value(get_user_default(key))
+                ui.notify("Defaults reset to built-in values", type="positive")
+
+            with ui.row().classes("items-center gap-2"):
+                save_defaults_btn = ui.button(
+                    "Save Defaults", icon="save", color="primary",
+                )
+                reset_defaults_btn = ui.button(
+                    "Reset", icon="restart_alt", color="secondary",
+                )
+            save_defaults_btn.on_click(save_defaults)
+            reset_defaults_btn.on_click(reset_defaults)
 
         # Custom type mappings (LabelMapper presets, reusable across runs).
         # Use the same Custom Mapping panel as the tool tabs so Settings and

@@ -1,7 +1,7 @@
 """NeuronBridge FindLines Tab - Find LM driver lines matching EM neurons."""
 
 from nicegui import ui
-from ..config import DEFAULTS, DATASETS, MATCH_ALGORITHMS
+from ..config import DATASETS, MATCH_ALGORITHMS, get_user_default
 from ..components.common import (
     dataset_selector, neuron_list_input, number_input, select_input,
     checkbox_input, dir_input, multi_select_input,
@@ -52,7 +52,7 @@ def create_nb_find_lines_tab():
             section_header("Search Parameters", "tune")
             with param_grid(2):
                 match_algo = select_input(
-                    "Algorithm", MATCH_ALGORITHMS, DEFAULTS["match_algorithm"],
+                    "Algorithm", MATCH_ALGORITHMS, get_user_default("match_algorithm"),
                     hint="'cds': Color Depth Search (fast). 'pppm': Point Pattern (precise). 'both': run both.",
                 )
                 top_image_lines = number_input(

@@ -1,7 +1,7 @@
 """Cross-Dataset Comparison Tab - runs ComparisonAnalyzer over N datasets."""
 
 from nicegui import ui
-from ..config import DEFAULTS, COMPARISON_MODES, PATH_MODES, PATHFINDING_ALGORITHMS, SEARCH_COLUMNS
+from ..config import COMPARISON_MODES, PATH_MODES, PATHFINDING_ALGORITHMS, SEARCH_COLUMNS, get_user_default
 from ..components.common import (
     dataset_multi_selector, neuron_list_input, number_input, select_input,
     checkbox_input, dir_input, section_header, param_grid, tool_page,
@@ -43,7 +43,6 @@ def create_inter_dataset_tab():
             section_header("Datasets", "storage")
             datasets_select = dataset_multi_selector(
                 label="Datasets to compare (one dataset with multiple thresholds is also supported)",
-                default=["male-cns:v1.0"],
             )
             output_dir = dir_input(scope="inter_dataset")
 
@@ -116,7 +115,7 @@ def create_inter_dataset_tab():
                 edge_limit_bodyid_hint = None
                 with param_grid(2):
                     pathfinding = select_input(
-                        "Pathfinding Algorithm", PATHFINDING_ALGORITHMS, "MemoizedDFS",
+                        "Pathfinding Algorithm", PATHFINDING_ALGORITHMS, get_user_default("pathfinding"),
                         hint="MemoizedDFS: recommended default (fastest measured at all depths, no graph copy). DFS: backward memoized, best with few targets. MeetInMiddle: shallow queries. DP: robust. Bidirectional: shortest-first but high memory.",
                         help_doc="pathfinding_algorithms.html",
                     )
@@ -130,31 +129,31 @@ def create_inter_dataset_tab():
                              "Edge Limit for plotted edges.",
                     )
                 search_columns = select_input(
-                    "Search Columns", SEARCH_COLUMNS, "auto",
+                    "Search Columns", SEARCH_COLUMNS, get_user_default("search_columns"),
                     hint="Which columns to search when resolving neuron names in every dataset. "
                          "'auto': all columns (bodyId -> type -> instance -> flywireType/others). "
                          "Use 'type'/'instance'/'bodyId' to restrict the search.",
                 )
                 with ui.row().classes("gap-4"):
-                    skip_bodyid = checkbox_input("Skip BodyId Level", True, hint="Skip bodyId-level results for speed.")
-                    cache_only = checkbox_input("Cache Only (Offline)", False, hint="Use only local cache, no server connection.")
+                    skip_bodyid = checkbox_input("Skip BodyId Level", get_user_default("skip_bodyId"), hint="Skip bodyId-level results for speed.")
+                    cache_only = checkbox_input("Cache Only (Offline)", get_user_default("cache_only"), hint="Use only local cache, no server connection.")
                     auto_type_mapping = checkbox_input(
-                        "Auto Type Mapping", True,
+                        "Auto Type Mapping", get_user_default("auto_type_mapping"),
                         hint="Auto-map type names across datasets via the male-cns v1.0 "
                              "neuron info (e.g. FAFB MTe07 <-> male-cns MeVPLo2) when no "
                              "custom LabelMapper preset is selected.",
                     )
                 with param_grid(3):
                     min_ratio = number_input(
-                        "Min Connection Ratio", 0.0, 0, 1, 0.01,
+                        "Min Connection Ratio", get_user_default("min_ratio"), 0, 1, 0.01,
                         hint="Minimum weight/post ratio for an edge to be kept.",
                     )
                     min_prob = number_input(
-                        "Min Traversal Prob.", 0.0, 0, 1, 0.01,
+                        "Min Traversal Prob.", get_user_default("min_traversal_probability"), 0, 1, 0.01,
                         hint="Minimum traversal probability for an edge to be kept.",
                     )
                     output_format = select_input(
-                        "Output Format", ["csv", "xlsx"], "csv",
+                        "Output Format", ["csv", "xlsx"], get_user_default("output_format"),
                         hint="Format for exported data tables.",
                     )
                 with param_grid(2):
@@ -175,7 +174,7 @@ def create_inter_dataset_tab():
                              "shallow runs keep the complete graph. 0 = unlimited.",
                     )
                     edge_limit_viz = number_input(
-                        "Visualization Edge Limit", DEFAULTS["edgeN_limit"], 10, 5000,
+                        "Visualization Edge Limit", get_user_default("edgeN_limit"), 10, 5000,
                         hint="Maximum edges drawn per visualization (network / Sankey / "
                              "heatmap) in the FindAllPath runs. Limits memory usage for "
                              "highly connected neurons. Same default as the Complete Paths tab.",

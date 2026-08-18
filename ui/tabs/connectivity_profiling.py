@@ -1,7 +1,7 @@
 """ConnectivityProfiling Tab - Intra-dataset connectivity profile comparison."""
 
 from nicegui import ui
-from ..config import DEFAULTS, get_tab_output_dir
+from ..config import get_tab_output_dir, get_user_default
 from ..components.common import (
     dataset_multi_selector, neuron_list_input, number_input, select_input, checkbox_input,
     dir_input, apply_filter_mode, section_header, param_grid, tool_page,
@@ -39,7 +39,6 @@ def create_connectivity_profiling_tab():
             section_header("Datasets", "storage")
             datasets_select = dataset_multi_selector(
                 label="Datasets to compare (select one or more)",
-                default=["male-cns:v1.0"],
                 hint="Select one or more datasets. One dataset with multiple thresholds "
                      "is also supported. Two or more datasets profile the same query in "
                      "each dataset (names mapped per dataset) and add within-dataset "
@@ -64,11 +63,11 @@ def create_connectivity_profiling_tab():
             section_header("Profile Construction", "build")
             with param_grid(2):
                 top_k = number_input(
-                    "Top K Partners", DEFAULTS["top_k"], 5, 50,
+                    "Top K Partners", get_user_default("top_k"), 5, 50,
                     hint="Number of top synaptic partners per direction to include in the profile.",
                 )
                 top_m = number_input(
-                    "Min Unique Types (M)", DEFAULTS["top_m"], 3, 20,
+                    "Min Unique Types (M)", get_user_default("top_m"), 3, 20,
                     hint="Minimum unique partner types. If top_k yields fewer, K is expanded.",
                 )
 
@@ -91,7 +90,7 @@ def create_connectivity_profiling_tab():
                 )
                 with param_grid(3):
                     min_synapse_threshold = number_input(
-                        "Min Synapse Threshold", 3, 1, 100,
+                        "Min Synapse Threshold", get_user_default("min_synapse_num"), 1, 100,
                         hint="Minimum synapse count for a connection to enter a profile.",
                     )
                     aggregation_level = select_input(
@@ -214,7 +213,7 @@ def create_connectivity_profiling_tab():
             "generate_heatmaps": cluster_heatmap.value,
             "show_figures": show_figures.value,
             "verbose": True,
-            "use_cache": True,
+            "use_cache": get_user_default("use_cache"),
             "aggregation_level": {
                 "type": "type",
                 "bodyid": "bodyid",

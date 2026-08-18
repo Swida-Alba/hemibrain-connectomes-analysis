@@ -1,7 +1,7 @@
 """NeuronBridge FindNeuron Tab - Find EM neurons matching LM driver lines."""
 
 from nicegui import ui
-from ..config import DEFAULTS, MATCH_ALGORITHMS
+from ..config import MATCH_ALGORITHMS, get_user_default
 from ..components.common import (
     neuron_list_input, number_input, select_input, checkbox_input,
     dir_input, section_header, param_grid, tool_page,
@@ -39,10 +39,10 @@ def create_nb_find_neuron_tab():
         with ui.card().classes("w-full drocat-card"):
             section_header("Search Parameters", "tune")
             with param_grid(2):
-                match_algo = select_input("Algorithm", MATCH_ALGORITHMS, DEFAULTS["match_algorithm"])
+                match_algo = select_input("Algorithm", MATCH_ALGORITHMS, get_user_default("match_algorithm"))
                 top_n = number_input(
                     "Top N Matches Per Line",
-                    DEFAULTS["nb_top_n"],
+                    get_user_default("nb_top_n"),
                     1,
                     2000,
                     hint=(
@@ -62,7 +62,6 @@ def create_nb_find_neuron_tab():
                     top_n_label="Visualize Top N",
                     top_n_hint="Number of top types or bodyIds to render in 3D.",
                     default_visualize_by="type",
-                    default_skeleton_mode="line",
                     show_high_quality_warning=True,
                     default_show_fig=False,
                     default_export_views=True,
@@ -83,7 +82,7 @@ def create_nb_find_neuron_tab():
                     )
                     min_score = number_input(
                         "Score Cutoff",
-                        DEFAULTS["nb_min_score"],
+                        get_user_default("nb_min_score"),
                         0,
                         200000,
                         1000,

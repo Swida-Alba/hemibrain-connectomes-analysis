@@ -25,6 +25,7 @@ from ..config import (
     PROJECT_ROOT,
     get_default_output_dir,
     get_tab_output_dir,
+    get_user_default,
     has_tab_output_override,
     set_default_output_dir,
     set_tab_output_dir,
@@ -336,6 +337,26 @@ def _refresh_local_dataset_flags(results, service) -> bool:
     return changed
 
 
+def _resolve_default_dataset(
+    options: List[str],
+    datasets: Optional[List[str]],
+    disable_banc: bool = False,
+) -> Optional[str]:
+    """Pick the initial single-dataset selection.
+
+    The saved user default applies only to selectors using the standard
+    dataset list (``datasets is None``); custom option lists such as
+    "(all)" helpers keep their first entry.  A disabled BANC default is
+    skipped so the selector never starts on an unselectable option.
+    """
+    if datasets is None and options:
+        preferred = get_user_default("default_dataset")
+        if preferred in options:
+            if not (disable_banc and "banc" in str(preferred).strip().lower()):
+                return preferred
+    return options[0] if options else None
+
+
 def dataset_selector(
     label: str = "Dataset",
     default: Optional[str] = None,
@@ -366,7 +387,9 @@ def dataset_selector(
     else:
         sel_options = options
 
-    default_val = default if default is not None else (options[0] if options else None)
+    default_val = default if default is not None else _resolve_default_dataset(
+        options, datasets, disable_banc
+    )
     sel = ui.select(
         options=sel_options,
         value=default_val,
@@ -425,11 +448,18 @@ def dataset_multi_selector(
     else:
         sel_options = options
 
-    # ``None`` means "use the first two datasets" for callers that want a
-    # convenient default.  An explicit empty list means "start unselected".
-    default_val = default if default is not None else (
-        options[:2] if len(options) >= 2 else options
-    )
+    # ``None`` means "use the saved user default dataset, else the first two
+    # datasets" for callers that want a convenient default.  An explicit empty
+    # list means "start unselected".
+    if default is not None:
+        default_val = default
+    else:
+        preferred = get_user_default("default_dataset")
+        default_val = (
+            [preferred]
+            if datasets is None and preferred in options
+            else (options[:2] if len(options) >= 2 else options)
+        )
     sel = ui.select(
         options=sel_options,
         value=default_val,

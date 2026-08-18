@@ -11,7 +11,12 @@ from typing import Any, Callable, Dict, Iterable, Optional
 
 from nicegui import ui
 
-from ..config import BRAIN_MESH_OPTIONS, DEFAULTS, SKELETON_MODES
+from ..config import (
+    BRAIN_MESH_OPTIONS,
+    SKELETON_MODES,
+    get_user_default,
+    has_user_default,
+)
 from .common import (
     checkbox_input,
     multi_select_input,
@@ -98,7 +103,7 @@ class SkeletonVisualizationSettings:
         # Keep all skeleton visualizations aligned with the application's
         # global data-output preference while still allowing programmatic
         # callers to override it in their settings dictionary.
-        values.setdefault("output_format", DEFAULTS["output_format"])
+        values.setdefault("output_format", get_user_default("output_format"))
         return values
 
     def warn_empty_custom_palettes(self) -> None:
@@ -125,12 +130,12 @@ def skeleton_visualization_settings(
     top_n_hint: str = "Number of ranked results to render as 3D skeletons.",
     default_visualize_by: str = "type",
     include_ranking: bool = True,
-    default_brain_mesh: str = "template",
-    default_skeleton_mode: str = "tube",
+    default_brain_mesh: Optional[str] = None,
+    default_skeleton_mode: Optional[str] = None,
     show_high_quality_warning: bool = False,
     default_neuron_alpha: float = 0.2,
-    default_show_fig: bool = False,
-    default_export_views: bool = False,
+    default_show_fig: Optional[bool] = None,
+    default_export_views: Optional[bool] = None,
     default_export_method: str = "webdriver",
     dataset_provider: Optional[Callable[[], Any]] = None,
     dataset_watchers: Optional[Iterable[Any]] = None,
@@ -143,6 +148,15 @@ def skeleton_visualization_settings(
     ``include_ranking`` adds the tab-specific top-N and type/bodyId controls.
     """
     fields: Dict[str, Any] = {}
+
+    def _fallback(param, key):
+        """Use the caller override when given, else the saved user default."""
+        return param if param is not None else get_user_default(key)
+
+    skeleton_mode_default = _fallback(default_skeleton_mode, "analysis_skeleton_mode")
+    brain_mesh_default = _fallback(default_brain_mesh, "brain_mesh")
+    show_fig_default = _fallback(default_show_fig, "show_fig_skeleton")
+    export_views_default = _fallback(default_export_views, "export_views")
 
     with ui.expansion(
         "Advanced Visualization",
@@ -177,25 +191,25 @@ def skeleton_visualization_settings(
             fields["skeleton_mode"] = select_input(
                 "Skeleton Mode",
                 SKELETON_MODES,
-                default_skeleton_mode,
+                skeleton_mode_default,
                 hint="'tube' is detailed; 'line' is faster for many neurons.",
             )
             fields["legend_mode"] = select_input(
                 "Legend Mode",
                 ["layer", "type", "single"],
-                "layer",
+                get_user_default("legend_mode"),
                 hint="Choose one legend entry per layer, type, or individual neuron.",
             )
             fields["background_color"] = select_input(
                 "Background",
                 ["white", "black"],
-                "white",
+                get_user_default("background"),
                 hint="Background color for the interactive scene and exported views.",
             )
             fields["brain_mesh"] = select_input(
                 "Brain Mesh",
                 BRAIN_MESH_OPTIONS,
-                default_brain_mesh,
+                brain_mesh_default,
                 hint=(
                     "'template': dataset-aligned template brain. 'whole': full "
                     "standard surface. 'none': no brain mesh."
@@ -315,7 +329,7 @@ def skeleton_visualization_settings(
         with param_grid(3):
             fields["cache_neurons"] = checkbox_input(
                 "Cache Neurons",
-                True,
+                get_user_default("cache_neurons"),
                 hint="Cache fetched skeletons for faster repeat renders.",
             )
             cache_default_state = {"user_changed": False, "updating": False}
@@ -327,22 +341,22 @@ def skeleton_visualization_settings(
             fields["cache_neurons"].on_value_change(on_cache_neurons_change)
             fields["cache_synapses"] = checkbox_input(
                 "Cache Synapses",
-                True,
+                get_user_default("cache_synapses"),
                 hint="Cache fetched synapse data for faster repeat renders.",
             )
             fields["smooth_skeleton"] = checkbox_input(
                 "Smooth Skeleton",
-                False,
+                get_user_default("smooth_skeleton"),
                 hint="Apply smoothing to skeleton tube meshes.",
             )
             fields["show_soma"] = checkbox_input(
                 "Show Soma",
-                True,
+                get_user_default("show_soma"),
                 hint="Render soma spheres when available.",
             )
             fields["show_connectors"] = checkbox_input(
                 "Show Connectors",
-                False,
+                get_user_default("show_connectors"),
                 hint="Render synaptic connector markers.",
             )
             fields["use_default_simplification"] = checkbox_input(
@@ -357,7 +371,7 @@ def skeleton_visualization_settings(
             fields["neuprint_skeleton_pipeline"] = select_input(
                 "Simplification Method",
                 ["fast", "fine", "artistic"],
-                "fast",
+                get_user_default("simplification_method"),
                 hint=(
                     "NeuPrint tube rendering: 'fast' (default) uses direct "
                     "simp90 simplification plus the FAFB fast node-reduction "
@@ -398,12 +412,12 @@ def skeleton_visualization_settings(
             )
             fields["show_fig"] = checkbox_input(
                 "Show Figure",
-                default_show_fig,
+                show_fig_default,
                 hint="Open the interactive figure after rendering.",
             )
             fields["export_views"] = checkbox_input(
                 "Export Views",
-                default_export_views,
+                export_views_default,
                 hint="Export the configured view images after rendering.",
             )
 
@@ -429,7 +443,10 @@ def skeleton_visualization_settings(
             fields["skeleton_mesh_simplification"].set_enabled(
                 not is_line and not bool(fields["use_default_simplification"].value)
             )
-            if not cache_default_state["user_changed"]:
+            if (
+                not cache_default_state["user_changed"]
+                and not has_user_default("cache_neurons")
+            ):
                 pipeline = str(
                     fields["neuprint_skeleton_pipeline"].value or "fast"
                 ).strip().lower()

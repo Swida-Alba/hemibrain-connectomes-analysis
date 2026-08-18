@@ -4,7 +4,7 @@ FindPath Tab - Multi-hop pathfinding between neuron groups.
 
 from nicegui import ui
 
-from ..config import DEFAULTS, PATHFINDING_ALGORITHMS, FILTER_OPTIONS, OUTPUT_FORMATS, NETWORK_LAYOUTS, SEARCH_COLUMNS
+from ..config import PATHFINDING_ALGORITHMS, FILTER_OPTIONS, OUTPUT_FORMATS, NETWORK_LAYOUTS, SEARCH_COLUMNS, get_user_default
 from ..components.common import (
     dataset_selector, neuron_list_input, number_input, select_input,
     checkbox_input, dir_input, apply_filter_mode, section_header, param_grid,
@@ -86,15 +86,15 @@ def create_find_path_tab():
             section_header("Core Parameters", "tune")
             with param_grid(3):
                 max_interlayer = number_input(
-                    "Max Intermediate Layers", DEFAULTS["max_interlayer"], 0, None,
+                    "Max Intermediate Layers", get_user_default("max_interlayer"), 0, None,
                     hint="Maximum number of intermediate neuron layers between source and target. Higher = more paths but slower.",
                 )
                 min_synapse = number_input(
-                    "Min Synapse Count", DEFAULTS["min_synapse_num"], 1, 100,
+                    "Min Synapse Count", get_user_default("min_synapse_num"), 1, 100,
                     hint="Minimum number of synapses for a connection to be included. Filters out weak/noisy connections.",
                 )
                 edge_limit = number_input(
-                    "Visualization Edge Limit", DEFAULTS["edgeN_limit"], 10, 5000,
+                    "Visualization Edge Limit", get_user_default("edgeN_limit"), 10, 5000,
                     hint="Maximum edges drawn per visualization (network / Sankey / heatmap, "
                          "including the network_early preview). Limits memory usage for highly "
                          "connected neurons.",
@@ -134,15 +134,15 @@ def create_find_path_tab():
 
                 with param_grid(3):
                     min_ratio = number_input(
-                        "Min Connection Ratio", DEFAULTS["min_ratio"], 0, 1, 0.01,
+                        "Min Connection Ratio", get_user_default("min_ratio"), 0, 1, 0.01,
                         hint="Minimum weight/post ratio (0-1). Higher = stronger connections only. 0 = include all.",
                     )
                     min_traversal = number_input(
-                        "Min Traversal Prob.", DEFAULTS["min_traversal_probability"], 0, 1, 0.01,
+                        "Min Traversal Prob.", get_user_default("min_traversal_probability"), 0, 1, 0.01,
                         hint="Minimum traversal probability (ratio/0.3, capped at 1.0). Controls path confidence threshold.",
                     )
                     pathfinding_algo = select_input(
-                        "Algorithm", PATHFINDING_ALGORITHMS, DEFAULTS["pathfinding"],
+                        "Algorithm", PATHFINDING_ALGORITHMS, get_user_default("pathfinding"),
                         hint="MemoizedDFS: recommended default (fastest measured at all depths, no graph copy). DFS: backward memoized, best with few targets. MeetInMiddle: shallow queries. DP: robust. Bidirectional: shortest-first but high memory.",
                         help_doc="pathfinding_algorithms.html",
                     )
@@ -167,23 +167,23 @@ def create_find_path_tab():
                     # enabled only for deep searches (max_interlayer >= 3)
                     edge_limit_bodyid.set_enabled((max_interlayer.value or 0) >= 3)
                 search_columns = select_input(
-                    "Search Columns", SEARCH_COLUMNS, "auto",
+                    "Search Columns", SEARCH_COLUMNS, get_user_default("search_columns"),
                     hint="Which columns to search when resolving neuron names. "
                          "'auto': all columns (bodyId -> type -> instance -> flywireType/others). "
                          "Use 'type'/'instance'/'bodyId' to restrict the search.",
                 )
                 filter_by = select_input(
-                    "Filter By", FILTER_OPTIONS, DEFAULTS["filter_by"],
+                    "Filter By", FILTER_OPTIONS, get_user_default("filter_by"),
                     hint="'bodyId': filter at individual neuron level. 'type': aggregate by neuron type.",
                 )
 
                 with ui.row().classes("gap-4"):
                     use_cache = checkbox_input(
-                        "Use Cache", DEFAULTS["use_cache"],
+                        "Use Cache", get_user_default("use_cache"),
                         hint="Cache neuron data locally for 10-100x speedup on repeated runs.",
                     )
                     cache_only = checkbox_input(
-                        "Cache Only (Offline)", False,
+                        "Cache Only (Offline)", get_user_default("cache_only"),
                         hint="Use only local cache and never contact the server. "
                              "Requires the cache to be pre-built.",
                     )
@@ -201,11 +201,11 @@ def create_find_path_tab():
                 ).classes("w-full").tooltip("Custom label for target group in output files/plots.")
             with param_grid(3):
                 output_format = select_input(
-                    "Output Format", OUTPUT_FORMATS, DEFAULTS["output_format"],
+                    "Output Format", OUTPUT_FORMATS, get_user_default("output_format"),
                     hint="'csv': faster, smaller. 'xlsx': Excel format with formatting.",
                 )
                 network_layout = select_input(
-                    "Network Layout", NETWORK_LAYOUTS, DEFAULTS["network_layout"],
+                    "Network Layout", NETWORK_LAYOUTS, get_user_default("network_layout"),
                     hint="Layout algorithm for the HTML network visualization.",
                 )
                 saveas = ui.input(
@@ -217,11 +217,11 @@ def create_find_path_tab():
                 )
             with ui.row().classes("gap-4"):
                 skip_bodyid = checkbox_input(
-                    "Skip BodyId in Output", True,
+                    "Skip BodyId in Output", get_user_default("skip_bodyId"),
                     hint="Exclude individual bodyId-level results. Only show type-level aggregation.",
                 )
                 show_fig = checkbox_input(
-                    "Show Figure", False,
+                    "Show Figure", get_user_default("showfig_analysis"),
                     hint="Open the interactive HTML visualization automatically after completion.",
                 )
 

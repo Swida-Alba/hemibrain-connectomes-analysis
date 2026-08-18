@@ -1,7 +1,7 @@
 """NeuronBridge Colabel Tab - Co-labeling analysis for driver lines."""
 
 from nicegui import ui
-from ..config import DATASETS, DEFAULTS, MATCH_ALGORITHMS
+from ..config import DATASETS, MATCH_ALGORITHMS, get_user_default
 from ..components.common import (
     dataset_selector, neuron_list_input, number_input, select_input, checkbox_input,
     dir_input, section_header, param_grid, tool_page,
@@ -55,10 +55,10 @@ def create_nb_colabel_tab():
                 "Line-specificity and sparsity metrics are included automatically."
             ).classes("text-caption drocat-muted")
             with param_grid(2):
-                match_algo = select_input("Algorithm", MATCH_ALGORITHMS, DEFAULTS["match_algorithm"])
+                match_algo = select_input("Algorithm", MATCH_ALGORITHMS, get_user_default("match_algorithm"))
                 top_n = number_input(
                     "Top N Matches Per Line",
-                    DEFAULTS["nb_top_n"],
+                    get_user_default("nb_top_n"),
                     1,
                     2000,
                     hint=(
@@ -92,7 +92,7 @@ def create_nb_colabel_tab():
                 with param_grid(2):
                     min_score = number_input(
                         "Score Cutoff",
-                        DEFAULTS["nb_min_score"],
+                        get_user_default("nb_min_score"),
                         0,
                         200000,
                         1000,
@@ -102,7 +102,7 @@ def create_nb_colabel_tab():
                         ),
                     )
                     min_type_avg_score = number_input(
-                        "Min Type Avg Score", DEFAULTS["nb_min_type_avg_score"], 0, 200000, 1000,
+                        "Min Type Avg Score", get_user_default("nb_min_type_avg_score"), 0, 200000, 1000,
                         hint="Additional filter for co-labeling similarity matrices; does not filter the expression matrix.",
                     )
                 with param_grid(3):

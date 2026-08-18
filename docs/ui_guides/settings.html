@@ -14,8 +14,8 @@
   </header>
   <h1>Settings</h1>
   <p class="lede">
-    Tokens, dataset availability, default output directory and dataset
-    preparation.
+    Tokens, dataset availability, default output directory, persistent tab
+    defaults and dataset preparation.
   </p>
 
   <h2>API tokens</h2>
@@ -64,6 +64,32 @@
   <p><b>Default Output Directory</b> is pre-filled in every panel; change it
     here and click <b>Save Default Directory</b>. Each run creates its own
     timestamped subfolder.</p>
+
+  <h2>Default Settings</h2>
+  <p>Tool-tab selections remain one-time: changing a control inside a tab
+    applies only to that run. The <b>Default Settings</b> card defines the
+    values every tab starts with. Adjust the controls, click <b>Save
+    Defaults</b>, and the overrides are stored in
+    <code>ui/local_config.json</code> (under <code>user_defaults</code>) so
+    they survive restarts. <b>Reset</b> clears every override and restores the
+    built-in values. Saved values are validated; an invalid entry in the
+    config file falls back to the built-in default.</p>
+  <table>
+    <tr><th>Group</th><th>Examples</th><th>Wired into</th></tr>
+    <tr><td>Dataset &amp; Search</td><td>Default Dataset, Homolog Target Dataset, Search Columns, Filter By</td><td>Dataset selectors in every tool tab, pathfinding and search tabs</td></tr>
+    <tr><td>Connection Thresholds</td><td>Min Synapse Count, Min Connection Ratio, Min Traversal Probability, Visualization Edge Limit</td><td>Find Path, Find Shortest, Network, Cross-Dataset, Profiling, Find Homologs, Find Similar</td></tr>
+    <tr><td>Cache &amp; Data</td><td>Connection Cache (Use Cache), Cache Only, Skeleton Cache (Cache Neurons), Cache Synapses, Auto Type Mapping</td><td>Pathfinding tabs, similarity/homolog searches, skeleton rendering</td></tr>
+    <tr><td>Pathfinding &amp; Output</td><td>Skip BodyId-Level Export, Output Format, Network Layout, Algorithm, Show Figure, Max Intermediate Layers</td><td>Pathfinding, Cross-Dataset and export surfaces</td></tr>
+    <tr><td>3D Skeleton Rendering</td><td>Skeleton Mode, Simplification Method, Show Soma, Legend Mode, Background, Brain Mesh, Export Views</td><td>Visualization → Skeleton tab and the Advanced Visualization editor in analysis tabs</td></tr>
+    <tr><td>Similarity &amp; Homolog Search</td><td>Top N/K/M, Similarity Metric, Fast Search, Vector Pre-filtering, Candidate Cap/Source, NeuronBridge controls</td><td>Find Similar, Find Homologs, NeuronBridge tabs</td></tr>
+  </table>
+  <div class="callout tip">
+    <b>Cache Neurons auto-flip</b>
+    Without a saved Skeleton Cache override, the skeleton surfaces keep their
+    dataset-aware behavior: Cache Neurons flips automatically (for example on
+    for FlyWire, off for NeuPrint fast/artistic tube renders). Saving a value
+    in Default Settings pins the checkbox and disables that auto-flip.
+  </div>
 
   <h2>Dataset preparation</h2>
   <div class="callout info">

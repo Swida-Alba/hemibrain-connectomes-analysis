@@ -4,7 +4,7 @@ import re
 
 from nicegui import ui
 
-from ..config import DEFAULTS, PROJECT_ROOT, SRC_DIR, SIMILARITY_METRICS
+from ..config import DEFAULTS, PROJECT_ROOT, SRC_DIR, SIMILARITY_METRICS, get_user_default
 from ..components.common import (
     dataset_selector, neuron_list_input, number_input, select_input,
     checkbox_input, dir_input, section_header, param_grid, tool_page,
@@ -89,7 +89,7 @@ def create_find_similar_tab():
                 section_header("Similarity Parameters", "tune")
                 with param_grid(3):
                     level = select_input(
-                        "Level", MORPH_LEVELS, DEFAULTS["morph_level"],
+                        "Level", MORPH_LEVELS, get_user_default("morph_level"),
                         hint="'auto' (recommended): a type query returns "
                              "type-to-type results, a bodyId query returns "
                              "bodyId-to-bodyId results. 'bodyid': rank "
@@ -97,13 +97,13 @@ def create_find_similar_tab():
                              "by neuron type.",
                     )
                     method = select_input(
-                        "Method", MORPH_METHODS, DEFAULTS["morph_method"],
+                        "Method", MORPH_METHODS, get_user_default("morph_method"),
                         hint="'Vector': fast morphometrics + persistence vectors "
                              "(recommended). 'NBLAST': canonical NBLAST (slower; "
                              "runs on vector-prefiltered candidates).",
                     )
                     metric = select_input(
-                        "Metric", MORPH_METRICS, DEFAULTS["morph_metric"],
+                        "Metric", MORPH_METRICS, get_user_default("morph_metric"),
                         hint="Similarity on standardized vectors: cosine or "
                              "Pearson. Applies to the 'Vector' method only.",
                     )
@@ -119,7 +119,7 @@ def create_find_similar_tab():
                     candidate_source = select_input(
                         "Candidate Source", ["auto", "roi", "combined",
                                              "profile", "cache"],
-                        DEFAULTS["candidate_source"],
+                        get_user_default("candidate_source"),
                         hint="'auto' (recommended): NeuPrint datasets screen "
                              "candidates by primary-ROI distribution "
                              "similarity (every neuron reachable; a one-time "
@@ -134,7 +134,7 @@ def create_find_similar_tab():
                              "(download skeletons first).",
                     )
                     candidate_cap = number_input(
-                        "Candidate Cap", DEFAULTS["candidate_cap"], 10, 5000,
+                        "Candidate Cap", get_user_default("candidate_cap"), 10, 5000,
                         hint="Maximum number of candidates entering the "
                              "morphological comparison: the sorted candidate "
                              "list is truncated to this many neurons (all "
@@ -164,7 +164,6 @@ def create_find_similar_tab():
                             "controls whether types or individual bodyIds are shown."
                         ),
                         default_visualize_by=DEFAULTS["morph_visualize_by"],
-                        default_skeleton_mode="line",
                         show_high_quality_warning=True,
                         dataset_provider=lambda: dataset.value,
                         dataset_watchers=[dataset],
@@ -329,7 +328,7 @@ def create_find_similar_tab():
                 section_header("Search Parameters", "tune")
                 with param_grid(3):
                     profile_top_n = number_input(
-                        "Top N Candidates", DEFAULTS["top_n"], 5, 100,
+                        "Top N Candidates", get_user_default("top_n"), 5, 100,
                         hint="Number of top candidates to return.",
                     )
                     min_shared_partners = number_input(
@@ -346,28 +345,28 @@ def create_find_similar_tab():
                 with param_grid(2):
                     similarity_metric = select_input(
                         "Similarity Metric", SIMILARITY_METRICS,
-                        DEFAULTS["similarity_metric"],
+                        get_user_default("similarity_metric"),
                         hint="Metric for comparing connectivity profiles.",
                     )
                     top_k = number_input(
-                        "Top K Partners", DEFAULTS["top_k"], 5, 50,
+                        "Top K Partners", get_user_default("top_k"), 5, 50,
                         hint="Top K partners per direction for profile construction.",
                     )
                 with ui.row().classes("gap-4"):
                     use_fast = checkbox_input(
-                        "Fast Search", True,
+                        "Fast Search", get_user_default("fast_search"),
                         hint="Adjacency-expansion discovery (recommended).",
                     )
                     vector_prefilter = checkbox_input(
-                        "Vector Pre-filtering", True,
+                        "Vector Pre-filtering", get_user_default("vector_prefilter"),
                         hint="Cosine pre-filter of candidates for speed.",
                     )
                     expand_2hop = checkbox_input(
-                        "2-Hop Expansion", True,
+                        "2-Hop Expansion", get_user_default("expand_2hop"),
                         hint="Include untyped partners via 2-hop typed partners.",
                     )
                     use_cache = checkbox_input(
-                        "Use Cache", True,
+                        "Use Cache", get_user_default("use_cache"),
                         hint="Cache profiles and connections locally.",
                     )
                 saveas = ui.input(
@@ -397,7 +396,6 @@ def create_find_similar_tab():
                             "similarity results."
                         ),
                         default_visualize_by="type",
-                        default_skeleton_mode="line",
                         show_high_quality_warning=True,
                         dataset_provider=lambda: [source_dataset.value],
                         dataset_watchers=[source_dataset],
@@ -508,7 +506,7 @@ def create_find_similar_tab():
             "saveas": "",
             "verbose": True,
             "n_workers": 8,
-            "use_cache": True,
+            "use_cache": get_user_default("use_cache"),
             # Raw skeleton persistence is now unconditional and shared with
             # visualization and Settings cache pulls.
             "cache_fetched_skeletons": True,
@@ -589,7 +587,7 @@ def create_find_similar_tab():
             "include_untyped_partners": expand_2hop.value,
             "use_cache": use_cache.value,
             "saveas": saveas.value.strip() or "",
-            "min_synapse_threshold": 3,
+            "min_synapse_threshold": get_user_default("min_synapse_num"),
             "ensure_cache_complete": full_cache.value,
             "morphological_enrichment": True,
             "output_folder_prefix": "similar-connectivity",

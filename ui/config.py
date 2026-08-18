@@ -167,6 +167,97 @@ def set_auto_suggest_enabled(enabled: bool) -> bool:
     config["auto_suggest_enabled"] = bool(enabled)
     return save_local_config(config)
 
+
+USER_DEFAULTS_KEY = "user_defaults"
+
+
+def get_user_defaults() -> dict:
+    """Return the persisted user default overrides (Settings tab)."""
+    overrides = load_local_config().get(USER_DEFAULTS_KEY, {})
+    return overrides if isinstance(overrides, dict) else {}
+
+
+def has_user_default(key: str) -> bool:
+    """Whether the user saved a custom default for *key*."""
+    return key in get_user_defaults()
+
+
+def _coerce_user_default(key: str, value):
+    """Validate a stored override against its registry spec.
+
+    Returns the coerced value, or None when the override is unknown or
+    invalid (callers fall back to the built-in DEFAULTS value).
+    """
+    spec = DEFAULT_SETTING_SPECS.get(key)
+    if spec is None:
+        return None
+    kind = spec["kind"]
+    if kind == "bool":
+        return value if isinstance(value, bool) else None
+    if kind in ("int", "float"):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        number = value
+        if kind == "int":
+            if isinstance(number, float) and not number.is_integer():
+                return None
+            number = int(number)
+        else:
+            number = float(number)
+        low, high = spec.get("min"), spec.get("max")
+        if low is not None and number < low:
+            return None
+        if high is not None and number > high:
+            return None
+        return number
+    options = spec.get("options") or []
+    return value if value in options else None
+
+
+def get_user_default(key: str):
+    """Resolve one default: a valid saved user override wins over DEFAULTS."""
+    overrides = get_user_defaults()
+    if key in overrides:
+        coerced = _coerce_user_default(key, overrides[key])
+        if coerced is not None:
+            return coerced
+    return DEFAULTS[key]
+
+
+def set_user_default(key: str, value) -> bool:
+    """Persist one validated default override; returns success."""
+    coerced = _coerce_user_default(key, value)
+    if coerced is None:
+        return False
+    config = load_local_config()
+    overrides = config.get(USER_DEFAULTS_KEY, {})
+    if not isinstance(overrides, dict):
+        overrides = {}
+    overrides[key] = coerced
+    config[USER_DEFAULTS_KEY] = overrides
+    return save_local_config(config)
+
+
+def reset_user_default(key: str) -> bool:
+    """Clear one saved default override so the built-in applies again."""
+    config = load_local_config()
+    overrides = config.get(USER_DEFAULTS_KEY, {})
+    if not isinstance(overrides, dict) or key not in overrides:
+        return True
+    overrides.pop(key, None)
+    if overrides:
+        config[USER_DEFAULTS_KEY] = overrides
+    else:
+        config.pop(USER_DEFAULTS_KEY, None)
+    return save_local_config(config)
+
+
+def reset_user_defaults() -> bool:
+    """Clear every saved default override (restore built-in DEFAULTS)."""
+    config = load_local_config()
+    config.pop(USER_DEFAULTS_KEY, None)
+    return save_local_config(config)
+
 # Available datasets (static fallback - use dataset_service for dynamic fetching)
 DATASETS = [
     "male-cns:v1.0",
@@ -216,10 +307,38 @@ DEFAULTS = {
     "max_interlayer": 2,
     "edgeN_limit": 500,
     "filter_by": "bodyId",
+    "search_columns": "auto",
     "output_format": "csv",
     "pathfinding": "MemoizedDFS",
     "network_layout": "distributed",
     "use_cache": True,
+    "cache_only": False,
+    # Cache defaults (Settings -> Default Settings). The connection cache
+    # stays on by default; the skeleton (Cache Neurons) cache stays off.
+    "cache_neurons": False,
+    "cache_synapses": True,
+    "auto_type_mapping": True,
+    "skip_bodyId": True,
+    "showfig_analysis": False,
+    # Default dataset selections
+    "default_dataset": "male-cns:v1.0",
+    "default_target_dataset": "male-cns:v0.9",
+    # 3D skeleton rendering defaults
+    "skeleton_mode": "tube",
+    "analysis_skeleton_mode": "line",
+    "simplification_method": "fast",
+    "smooth_skeleton": False,
+    "show_soma": True,
+    "show_connectors": False,
+    "show_fig_skeleton": True,
+    "export_views": True,
+    "legend_mode": "type",
+    "background": "white",
+    "brain_mesh": "template",
+    # Similarity / homolog search toggles
+    "fast_search": True,
+    "vector_prefilter": True,
+    "expand_2hop": True,
     "top_k": 15,
     "top_m": 5,
     "similarity_metric": "cosine",  # Sort By (homolog candidates): sorting only — all metrics are always computed
@@ -271,6 +390,371 @@ SKELETON_MODES = ["tube", "line"]
 
 # Brain mesh options
 BRAIN_MESH_OPTIONS = ["template", "whole", "none"]
+
+# Morphology similarity options (Find Similar tab)
+MORPH_LEVEL_OPTIONS = ["auto", "bodyid", "type"]
+MORPH_METHOD_OPTIONS = ["vector", "nblast"]
+MORPH_METRIC_OPTIONS = ["cosine", "pearson"]
+CANDIDATE_SOURCE_OPTIONS = ["auto", "roi", "combined", "profile", "cache"]
+
+# Simplification pipelines (NeuPrint tube rendering)
+SIMPLIFICATION_METHODS = ["fast", "fine", "artistic"]
+
+# User-configurable defaults rendered in the Settings tab. Each spec drives
+# the Default Settings card and validates overrides saved to
+# local_config.json under ``user_defaults``; the built-in fallback always
+# comes from DEFAULTS.
+DEFAULT_SETTING_GROUPS = [
+    ("dataset_search", "Dataset & Search"),
+    ("thresholds", "Connection Thresholds"),
+    ("cache", "Cache & Data"),
+    ("pathfinding_output", "Pathfinding & Output"),
+    ("skeleton_render", "3D Skeleton Rendering"),
+    ("similarity", "Similarity & Homolog Search"),
+]
+
+DEFAULT_SETTING_SPECS = {
+    # --- Dataset & Search -------------------------------------------------
+    "default_dataset": {
+        "label": "Default Dataset",
+        "group": "dataset_search",
+        "kind": "select",
+        "options": DATASETS,
+        "hint": "Dataset preselected in every tool tab until changed.",
+    },
+    "default_target_dataset": {
+        "label": "Default Homolog Target Dataset",
+        "group": "dataset_search",
+        "kind": "select",
+        "options": DATASETS,
+        "hint": "Target dataset preselected in Homolog Finding.",
+    },
+    "search_columns": {
+        "label": "Search Columns",
+        "group": "dataset_search",
+        "kind": "select",
+        "options": SEARCH_COLUMNS,
+        "hint": "Columns searched when resolving neuron names.",
+    },
+    "filter_by": {
+        "label": "Filter By",
+        "group": "dataset_search",
+        "kind": "select",
+        "options": FILTER_OPTIONS,
+        "hint": "'bodyId': individual neuron level. 'type': aggregate by type.",
+    },
+    # --- Connection Thresholds --------------------------------------------
+    "min_synapse_num": {
+        "label": "Min Synapse Count / Threshold",
+        "group": "thresholds",
+        "kind": "int",
+        "min": 1,
+        "max": 100,
+        "step": 1,
+        "hint": "Default minimum synapses for a connection to be included "
+                "(pathfinding, network, skeleton tab, profiling, homologs).",
+    },
+    "min_ratio": {
+        "label": "Min Connection Ratio",
+        "group": "thresholds",
+        "kind": "float",
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.01,
+        "hint": "Minimum weight/post ratio (0 = include all).",
+    },
+    "min_traversal_probability": {
+        "label": "Min Traversal Probability",
+        "group": "thresholds",
+        "kind": "float",
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.01,
+        "hint": "Minimum traversal probability (0 = include all).",
+    },
+    "edgeN_limit": {
+        "label": "Visualization Edge Limit",
+        "group": "thresholds",
+        "kind": "int",
+        "min": 10,
+        "max": 5000,
+        "step": 10,
+        "hint": "Maximum edges drawn per visualization.",
+    },
+    # --- Cache & Data ------------------------------------------------------
+    "use_cache": {
+        "label": "Connection Cache (Use Cache)",
+        "group": "cache",
+        "kind": "bool",
+        "hint": "Cache neuron/connection data locally for faster repeat runs.",
+    },
+    "cache_only": {
+        "label": "Cache Only (Offline)",
+        "group": "cache",
+        "kind": "bool",
+        "hint": "Never contact the server; requires a pre-built cache.",
+    },
+    "cache_neurons": {
+        "label": "Skeleton Cache (Cache Neurons)",
+        "group": "cache",
+        "kind": "bool",
+        "hint": "Cache fetched skeletons locally for faster repeat renders. "
+                "Saving a value here disables the dataset-aware auto-flip.",
+    },
+    "cache_synapses": {
+        "label": "Synapse Cache (Cache Synapses)",
+        "group": "cache",
+        "kind": "bool",
+        "hint": "Cache fetched synapse data locally.",
+    },
+    "auto_type_mapping": {
+        "label": "Auto Type Mapping",
+        "group": "cache",
+        "kind": "bool",
+        "hint": "Standardize type names across datasets via male-cns v1.0.",
+    },
+    # --- Pathfinding & Output ----------------------------------------------
+    "skip_bodyId": {
+        "label": "Skip BodyId-Level Export",
+        "group": "pathfinding_output",
+        "kind": "bool",
+        "hint": "Exclude bodyId-level results/tables; keep type-level output.",
+    },
+    "output_format": {
+        "label": "Output Format",
+        "group": "pathfinding_output",
+        "kind": "select",
+        "options": OUTPUT_FORMATS,
+        "hint": "'csv': faster, smaller. 'xlsx': Excel format.",
+    },
+    "network_layout": {
+        "label": "Network Layout",
+        "group": "pathfinding_output",
+        "kind": "select",
+        "options": NETWORK_LAYOUTS,
+        "hint": "Layout algorithm for the HTML network visualization.",
+    },
+    "pathfinding": {
+        "label": "Pathfinding Algorithm",
+        "group": "pathfinding_output",
+        "kind": "select",
+        "options": PATHFINDING_ALGORITHMS,
+        "hint": "Default algorithm for Complete Paths and Cross-Dataset runs.",
+    },
+    "showfig_analysis": {
+        "label": "Show Figure (Analysis Tabs)",
+        "group": "pathfinding_output",
+        "kind": "bool",
+        "hint": "Open the HTML visualization automatically after "
+                "Complete/Shortest Paths runs.",
+    },
+    "max_interlayer": {
+        "label": "Max Intermediate Layers (Complete Paths)",
+        "group": "pathfinding_output",
+        "kind": "int",
+        "min": 0,
+        "max": 10,
+        "step": 1,
+        "hint": "Default intermediate neuron layers for Complete Paths.",
+    },
+    # --- 3D Skeleton Rendering ---------------------------------------------
+    "skeleton_mode": {
+        "label": "Skeleton Mode (Skeleton tab)",
+        "group": "skeleton_render",
+        "kind": "select",
+        "options": SKELETON_MODES,
+        "hint": "'tube': detailed. 'line': fast, for many neurons.",
+    },
+    "analysis_skeleton_mode": {
+        "label": "Skeleton Mode (analysis visualizations)",
+        "group": "skeleton_render",
+        "kind": "select",
+        "options": SKELETON_MODES,
+        "hint": "Skeleton mode for optional renders generated by analysis tabs.",
+    },
+    "simplification_method": {
+        "label": "Simplification Method",
+        "group": "skeleton_render",
+        "kind": "select",
+        "options": SIMPLIFICATION_METHODS,
+        "hint": "NeuPrint tube rendering pipeline (fast / fine / artistic).",
+    },
+    "smooth_skeleton": {
+        "label": "Smooth Skeleton",
+        "group": "skeleton_render",
+        "kind": "bool",
+        "hint": "Apply mesh smoothing to neuron skeletons.",
+    },
+    "show_soma": {
+        "label": "Show Soma",
+        "group": "skeleton_render",
+        "kind": "bool",
+        "hint": "Render the soma sphere for neurons that have one.",
+    },
+    "show_connectors": {
+        "label": "Show Connectors",
+        "group": "skeleton_render",
+        "kind": "bool",
+        "hint": "Show synaptic connector markers.",
+    },
+    "show_fig_skeleton": {
+        "label": "Show Figure (Skeleton renders)",
+        "group": "skeleton_render",
+        "kind": "bool",
+        "hint": "Open the 3D HTML visualization after rendering.",
+    },
+    "export_views": {
+        "label": "Export Views",
+        "group": "skeleton_render",
+        "kind": "bool",
+        "hint": "Export PNG screenshots from 6 angles after rendering.",
+    },
+    "legend_mode": {
+        "label": "Neuron Legend Mode",
+        "group": "skeleton_render",
+        "kind": "select",
+        "options": ["layer", "type", "single"],
+        "hint": "One legend entry per layer, type, or individual neuron.",
+    },
+    "background": {
+        "label": "Background",
+        "group": "skeleton_render",
+        "kind": "select",
+        "options": ["white", "black"],
+        "hint": "Background color for the 3D scene and exports.",
+    },
+    "brain_mesh": {
+        "label": "Brain Mesh",
+        "group": "skeleton_render",
+        "kind": "select",
+        "options": BRAIN_MESH_OPTIONS,
+        "hint": "'template': brain outline. 'whole': full surface. 'none'.",
+    },
+    # --- Similarity & Homolog Search ----------------------------------------
+    "top_n": {
+        "label": "Top N Candidates",
+        "group": "similarity",
+        "kind": "int",
+        "min": 5,
+        "max": 100,
+        "step": 1,
+        "hint": "Number of top candidates returned by similarity searches.",
+    },
+    "top_k": {
+        "label": "Top K Partners",
+        "group": "similarity",
+        "kind": "int",
+        "min": 5,
+        "max": 50,
+        "step": 1,
+        "hint": "Top K partners per direction for profile construction.",
+    },
+    "top_m": {
+        "label": "Min Types (M)",
+        "group": "similarity",
+        "kind": "int",
+        "min": 3,
+        "max": 20,
+        "step": 1,
+        "hint": "Minimum unique partner types in a connectivity profile.",
+    },
+    "similarity_metric": {
+        "label": "Similarity Metric (Sort By)",
+        "group": "similarity",
+        "kind": "select",
+        "options": SIMILARITY_METRICS,
+        "hint": "Metric used for ordering candidate lists.",
+    },
+    "fast_search": {
+        "label": "Fast Search",
+        "group": "similarity",
+        "kind": "bool",
+        "hint": "Adjacency-expansion candidate discovery.",
+    },
+    "vector_prefilter": {
+        "label": "Vector Pre-filtering",
+        "group": "similarity",
+        "kind": "bool",
+        "hint": "Cosine pre-filter of candidates for speed.",
+    },
+    "expand_2hop": {
+        "label": "2-Hop Expansion",
+        "group": "similarity",
+        "kind": "bool",
+        "hint": "Include untyped partners via 2-hop typed partners.",
+    },
+    "candidate_cap": {
+        "label": "Candidate Cap",
+        "group": "similarity",
+        "kind": "int",
+        "min": 10,
+        "max": 5000,
+        "step": 10,
+        "hint": "Maximum candidates entering morphological comparison.",
+    },
+    "candidate_source": {
+        "label": "Candidate Source",
+        "group": "similarity",
+        "kind": "select",
+        "options": CANDIDATE_SOURCE_OPTIONS,
+        "hint": "Discovery pool for morphological similarity.",
+    },
+    "morph_level": {
+        "label": "Morphology Level",
+        "group": "similarity",
+        "kind": "select",
+        "options": MORPH_LEVEL_OPTIONS,
+        "hint": "'auto' follows the query kind (type vs bodyId).",
+    },
+    "morph_method": {
+        "label": "Morphology Method",
+        "group": "similarity",
+        "kind": "select",
+        "options": MORPH_METHOD_OPTIONS,
+        "hint": "'vector': fast morphometrics. 'nblast': canonical NBLAST.",
+    },
+    "morph_metric": {
+        "label": "Morphology Metric",
+        "group": "similarity",
+        "kind": "select",
+        "options": MORPH_METRIC_OPTIONS,
+        "hint": "Similarity on standardized vectors (Vector method only).",
+    },
+    "match_algorithm": {
+        "label": "NeuronBridge Algorithm",
+        "group": "similarity",
+        "kind": "select",
+        "options": MATCH_ALGORITHMS,
+        "hint": "'cds': Color Depth Search. 'pppm': Point Pattern. 'both'.",
+    },
+    "nb_top_n": {
+        "label": "NeuronBridge Top N Matches Per Line",
+        "group": "similarity",
+        "kind": "int",
+        "min": 1,
+        "max": 2000,
+        "step": 10,
+        "hint": "Highest-scoring matches retrieved per driver line.",
+    },
+    "nb_min_score": {
+        "label": "NeuronBridge Score Cutoff",
+        "group": "similarity",
+        "kind": "float",
+        "min": 0,
+        "max": 200000,
+        "step": 1000,
+        "hint": "Threshold for score-based NeuronBridge views.",
+    },
+    "nb_min_type_avg_score": {
+        "label": "NeuronBridge Min Type Avg Score",
+        "group": "similarity",
+        "kind": "float",
+        "min": 0,
+        "max": 200000,
+        "step": 1000,
+        "hint": "Extra filter for co-labeling similarity matrices.",
+    },
+}
 
 # App settings
 APP_TITLE = "DROCAT - Connectome Analysis Toolkit"

@@ -2386,6 +2386,141 @@ class TestDatasetService:
         suggest_cb.value = True
         assert cfg_mod.get_auto_suggest_enabled() is True
 
+    def test_settings_default_settings_card_save_and_reset(self, tmp_path, monkeypatch):
+        """The Settings tab renders the registry-driven Default Settings card
+        and Save/Reset persist the overrides to the local config."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.settings import create_settings_tab
+        import ui.config as cfg_mod
+
+        monkeypatch.setattr(cfg_mod, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        client = Client(page("/settings-defaults-card"))
+        with client:
+            create_settings_tab()
+
+        texts = [el.text for el in client.elements.values() if getattr(el, "text", "")]
+        assert "Default Settings" in texts
+
+        def by_label(label):
+            return next(
+                el for el in client.elements.values()
+                if getattr(el, "_props", {}).get("label") == label
+                or (type(el).__name__ == "Checkbox"
+                    and getattr(el, "text", "") == label)
+            )
+
+        skip_cb = by_label("Skip BodyId-Level Export")
+        min_syn = by_label("Min Synapse Count / Threshold")
+        dataset_sel = by_label("Default Dataset")
+        assert bool(skip_cb.value) == cfg_mod.DEFAULTS["skip_bodyId"]
+        assert int(min_syn.value) == cfg_mod.DEFAULTS["min_synapse_num"]
+        assert dataset_sel.value == cfg_mod.DEFAULTS["default_dataset"]
+
+        skip_cb.set_value(not cfg_mod.DEFAULTS["skip_bodyId"])
+        min_syn.set_value(9)
+        dataset_sel.set_value("hemibrain:v1.2.1")
+
+        save_btn = next(
+            el for el in client.elements.values()
+            if getattr(el, "text", "") == "Save Defaults"
+        )
+        next(iter(save_btn._event_listeners.values())).handler(None)
+        assert cfg_mod.get_user_default("skip_bodyId") is not cfg_mod.DEFAULTS["skip_bodyId"]
+        assert cfg_mod.get_user_default("min_synapse_num") == 9
+        assert cfg_mod.get_user_default("default_dataset") == "hemibrain:v1.2.1"
+
+        # The Reset action lives on the same card right after Save Defaults.
+        elements = list(client.elements.values())
+        save_idx = elements.index(save_btn)
+        reset_btn = next(
+            el for el in elements[save_idx:]
+            if getattr(el, "text", "") == "Reset"
+        )
+        next(iter(reset_btn._event_listeners.values())).handler(None)
+        assert cfg_mod.get_user_defaults() == {}
+        assert bool(skip_cb.value) == cfg_mod.DEFAULTS["skip_bodyId"]
+        assert int(min_syn.value) == cfg_mod.DEFAULTS["min_synapse_num"]
+        assert dataset_sel.value == cfg_mod.DEFAULTS["default_dataset"]
+
+    def test_saved_defaults_wire_into_pathfinding_tabs(self, tmp_path, monkeypatch):
+        """Saved user defaults initialize the one-time tab controls: dataset
+        selectors, Skip BodyId, Min Synapse Count, and Use Cache."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.find_path import create_find_path_tab
+        from ui.tabs.inter_dataset import create_inter_dataset_tab
+        import ui.config as cfg_mod
+
+        monkeypatch.setattr(cfg_mod, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        cfg_mod.set_user_default("default_dataset", "hemibrain:v1.2.1")
+        cfg_mod.set_user_default("skip_bodyId", False)
+        cfg_mod.set_user_default("min_synapse_num", 7)
+        cfg_mod.set_user_default("use_cache", False)
+
+        client = Client(page("/defaults-find-path"))
+        with client:
+            create_find_path_tab()
+
+        def labeled(c, label):
+            return [
+                el for el in c.elements.values()
+                if getattr(el, "_props", {}).get("label") == label
+                or (type(el).__name__ == "Checkbox"
+                    and getattr(el, "text", "") == label)
+            ]
+
+        dataset_sels = labeled(client, "Dataset")
+        assert dataset_sels
+        assert all(sel.value == "hemibrain:v1.2.1" for sel in dataset_sels)
+        assert labeled(client, "Skip BodyId in Output")[0].value is False
+        assert int(labeled(client, "Min Synapse Count")[0].value) == 7
+        assert labeled(client, "Use Cache")[0].value is False
+
+        client2 = Client(page("/defaults-inter-dataset"))
+        with client2:
+            create_inter_dataset_tab()
+        multi = [
+            el for el in client2.elements.values()
+            if getattr(el, "_props", {}).get("multiple")
+            and isinstance(getattr(el, "value", None), list)
+        ]
+        assert multi
+        assert multi[0].value == ["hemibrain:v1.2.1"]
+
+    def test_cache_neurons_override_gates_auto_flip(self, tmp_path, monkeypatch):
+        """A saved Cache Neurons override initializes the analysis component
+        and disables the pipeline-based auto-flip."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.skeleton_visualization_settings import (
+            skeleton_visualization_settings,
+        )
+        import ui.config as cfg_mod
+
+        monkeypatch.setattr(cfg_mod, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+
+        # Without an override the FlyWire-aware auto-flip turns Cache
+        # Neurons on (initial built-in value is False).
+        client = Client(page("/cache-flip-auto"))
+        with client:
+            auto = skeleton_visualization_settings(
+                dataset_provider=lambda: "FAFB:FlyWire",
+            )
+        assert auto.fields["cache_neurons"].value is True
+
+        # A saved override wins and survives the refresh triggered by a
+        # skeleton-mode change.
+        cfg_mod.set_user_default("cache_neurons", False)
+        client2 = Client(page("/cache-flip-pinned"))
+        with client2:
+            pinned = skeleton_visualization_settings(
+                dataset_provider=lambda: "FAFB:FlyWire",
+            )
+        assert pinned.fields["cache_neurons"].value is False
+        pinned.fields["skeleton_mode"].set_value("tube")
+        assert pinned.fields["cache_neurons"].value is False
+
     def test_settings_token_status_is_non_sensitive(self):
         from ui.tabs.settings import _token_status
 

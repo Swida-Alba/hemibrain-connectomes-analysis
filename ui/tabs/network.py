@@ -6,7 +6,7 @@ hemisphere-aware analysis, network + heatmap visualizations without Sankey).
 
 from nicegui import ui
 
-from ..config import DEFAULTS, OUTPUT_FORMATS, NETWORK_LAYOUTS, SEARCH_COLUMNS
+from ..config import OUTPUT_FORMATS, NETWORK_LAYOUTS, SEARCH_COLUMNS, get_user_default
 from ..components.common import (
     dataset_selector, neuron_list_input, number_input, select_input,
     checkbox_input, dir_input, apply_filter_mode, section_header, param_grid, tool_page,
@@ -79,7 +79,7 @@ def create_network_tab():
         with ui.card().classes("w-full drocat-card").props('id="card-network-core"'):
             section_header("Core Parameters", "tune")
             min_synapse = number_input(
-                "Min Synapse Count", DEFAULTS["min_synapse_num"], 1, 100,
+                "Min Synapse Count", get_user_default("min_synapse_num"), 1, 100,
                 hint="Minimum number of synapses for a connection to be included. Filters out weak/noisy connections.",
             )
 
@@ -87,26 +87,26 @@ def create_network_tab():
             with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
                 with param_grid(2):
                     min_ratio = number_input(
-                        "Min Connection Ratio", DEFAULTS["min_ratio"], 0, 1, 0.01,
+                        "Min Connection Ratio", get_user_default("min_ratio"), 0, 1, 0.01,
                         hint="Minimum weight/post ratio (0-1). Higher = stronger connections only. 0 = include all.",
                     )
                     min_traversal = number_input(
-                        "Min Traversal Prob.", DEFAULTS["min_traversal_probability"], 0, 1, 0.01,
+                        "Min Traversal Prob.", get_user_default("min_traversal_probability"), 0, 1, 0.01,
                         hint="Minimum traversal probability (ratio/0.3, capped at 1.0). Controls connection confidence threshold.",
                     )
                 search_columns = select_input(
-                    "Search Columns", SEARCH_COLUMNS, "auto",
+                    "Search Columns", SEARCH_COLUMNS, get_user_default("search_columns"),
                     hint="Which columns to search when resolving neuron names. "
                          "'auto': all columns (bodyId -> type -> instance -> flywireType/others). "
                          "Use 'type'/'instance'/'bodyId' to restrict the search.",
                 )
                 with ui.row().classes("gap-4"):
                     use_cache = checkbox_input(
-                        "Use Cache", DEFAULTS["use_cache"],
+                        "Use Cache", get_user_default("use_cache"),
                         hint="Cache neuron data locally for 10-100x speedup on repeated runs.",
                     )
                     cache_only = checkbox_input(
-                        "Cache Only (Offline)", False,
+                        "Cache Only (Offline)", get_user_default("cache_only"),
                         hint="Use only local cache and never contact the server. "
                              "Requires the cache to be pre-built.",
                     )
@@ -127,15 +127,15 @@ def create_network_tab():
                 )
             with param_grid(3):
                 output_format = select_input(
-                    "Output Format", OUTPUT_FORMATS, DEFAULTS["output_format"],
+                    "Output Format", OUTPUT_FORMATS, get_user_default("output_format"),
                     hint="'csv': faster, smaller. 'xlsx': Excel format with formatting.",
                 )
                 network_layout = select_input(
-                    "Network Layout", NETWORK_LAYOUTS, DEFAULTS["network_layout"],
+                    "Network Layout", NETWORK_LAYOUTS, get_user_default("network_layout"),
                     hint="Layout algorithm for the HTML network visualization.",
                 )
                 skip_bodyid = checkbox_input(
-                    "Skip BodyId in Output", True,
+                    "Skip BodyId in Output", get_user_default("skip_bodyId"),
                     hint="Exclude individual bodyId-level connection tables. Type-level tables are always saved.",
                 )
 
@@ -208,7 +208,7 @@ def create_network_tab():
             "search_columns": search_columns.value,
             "network_layout": network_layout.value,
             "use_cache": use_cache.value,
-            "edgeN_limit": DEFAULTS["edgeN_limit"],
+            "edgeN_limit": get_user_default("edgeN_limit"),
             "output_format": output_format.value,
             "skip_bodyId": skip_bodyid.value,
             "custom_source_name": custom_group_name.value or '',

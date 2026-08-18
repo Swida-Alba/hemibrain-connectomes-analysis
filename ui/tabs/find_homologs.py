@@ -3,7 +3,7 @@
 import re
 
 from nicegui import ui
-from ..config import DEFAULTS, DATASETS, SIMILARITY_METRICS
+from ..config import SIMILARITY_METRICS, get_user_default
 from ..components.common import (
     dataset_selector, neuron_list_input, number_input, select_input,
     checkbox_input, dir_input, section_header, param_grid, tool_page,
@@ -40,7 +40,7 @@ def create_find_homologs_tab():
                 )
                 target_dataset = dataset_selector(
                     label="Target Dataset",
-                    default=DATASETS[1],
+                    default=get_user_default("default_target_dataset"),
                     hint="Dataset to search for homologs in.",
                 )
             output_dir = dir_input(scope="find_homologs")
@@ -60,31 +60,31 @@ def create_find_homologs_tab():
         with ui.card().classes("w-full drocat-card"):
             section_header("Search Parameters", "tune")
             with param_grid(3):
-                top_n = number_input("Top N Candidates", DEFAULTS["top_n"], 5, 100, hint="Number of top homolog candidates to return.")
-                top_k = number_input("Top K Partners", DEFAULTS["top_k"], 5, 50, hint="Top K partners per direction for profile construction.")
-                top_m = number_input("Min Types (M)", DEFAULTS["top_m"], 3, 20, hint="Minimum unique partner types in profile.")
+                top_n = number_input("Top N Candidates", get_user_default("top_n"), 5, 100, hint="Number of top homolog candidates to return.")
+                top_k = number_input("Top K Partners", get_user_default("top_k"), 5, 50, hint="Top K partners per direction for profile construction.")
+                top_m = number_input("Min Types (M)", get_user_default("top_m"), 3, 20, hint="Minimum unique partner types in profile.")
             with param_grid(2):
                 similarity_metric = select_input(
-                    "Sort By", SIMILARITY_METRICS, DEFAULTS["similarity_metric"],
+                    "Sort By", SIMILARITY_METRICS, get_user_default("similarity_metric"),
                     hint="Metric used ONLY for ordering the candidate list (top-N cut). "
                          "All similarity metrics (jaccard, cosine, rank_corr, combined) are "
                          "always computed — same backend as Connectivity Profiling.",
                 )
             with ui.row().classes("gap-4"):
-                use_fast = checkbox_input("Fast Search", True, hint="Use adjacency expansion for faster candidate discovery.")
-                vector_prefilter = checkbox_input("Vector Pre-filtering", True, hint="Pre-filter candidates using vector cosine similarity.")
-                expand_2hop = checkbox_input("2-Hop Expansion", True, hint="Include 2-hop typed partners for untyped 1-hop neurons.")
+                use_fast = checkbox_input("Fast Search", get_user_default("fast_search"), hint="Use adjacency expansion for faster candidate discovery.")
+                vector_prefilter = checkbox_input("Vector Pre-filtering", get_user_default("vector_prefilter"), hint="Pre-filter candidates using vector cosine similarity.")
+                expand_2hop = checkbox_input("2-Hop Expansion", get_user_default("expand_2hop"), hint="Include 2-hop typed partners for untyped 1-hop neurons.")
             with param_grid(3):
                 min_synapse_threshold = number_input(
-                    "Min Synapse Threshold", 3, 1, 100,
+                    "Min Synapse Threshold", get_user_default("min_synapse_num"), 1, 100,
                     hint="Minimum synapse count for a connection to enter a profile.",
                 )
                 use_cache = checkbox_input(
-                    "Use Cache", True,
+                    "Use Cache", get_user_default("use_cache"),
                     hint="Cache profiles and connections locally for faster repeat searches.",
                 )
                 use_auto_type_mapping = checkbox_input(
-                    "Auto Type Mapping", True,
+                    "Auto Type Mapping", get_user_default("auto_type_mapping"),
                     hint="Standardize partner type names to canonical (male-cns) names "
                          "before cross-dataset comparison.",
                 )
@@ -99,7 +99,6 @@ def create_find_homologs_tab():
                     top_n_label="Visualize Top N Candidates",
                     top_n_hint="Number of top homolog candidates to render as 3D skeletons.",
                     default_visualize_by="type",
-                    default_skeleton_mode="line",
                     show_high_quality_warning=True,
                     dataset_provider=lambda: [
                         source_dataset.value,

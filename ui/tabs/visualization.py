@@ -12,11 +12,12 @@ from pathlib import Path
 from nicegui import ui
 
 from ..config import (
-    DEFAULTS,
     SKELETON_MODES,
     BRAIN_MESH_OPTIONS,
     NETWORK_LAYOUTS,
     SEARCH_COLUMNS,
+    get_user_default,
+    has_user_default,
 )
 from ..components.common import (
     dataset_selector, multi_select_input, number_input, select_input,
@@ -131,7 +132,7 @@ def create_skeleton_tab():
                          "the pathfinding search backend.",
                 )
                 search_columns = select_input(
-                    "Search Columns", SEARCH_COLUMNS, "auto",
+                    "Search Columns", SEARCH_COLUMNS, get_user_default("search_columns"),
                     hint="Which columns to search when resolving neuron names (same as "
                          "pathfinding). 'auto': all columns (bodyId -> type -> instance -> "
                          "flywireType/others). Use 'type'/'instance'/'bodyId' to restrict.",
@@ -150,23 +151,23 @@ def create_skeleton_tab():
                 section_header("General Appearance", "palette")
                 with param_grid(2):
                     skeleton_mode = select_input(
-                        "Skeleton Mode", SKELETON_MODES, "tube",
+                        "Skeleton Mode", SKELETON_MODES, get_user_default("skeleton_mode"),
                         hint="'tube': 3D tube rendering (detailed). 'line': thin line (fast, for many neurons).",
                     )
                     legend_mode = select_input(
-                        "Neuron Legend Mode", ["layer", "type", "single"], "type",
+                        "Neuron Legend Mode", ["layer", "type", "single"], get_user_default("legend_mode"),
                         hint="'layer': one neuron legend entry per layer (or per custom group). "
                              "'type': per neuron type. 'single': every neuron. "
                              "ROI meshes always remain separate.",
                     )
                     bg_color = select_input(
-                        "Background", ["white", "black"], "white",
+                        "Background", ["white", "black"], get_user_default("background"),
                         hint="Background color for the 3D scene and exports. "
                              "The default neuron palette follows it: Category10 on "
                              "white, Set3 on black (until a palette is picked manually).",
                     )
                     brain_mesh = select_input(
-                        "Brain Mesh", BRAIN_MESH_OPTIONS, "template",
+                        "Brain Mesh", BRAIN_MESH_OPTIONS, get_user_default("brain_mesh"),
                         hint="'template': brain outline. 'whole': full brain surface. 'none': no mesh.",
                     )
                     vnc_mesh = checkbox_input(
@@ -236,7 +237,7 @@ def create_skeleton_tab():
                         hint="Hide synapse markers for a cleaner view.",
                     )
                     min_synapse_num = number_input(
-                        "Min Synapse Count", 3, 1, 100,
+                        "Min Synapse Count", get_user_default("min_synapse_num"), 1, 100,
                         hint="Minimum synapses for a connection marker to be shown.",
                     )
                     synapse_size = select_input(
@@ -316,7 +317,7 @@ def create_skeleton_tab():
                 ui.label("Data & Rendering").classes("drocat-mini-label")
                 with ui.row().classes("gap-4"):
                     cache_neurons = checkbox_input(
-                        "Cache Neurons", True,
+                        "Cache Neurons", get_user_default("cache_neurons"),
                         hint="Cache fetched skeletons locally for faster repeat renders.",
                     )
                     cache_default_state = {"user_changed": False, "updating": False}
@@ -327,26 +328,26 @@ def create_skeleton_tab():
 
                     cache_neurons.on_value_change(on_cache_neurons_change)
                     cache_synapses = checkbox_input(
-                        "Cache Synapses", True,
+                        "Cache Synapses", get_user_default("cache_synapses"),
                         hint="Cache fetched synapse data locally.",
                     )
                     smooth_skeleton = checkbox_input(
-                        "Smooth Skeleton", False,
+                        "Smooth Skeleton", get_user_default("smooth_skeleton"),
                         hint="Apply mesh smoothing to neuron skeletons.",
                     )
                     show_soma = checkbox_input(
-                        "Show Soma", True,
+                        "Show Soma", get_user_default("show_soma"),
                         hint="Render the soma sphere for neurons that have one.",
                     )
                     show_connectors = checkbox_input(
-                        "Show Connectors", False,
+                        "Show Connectors", get_user_default("show_connectors"),
                         hint="Show synaptic connector markers.",
                     )
                 with ui.row().classes("gap-4"):
                     simplification_method = select_input(
                         "Simplification Method",
                         ["fast", "fine", "artistic"],
-                        "fast",
+                        get_user_default("simplification_method"),
                         hint=(
                             "NeuPrint tube rendering: 'fast' (default) uses "
                             "direct simp90 simplification plus the FAFB fast "
@@ -389,11 +390,11 @@ def create_skeleton_tab():
                     )
                 with ui.row().classes("gap-4"):
                     show_fig = checkbox_input(
-                        "Show Figure", True,
+                        "Show Figure", get_user_default("show_fig_skeleton"),
                         hint="Open the 3D HTML visualization after rendering.",
                     )
                     export_views = checkbox_input(
-                        "Export Views", True,
+                        "Export Views", get_user_default("export_views"),
                         hint="Export PNG screenshots from 6 angles.",
                     )
 
@@ -460,7 +461,10 @@ def create_skeleton_tab():
             simplification_method.set_enabled(
                 not is_line
             )
-            if not cache_default_state["user_changed"]:
+            if (
+                not cache_default_state["user_changed"]
+                and not has_user_default("cache_neurons")
+            ):
                 # FAFB's method selector starts at ``fast`` and remains
                 # selectable; its fast/fine default follows the selected
                 # method while cache eligibility is handled independently.
@@ -630,7 +634,7 @@ def create_skeleton_tab():
             "hemisphere": hemisphere.value,
             "custom_layer_names": custom_names,
             "output_dir": output_dir.value,
-            "output_format": DEFAULTS["output_format"],
+            "output_format": get_user_default("output_format"),
             "skeleton_mode": skeleton_mode.value,
             "brain_mesh": brain_mesh.value,
             "vnc_mesh": vnc_mesh.value,

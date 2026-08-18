@@ -152,3 +152,86 @@ class TestAutoSuggestSetting:
         cfg.save_local_config({"default_output_dir": "/custom/out"})
         cfg.set_auto_suggest_enabled(False)
         assert cfg.get_default_output_dir() == "/custom/out"
+
+
+class TestUserDefaults:
+    """Persistent tab-default overrides (Settings > Default Settings)."""
+
+    def test_no_override_returns_builtin(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        for key in cfg.DEFAULT_SETTING_SPECS:
+            assert cfg.get_user_default(key) == cfg.DEFAULTS[key]
+            assert cfg.has_user_default(key) is False
+
+    def test_set_and_get_roundtrip(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        assert cfg.set_user_default("min_synapse_num", 7) is True
+        assert cfg.set_user_default("use_cache", False) is True
+        assert cfg.set_user_default("default_dataset", "hemibrain:v1.2.1") is True
+        assert cfg.get_user_default("min_synapse_num") == 7
+        assert cfg.get_user_default("use_cache") is False
+        assert cfg.get_user_default("default_dataset") == "hemibrain:v1.2.1"
+        assert cfg.has_user_default("min_synapse_num") is True
+        # Overrides survive a fresh config load (persisted on disk).
+        assert cfg.load_local_config()[cfg.USER_DEFAULTS_KEY]["min_synapse_num"] == 7
+
+    def test_invalid_type_rejected_on_set(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        assert cfg.set_user_default("min_synapse_num", "many") is False
+        assert cfg.set_user_default("use_cache", "yes") is False
+        assert cfg.has_user_default("min_synapse_num") is False
+        assert cfg.get_user_default("min_synapse_num") == cfg.DEFAULTS["min_synapse_num"]
+
+    def test_invalid_option_rejected_on_set(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        assert cfg.set_user_default("skeleton_mode", "wireframe") is False
+        assert cfg.set_user_default("default_dataset", "not-a-dataset") is False
+        assert cfg.get_user_default("skeleton_mode") == cfg.DEFAULTS["skeleton_mode"]
+
+    def test_out_of_range_rejected_on_set(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        assert cfg.set_user_default("min_synapse_num", 0) is False
+        assert cfg.set_user_default("min_synapse_num", 10**6) is False
+        assert cfg.get_user_default("min_synapse_num") == cfg.DEFAULTS["min_synapse_num"]
+
+    def test_invalid_saved_override_falls_back_to_builtin(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        cfg.save_local_config({
+            cfg.USER_DEFAULTS_KEY: {
+                "min_synapse_num": "oops",
+                "skeleton_mode": "bogus",
+                "use_cache": "yes",
+            }
+        })
+        assert cfg.get_user_default("min_synapse_num") == cfg.DEFAULTS["min_synapse_num"]
+        assert cfg.get_user_default("skeleton_mode") == cfg.DEFAULTS["skeleton_mode"]
+        assert cfg.get_user_default("use_cache") == cfg.DEFAULTS["use_cache"]
+
+    def test_reset_single_keeps_others(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        cfg.set_user_default("min_synapse_num", 7)
+        cfg.set_user_default("skip_bodyId", False)
+        assert cfg.reset_user_default("min_synapse_num") is True
+        assert cfg.has_user_default("min_synapse_num") is False
+        assert cfg.get_user_default("min_synapse_num") == cfg.DEFAULTS["min_synapse_num"]
+        assert cfg.get_user_default("skip_bodyId") is False
+
+    def test_reset_all_clears_and_preserves_other_config(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        cfg.save_local_config({"default_output_dir": "/custom/out"})
+        cfg.set_user_default("min_synapse_num", 7)
+        cfg.set_user_default("use_cache", False)
+        assert cfg.reset_user_defaults() is True
+        assert cfg.get_user_defaults() == {}
+        assert cfg.get_user_default("min_synapse_num") == cfg.DEFAULTS["min_synapse_num"]
+        assert cfg.get_user_default("use_cache") == cfg.DEFAULTS["use_cache"]
+        assert cfg.get_default_output_dir() == "/custom/out"
+
+    def test_registry_covers_groups(self):
+        group_ids = {group_id for group_id, _ in cfg.DEFAULT_SETTING_GROUPS}
+        spec_groups = {spec["group"] for spec in cfg.DEFAULT_SETTING_SPECS.values()}
+        assert spec_groups == group_ids
+        for key, spec in cfg.DEFAULT_SETTING_SPECS.items():
+            assert key in cfg.DEFAULTS, f"registry key {key} missing from DEFAULTS"
+            if spec["kind"] == "select":
+                assert cfg.DEFAULTS[key] in spec["options"]
