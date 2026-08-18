@@ -514,6 +514,26 @@ class TestNetworkTabIntegration:
         ids = [(getattr(el, "_props", None) or {}).get("id") for el in client.elements.values()]
         assert "card-net-viz-edge-editor" in ids
 
+    def test_net_viz_editor_does_not_receive_output_dir_provider(self, monkeypatch, tmp_path):
+        """Net-Viz edge-list exports should only trigger the browser download."""
+        self._patch_store(monkeypatch, tmp_path)
+        from ui.tabs import visualization
+
+        original_editor = visualization.edge_list_editor
+        captured = {}
+
+        def capture_editor(*args, **kwargs):
+            captured["kwargs"] = kwargs
+            handle = original_editor(*args, **kwargs)
+            captured["handle"] = handle
+            return handle
+
+        monkeypatch.setattr(visualization, "edge_list_editor", capture_editor)
+        self._build_tab(monkeypatch, tmp_path)
+
+        assert "export_dir_provider" not in captured["kwargs"]
+        assert captured["handle"].export_dir_provider is None
+
     def test_no_reminder_without_dirty_drafts(self, monkeypatch, tmp_path):
         self._patch_store(monkeypatch, tmp_path)
         store.save_draft("clean", ROWS, dirty=False)
