@@ -8,6 +8,7 @@ import shutil
 import time
 import gc
 import logging
+from contextlib import contextmanager, redirect_stderr
 from dataclasses import dataclass, field
 from pathlib import Path
 from copy import deepcopy
@@ -155,6 +156,25 @@ def _get_api_retry_utils():
         return api_call_with_retry, APITimeoutError, APIRetryExhaustedError
 
 
+@contextmanager
+def _suppress_nested_fetch_progress():
+    """Hide progress bars emitted by a third-party connection fetcher.
+
+    ``fetch_adjacencies()`` owns an internal ``trange`` for its own request
+    batches.  Pathfinding already owns the user-facing progress bar, so the
+    nested bar makes a single fetch look like several unrelated operations.
+    NeuPrint's ``tqdm`` writes to stderr. Redirecting that stream only for the
+    API call keeps the outer DROCAT ``tqdm`` instance visible (it has already
+    captured its output stream) while preventing the dependency's transient
+    bars from leaking into the analysis log. This avoids mutating neuprint
+    module globals.
+    """
+    import io
+
+    with redirect_stderr(io.StringIO()):
+        yield
+
+
 # Monkey-patch for pandas 2.x compatibility
 import neuprint.utils as neuprint_utils
 _original_connection_table_to_matrix = connection_table_to_matrix
@@ -208,7 +228,9 @@ logging.getLogger('navis').setLevel(logging.WARNING)
 # ============================================================================
 # Module-level cache for sharing connection data across FindNeuronConnection instances
 # This avoids repeated disk reads when comparison module creates multiple instances
-# Structure: {dataset: {'conn_df': DataFrame, 'conn_index': dict, 'neuron_index': DataFrame, 'neuron_dict': dict}}
+# Structure: {dataset: {'conn_df': DataFrame, 'conn_index': dict,
+#             'neuron_index': DataFrame, 'neuron_dict': dict,
+#             '<source>_signature': tuple}}
 # ============================================================================
 _FNC_CACHE = {}
 
@@ -1986,6 +2008,12 @@ class FindNeuronConnection:
         # Local FAFB/FlyWire connection table: (mtime, DataFrame), so layer
         # fetches stop re-reading the multi-million-row CSV each time.
         self._fafb_local_conn_cache = None
+        # Signatures of the disk files represented by the shared in-memory
+        # snapshots.  Settings-tab pulls update these files in another
+        # thread, so a cached frame must be reloaded when the signature moves.
+        self._conn_cache_signature = None
+        self._neuron_index_signature_value = None
+        self._cache_incomplete_notice_emitted = False
         
         self._vprint('Initializing...', level='full')
         
@@ -2138,6 +2166,8 @@ class FindNeuronConnection:
             self._conn_index = cache.get('conn_index')
             self._neuron_index_cache = cache.get('neuron_index')
             self._neuron_index_dict = cache.get('neuron_dict')
+            self._conn_cache_signature = cache.get('conn_signature')
+            self._neuron_index_signature_value = cache.get('neuron_index_signature')
             self._vprint(f'Using shared module cache for {dataset_safe}', level='full')
         else:
             # Initialize empty caches (will be populated on first load)
@@ -2360,6 +2390,86 @@ class FindNeuronConnection:
     def _get_connection_db_path(self):
         '''Get path to unified connection database'''
         return os.path.join(self.cache_folder, 'connections.parquet')
+
+    @staticmethod
+    def _file_signature(path):
+        """Return a cheap change marker for one cache file."""
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return None
+        return (stat.st_mtime_ns, stat.st_size)
+
+    def _connection_cache_signature(self):
+        """Return the current on-disk connection-cache signature.
+
+        The UI keeps a process alive while the Settings pull writes batch
+        files and later replaces ``connections.parquet``.  A signature lets
+        analysis instances retain fast in-memory lookups without serving a
+        frame that predates that pull.
+        """
+        if not getattr(self, 'cache_folder', None):
+            return ()
+        db_path = self._get_connection_db_path()
+        cache_dir = os.path.dirname(db_path)
+        batch_dir = os.path.join(cache_dir, '_batch_files')
+        paths = [db_path] if os.path.exists(db_path) else []
+        if os.path.isdir(batch_dir):
+            paths.extend(
+                os.path.join(batch_dir, name)
+                for name in sorted(os.listdir(batch_dir))
+                if name.startswith('batch_') and name.endswith('.parquet')
+            )
+        return tuple(
+            (os.path.relpath(path, cache_dir), self._file_signature(path))
+            for path in paths
+        )
+
+    def _neuron_index_signature(self):
+        """Return the current on-disk metadata/progress-index signature."""
+        if not getattr(self, 'cache_folder', None):
+            return ()
+        paths = [
+            self._get_neuron_index_path(),
+            self._get_neuron_index_state_path(),
+        ]
+        return tuple(
+            (os.path.basename(path), self._file_signature(path))
+            for path in paths
+            if os.path.exists(path)
+        )
+
+    def _record_connection_cache_signature(self):
+        """Remember the source files represented by the connection frame."""
+        signature = self._connection_cache_signature()
+        self._conn_cache_signature = signature
+        global _FNC_CACHE
+        if getattr(self, '_dataset_safe', None) in _FNC_CACHE:
+            _FNC_CACHE[self._dataset_safe]['conn_signature'] = signature
+
+    def _record_neuron_index_signature(self):
+        """Remember the source files represented by the neuron index frame."""
+        signature = self._neuron_index_signature()
+        self._neuron_index_signature_value = signature
+        global _FNC_CACHE
+        if getattr(self, '_dataset_safe', None) in _FNC_CACHE:
+            _FNC_CACHE[self._dataset_safe]['neuron_index_signature'] = signature
+
+    def _invalidate_connection_memory_cache(self):
+        """Drop connection snapshots after another operation writes parquet."""
+        self._conn_df_cache = None
+        self._conn_index = None
+        self._conn_index_post = None
+        self._conn_db_pre_id_cache = None
+        self._conn_cache_signature = None
+        if hasattr(self, '_connection_maps'):
+            self._connection_maps.clear()
+        global _FNC_CACHE
+        if getattr(self, '_dataset_safe', None) in _FNC_CACHE:
+            _FNC_CACHE[self._dataset_safe]['conn_df'] = None
+            _FNC_CACHE[self._dataset_safe]['conn_index'] = None
+            _FNC_CACHE[self._dataset_safe]['conn_index_post'] = None
+            _FNC_CACHE[self._dataset_safe]['conn_signature'] = None
     
     def _get_neuron_index_path(self):
         '''Get path to the app-owned neuron index (persists across cache clears)'''
@@ -2724,6 +2834,7 @@ class FindNeuronConnection:
                     pass
             self._neuron_index_cache = None
             self._neuron_index_dict = {}
+            self._record_neuron_index_signature()
             if self._dataset_safe in _FNC_CACHE:
                 _FNC_CACHE[self._dataset_safe]['neuron_index'] = None
                 _FNC_CACHE[self._dataset_safe]['neuron_dict'] = {}
@@ -2798,6 +2909,7 @@ class FindNeuronConnection:
                         os.remove(temporary)
                     except OSError:
                         pass
+            self._record_neuron_index_signature()
         except Exception as exc:
             self._vprint(
                 f'  ⚠️ Could not reset neuron index progress flags: {exc}',
@@ -2892,7 +3004,22 @@ class FindNeuronConnection:
             self._conn_index_post = {}
             return empty
 
-        # Return cached DataFrame if available
+        # Return cached DataFrame only while it still represents the current
+        # on-disk cache.  The Settings pull writes from a background thread;
+        # without this check, an analysis created before that pull completed
+        # keeps classifying the newly downloaded neurons as uncached.
+        if self._conn_df_cache is not None and not force_reload:
+            current_signature = self._connection_cache_signature()
+            cached_signature = getattr(self, '_conn_cache_signature', None)
+            if cached_signature != current_signature and not (
+                cached_signature is None and not current_signature
+            ):
+                self._conn_df_cache = None
+                self._conn_index = None
+                self._conn_index_post = None
+                self._conn_db_pre_id_cache = None
+                self._conn_cache_signature = None
+
         if self._conn_df_cache is not None and not force_reload:
             # Boundary normalization: the shared _FNC_CACHE stores pandas (for
             # the comparison modules), so a frame picked up from there must be
@@ -3090,6 +3217,7 @@ class FindNeuronConnection:
                 self._conn_df_cache = pl.DataFrame(schema={'bodyId_pre': pl.Utf8, 'bodyId_post': pl.Utf8, 'weight': pl.Int64, 'roi': pl.Utf8, 'cached_date': pl.Utf8})
                 self._conn_index = {}
                 self._conn_index_post = {}
+                self._record_connection_cache_signature()
                 return self._conn_df_cache
         
         # No cache exists - return empty DataFrame
@@ -3097,6 +3225,7 @@ class FindNeuronConnection:
         self._conn_df_cache = pl.DataFrame(schema={'bodyId_pre': pl.Utf8, 'bodyId_post': pl.Utf8, 'weight': pl.Int64, 'roi': pl.Utf8, 'cached_date': pl.Utf8})
         self._conn_index = {}
         self._conn_index_post = {}
+        self._record_connection_cache_signature()
         return self._conn_df_cache
 
     def _get_cached_upstream_bodyids(self, force_reload: bool = False) -> set:
@@ -3156,6 +3285,7 @@ class FindNeuronConnection:
         Called after loading connection database from disk.
         Also updates the module-level shared cache.
         '''
+        global _FNC_CACHE
         if not self.use_cache:
             self._conn_index = {}
             self._conn_index_post = {}
@@ -3163,6 +3293,13 @@ class FindNeuronConnection:
         if self._conn_df_cache is None or self._conn_df_cache.is_empty():
             self._conn_index = {}
             self._conn_index_post = {}
+            if hasattr(self, '_dataset_safe'):
+                if self._dataset_safe not in _FNC_CACHE:
+                    _FNC_CACHE[self._dataset_safe] = {}
+                _FNC_CACHE[self._dataset_safe]['conn_df'] = self._conn_df_cache
+                _FNC_CACHE[self._dataset_safe]['conn_index'] = self._conn_index
+                _FNC_CACHE[self._dataset_safe]['conn_index_post'] = self._conn_index_post
+            self._record_connection_cache_signature()
             return
 
         # self._vprint(f'  ⏳ Building connection indexes for fast lookups...', level='always')
@@ -3220,7 +3357,6 @@ class FindNeuronConnection:
         self._vprint(f'  ✓ Index built: {len(self._conn_index):,} upstream, {len(self._conn_index_post):,} downstream neurons', level='always')
         
         # Update module-level shared cache for other instances
-        global _FNC_CACHE
         if hasattr(self, '_dataset_safe'):
             if self._dataset_safe not in _FNC_CACHE:
                 _FNC_CACHE[self._dataset_safe] = {}
@@ -3239,6 +3375,7 @@ class FindNeuronConnection:
             _FNC_CACHE[self._dataset_safe]['conn_df'] = conn_df_for_cache
             _FNC_CACHE[self._dataset_safe]['conn_index'] = self._conn_index
             _FNC_CACHE[self._dataset_safe]['conn_index_post'] = self._conn_index_post
+            self._record_connection_cache_signature()
     
     def _save_connection_db(self, conn_db):
         '''
@@ -3320,6 +3457,9 @@ class FindNeuronConnection:
         
         # Write this batch to its own file - NO loading of existing data
         conn.to_parquet(batch_path, index=False, compression='gzip')
+        # A batch file changes the source set even though the consolidated
+        # parquet is not replaced until the end of the pull.
+        self._invalidate_connection_memory_cache()
         
         # Calculate connection counts per neuron.
         # NOTE: group on the str-cast copy (`conn`), not the original
@@ -3427,17 +3567,7 @@ class FindNeuronConnection:
             # earlier in this process. Drop those snapshots so the next cache
             # query reads the consolidated parquet instead of returning stale
             # rows from the shared module cache.
-            self._conn_df_cache = None
-            self._conn_index = None
-            self._conn_index_post = None
-            self._conn_db_pre_id_cache = None
-            if hasattr(self, '_connection_maps'):
-                self._connection_maps.clear()
-            global _FNC_CACHE
-            if getattr(self, '_dataset_safe', None) in _FNC_CACHE:
-                _FNC_CACHE[self._dataset_safe]['conn_df'] = None
-                _FNC_CACHE[self._dataset_safe]['conn_index'] = None
-                _FNC_CACHE[self._dataset_safe]['conn_index_post'] = None
+            self._invalidate_connection_memory_cache()
             
             print(f"  ✓ Consolidated to {total_count:,} connections")
             return total_count
@@ -3490,9 +3620,19 @@ class FindNeuronConnection:
             self._neuron_index_dict = {}
             return self._neuron_index_cache
 
-        # Return cached DataFrame if available
+        # Return cached DataFrame only when the canonical index and its
+        # progress sidecar are unchanged.  A Settings pull updates the small
+        # sidecar after every batch; a long-lived analysis object must see
+        # those flags instead of the snapshot it loaded before the pull.
         if self._neuron_index_cache is not None and not force_reload:
-            return self._neuron_index_cache
+            current_signature = self._neuron_index_signature()
+            cached_signature = getattr(self, '_neuron_index_signature_value', None)
+            if cached_signature == current_signature or (
+                cached_signature is None and not current_signature
+            ):
+                return self._neuron_index_cache
+            self._neuron_index_cache = None
+            self._neuron_index_dict = None
         
         self._migrate_legacy_index()
         index_path = self._get_neuron_index_path()
@@ -3579,6 +3719,7 @@ class FindNeuronConnection:
                     'last_fetched', 'connection_count'
                 ])
                 self._neuron_index_dict = {}
+                self._record_neuron_index_signature()
                 return self._neuron_index_cache
         
         self._neuron_index_cache = pd.DataFrame(columns=[
@@ -3586,6 +3727,7 @@ class FindNeuronConnection:
             'last_fetched', 'connection_count'
         ])
         self._neuron_index_dict = {}
+        self._record_neuron_index_signature()
         return self._neuron_index_cache
     
     def _build_neuron_index_dict(self):
@@ -3594,11 +3736,18 @@ class FindNeuronConnection:
         Called after loading neuron index from disk.
         Also updates the module-level shared cache.
         '''
+        global _FNC_CACHE
         if not self.use_cache:
             self._neuron_index_dict = {}
             return
         if self._neuron_index_cache is None or self._neuron_index_cache.empty:
             self._neuron_index_dict = {}
+            if hasattr(self, '_dataset_safe'):
+                if self._dataset_safe not in _FNC_CACHE:
+                    _FNC_CACHE[self._dataset_safe] = {}
+                _FNC_CACHE[self._dataset_safe]['neuron_index'] = self._neuron_index_cache
+                _FNC_CACHE[self._dataset_safe]['neuron_dict'] = self._neuron_index_dict
+            self._record_neuron_index_signature()
             return
         
         self._vprint(f'  ⏳ Building neuron index dict for fast lookups...', level='full')
@@ -3629,12 +3778,12 @@ class FindNeuronConnection:
         self._vprint(f'  ✓ Neuron index dict built: {len(self._neuron_index_dict):,} neurons', level='full')
         
         # Update module-level shared cache for other instances
-        global _FNC_CACHE
         if hasattr(self, '_dataset_safe'):
             if self._dataset_safe not in _FNC_CACHE:
                 _FNC_CACHE[self._dataset_safe] = {}
             _FNC_CACHE[self._dataset_safe]['neuron_index'] = self._neuron_index_cache
             _FNC_CACHE[self._dataset_safe]['neuron_dict'] = self._neuron_index_dict
+            self._record_neuron_index_signature()
     
     def _save_neuron_index(self, index_df):
         '''
@@ -3710,6 +3859,7 @@ class FindNeuronConnection:
         cached_upstream = []
         uncached_upstream = []
         partially_cached = []
+        incomplete_with_rows = []
         
         for bodyId in upstream_bodyIds:
             bodyId = str(bodyId)
@@ -3739,9 +3889,24 @@ class FindNeuronConnection:
                         # Marked complete but absent from the current cache.
                         uncached_upstream.append(bodyId)
                 else:
+                    if bodyId in neurons_with_connections:
+                        incomplete_with_rows.append(bodyId)
                     uncached_upstream.append(bodyId)
             else:
                 uncached_upstream.append(bodyId)
+
+        if incomplete_with_rows and not getattr(
+            self, '_cache_incomplete_notice_emitted', False
+        ):
+            self._vprint(
+                f'  ⚠️ Cache rows exist for {len(incomplete_with_rows):,} '
+                'requested neurons, but their downstream-complete flags are '
+                'false. Treating those rows as partial and fetching the '
+                'missing connections; finish or rerun the Settings pull to '
+                'make them reusable.',
+                level='both',
+            )
+            self._cache_incomplete_notice_emitted = True
         
         # Retrieve cached connections using O(1) dict index
         all_cached = cached_upstream + partially_cached  # partially_cached will be empty (no recovery)
@@ -5363,9 +5528,6 @@ class FindNeuronConnection:
                         # Create batches
                         batches = [neuprint_upstream[i:i + batch_size] for i in range(0, len(neuprint_upstream), batch_size)]
                         
-                        if len(batches) > 1:
-                            self._vprint(f'     Processing {len(batches)} batches (size={batch_size})...', level='full')
-                        
                         # Progress bar over the neurons being pulled: the first
                         # run of a fresh dataset downloads every neuron here, so
                         # the user always sees the downloading progress (also
@@ -5384,12 +5546,13 @@ class FindNeuronConnection:
                                         from neuprint import fetch_simple_connections
                                         upstream_criteria = NeuronCriteria(bodyId=b)
                                         downstream_criteria = NeuronCriteria(bodyId=neuprint_downstream) if neuprint_downstream is not None else None
-                                        return fetch_simple_connections(
-                                            upstream_criteria=upstream_criteria,
-                                            downstream_criteria=downstream_criteria,
-                                            min_weight=1,
-                                            **self.kwargs_fetch
-                                        )
+                                        with _suppress_nested_fetch_progress():
+                                            return fetch_simple_connections(
+                                                upstream_criteria=upstream_criteria,
+                                                downstream_criteria=downstream_criteria,
+                                                min_weight=1,
+                                                **self.kwargs_fetch
+                                            )
                                     else:
                                         from neuprint import fetch_adjacencies
                                         # NeuPrint's own fetch_adjacencies()
@@ -5403,12 +5566,13 @@ class FindNeuronConnection:
                                         adjacency_kwargs = dict(self.kwargs_fetch)
                                         adjacency_kwargs.pop('batch_size', None)
                                         adjacency_kwargs['batch_size'] = max(1, len(b))
-                                        neuron_df, roi_conn_df = fetch_adjacencies(
-                                            sources=b,
-                                            targets=neuprint_downstream,
-                                            min_total_weight=1,
-                                            **adjacency_kwargs
-                                        )
+                                        with _suppress_nested_fetch_progress():
+                                            neuron_df, roi_conn_df = fetch_adjacencies(
+                                                sources=b,
+                                                targets=neuprint_downstream,
+                                                min_total_weight=1,
+                                                **adjacency_kwargs
+                                            )
                                         # roi_conn_df already has bodyId_pre, bodyId_post, roi, weight
                                         return roi_conn_df
 
@@ -6503,10 +6667,10 @@ class FindNeuronConnection:
             # progress flags that described the deleted connection data.
             self._reset_index_progress()
             # Clear in-memory caches
-            self._conn_df_cache = None
-            self._conn_index = {}
+            self._invalidate_connection_memory_cache()
             self._neuron_index_cache = None
             self._neuron_index_dict = {}
+            self._neuron_index_signature_value = None
             self._ensure_neuron_index_from_metadata()
         else:
             # Check for pending batch files from interrupted previous run

@@ -42,7 +42,7 @@ def test_positive_completion_flag_without_rows_is_refetched():
 
 
 def test_use_cache_false_does_not_write_connection_or_state_files(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, capsys
 ):
     """No-cache path keeps fetched data in memory and writes no cache files."""
     import coana
@@ -95,6 +95,12 @@ def test_use_cache_false_does_not_write_connection_or_state_files(
     )
 
     def fake_fetch_adjacencies(**kwargs):
+        from tqdm import tqdm
+
+        # Simulate neuprint's internal request progress.  The analysis should
+        # expose only its own outer bar.
+        for _ in tqdm(range(5), desc="nested fake"):
+            pass
         return pd.DataFrame(), pd.DataFrame({
             "bodyId_pre": ["1"],
             "bodyId_post": ["2"],
@@ -115,6 +121,9 @@ def test_use_cache_false_does_not_write_connection_or_state_files(
     assert len(result) == 1
     assert not (tmp_path / "connections.parquet").exists()
     assert not (tmp_path / "neuron_index_state.parquet").exists()
+    output = capsys.readouterr()
+    assert "nested fake" not in output.out + output.err
+    assert "Pulling connections" in output.out + output.err
 
 
 def test_resume_pull_refetches_complete_flags_missing_from_connection_cache(
@@ -180,3 +189,95 @@ def test_resume_pull_refetches_complete_flags_missing_from_connection_cache(
     assert fetched == ["1"]
     assert summary["already_cached"] == 0
     assert summary["newly_cached"] == 1
+
+
+def test_analysis_reloads_connection_snapshot_after_settings_pull(tmp_path):
+    """An existing analysis object must see a newly replaced connections file."""
+    import coana
+    from coana import FindNeuronConnection
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    db_path = cache_dir / "connections.parquet"
+    pl.DataFrame({
+        "bodyId_pre": ["old"],
+        "bodyId_post": ["target"],
+        "weight": [1],
+    }).write_parquet(db_path)
+
+    fc = object.__new__(FindNeuronConnection)
+    fc.use_cache = True
+    fc.dataset = "fake:reload"
+    fc.client_type = "neuprint"
+    fc.cache_folder = str(cache_dir)
+    fc._dataset_safe = "fake_reload"
+    fc._conn_df_cache = None
+    fc._conn_index = None
+    fc._conn_index_post = None
+    fc._conn_db_pre_id_cache = None
+    fc._vprint = lambda *args, **kwargs: None
+
+    try:
+        first = fc._load_connection_db()
+        assert first["bodyId_pre"].to_list() == ["old"]
+
+        # Simulate the Settings pull's final atomic replacement.
+        pl.DataFrame({
+            "bodyId_pre": ["new"],
+            "bodyId_post": ["target"],
+            "weight": [2],
+        }).write_parquet(db_path)
+
+        second = fc._load_connection_db()
+        assert second["bodyId_pre"].to_list() == ["new"]
+    finally:
+        coana._FNC_CACHE.pop("fake_reload", None)
+
+
+def test_analysis_reloads_completion_state_sidecar_after_settings_pull(tmp_path):
+    """Completion flags written by the pull must reach an existing analysis."""
+    import coana
+    from coana import FindNeuronConnection
+
+    dataset = "fake:state-reload"
+    fc = object.__new__(FindNeuronConnection)
+    fc.use_cache = True
+    fc.dataset = dataset
+    fc.client_type = "neuprint"
+    fc.script_path = str(tmp_path)
+    fc.cache_folder = str(tmp_path / "cache" / "fake_state-reload")
+    fc._dataset_safe = "fake_state-reload"
+    fc._neuron_index_cache = None
+    fc._neuron_index_dict = None
+    fc._vprint = lambda *args, **kwargs: None
+
+    index_path = Path(fc._get_neuron_index_path())
+    index_path.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "bodyId": ["1"],
+        "type": ["T"],
+        "instance": ["T_L"],
+        "post": [1],
+        "downstream_complete": [False],
+        "last_fetched": [""],
+        "connection_count": [0],
+    }).write_parquet(index_path)
+
+    try:
+        first = fc._load_neuron_index()
+        assert not bool(first.loc[0, "downstream_complete"])
+
+        state_path = Path(fc._get_neuron_index_state_path())
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({
+            "bodyId": ["1"],
+            "downstream_complete": [True],
+            "last_fetched": ["2026-08-18 12:00:00"],
+            "connection_count": [7],
+        }).write_parquet(state_path)
+
+        second = fc._load_neuron_index()
+        assert bool(second.loc[0, "downstream_complete"])
+        assert int(second.loc[0, "connection_count"]) == 7
+    finally:
+        coana._FNC_CACHE.pop("fake_state-reload", None)
