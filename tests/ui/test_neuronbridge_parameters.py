@@ -33,6 +33,7 @@ def test_neuronbridge_tabs_share_top_n_and_score_cutoff_defaults(factory, url):
         if getattr(element, "_props", {}).get("label")
     }
 
+    assert controls["Algorithm"].value == DEFAULTS["match_algorithm"] == "cds"
     assert controls["Top N Matches Per Line"].value == DEFAULTS["nb_top_n"] == 50
     assert controls["Score Cutoff"].value == DEFAULTS["nb_min_score"] == 30000
     assert "Top N Results" not in controls
