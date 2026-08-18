@@ -131,6 +131,7 @@ py-modules = [
     "cave_data_fetcher",
     "coana",
     "fafb_utils",
+    "flywire_ids",
     "flylight_downloader",
     "inter_dataset_preliminary",
     "neuronbridge_client",

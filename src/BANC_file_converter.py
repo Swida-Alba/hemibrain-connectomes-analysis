@@ -1,6 +1,11 @@
 import os
 import pandas as pd
 
+try:
+    from .flywire_ids import normalize_flywire_id_columns
+except ImportError:
+    from flywire_ids import normalize_flywire_id_columns
+
 def process_neurons_to_parquet(read_path, save_path, save_csv_path=None):
     """
     Process neurons.csv.gz into neuron_df parquet format for BANC.
@@ -18,7 +23,11 @@ def process_neurons_to_parquet(read_path, save_path, save_csv_path=None):
     try:
         # Read neurons
         print("  Reading neuron data...")
-        df = pd.read_csv(read_path, compression='gzip' if read_path.endswith('.gz') else None)
+        df = pd.read_csv(
+            read_path,
+            compression='gzip' if read_path.endswith('.gz') else None,
+            dtype={'Root ID': 'string', 'bodyId': 'string'},
+        )
         
         # Rename columns to match coana expectations
         # BANC columns: ['Root ID', 'Top in/out region', 'Community labels', 'Predicted NT type', 
@@ -42,7 +51,7 @@ def process_neurons_to_parquet(read_path, save_path, save_csv_path=None):
         actual_rename = {k: v for k, v in rename_map.items() if k in existing_cols}
         
         df = df.rename(columns=actual_rename)
-        df['bodyId'] = df['bodyId'].astype(str)
+        normalize_flywire_id_columns(df, ['bodyId'])
         
         # Deduplicate if needed
         if df.duplicated(subset=['bodyId']).any():
@@ -100,7 +109,16 @@ def process_connections_to_parquet(read_path, save_path):
         return False
 
     try:
-        df = pd.read_csv(read_path, compression='gzip' if read_path.endswith('.gz') else None)
+        df = pd.read_csv(
+            read_path,
+            compression='gzip' if read_path.endswith('.gz') else None,
+            dtype={
+                'pre_root_id': 'string',
+                'post_root_id': 'string',
+                'bodyId_pre': 'string',
+                'bodyId_post': 'string',
+            },
+        )
         
         # Rename for consistency
         # BANC columns: ['pre_root_id', 'post_root_id', 'neuropil', 'syn_count', 'nt_type']
@@ -113,8 +131,7 @@ def process_connections_to_parquet(read_path, save_path):
         df = df.rename(columns=rename_map)
         
         # Ensure strings
-        df['bodyId_pre'] = df['bodyId_pre'].astype(str)
-        df['bodyId_post'] = df['bodyId_post'].astype(str)
+        normalize_flywire_id_columns(df, ['bodyId_pre', 'bodyId_post'])
         
         # Aggregate weights and ROIs (sum weights, join ROIs)
         print("  Aggregating connections across ROIs...")
@@ -165,12 +182,12 @@ def update_neuron_post_counts(neuron_path, conn_path, save_csv_path=None):
         # Calculate post counts
         print("  Calculating post counts...")
         # Ensure bodyId_post is string
-        df_conn['bodyId_post'] = df_conn['bodyId_post'].astype(str)
+        normalize_flywire_id_columns(df_conn, ['bodyId_post'])
         post_counts = df_conn.groupby('bodyId_post')['weight'].sum()
         
         # Update df_neuron
         # Ensure bodyId is string
-        df_neuron['bodyId'] = df_neuron['bodyId'].astype(str)
+        normalize_flywire_id_columns(df_neuron, ['bodyId'])
         
         # Map counts
         print("  Mapping counts to neurons...")

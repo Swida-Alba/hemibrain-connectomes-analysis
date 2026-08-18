@@ -52,8 +52,8 @@ VisualizeSkeleton : dataclass
     - neuron_layers: List of neuron types or body IDs to visualize
     - skeleton_mode: 'tube' (mesh) or 'line' rendering
     - auto_fix_extrusions: Automatically detect and replace distorted skeletons (FAFB)
-    - cache_neurons: Enable the legacy simp90 cache for fast/line renders;
-      fine/artistic renders persist raw SWC sources and never fine meshes
+    - cache_neurons: Compatibility flag for the former visualization cache;
+      all NeuPrint render modes use the shared raw SWC source
     
     Key methods:
     - plot_skeleton(): Generate 3D visualization
@@ -83,6 +83,7 @@ See Also
 - OUTPUT_FILES.md: Documentation of output formats and file structure
 """
 
+import json
 import os
 import sys
 import shutil
@@ -132,6 +133,42 @@ from utils.flywire_readiness import (
     flywire_skeleton_readiness,
     require_flywire_skeleton_access,
 )
+try:
+    from .flywire_ids import (
+        body_id_to_api_int,
+        is_flywire_dataset,
+        normalize_flywire_body_id,
+        normalize_flywire_body_ids,
+        resolve_flywire_dataset_dir,
+    )
+except ImportError:
+    from flywire_ids import (
+        body_id_to_api_int,
+        is_flywire_dataset,
+        normalize_flywire_body_id,
+        normalize_flywire_body_ids,
+        resolve_flywire_dataset_dir,
+    )
+try:
+    from .flywire_mesh_cache import (
+        FLYWIRE_MESH_CACHE_SIMPLIFICATION,
+        FLYWIRE_MESH_CACHE_SOMA_RADIUS,
+        FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION,
+        FlyWireMeshCache,
+        flywire_mesh_cache_key,
+        parse_soma_position,
+        simplify_mesh_with_soma_awareness,
+    )
+except ImportError:
+    from flywire_mesh_cache import (
+        FLYWIRE_MESH_CACHE_SIMPLIFICATION,
+        FLYWIRE_MESH_CACHE_SOMA_RADIUS,
+        FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION,
+        FlyWireMeshCache,
+        flywire_mesh_cache_key,
+        parse_soma_position,
+        simplify_mesh_with_soma_awareness,
+    )
 
 
 def _configure_roi_mesh_traces(mesh_traces, roi_name):
@@ -154,7 +191,7 @@ def _configure_roi_mesh_traces(mesh_traces, roi_name):
 def _detect_content_bounds(img, background_color=(255, 255, 255)):
         """
         Detect the bounding box of content in an image.
-        
+
         Parameters
         ----------
         img : PIL.Image
@@ -1445,8 +1482,8 @@ class VisualizeSkeleton:
     - **Mesh rendering**: High-quality tube meshes with automatic simplification
     - **Synapse visualization**: Multiple modes (scatter, sphere, cone, tetrahedron)
     - **ROI meshes**: Display brain region boundaries with bilateral auto-expansion
-    - **Smart caching**: Efficient storage of raw skeletons, legacy simp90
-      skeletons, and analysis results
+    - **Smart caching**: Efficient storage of raw compressed-SWC skeletons
+      and analysis results
     - **Export options**: HTML (interactive), PNG (multiple views), video animations
     
     FAFB/FlyWire Features
@@ -1485,8 +1522,7 @@ class VisualizeSkeleton:
     skeleton_mesh_simplification : float, optional
         Mesh simplification factor (0.0-1.0). Higher = more simplification.
         Default: 0.95 for the dedicated Skeleton tab and fine NeuPrint
-        renders. The legacy fast programmatic path retains 0.9 for its
-        simp90 skeleton cache unless a level is supplied explicitly.
+        renders. The direct/fast path uses 0.9 as its render-time target.
         Example: 0.95 removes 95% of faces, keeping 5%.
     
     soma_mesh_simplification : float, default=0.9
@@ -1494,12 +1530,11 @@ class VisualizeSkeleton:
         Applied within soma_region_radius (default 15µm) of detected soma position.
     
     cache_neurons : bool, default=False
-        Enable the legacy persistent simp90 skeleton cache for fast/line
-        rendering.  NeuPrint fine/artistic fetches always populate the
-        shared raw ``.swc.gz`` cache used as their render source; fine
-        meshes are never persisted.
-        Cache location: cache/{dataset}/skeletons/{bodyId}.pkl for the
-        legacy simp90 namespace.
+        Compatibility flag retained for callers that used the old
+        visualization cache switch. NeuPrint fetches now use the shared raw
+        compressed-SWC cache for every render mode; fast/direct and
+        fine/artistic simplification happens in memory and meshes are never
+        persisted by this option.
     
     mesh_roi : list, default=[]
         List of brain region names to display. ROI names without (L)/(R) suffix
@@ -2174,15 +2209,14 @@ class VisualizeSkeleton:
     Default:
     - FAFB/FlyWire: 0.95 (remove 95% of faces - high detail meshes)
     - NeuPrint ``fine``/``artistic``: 0.95 (the transient fine-render target)
-    - NeuPrint ``fast``: 0.90 (the legacy simp90 skeleton-cache level)
+    - NeuPrint ``fast``: 0.90 (the transient direct-render target)
     
     Recommended: 0.5 - 0.95 for large populations.
     
     NeuPrint tube mode has three user-facing methods:
 
-    - ``fast``: the original direct path. It uses the fixed
-      ``simp90`` skeleton cache and applies direct mesh decimation at render
-      time.
+    - ``fast``: the original direct path. It starts from the shared raw
+      compressed-SWC cache and applies direct mesh decimation in memory.
     - ``fine`` (default): the FAFB-style NeuPrint pipeline. It loads RAW
       skeletons from the standalone compressed-SWC cache, transforms them to
       a smoothed/resampled path with the FAFB-style radius profile, and then
@@ -2193,9 +2227,8 @@ class VisualizeSkeleton:
       decimation. Its result is also generated transiently from the raw
       skeleton cache.
 
-    The 90%-node-downsampled skeleton pkls
-    (``cache/{dataset}/skeletons/{bodyId}.pkl``) are still written for the
-    morphology pipeline.
+    All three methods use the same raw skeleton source. No fetch-level
+    simplified skeleton pickle or ``.level`` marker is created.
     '''
     
     soma_mesh_simplification: float = 0.9
@@ -2332,14 +2365,10 @@ class VisualizeSkeleton:
     
     cache_neurons: bool = False
     '''
-    Whether to enable the legacy simp90 skeleton cache for fast/line renders.\n
-    NeuPrint fine/artistic fetches always persist their raw source as compressed\n
-        SWC in the shared dataset skeleton cache, regardless of this flag. Fine\n
-    tube meshes are transient visualization products and are never cached.\n
-    True: Save fast/line skeletons as individual {bodyId}.pkl files to\n
-    cache/{dataset}/skeletons/\n
-    False: Do not use that legacy simp90 cache (default).\n
-    Individual files allow better reuse across different neuron layer selections.\n
+    Compatibility flag for the former visualization skeleton cache. All
+    NeuPrint fetches now persist raw skeletons as compressed SWC in the shared
+    raw cache, regardless of this flag. Fast/fine simplification and tube
+    meshes are transient render products and are never cached here.
     '''
     
     cache_synapses: bool = False
@@ -3083,99 +3112,16 @@ class VisualizeSkeleton:
         return self._simplify_mesh_open3d(trimesh_obj, target_faces)
 
     def _simplify_mesh_with_soma_awareness(self, trimesh_obj, skeleton_simp, soma_simp, soma_pos, soma_radius=15000):
-        """
-        Simplify a mesh with different simplification levels for soma vs skeleton regions.
-        
-        This method splits the mesh into soma region and skeleton region, applies different
-        simplification levels to each, then recombines them. This helps prevent extrusion
-        artifacts around the cell body that can occur with aggressive simplification.
-        
-        Parameters
-        ----------
-        trimesh_obj : trimesh.Trimesh
-            The mesh to simplify.
-        skeleton_simp : float
-            Simplification factor for skeleton region (0.0-1.0, e.g., 0.95 = remove 95% faces).
-        soma_simp : float
-            Simplification factor for soma region (0.0-1.0, e.g., 0.8 = remove 80% faces).
-        soma_pos : array-like
-            [x, y, z] position of the soma center in the same units as the mesh.
-        soma_radius : float
-            Radius around soma_pos defining the soma region (default 15000nm = 15µm).
-            
-        Returns
-        -------
-        trimesh.Trimesh
-            Combined simplified mesh with region-specific simplification.
-        """
-        import trimesh
-        import numpy as np
-        
-        if soma_pos is None or len(soma_pos) == 0:
-            # No soma info, fall back to uniform simplification
-            n_faces = len(trimesh_obj.faces)
-            target_faces = max(100, int(n_faces * (1 - skeleton_simp)))
-            return self._simplify_mesh_open3d(trimesh_obj, target_faces)
-        
-        # Ensure soma_pos is a 1D array
-        soma_pos = np.array(soma_pos).flatten()[:3]
-        
-        # Calculate face centroids
-        vertices = trimesh_obj.vertices
-        faces = trimesh_obj.faces
-        face_centroids = vertices[faces].mean(axis=1)
-        
-        # Calculate distance from each face centroid to soma
-        distances = np.linalg.norm(face_centroids - soma_pos, axis=1)
-        
-        # Split faces into soma region and skeleton region
-        soma_mask = distances <= soma_radius
-        skeleton_mask = ~soma_mask
-        
-        soma_faces = faces[soma_mask]
-        skeleton_faces = faces[skeleton_mask]
-        
-        # If one region is empty, simplify the whole mesh with appropriate level
-        if len(soma_faces) == 0:
-            n_faces = len(faces)
-            target_faces = max(100, int(n_faces * (1 - skeleton_simp)))
-            return self._simplify_mesh_open3d(trimesh_obj, target_faces)
-        
-        if len(skeleton_faces) == 0:
-            n_faces = len(faces)
-            target_faces = max(100, int(n_faces * (1 - soma_simp)))
-            return self._simplify_mesh_open3d(trimesh_obj, target_faces)
-        
-        # Create sub-meshes for each region
-        # We need to keep all vertices and just select faces
-        try:
-            # Create soma sub-mesh
-            soma_mesh = trimesh.Trimesh(vertices=vertices, faces=soma_faces, process=False)
-            # Remove unreferenced vertices to clean up
-            soma_mesh.remove_unreferenced_vertices()
-            
-            # Create skeleton sub-mesh  
-            skeleton_mesh = trimesh.Trimesh(vertices=vertices, faces=skeleton_faces, process=False)
-            skeleton_mesh.remove_unreferenced_vertices()
-            
-            # Simplify each region with its target level
-            soma_target = max(50, int(len(soma_mesh.faces) * (1 - soma_simp)))
-            skeleton_target = max(50, int(len(skeleton_mesh.faces) * (1 - skeleton_simp)))
-            
-            simplified_soma = self._simplify_mesh_open3d(soma_mesh, soma_target)
-            simplified_skeleton = self._simplify_mesh_open3d(skeleton_mesh, skeleton_target)
-            
-            # Combine the simplified meshes
-            combined = trimesh.util.concatenate([simplified_soma, simplified_skeleton])
-            
-            return combined
-            
-        except Exception as e:
-            # Fall back to uniform simplification on any error
-            self._vprint(f'      ⚠️ Soma-aware simplification failed ({e}), using uniform', level='full')
-            n_faces = len(faces)
-            target_faces = max(100, int(n_faces * (1 - skeleton_simp)))
-            return self._simplify_mesh_open3d(trimesh_obj, target_faces)
+        """Apply the shared FAFB soma-aware mesh decimation policy."""
+        return simplify_mesh_with_soma_awareness(
+            trimesh_obj,
+            skeleton_simp=skeleton_simp,
+            soma_simp=soma_simp,
+            soma_pos=soma_pos,
+            soma_radius=soma_radius,
+            # Keep the visualizer's established decimator and its test seam.
+            decimator=self._simplify_mesh_open3d,
+        )
 
     def _export_png_with_timeout(self, fig, output_path, width=1200, height=900, scale=3, timeout=120,
                                    auto_crop=False, crop_margin=30):
@@ -3840,7 +3786,11 @@ class VisualizeSkeleton:
                 if pd.notna(color_val) and str(color_val).strip():
                     # Normalize id
                     id_str = str(id_val).strip()
-                    id_key = int(id_str) if id_str.isdigit() else id_str
+                    id_key = (
+                        normalize_flywire_body_id(id_str)
+                        if is_flywire_dataset(self.dataset) and id_str.isdigit()
+                        else (int(id_str) if id_str.isdigit() else id_str)
+                    )
                     # Standardize color
                     try:
                         rgba_str = standardize_color(str(color_val).strip(), default_alpha=self.neuron_alpha)
@@ -3866,7 +3816,11 @@ class VisualizeSkeleton:
             for id_val in identifiers:
                 id_str = str(id_val).strip()
                 if id_str.isdigit():
-                    processed_ids.append(int(id_str))
+                    processed_ids.append(
+                        normalize_flywire_body_id(id_str)
+                        if is_flywire_dataset(self.dataset)
+                        else int(id_str)
+                    )
                 else:
                     processed_ids.append(id_str)
             
@@ -4835,9 +4789,13 @@ class VisualizeSkeleton:
             if self.neuron_layers.strip():
                 # Non-empty string: parse by '->' separator
                 self.neuron_layers = self.neuron_layers.replace(' ','').split('->')
-                for i,layer in enumerate(self.neuron_layers): # convert bodyId str to int
+                for i,layer in enumerate(self.neuron_layers):
                     if layer.isnumeric():
-                        self.neuron_layers[i] = int(layer)
+                        self.neuron_layers[i] = (
+                            normalize_flywire_body_id(layer)
+                            if is_flywire_dataset(self.dataset)
+                            else int(layer)
+                        )
             else:
                 # Empty string: convert to empty list for mesh-only mode
                 self.neuron_layers = []
@@ -5336,8 +5294,7 @@ class VisualizeSkeleton:
             "fine_opt1": "artistic",
             "fafb": "fine",
         }.get(requested_pipeline, requested_pipeline)
-        dataset_lower = str(getattr(self, "dataset", "")).lower()
-        is_fafb_dataset = "flywire" in dataset_lower or "fafb" in dataset_lower
+        is_fafb_dataset = is_flywire_dataset(self.dataset)
         if skeleton_mode == "tube":
             scope = "applied to the rendered tube mesh"
         else:
@@ -5379,14 +5336,14 @@ class VisualizeSkeleton:
         """Get the cache directory for skeletons or synapses
         
         Uses project cache/ folder for organized storage:
-        cache/{dataset}/skeletons/ - for individual skeleton .pkl files
+        cache/{dataset}/skeletons/ - for raw skeleton cache namespaces
         cache/{dataset}/synapses/ - for synapse cache files
         
         For datasets folder resources:
         datasets/{dataset}/*_synapse_table.parquet - synapse table
         
         Example:
-        - cache/hemibrain_v1_2_1/skeletons/{bodyId}.pkl
+        - cache/hemibrain_v1_2_1/skeletons/raw_skeletons/{bodyId}.swc.gz
         - datasets/flywire_FAFB_v783/flywire_FAFB_v783_synapse_table.parquet
         """
         dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
@@ -5519,22 +5476,28 @@ class VisualizeSkeleton:
             str: Path to synapse table, or None if not found
         """
         dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
+        if is_flywire_dataset(self.dataset):
+            # FlyWire-family datasets are independent sources. In particular,
+            # a BANC query must never read FAFB synapses merely because the
+            # BANC table is absent.
+            dataset_dir = resolve_flywire_dataset_dir(
+                self.script_path, self.dataset
+            )
+            if dataset_dir is None:
+                return None
+            names = [dataset_dir.name, dataset_normalized]
+            candidates = []
+            for name in names:
+                path = dataset_dir / f"{name}_synapse_table.parquet"
+                if path not in candidates:
+                    candidates.append(path)
+            return next((str(path) for path in candidates if path.exists()), None)
+
         datasets_dir = os.path.join(self.script_path, 'datasets', dataset_normalized)
-        
-        # Look for synapse table file
-        parquet_file = os.path.join(datasets_dir, f"{dataset_normalized}_synapse_table.parquet")
-        
-        if os.path.exists(parquet_file):
-            return parquet_file
-        
-        # Fallback: try FAFB naming if dataset includes flywire
-        if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
-            fafb_dir = os.path.join(self.script_path, 'datasets', 'flywire_FAFB_v783')
-            fafb_file = os.path.join(fafb_dir, 'flywire_FAFB_v783_synapse_table.parquet')
-            if os.path.exists(fafb_file):
-                return fafb_file
-        
-        return None
+        parquet_file = os.path.join(
+            datasets_dir, f"{dataset_normalized}_synapse_table.parquet"
+        )
+        return parquet_file if os.path.exists(parquet_file) else None
     
     def _preload_fafb_skeletons(self, body_ids_filter=None):
         """Pre-load FAFB skeletons from ZIP file in a single batch.
@@ -5553,15 +5516,28 @@ class VisualizeSkeleton:
         from tqdm import tqdm
         import sys
         
-        # Collect all body IDs needed
-        if body_ids_filter is not None:
-            all_body_ids = set(body_ids_filter)
+        # Collect all body IDs needed. Internal FlyWire cache/file keys stay
+        # canonical strings; navis object IDs are converted to integers only
+        # when assigning the third-party object attribute below.
+        if is_flywire_dataset(self.dataset):
+            if body_ids_filter is not None:
+                all_body_ids = set(normalize_flywire_body_ids(body_ids_filter))
+            else:
+                all_body_ids = set()
+                for df in self.neuron_dfs:
+                    if df is not None:
+                        all_body_ids.update(
+                            normalize_flywire_body_ids(df['bodyId'].tolist())
+                        )
+        elif body_ids_filter is not None:
+            all_body_ids = {int(body_id) for body_id in body_ids_filter}
         else:
-            # Collect from all layers
             all_body_ids = set()
             for df in self.neuron_dfs:
                 if df is not None:
-                    all_body_ids.update(df['bodyId'].tolist())
+                    all_body_ids.update(
+                        int(body_id) for body_id in df['bodyId'].tolist()
+                    )
         
         if not all_body_ids:
             return {}
@@ -5573,10 +5549,10 @@ class VisualizeSkeleton:
             project_root = os.path.dirname(os.path.dirname(__file__))
             
             # Try to find dataset directory by name
-            data_dir = os.path.join(project_root, "datasets", self.dataset)
-            if not os.path.exists(data_dir):
-                data_dir = os.path.join(project_root, "datasets", "flywire_FAFB_v783")
-            
+            data_dir = resolve_flywire_dataset_dir(project_root, self.dataset)
+            if data_dir is None:
+                return {}
+
             zip_path = fafb_utils.get_fafb_skeleton_zip(data_dir)
             
             if zip_path:
@@ -5600,9 +5576,17 @@ class VisualizeSkeleton:
                                     content = f.read().decode('utf-8')
                                     n = navis.read_swc(io.StringIO(content))
                                     n.units = 'nm'
-                                    n.id = bid
+                                    n.id = (
+                                        body_id_to_api_int(bid)
+                                        if is_flywire_dataset(self.dataset)
+                                        else int(bid)
+                                    )
                                     n.name = str(bid)
-                                    skeleton_cache[bid] = n
+                                    skeleton_cache[
+                                        normalize_flywire_body_id(bid)
+                                        if is_flywire_dataset(self.dataset)
+                                        else int(bid)
+                                    ] = n
                         except Exception:
                             pass  # Skip errors silently
                 
@@ -5696,188 +5680,127 @@ class VisualizeSkeleton:
         )
     
     def _skeleton_cache_is_simplified(self) -> bool:
-        """True when the skeleton cache holds the fixed simplified level.
+        """Compatibility shim for the removed simplified skeleton cache.
 
-        Reads the ``skeletons/.level`` marker written by the cache pipeline
-        (morphology.fetch_skeleton_on_demand and ``_save_cached_neurons``);
-        a missing marker means the cache predates the marker (raw).
+        Skeleton files are now always raw compressed SWC. Simplification is
+        selected per visualization run and is never represented by a folder
+        marker, so this method intentionally always returns ``False``.
         """
-        marker = os.path.join(self._get_cache_path('skeletons'), '.level')
-        try:
-            with open(marker) as f:
-                return f.read().strip() == 'simp90'
-        except Exception:
-            return False
+        return False
 
     def _effective_render_simplification(
             self, is_fafb: bool, using_simplified_cache: bool | None = None
     ) -> float:
         """Effective render-time mesh decimation fraction for tube mode.
 
-        For NeuPrint datasets whose skeleton cache already holds the fixed
-        simp90 level, the cache-level reduction is baked into the tube mesh.
-        At exactly that level no further decimation is applied (decimating
-        again would double-reduce: 10% nodes -> ~1% faces). Levels ABOVE
-        the cache level apply the *remaining* relative reduction (same
-        semantics as the FAFB path), so e.g. 0.95 still halves the face
-        count instead of silently doing nothing.
+        The source skeleton is always raw, so the requested render target is
+        always applied directly to the in-memory tube mesh. There is no
+        cache-relative adjustment and no second simplification level encoded
+        on disk.
 
         Returns the fraction of faces to remove (0.0 = keep all).
 
-        ``using_simplified_cache`` describes the source of the neurons being
-        rendered in the current run.  The default ``None`` keeps the marker-
-        based behavior for existing callers, while the main render pipeline
-        passes the per-run source explicitly.  This matters on the first
-        fetch: saving a simp90 cache must not make a still-raw in-memory
-        render use the cache-relative decimation formula.
+        ``using_simplified_cache`` remains an accepted compatibility argument;
+        it has no effect because no simplified skeleton cache is used.
         """
-        target = self.skeleton_mesh_simplification
-        if using_simplified_cache is None:
-            using_simplified_cache = self._skeleton_cache_is_simplified()
-        if (not is_fafb and using_simplified_cache
-                and target >= self.NEUPRINT_SKELETON_CACHE_LEVEL):
-            remaining_after_cache = 1 - self.NEUPRINT_SKELETON_CACHE_LEVEL
-            remaining_target = 1 - target
-            keep_factor = remaining_target / remaining_after_cache
-            return max(0.0, 1.0 - keep_factor)
-        return target
+        return self.skeleton_mesh_simplification
 
     def _load_cached_neurons(self, neuron_df, transformed_target=None,
                              ignore_cache=False):
-        """Load cached neuron skeletons if available.
+        """Load raw NeuPrint skeletons from the shared SWC cache.
 
-        Loads individual {bodyId}.pkl files from cache/{dataset}/skeletons/
-        (NeuPrint caches hold the fixed 90%-simplified skeletons). With
-        ``ignore_cache=True`` (less-simplified render, NeuPrint only) every
-        neuron is reported missing so the caller re-fetches RAW skeletons
-        transiently; the simplified cache is still written from that fetch.
-
-        Returns:
-            tuple: (navis.NeuronList or None, list of missing bodyIds)
+        The raw cache is the single source for every visualization
+        simplification mode. Legacy ``skeletons/{bodyId}.pkl`` files are not
+        read because their representation level is ambiguous.
         """
-        if not self.cache_neurons:
-            return None, neuron_df['bodyId'].tolist()
-        
-        cache_dir = self._get_cache_path('skeletons')
-        body_ids = neuron_df['bodyId'].tolist()
-        
-        import pickle
+        body_ids = [int(bid) for bid in neuron_df['bodyId'].tolist()]
+        if ignore_cache:
+            return None, body_ids
+        if (self.client_type == 'flywire'
+                or 'flywire' in self.dataset.lower()
+                or 'fafb' in self.dataset.lower()
+                or 'banc' in self.dataset.lower()):
+            return None, body_ids
+
+        try:
+            from morphology import find_similar_raw_cache
+            raw_cache = find_similar_raw_cache(
+                self.dataset, project_root=self.script_path, verbose=False,
+            )
+        except Exception as exc:
+            self._vprint(
+                f'  ⚠ Raw skeleton cache unavailable: {exc}', level='full')
+            return None, body_ids
+
         neurons = []
-        loaded_ids = []
         missing_ids = []
-        
         for bid in body_ids:
-            if ignore_cache:
+            neuron = raw_cache.load_skeleton(bid)
+            if neuron is None:
                 missing_ids.append(bid)
-                continue
-            # NeuPrint's raw skeletons are never a valid cache source.  A
-            # missing level marker means this folder predates the simp90
-            # contract (or was manually populated), so re-fetch it instead
-            # of accidentally treating a raw pickle as a 90%-simplified one.
-            if (self.client_type != 'flywire'
-                    and 'flywire' not in self.dataset.lower()
-                    and 'fafb' not in self.dataset.lower()
-                    and not self._skeleton_cache_is_simplified()):
-                missing_ids.append(bid)
-                continue
-            cache_file = os.path.join(cache_dir, f'{bid}.pkl')
-            if os.path.exists(cache_file):
-                try:
-                    with open(cache_file, 'rb') as f:
-                        neuron = pickle.load(f)
-                    neurons.append(neuron)
-                    loaded_ids.append(bid)
-                except Exception as e:
-                    self._vprint(f'  ⚠ Failed to load cached skeleton {bid}: {e}')
-                    missing_ids.append(bid)
             else:
-                missing_ids.append(bid)
-        
+                neurons.append(neuron)
+
         if neurons:
-            self._vprint(f'  ✓ Loaded {len(neurons)} neurons from cache', level='full')
+            self._vprint(
+                f'  ✓ Loaded {len(neurons)} raw skeletons from SWC cache',
+                level='full',
+            )
             if missing_ids:
-                self._vprint(f'  ℹ  {len(missing_ids)} neurons not in cache, will fetch', level='full')
-            # Return loaded neurons plus info about missing ones
+                self._vprint(
+                    f'  ℹ  {len(missing_ids)} raw skeletons not in cache, will fetch',
+                    level='full',
+                )
             return navis.NeuronList(neurons), missing_ids
-        
-        return None, body_ids  # All missing
+        return None, body_ids
     
     def _save_cached_neurons(self, neuron_df, neuron_vols):
-        """Save neuron skeletons to cache as individual {bodyId}.pkl files.
+        """Persist raw NeuPrint skeletons in the shared SWC cache.
 
-        NeuPrint skeletons are cached ONLY at the fixed 90%-simplified level
-        (``navis.downsample_neuron`` factor 10): the raw skeleton is never
-        persisted, and the folder's ``.level`` marker is written so the
-        morphology pipeline's level guards stay consistent.
-
-        Saves each neuron as a separate file for better reusability.
+        The method name is retained for compatibility with older callers,
+        but it no longer writes visualization pickles or a simplification
+        marker. Render-time ``fast``/``fine`` decimation always starts from
+        these raw skeletons.
         """
-        if not self.cache_neurons:
-            return
-        
         is_neuprint = not (self.client_type == 'flywire'
                            or 'flywire' in self.dataset.lower()
-                           or 'fafb' in self.dataset.lower())
-        cache_dir = self._get_cache_path('skeletons')
-        
-        import pickle
-        saved_count = 0
-        cache_is_simp90 = self._skeleton_cache_is_simplified() if is_neuprint else False
-        
-        # Handle both NeuronList and list of neurons
-        if hasattr(neuron_vols, '__iter__'):
-            for neuron in neuron_vols:
-                try:
-                    # Get bodyId from neuron
-                    bid = getattr(neuron, 'id', None) or getattr(neuron, 'bodyId', None)
-                    if bid is None:
-                        continue
-                    
-                    cache_file = os.path.join(cache_dir, f'{bid}.pkl')
-                    
-                    # A NeuPrint file is reusable only when the folder marker
-                    # confirms the fixed simp90 contract.  This also lets a
-                    # new fetch replace legacy raw pickles instead of leaving
-                    # them in the fast-mode cache forever.
-                    if os.path.exists(cache_file) and (
-                            not is_neuprint or cache_is_simp90):
-                        continue
-                    
-                    # NeuPrint: persist ONLY the simplified skeleton (raw is
-                    # never cached); the morphology pipeline vectorizes the
-                    # raw skeleton on its next fetch instead.
-                    to_store = (
-                        self._downsample_neuprint_skeleton_for_cache(neuron)
-                        if is_neuprint else neuron
-                    )
-                    
-                    with open(cache_file, 'wb') as f:
-                        pickle.dump(to_store, f)
-                    saved_count += 1
-                except Exception as e:
-                    self._vprint(f'  ⚠ Failed to save skeleton {bid}: {e}')
-        
-        if saved_count > 0:
-            if is_neuprint:
-                # Mark the folder's simplification level (idempotent);
-                # only the NeuPrint path writes simplified skeletons.
-                try:
-                    marker = os.path.join(cache_dir, '.level')
-                    if not os.path.exists(marker):
-                        os.makedirs(cache_dir, exist_ok=True)
-                        with open(marker, 'w') as f:
-                            f.write('simp90\n')
-                except Exception:
-                    pass
-        self._vprint(f'  💾 Saved {saved_count} new neurons to cache', level='full')
+                           or 'fafb' in self.dataset.lower()
+                           or 'banc' in self.dataset.lower())
+        if not is_neuprint or neuron_vols is None:
+            return
+
+        raw_items = {}
+        for neuron in neuron_vols:
+            bid = getattr(neuron, 'id', None) or getattr(neuron, 'bodyId', None)
+            if bid is None:
+                continue
+            try:
+                raw_items[int(bid)] = neuron
+            except (TypeError, ValueError):
+                continue
+        if not raw_items:
+            return
+
+        try:
+            from morphology import find_similar_raw_cache
+            raw_cache = find_similar_raw_cache(
+                self.dataset, project_root=self.script_path, verbose=False,
+            )
+            saved_count = raw_cache.persist_skeletons(raw_items)
+            self._vprint(
+                f'  💾 Saved {saved_count}/{len(raw_items)} raw .swc.gz skeletons',
+                level='full',
+            )
+        except Exception as exc:
+            self._vprint(
+                f'  ⚠ Failed to save raw skeleton cache: {exc}', level='full')
 
     def _downsample_neuprint_skeleton_for_cache(self, neuron):
-        """Return the fixed simp90 NeuPrint skeleton used by fast mode.
+        """Deprecated compatibility helper; do not use for cache writes.
 
-        Keeping this conversion in one helper makes the persisted cache and
-        the first-run in-memory render use exactly the same representation.
-        In particular, saving a cache must not leave the current render on the
-        raw skeleton while later cache hits use the downsampled one.
+        NeuPrint skeleton persistence is raw compressed SWC. Fast/direct
+        simplification belongs to the transient render mesh, so this helper
+        remains only for older external callers that imported it directly.
         """
         if not hasattr(neuron, 'nodes'):
             return neuron
@@ -5900,16 +5823,14 @@ class VisualizeSkeleton:
     # Cache stores meshes simplified with soma-aware parameters
     # Skeleton: 0.95 simplification (keep 5% of faces) 
     # Soma: 0.8 simplification (keep 20% of faces) to prevent extrusion artifacts
-    FAFB_MESH_CACHE_SIMPLIFICATION = 0.95  # Skeleton simplification level
-    FAFB_MESH_CACHE_SOMA_SIMPLIFICATION = 0.8  # Gentler simplification for soma region
+    FAFB_MESH_CACHE_SIMPLIFICATION = FLYWIRE_MESH_CACHE_SIMPLIFICATION
+    FAFB_MESH_CACHE_SOMA_SIMPLIFICATION = FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION
 
-    # NeuPrint's legacy visualization cache remains fixed at the
-    # 90%-simplified level (``navis.downsample_neuron`` factor 10, keeps ~10%
-    # of nodes) for fast/line rendering. Fine/artistic rendering never uses a
-        # persisted mesh; it starts from the shared raw ``.swc.gz`` cache.
+    # Compatibility threshold retained as the direct/fast default render
+    # target. It is not an on-disk skeleton-cache level.
     NEUPRINT_SKELETON_CACHE_LEVEL = 0.9
-    NEUPRINT_SKELETON_DOWNSAMPLE = 10
-    FAFB_MESH_CACHE_SOMA_RADIUS = 20000  # 20µm radius around soma for gentler simplification
+    NEUPRINT_SKELETON_DOWNSAMPLE = 10  # deprecated helper compatibility
+    FAFB_MESH_CACHE_SOMA_RADIUS = FLYWIRE_MESH_CACHE_SOMA_RADIUS
     
     # Number of radial segments used when converting TreeNeurons to tube
     # meshes. This controls the tube cross-section only; it is deliberately
@@ -5958,14 +5879,11 @@ class VisualizeSkeleton:
         Cache stores meshes with soma-aware simplification (gentler on cell body).
         Note: FAFB cache stores UN-TRANSFORMED, UN-ROTATED meshes (native FLYWIRE).
         """
-        # Always use 'FLYWIRE' as base since we cache raw simplified meshes
-        target = 'FLYWIRE'
-        
-        # Include simplification levels and soma radius in cache key
-        skel_simp = int(self.FAFB_MESH_CACHE_SIMPLIFICATION * 100)
-        soma_simp = int(self.FAFB_MESH_CACHE_SOMA_SIMPLIFICATION * 100)
-        soma_r = int(self.FAFB_MESH_CACHE_SOMA_RADIUS / 1000)  # In µm for readability
-        return f"{target}_simp{skel_simp}_soma{soma_simp}_r{soma_r}"
+        return flywire_mesh_cache_key(
+            self.FAFB_MESH_CACHE_SIMPLIFICATION,
+            self.FAFB_MESH_CACHE_SOMA_SIMPLIFICATION,
+            self.FAFB_MESH_CACHE_SOMA_RADIUS,
+        )
     
     def _load_cached_fafb_meshes(self, body_ids):
         """Load simplified and meshed FAFB neurons from cache.
@@ -5995,29 +5913,25 @@ class VisualizeSkeleton:
             return {}, body_ids
         
         # Check for flywire/fafb dataset
-        if not ('flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()):
+        if not is_flywire_dataset(self.dataset):
             return {}, body_ids
         
-        import pickle
-        
-        cache_key = self._get_fafb_mesh_cache_key()
-        # Store in skeletons folder as individual simplified meshes
-        cache_dir = os.path.join(self._get_cache_path('skeletons'), cache_key)
-        os.makedirs(cache_dir, exist_ok=True)
+        mesh_cache = FlyWireMeshCache(
+            self.dataset,
+            project_root=self.script_path,
+            simplification=self.FAFB_MESH_CACHE_SIMPLIFICATION,
+            soma_simplification=self.FAFB_MESH_CACHE_SOMA_SIMPLIFICATION,
+            soma_radius=self.FAFB_MESH_CACHE_SOMA_RADIUS,
+        )
         
         loaded = {}
         missing = []
         
         for bid in body_ids:
-            cache_file = os.path.join(cache_dir, f'{bid}.pkl')
-            if os.path.exists(cache_file):
-                try:
-                    with open(cache_file, 'rb') as f:
-                        mesh_neuron = pickle.load(f)
-                    loaded[bid] = mesh_neuron
-                except Exception as e:
-                    self._vprint(f'  ⚠ Failed to load cached mesh {bid}: {e}', level='full')
-                    missing.append(bid)
+            bid = normalize_flywire_body_id(bid)
+            mesh_neuron = mesh_cache.load(bid)
+            if mesh_neuron is not None:
+                loaded[bid] = mesh_neuron
             else:
                 missing.append(bid)
         
@@ -6038,28 +5952,22 @@ class VisualizeSkeleton:
             return
         
         # Check for flywire/fafb dataset
-        if not ('flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()):
+        if not is_flywire_dataset(self.dataset):
             return
         
-        import pickle
-        
-        cache_key = self._get_fafb_mesh_cache_key()
-        # Store in skeletons folder as individual simplified meshes
-        cache_dir = os.path.join(self._get_cache_path('skeletons'), cache_key)
-        os.makedirs(cache_dir, exist_ok=True)
-        
-        saved_count = 0
-        for bid, mesh_neuron in mesh_neurons_dict.items():
-            cache_file = os.path.join(cache_dir, f'{bid}.pkl')
-            if os.path.exists(cache_file):
-                continue  # Skip if already cached
-            
-            try:
-                with open(cache_file, 'wb') as f:
-                    pickle.dump(mesh_neuron, f)
-                saved_count += 1
-            except Exception as e:
-                self._vprint(f'  ⚠ Failed to save mesh {bid}: {e}', level='full')
+        mesh_cache = FlyWireMeshCache(
+            self.dataset,
+            project_root=self.script_path,
+            simplification=self.FAFB_MESH_CACHE_SIMPLIFICATION,
+            soma_simplification=self.FAFB_MESH_CACHE_SOMA_SIMPLIFICATION,
+            soma_radius=self.FAFB_MESH_CACHE_SOMA_RADIUS,
+        )
+        normalized = {
+            normalize_flywire_body_id(bid): mesh
+            for bid, mesh in mesh_neurons_dict.items()
+            if isinstance(mesh, navis.MeshNeuron)
+        }
+        saved_count = mesh_cache.save(normalized)
         
         if saved_count > 0:
             self._vprint(f'  💾 Saved {saved_count} new meshes to cache', level='full')
@@ -6324,11 +6232,10 @@ class VisualizeSkeleton:
             use_neuprint_mesh_cache, neuprint_mesh_cache):
         """Return unique NeuPrint body IDs that need an online fetch.
 
-        The decision is deliberately cache-aware. Fine methods skip IDs
-        already represented by the shared raw cache; fast and line
-        methods skip IDs present in the fixed simp90 skeleton cache, except
-        when a tube render requests a less-simplified level and must start
-        from raw skeletons.
+        Every visualization pipeline uses the same raw compressed-SWC source.
+        Render-time ``fast``/``fine`` simplification never changes this
+        fetch decision. Mesh-cache hits can still avoid a render fetch when
+        that separate mesh cache is explicitly enabled.
         """
         if ('flywire' in self.dataset.lower()
                 or 'fafb' in self.dataset.lower()
@@ -6344,24 +6251,13 @@ class VisualizeSkeleton:
             if df is None or 'bodyId' not in df.columns:
                 continue
 
-            if use_neuprint_fine_pipeline:
-                layer_fetch_ids = df['bodyId'].tolist()
-                if use_neuprint_mesh_cache:
-                    layer_fetch_ids = [
-                        body_id for body_id in layer_fetch_ids
-                        if str(body_id) not in cached_mesh_ids
-                    ]
-            else:
-                # Tube renders below simp90 and line renders that miss their
-                # cache need raw skeletons; otherwise the fixed simp90 cache
-                # is the correct source and is not fetched again.
-                ignore_skeleton_cache = (
-                    self.skeleton_mode == 'tube'
-                    and self.skeleton_mesh_simplification
-                        < self.NEUPRINT_SKELETON_CACHE_LEVEL
-                )
-                _, layer_fetch_ids = self._load_cached_neurons(
-                    df, ignore_cache=ignore_skeleton_cache)
+            _, layer_fetch_ids = self._load_cached_neurons(
+                df, ignore_cache=False)
+            if use_neuprint_mesh_cache:
+                layer_fetch_ids = [
+                    body_id for body_id in layer_fetch_ids
+                    if str(body_id) not in cached_mesh_ids
+                ]
 
             for body_id in layer_fetch_ids:
                 key = str(body_id)
@@ -6395,7 +6291,7 @@ class VisualizeSkeleton:
         This is the four-stage NeuPrint pipeline boundary:
 
         1. aggregate all body IDs from all layers;
-        2. resolve raw/simp90 cache hits and the raw IDs still needed;
+        2. resolve raw cache hits and the raw IDs still needed;
         3. fetch those misses in bounded parallel batches, run the active
            FAFB-format/mesh simplification once, and persist only reusable
            raw skeleton/vector artifacts;
@@ -6414,7 +6310,6 @@ class VisualizeSkeleton:
         fine = bool(use_neuprint_fine_pipeline)
         target_simp = float(self.skeleton_mesh_simplification or 0.0)
         prepared = {}
-        cached_skeletons = {}
         raw_cached_skeletons = {}
 
         def _id_key(value):
@@ -6425,8 +6320,8 @@ class VisualizeSkeleton:
 
         # The shared raw cache is a valid source for every visualization
         # pipeline. Check it before issuing a new online request, even when
-        # visualization's own ``cache_neurons`` option is off. It is isolated
-        # from the shared simp90 directory, so this cannot mix cache levels.
+        # visualization's own ``cache_neurons`` option is off. Legacy root
+        # skeleton pickles are intentionally not considered raw sources.
         try:
             from morphology import find_similar_raw_cache
             raw_cache = find_similar_raw_cache(
@@ -6443,43 +6338,14 @@ class VisualizeSkeleton:
                 level='full',
             )
 
-        # Stage 2: load the relevant raw/skeleton cache family once for the
-        # complete visualization. Fine methods intentionally have no mesh
-        # cache: every render starts from the raw TreeNeuron and performs its
-        # FAFB transform, tube conversion, and requested simplification below.
-        if not fine:
-            ignore_skeleton_cache = (
-                self.skeleton_mode == 'tube'
-                and target_simp < self.NEUPRINT_SKELETON_CACHE_LEVEL
-            )
-            cached_list, _ = self._load_cached_neurons(
-                all_df, ignore_cache=ignore_skeleton_cache)
-            if cached_list is not None:
-                for neuron in cached_list:
-                    key = _id_key(getattr(neuron, 'id', None))
-                    if key is not None:
-                        cached_skeletons[key] = neuron
-
-        if fine:
-            fetch_ids = [bid for bid in body_ids
-                         if bid not in raw_cached_skeletons]
-        elif self.skeleton_mode == 'line':
-            fetch_ids = [bid for bid in body_ids
-                         if bid not in cached_skeletons
-                         and bid not in raw_cached_skeletons]
-        elif target_simp < self.NEUPRINT_SKELETON_CACHE_LEVEL:
-            # A target below simp90 must start from raw skeletons. Do not let
-            # the fixed simplified cache silently become the render source.
-            fetch_ids = [bid for bid in body_ids
-                         if bid not in raw_cached_skeletons]
-        else:
-            fetch_ids = [bid for bid in body_ids
-                         if bid not in cached_skeletons
-                         and bid not in raw_cached_skeletons]
+        # Stage 2: every visualization mode consumes the same raw source.
+        # ``fast`` only changes the in-memory mesh decimation below; it never
+        # selects a separate skeleton cache.
+        fetch_ids = [bid for bid in body_ids
+                     if bid not in raw_cached_skeletons]
 
         self._vprint(
             f'  🗃️ NeuPrint cache check complete: {len(body_ids)} unique '
-            f'neurons, {len(cached_skeletons)} simp90 cache hits, '
             f'{len(raw_cached_skeletons)} shared raw-cache hits, '
             f'{len(fetch_ids)} online fetches required',
             level='simple',
@@ -6572,7 +6438,9 @@ class VisualizeSkeleton:
             )
 
         # MANC's NeuPrint coordinates are voxel units. Apply the same guarded
-        # scale once, before either the FAFB transform or cache persistence.
+        # scale once to the in-memory render source. Raw cache files remain
+        # in the source coordinate system and are never rewritten as scaled
+        # render products.
         def _scale_manc(neuron):
             if 'manc' not in self.dataset.lower():
                 return neuron
@@ -6586,30 +6454,8 @@ class VisualizeSkeleton:
 
         for key in list(fetched):
             fetched[key] = _scale_manc(fetched[key])
-        for key in list(cached_skeletons):
-            cached_skeletons[key] = _scale_manc(cached_skeletons[key])
-
-        if fetched and not fine:
-            # Persist the fixed simp90 skeleton cache once, not once per
-            # layer. Fast tube renders at or above the cache level also use
-            # that same downsampled representation immediately, so the first
-            # run has the same geometry semantics as a cache-hit run.
-            self._save_cached_neurons(all_df, list(fetched.values()))
-            self._vprint(
-                f'  ✓ Skeleton cache stage complete: persisted '
-                f'{len(fetched)} simp90 skeletons',
-                level='simple',
-                use_tqdm=True,
-            )
-            if (not fine
-                    and self.skeleton_mode == 'tube'
-                    and self.cache_neurons
-                    and not self.show_connectors
-                    and target_simp >= self.NEUPRINT_SKELETON_CACHE_LEVEL):
-                for body_id, neuron in fetched.items():
-                    cached_skeletons[body_id] = (
-                        self._downsample_neuprint_skeleton_for_cache(neuron)
-                    )
+        # Online fetches are persisted by the shared batched fetcher. Keep
+        # this phase render-only; no simplified skeleton pickle is written.
 
         # Stage 3b/4: transform and simplify in the same pre-processing phase
         # for all fetched neurons, then combine them with cache hits. The
@@ -6704,30 +6550,23 @@ class VisualizeSkeleton:
                 _mark_preprocessed(body_id, 'fine')
         elif self.skeleton_mode == 'tube' and target_simp > 0 \
                 and not self.show_connectors:
-            # Fast/direct tube mode has no transformed mesh cache, but its
-            # final mesh simplification can still be performed once across
-            # all layers here. Cache hits carry simp90 already, so only the
-            # remaining relative reduction is applied to them.
+            # Fast/direct tube mode converts the raw skeleton to a mesh and
+            # applies the requested simplification directly in memory.
             for body_id in body_ids:
-                base = cached_skeletons.get(body_id, fetched.get(body_id))
+                base = fetched.get(body_id)
                 if base is None:
                     _mark_preprocessed(body_id, 'missing')
                     continue
-                effective = target_simp
-                if body_id in cached_skeletons:
-                    effective = self._effective_render_simplification(
-                        False, using_simplified_cache=True)
                 _set_preprocess_stage(body_id, 'tube mesh')
                 mesh = _as_mesh(base)
                 _set_preprocess_stage(body_id, 'simplify')
-                prepared[body_id] = _decimate(mesh, effective)
+                prepared[body_id] = _decimate(mesh, target_simp)
                 _mark_preprocessed(body_id, 'fast')
         else:
             # Line renders and unsimplified tube/fine renders consume the
             # prepared skeleton directly.
             for body_id in body_ids:
-                base = (cached_skeletons.get(body_id)
-                        if not fine else None) or fetched.get(body_id)
+                base = fetched.get(body_id)
                 if base is not None:
                     prepared[body_id] = base
                     _mark_preprocessed(body_id, 'ready')
@@ -6742,7 +6581,7 @@ class VisualizeSkeleton:
         self._vprint(
             f'  ✓ NeuPrint preprocessing ready: {len(prepared)}/'
             f'{len(body_ids)} neurons in {elapsed:.2f}s '
-            f'(cache={len(cached_skeletons) + len(raw_cached_skeletons)}, '
+            f'(cache={len(raw_cached_skeletons)}, '
             f'fetched={len(fetched)}, mesh={prepared_mesh})',
             level='full')
         self._vprint(
@@ -7060,10 +6899,12 @@ class VisualizeSkeleton:
         return 0
 
     def _load_api_cached_skeletons(self, body_ids: list) -> tuple:
-        """Load skeletons from API cache (cache/{dataset}/API_cache/skeletons/).
+        """Load raw skeletons from the shared compressed-SWC cache.
         
         These are skeletons previously fetched via CAVE API and cached locally.
-        API cache takes priority over ZIP files as it contains more up-to-date data.
+        The shared raw cache takes priority over ZIP files as it contains more
+        up-to-date data. The old API-cache pickle namespace is read only as a
+        migration fallback.
         
         Parameters
         ----------
@@ -7075,49 +6916,94 @@ class VisualizeSkeleton:
         tuple
             (dict of loaded skeletons {bodyId: TreeNeuron}, list of missing bodyIds)
         """
-        import pickle
-        
-        project_root = os.path.dirname(os.path.dirname(__file__))
-        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
-        cache_dir = os.path.join(project_root, 'cache', dataset_safe, 'API_cache', 'skeletons')
-        
-        if not os.path.exists(cache_dir):
-            return {}, list(body_ids)
-        
+        requested_ids = (
+            normalize_flywire_body_ids(body_ids)
+            if is_flywire_dataset(self.dataset)
+            else list(body_ids)
+        )
         cached = {}
         missing = []
-        
-        for bid in body_ids:
-            # Check for both int and str versions of bodyId
-            cache_file = os.path.join(cache_dir, f'{bid}.pkl')
-            if os.path.exists(cache_file):
+
+        try:
+            from morphology import find_similar_raw_cache
+            raw_cache = find_similar_raw_cache(
+                self.dataset, project_root=self.script_path, verbose=False,
+            )
+        except Exception:
+            raw_cache = None
+
+        for bid in requested_ids:
+            neuron = raw_cache.load_skeleton(bid) if raw_cache is not None else None
+            if neuron is not None:
+                key = (
+                    normalize_flywire_body_id(bid)
+                    if is_flywire_dataset(self.dataset)
+                    else bid
+                )
+                cached[key] = neuron
+                continue
+
+            # Compatibility read for API_cache/{bodyId}.pkl produced by older
+            # CAVE versions. New writes never target this path.
+            dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+            legacy_file = os.path.join(
+                self.script_path, 'cache', dataset_safe, 'API_cache',
+                'skeletons', f'{bid}.pkl')
+            if os.path.exists(legacy_file):
                 try:
-                    with open(cache_file, 'rb') as f:
+                    import pickle
+                    with open(legacy_file, 'rb') as f:
                         neuron = pickle.load(f)
-                        cached[bid] = neuron
-                        cached[str(bid)] = neuron  # Also store with str key for compatibility
+                    if raw_cache is not None:
+                        raw_cache.persist_skeletons({bid: neuron})
+                    key = (
+                        normalize_flywire_body_id(bid)
+                        if is_flywire_dataset(self.dataset)
+                        else bid
+                    )
+                    cached[key] = neuron
+                    continue
                 except Exception:
-                    missing.append(bid)
-            else:
-                missing.append(bid)
+                    pass
+            missing.append(bid)
         
         return cached, missing
 
-    def _fetch_fafb_skeletons_via_api(self, body_ids: list) -> dict:
-        """Fetch FAFB skeletons via CAVE API (CloudVolume mesh + navis skeletonization).
-        
-        Uses CAVEDataFetcher to fetch meshes and generate skeletons.
-        Results are cached in cache/{dataset}/API_cache/skeletons/.
-        
-        Parameters
-        ----------
-        body_ids : list
-            List of body IDs to fetch (can be strings or ints)
-            
-        Returns
-        -------
-        dict
-            Dictionary of bodyId -> TreeNeuron (keys are both int and str for compatibility)
+    def _fafb_soma_positions(self, body_ids: list) -> dict:
+        """Read numeric FAFB soma positions from the local neuron table."""
+        requested = set(normalize_flywire_body_ids(body_ids))
+        positions = {}
+        for frame in self.neuron_dfs:
+            if frame is None or 'bodyId' not in frame.columns:
+                continue
+            position_col = next(
+                (name for name in (
+                    'position', 'soma_position', 'soma_pos', 'somaLocation')
+                 if name in frame.columns),
+                None,
+            )
+            if position_col is None:
+                continue
+            for body_id, value in zip(
+                    frame['bodyId'].tolist(), frame[position_col].tolist()):
+                key = normalize_flywire_body_id(body_id)
+                if key not in requested or key in positions:
+                    continue
+                soma_pos = parse_soma_position(value)
+                if soma_pos is not None:
+                    positions[key] = soma_pos
+        return positions
+
+    def _fetch_fafb_skeletons_via_api(
+            self, body_ids: list, cache_prepared: bool = True,
+            soma_positions: dict | None = None) -> dict:
+        """Fetch FAFB meshes through CAVE without skeletonizing.
+
+        With ``cache_prepared=True`` this uses the shared FlyWire mesh cache
+        and applies the visualization cache policy (95% branch reduction,
+        80% soma reduction within 20 µm).  When that cache is intentionally
+        bypassed, the online path returns raw ``MeshNeuron`` objects for a
+        lower render simplification.  Neither path writes NeuPrint SWC.
         """
         access = getattr(self, '_flywire_skeleton_access', None)
         if access is not None and not access.get('cave_token'):
@@ -7137,10 +7023,19 @@ class VisualizeSkeleton:
                 self._vprint("  ⚠️  cave_data_fetcher module not found, falling back to ZIP", use_tqdm=True)
                 return {}
         
-        self._vprint(f'  🌐 Fetching {len(body_ids)} skeletons via CAVE API...', use_tqdm=True)
-        
-        # Convert body_ids to integers for API call
-        int_body_ids = [int(bid) for bid in body_ids]
+        requested_ids = (
+            normalize_flywire_body_ids(body_ids)
+            if is_flywire_dataset(self.dataset)
+            else list(body_ids)
+        )
+        self._vprint(f'  🌐 Fetching {len(requested_ids)} meshes via CAVE API...', use_tqdm=True)
+
+        # Convert to integers only at the CAVE boundary.
+        int_body_ids = [
+            body_id_to_api_int(bid) if is_flywire_dataset(self.dataset)
+            else int(bid)
+            for bid in requested_ids
+        ]
         
         fetcher = CAVEDataFetcher(
             dataset=self.dataset,
@@ -7148,38 +7043,45 @@ class VisualizeSkeleton:
             verbose=self.verbose == 'full'
         )
         
-        # Fetch skeletons with soma-aware simplification
-        # Use the class cache parameters for consistency
-        skeleton_simp = self.FAFB_MESH_CACHE_SIMPLIFICATION
-        soma_simp = self.FAFB_MESH_CACHE_SOMA_SIMPLIFICATION
-        soma_radius = self.FAFB_MESH_CACHE_SOMA_RADIUS
-        
-        skeleton_cache = {}
-        # Fetch with skeleton simplification level (soma-aware applied after)
-        neurons = fetcher.fetch_skeletons(int_body_ids, use_cache=True, simplify_mesh=skeleton_simp)
+        positions = soma_positions or self._fafb_soma_positions(requested_ids)
+        mesh_cache = {}
+        if cache_prepared and self.cache_neurons:
+            neurons = fetcher.fetch_fafb_meshes(
+                int_body_ids,
+                use_cache=True,
+                simplify_mesh=self.FAFB_MESH_CACHE_SIMPLIFICATION,
+                soma_simplification=self.FAFB_MESH_CACHE_SOMA_SIMPLIFICATION,
+                soma_radius=self.FAFB_MESH_CACHE_SOMA_RADIUS,
+                soma_positions=positions,
+            )
+        else:
+            # This is the detail-preserving render path.  It intentionally
+            # fetches online-only raw meshes and never calls fetch_skeleton.
+            neurons = []
+            for body_id in int_body_ids:
+                mesh = fetcher.fetch_mesh(body_id, use_cache=False)
+                if mesh is None:
+                    continue
+                key = normalize_flywire_body_id(body_id)
+                soma_pos = positions.get(key, positions.get(body_id))
+                if soma_pos is not None:
+                    try:
+                        mesh.soma_pos = soma_pos
+                    except Exception:
+                        pass
+                neurons.append(mesh)
         
         for n in neurons:
-            if hasattr(n, 'id'):
-                # Apply soma-aware simplification if soma position is available
-                if hasattr(n, 'trimesh') and hasattr(n, 'soma_pos') and n.soma_pos is not None:
-                    try:
-                        simplified_trimesh = self._simplify_mesh_with_soma_awareness(
-                            n.trimesh,
-                            skeleton_simp=skeleton_simp,
-                            soma_simp=soma_simp,
-                            soma_pos=n.soma_pos,
-                            soma_radius=soma_radius
-                        )
-                        n._trimesh = simplified_trimesh
-                    except Exception:
-                        pass  # Keep original if soma-aware simplification fails
-                
-                # Store with both int and str keys for compatibility
-                skeleton_cache[n.id] = n
-                skeleton_cache[str(n.id)] = n
-        
-        self._vprint(f'  ✓ Fetched {len(neurons)}/{len(body_ids)} skeletons via API (soma-aware simplification)', use_tqdm=True)
-        return skeleton_cache
+            if isinstance(n, navis.MeshNeuron) and hasattr(n, 'id'):
+                key = (
+                    normalize_flywire_body_id(n.id)
+                    if is_flywire_dataset(self.dataset)
+                    else n.id
+                )
+                mesh_cache[key] = n
+
+        self._vprint(f'  ✓ Fetched {len(mesh_cache)}/{len(requested_ids)} meshes via API', use_tqdm=True)
+        return mesh_cache
 
     @staticmethod
     def detect_mesh_extrusions(mesh, soma_pos=None, soma_radius=20000, 
@@ -7425,22 +7327,38 @@ class VisualizeSkeleton:
         if verbose:
             print(f"🔧 Fixing FAFB skeleton extrusions for {len(body_ids)} neurons...")
         
-        # Convert to integers
-        int_body_ids = [int(bid) for bid in body_ids]
+        requested_ids = (
+            normalize_flywire_body_ids(body_ids)
+            if is_flywire_dataset(dataset)
+            else list(body_ids)
+        )
+        api_body_ids = [
+            body_id_to_api_int(bid) if is_flywire_dataset(dataset)
+            else int(bid)
+            for bid in requested_ids
+        ]
         
         fetcher = CAVEDataFetcher(
             dataset=dataset,
             verbose=verbose
         )
         
-        # Fetch and cache fresh skeletons (0.95 simplification)
-        neurons = fetcher.fetch_skeletons(int_body_ids, use_cache=False, simplify_mesh=0.95)
+        # Online-only repair fetches raw skeletons; no local cache is touched
+        # when ``use_cache=False``.
+        neurons = fetcher.fetch_skeletons(
+            api_body_ids, use_cache=False, simplify_mesh=0.0,
+            denoise_twigs=None,
+        )
         
         result = {}
         for n in neurons:
             if hasattr(n, 'id'):
-                result[n.id] = n
-                result[str(n.id)] = n
+                key = (
+                    normalize_flywire_body_id(n.id)
+                    if is_flywire_dataset(dataset)
+                    else n.id
+                )
+                result[key] = n
         
         if verbose:
             print(f"✓ Fixed and cached {len(neurons)}/{len(body_ids)} skeletons")
@@ -7726,7 +7644,7 @@ class VisualizeSkeleton:
         # - simplification=0.98 (keep 2%): load from cache (5%), simplify to 2% → additional_keep = 0.02/0.05 = 40%
         # - simplification=0.95 (keep 5%): load from cache (5%), no additional simplification needed
         # - simplification=0.5 (keep 50%): cannot use cache (only has 10%), load from ZIP and apply 0.5 simplification
-        is_fafb = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
+        is_fafb = is_flywire_dataset(self.dataset)
         neuprint_pipeline = self._resolved_neuprint_skeleton_pipeline()
         use_neuprint_fine_pipeline = (
             not is_fafb
@@ -7759,7 +7677,11 @@ class VisualizeSkeleton:
             all_fafb_body_ids = []
             for df in self.neuron_dfs:
                 if df is not None and 'bodyId' in df.columns:
-                    all_fafb_body_ids.extend(df['bodyId'].tolist())
+                    all_fafb_body_ids.extend(
+                        normalize_flywire_body_ids(df['bodyId'].tolist())
+                        if is_flywire_dataset(self.dataset)
+                        else [int(body_id) for body_id in df['bodyId'].tolist()]
+                    )
             all_fafb_body_ids = list(set(all_fafb_body_ids))
             
             # Load from mesh cache
@@ -7772,23 +7694,32 @@ class VisualizeSkeleton:
             all_fafb_body_ids = []
             for df in self.neuron_dfs:
                 if df is not None and 'bodyId' in df.columns:
-                    all_fafb_body_ids.extend(df['bodyId'].tolist())
+                    all_fafb_body_ids.extend(
+                        normalize_flywire_body_ids(df['bodyId'].tolist())
+                        if is_flywire_dataset(self.dataset)
+                        else [int(body_id) for body_id in df['bodyId'].tolist()]
+                    )
             all_fafb_body_ids = list(set(all_fafb_body_ids))
             
-            # ALWAYS check API cache first for VisualizeSkeleton
-            # This allows fixing individual neurons with extrusion issues by fetching via API
-            # API-cached skeletons take priority over ZIP data for better morphology
-            api_cached_skeletons, api_cache_missing = self._load_api_cached_skeletons(all_fafb_body_ids)
-            
-            if api_cached_skeletons:
-                fafb_skeleton_cache.update(api_cached_skeletons)
-                self._vprint(f'  ✓ Loaded {len(api_cached_skeletons)} skeletons from API cache (extrusion-fixed)', level='simple')
+            # FlyWire/FAFB owns a MeshNeuron cache.  Do not route this
+            # dataset through the NeuPrint raw-SWC/API skeleton cache: CAVE
+            # returns meshes and the CAVE path below must never skeletonize
+            # them merely to satisfy a shared cache interface.
+            api_cached_skeletons = {}
+            if use_fafb_cache:
+                mesh_cache_ids = set(fafb_mesh_cache)
+                api_cache_missing = [
+                    bid for bid in all_fafb_body_ids if bid not in mesh_cache_ids
+                ]
+            else:
+                api_cache_missing = list(all_fafb_body_ids)
             
             if use_api_fetching:
                 # force_API_fetching=True: Fetch remaining via CAVE API
                 if api_cache_missing:
                     self._vprint(f'  🌐 Fetching {len(api_cache_missing)} skeletons via CAVE API...')
-                    api_fetched = self._fetch_fafb_skeletons_via_api(api_cache_missing)
+                    api_fetched = self._fetch_fafb_skeletons_via_api(
+                        api_cache_missing, cache_prepared=use_fafb_cache)
                     fafb_skeleton_cache.update(api_fetched)
             else:
                 # force_API_fetching=False: Load remaining from local ZIP
@@ -7808,7 +7739,8 @@ class VisualizeSkeleton:
                                 extrusion_ids = self._detect_extrusions_in_skeletons(zip_skeletons)
                                 if extrusion_ids:
                                     self._vprint(f'  🔍 Detected {len(extrusion_ids)} skeletons with extrusion artifacts, fetching fresh from API...', level='simple')
-                                    api_fixed = self._fetch_fafb_skeletons_via_api(extrusion_ids)
+                                    api_fixed = self._fetch_fafb_skeletons_via_api(
+                                        extrusion_ids, cache_prepared=use_fafb_cache)
                                     if api_fixed:
                                         fafb_skeleton_cache.update(api_fixed)
                                         self._vprint(f'  ✓ Replaced {len(api_fixed)} extrusion-affected skeletons', level='simple')
@@ -7823,7 +7755,8 @@ class VisualizeSkeleton:
                             extrusion_ids = self._detect_extrusions_in_skeletons(zip_skeletons)
                             if extrusion_ids:
                                 self._vprint(f'  🔍 Detected {len(extrusion_ids)} skeletons with extrusion artifacts, fetching fresh from API...', level='simple')
-                                api_fixed = self._fetch_fafb_skeletons_via_api(extrusion_ids)
+                                api_fixed = self._fetch_fafb_skeletons_via_api(
+                                    extrusion_ids, cache_prepared=use_fafb_cache)
                                 if api_fixed:
                                     fafb_skeleton_cache.update(api_fixed)
                                     self._vprint(f'  ✓ Replaced {len(api_fixed)} extrusion-affected skeletons', level='simple')
@@ -7845,7 +7778,8 @@ class VisualizeSkeleton:
                                 and bid not in mesh_cache_lookup]  # Don't fetch if mesh cache has them
                 if still_missing:
                     self._vprint(f'  ⚠️  {len(still_missing)} neurons not in local cache/ZIP, auto-fetching via CAVE API...')
-                    api_fetched = self._fetch_fafb_skeletons_via_api(still_missing)
+                    api_fetched = self._fetch_fafb_skeletons_via_api(
+                        still_missing, cache_prepared=use_fafb_cache)
                     fafb_skeleton_cache.update(api_fetched)
         
         # NeuPrint fine/artistic rendering never loads or writes a transformed
@@ -7902,7 +7836,11 @@ class VisualizeSkeleton:
             
             # For FAFB with caching: check which neurons already have cached meshes
             layer_body_ids = self.neuron_dfs[i]['bodyId'].tolist() if self.neuron_dfs[i] is not None else []
-            layer_body_ids = [int(body_id) for body_id in layer_body_ids]
+            layer_body_ids = (
+                normalize_flywire_body_ids(layer_body_ids)
+                if is_flywire_dataset(self.dataset)
+                else [int(body_id) for body_id in layer_body_ids]
+            )
             neuprint_layer_prepared = (
                 neuprint_preprocessing_active
                 and all(body_id in neuprint_prepared_skeletons
@@ -7945,19 +7883,10 @@ class VisualizeSkeleton:
                 if cached_mesh_neurons:
                     self._vprint(f'    ✓ {len(cached_mesh_neurons)}/{len(layer_body_ids)} from NeuPrint mesh cache', level='full', use_tqdm=True)
             
-            # FAFB-style NeuPrint tube rendering starts from RAW skeletons so
-            # it can smooth/resample before mesh construction. The direct
-            # pipeline restores the legacy simp90 skeleton-cache semantics;
-            # fine/artistic always begin from raw skeletons.
-            if use_neuprint_fine_pipeline:
-                ignore_skeleton_cache = True
-            else:
-                ignore_skeleton_cache = (
-                    not is_fafb
-                    and self.skeleton_mode == 'tube'
-                    and self.skeleton_mesh_simplification
-                        < self.NEUPRINT_SKELETON_CACHE_LEVEL
-                )
+            # Every NeuPrint render starts from the same raw SWC cache. The
+            # selected pipeline and mesh simplification are render-time
+            # choices, never cache-level selectors.
+            ignore_skeleton_cache = False
             if neuprint_preprocessing_active:
                 # The aggregate preprocessing phase owns all NeuPrint cache
                 # resolution. Do not re-open the fixed skeleton cache here.
@@ -7966,22 +7895,9 @@ class VisualizeSkeleton:
                 cached_neurons, missing_ids = self._load_cached_neurons(
                     self.neuron_dfs[i], ignore_cache=ignore_skeleton_cache)
 
-            # Track the source used by THIS render, rather than inferring it
-            # later from the folder marker.  A cache marker can be written
-            # while this run is still holding the freshly fetched raw
-            # skeletons in memory.
-            using_simplified_skeleton_cache = (
-                not is_fafb
-                and self.skeleton_mode == 'tube'
-                and self.cache_neurons
-                and self.skeleton_mesh_simplification
-                    >= self.NEUPRINT_SKELETON_CACHE_LEVEL
-                and cached_neurons is not None
-                and not missing_ids
-                and self._skeleton_cache_is_simplified()
-            )
-            
-            # Check and fix MANC scaling for cached neurons (handling legacy cache)
+            # Check and fix MANC scaling for cached neurons (compatibility for
+            # non-aggregate callers; aggregate NeuPrint rendering scales the
+            # in-memory raw source once in _prepare_neuprint_skeletons_for_render).
             if cached_neurons is not None and 'manc' in self.dataset.lower():
                 try:
                     # Check first neuron
@@ -8062,8 +7978,8 @@ class VisualizeSkeleton:
 
                 # NeuPrint tube-mode fine/artistic transform for rendering.
                 # Applied to COPIES in native units BEFORE any dataset
-                # scaling; the raw skeletons (used for the simp90 cache and
-                # line mode) are left untouched.  Radius style is selected
+                        # scaling; the raw skeletons used by the shared cache and
+                        # line mode are left untouched. Radius style is selected
                 # inside the transform, so the constant-radius experiment
                 # still receives the fine/artistic path smoothing/resampling.
                 render_neuron_vols = raw_neuron_vols
@@ -8109,9 +8025,10 @@ class VisualizeSkeleton:
                     except Exception as e:
                         self._vprint(f'  ⚠️  Failed to check/apply scaling: {e}', level='full')
 
-                # Save to raw cache (for non-FAFB datasets): the 90%-simplified
-                # skeleton pkls still serve the morphology pipeline. Tube-mode
-                # rendering continues with the FAFB-format transformed copies.
+                # The aggregate NeuPrint fetcher already persists raw
+                # compressed-SWC files. Keep rendering on the selected
+                # in-memory representation; never persist a transformed or
+                # simplified skeleton here.
                 if (raw_neuron_vols is not None and not is_fafb
                         and not neuprint_layer_prepared):
                     self._save_cached_neurons(self.neuron_dfs[i], raw_neuron_vols)
@@ -8682,7 +8599,6 @@ class VisualizeSkeleton:
             # the remaining legacy/direct paths and line mode is skipped.
             render_simplification = self._effective_render_simplification(
                 is_fafb,
-                using_simplified_cache=using_simplified_skeleton_cache,
             )
             if (render_simplification > 0 and self.skeleton_mode == 'tube'
                     and not fafb_already_simplified
@@ -10452,6 +10368,61 @@ class VisualizeSkeleton:
         
         return expanded_rois, expanded_colors
 
+    def _get_metadata_primary_rois(self):
+        """Load the dataset's authoritative NeuPrint primary ROI list.
+
+        NeuPrint labels this set ``primaryRois`` in its metadata.  DROCAT's
+        local dataset sidecars store the same values under
+        ``roi_coverage.roi_list``.  Prefer the sidecar so the ``primary``
+        keyword remains complete and deterministic in offline runs; FlyWire
+        ROI meshes use the male-cns metadata as their backend does.
+        """
+        dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
+        folders = [dataset_normalized]
+        dataset_lower = str(self.dataset).lower()
+        if 'flywire' in dataset_lower or 'fafb' in dataset_lower:
+            folders = ['male-cns_v0_9', 'male-cns_v1_0', *folders]
+
+        for folder in folders:
+            metadata_dir = os.path.join(self.script_path, 'datasets', folder)
+            if not os.path.isdir(metadata_dir):
+                continue
+            metadata_files = []
+            preferred = os.path.join(metadata_dir, f'{folder}_metadata.json')
+            if os.path.isfile(preferred):
+                metadata_files.append(preferred)
+            metadata_files.extend(
+                os.path.join(metadata_dir, name)
+                for name in sorted(os.listdir(metadata_dir))
+                if 'metadata' in name.lower() and name.endswith('.json')
+                and os.path.join(metadata_dir, name) not in metadata_files
+            )
+            for metadata_file in metadata_files:
+                try:
+                    with open(metadata_file, 'r', encoding='utf-8') as handle:
+                        metadata = json.load(handle)
+                except (OSError, ValueError, TypeError):
+                    continue
+                if not isinstance(metadata, dict):
+                    continue
+
+                primary = metadata.get('primaryRois') or metadata.get('primary_rois')
+                if not primary:
+                    coverage = metadata.get('roi_coverage') or {}
+                    if isinstance(coverage, dict):
+                        primary = coverage.get('roi_list')
+                if isinstance(primary, list):
+                    values = []
+                    seen = set()
+                    for roi in primary:
+                        roi = str(roi).strip()
+                        if roi and roi != 'NotPrimary' and roi not in seen:
+                            values.append(roi)
+                            seen.add(roi)
+                    if values:
+                        return values
+        return []
+
     def _expand_mesh_roi_patterns(self, roi_list):
         """Expand special keywords and regex patterns in mesh_roi list.
         
@@ -10494,8 +10465,10 @@ class VisualizeSkeleton:
         available_rois = self._get_available_rois(use_cache=True, fetch_online=True)
         available_set = set(available_rois) if available_rois else set()
         
-        # Define primary ROIs - major brain regions that are commonly used
-        # These are regions that typically exist across datasets
+        # Prefer the dataset's primaryRois metadata.  The hard-coded patterns
+        # below remain only as a compatibility fallback for datasets that have
+        # not been pulled locally yet.
+        metadata_primary_rois = self._get_metadata_primary_rois()
         primary_roi_patterns = [
             # Central Complex
             'EB', 'FB', 'PB', 'NO', 'AB',
@@ -10532,22 +10505,31 @@ class VisualizeSkeleton:
                 continue
                 
             elif item_str.lower() == 'primary':
-                # Add ROIs matching primary patterns
                 primary_count = 0
-                for pattern in primary_roi_patterns:
-                    try:
-                        regex = re.compile(f'^{pattern}$')
-                        for roi in available_rois:
-                            if regex.match(roi) and roi not in seen:
-                                expanded.append(roi)
-                                seen.add(roi)
-                                primary_count += 1
-                    except re.error:
-                        # If pattern is invalid regex, try exact match
-                        if pattern in available_set and pattern not in seen:
-                            expanded.append(pattern)
-                            seen.add(pattern)
+                if metadata_primary_rois:
+                    # Keep metadata order, which is the order supplied by the
+                    # dataset, and do not discard valid metadata names merely
+                    # because an offline mesh inventory is incomplete.
+                    for roi in metadata_primary_rois:
+                        if roi not in seen:
+                            expanded.append(roi)
+                            seen.add(roi)
                             primary_count += 1
+                else:
+                    for pattern in primary_roi_patterns:
+                        try:
+                            regex = re.compile(f'^{pattern}$')
+                            for roi in available_rois:
+                                if regex.match(roi) and roi not in seen:
+                                    expanded.append(roi)
+                                    seen.add(roi)
+                                    primary_count += 1
+                        except re.error:
+                            # If pattern is invalid regex, try exact match
+                            if pattern in available_set and pattern not in seen:
+                                expanded.append(pattern)
+                                seen.add(pattern)
+                                primary_count += 1
                 self._vprint(f"   🏛️ 'primary': Added {primary_count} primary ROIs", level='simple')
                 continue
             

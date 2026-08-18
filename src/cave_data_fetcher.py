@@ -1,33 +1,65 @@
 """
 CAVE API Data Fetcher for FlyWire (FAFB) datasets.
 
-This module provides functionality to fetch neuron skeletons, meshes, and synapses
-from the CAVE/CloudVolume API for FlyWire datasets.
+This module provides functionality to fetch FlyWire meshes and synapses from
+the CAVE/CloudVolume API.  CAVE/FAFB production fetches remain
+``MeshNeuron`` objects; they are never converted to SWC trees.  The legacy
+``fetch_skeleton`` methods remain available for compatibility with older
+callers, but the application FlyWire path uses ``fetch_fafb_mesh``.
 
 Key features:
 - Fetch meshes via CloudVolume (graphene protocol)
-- Generate skeletons from meshes using navis
-- Cache results in cache/{dataset}/API_cache/
+- Prepare and cache soma-aware meshes in
+  ``cache/{dataset}/meshes/FLYWIRE_simp95_soma80_r20/``
+- Keep NeuPrint's TreeNeuron/SWC cache separate
 - Integration with TokenManager for authentication
 
 Usage:
     from cave_data_fetcher import CAVEDataFetcher
     
     fetcher = CAVEDataFetcher(dataset='flywire_FAFB_v783')
-    skeleton = fetcher.fetch_skeleton(720575940596125868)
     mesh = fetcher.fetch_mesh(720575940596125868)
+    prepared = fetcher.fetch_fafb_mesh(720575940596125868)
     synapses = fetcher.fetch_synapses(720575940596125868)
 """
 
 import os
 import pickle
+import gzip
 import logging
+import re
+import tempfile
 from pathlib import Path
 from typing import List, Dict, Optional
 from dataclasses import dataclass, field
 import warnings
 
 import pandas as pd
+
+try:
+    from .flywire_ids import (
+        body_id_to_api_int,
+        normalize_flywire_id_columns,
+    )
+except ImportError:
+    from flywire_ids import body_id_to_api_int, normalize_flywire_id_columns
+
+try:
+    from .flywire_mesh_cache import (
+        FLYWIRE_MESH_CACHE_SIMPLIFICATION,
+        FLYWIRE_MESH_CACHE_SOMA_RADIUS,
+        FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION,
+        FlyWireMeshCache,
+        prepare_flywire_mesh,
+    )
+except ImportError:
+    from flywire_mesh_cache import (
+        FLYWIRE_MESH_CACHE_SIMPLIFICATION,
+        FLYWIRE_MESH_CACHE_SOMA_RADIUS,
+        FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION,
+        FlyWireMeshCache,
+        prepare_flywire_mesh,
+    )
 
 # Suppress warnings during import
 with warnings.catch_warnings():
@@ -86,8 +118,9 @@ class CAVEDataFetcher:
         if self.cave_token is None:
             self.cave_token = self._load_token('CAVE_TOKEN')
         
-        # Create API cache directory
-        self._ensure_cache_dir()
+        # Cache creation is lazy.  In particular, a caller that performs an
+        # online-only ``fetch_skeleton(..., use_cache=False)`` must not create
+        # an API-cache tree just by constructing the fetcher.
     
     def _load_token(self, token_name: str) -> Optional[str]:
         """Load token from token_info_local.txt or token_info.txt"""
@@ -114,15 +147,19 @@ class CAVEDataFetcher:
     
     def _get_config(self) -> dict:
         """Get configuration for current dataset."""
+        # Check BANC first: a future BANC materialization could also use a
+        # version number that happens to match the historical FAFB v783.
+        if 'BANC' in self.dataset.upper():
+            return self.FLYWIRE_BANC_CONFIG
         if 'FAFB' in self.dataset.upper() or 'v783' in self.dataset:
             return self.FLYWIRE_FAFB_CONFIG
-        elif 'BANC' in self.dataset.upper():
-            return self.FLYWIRE_BANC_CONFIG
         else:
             raise ValueError(f"Unknown dataset: {self.dataset}")
     
     def _ensure_cache_dir(self):
         """Ensure API cache directory exists."""
+        if not self.cache_enabled:
+            return
         cache_dir = self.get_cache_path()
         os.makedirs(cache_dir, exist_ok=True)
         os.makedirs(os.path.join(cache_dir, 'skeletons'), exist_ok=True)
@@ -134,18 +171,26 @@ class CAVEDataFetcher:
         Returns:
             Path to cache/{dataset}/API_cache/{subdir}
         """
-        # Map dataset name to cache folder
-        if 'FAFB' in self.dataset.upper() or 'v783' in self.dataset:
-            cache_dataset = 'flywire_FAFB_v783'
-        elif 'BANC' in self.dataset.upper():
-            cache_dataset = 'flywire_BANC_v626'
-        else:
-            cache_dataset = self.dataset.replace(':', '_').replace('.', '_')
+        cache_dataset = self._cache_dataset_name()
         
         cache_path = os.path.join(self.project_root, 'cache', cache_dataset, 'API_cache')
         if subdir:
             cache_path = os.path.join(cache_path, subdir)
         return cache_path
+
+    def _cache_dataset_name(self) -> str:
+        """Return the release-specific cache namespace for this dataset.
+
+        FAFB keeps its historical namespace for compatibility.  BANC must
+        retain the requested release (for example, ``v888``) so a skeleton
+        fetched for one FlyWire materialization can never be reused by
+        another release merely because both are labelled BANC.
+        """
+        dataset_name = str(self.dataset or '').strip()
+        upper = dataset_name.upper()
+        if 'BANC' not in upper and ('FAFB' in upper or 'v783' in dataset_name):
+            return 'flywire_FAFB_v783'
+        return dataset_name.replace(':', '_').replace('.', '_')
     
     @property
     def cloudvolume(self):
@@ -177,7 +222,8 @@ class CAVEDataFetcher:
                 config = self._get_config()
                 self._cave_client = CAVEclient(
                     datastack_name=config['datastack'],
-                    auth_token=self.cave_token
+                    auth_token=self.cave_token,
+                    write_server_cache=self.cache_enabled,
                 )
                 if self.verbose:
                     print(f"✓ Connected to CAVE: {config['datastack']}")
@@ -186,17 +232,40 @@ class CAVEDataFetcher:
         return self._cave_client
     
     def _get_skeleton_cache_path(self, body_id: int) -> str:
-        """Get cache file path for a skeleton."""
+        """Get the canonical raw compressed-SWC cache path for a skeleton."""
+        cache_dataset = self._cache_dataset_name()
+        return os.path.join(
+            self.project_root, 'cache', cache_dataset, 'skeletons',
+            'raw_skeletons', f'{body_id}.swc.gz'
+        )
+
+    def _get_legacy_skeleton_cache_path(self, body_id: int) -> str:
+        """Return the former API-cache pickle path for migration reads."""
         return os.path.join(self.get_cache_path('skeletons'), f'{body_id}.pkl')
     
     def _get_mesh_cache_path(self, body_id: int) -> str:
-        """Get cache file path for a mesh."""
+        """Get the canonical prepared FlyWire mesh cache path."""
+        return str(FlyWireMeshCache(
+            self._cache_dataset_name(), project_root=self.project_root,
+        ).path(body_id))
+
+    def _get_legacy_mesh_cache_path(self, body_id: int) -> str:
+        """Return the former API-cache mesh path for compatibility reads."""
         return os.path.join(self.get_cache_path('meshes'), f'{body_id}.pkl')
     
     def _load_from_cache(self, cache_path: str):
         """Load object from cache if exists."""
         if self.cache_enabled and os.path.exists(cache_path):
             try:
+                if str(cache_path).endswith('.swc.gz'):
+                    with gzip.open(cache_path, 'rt', encoding='utf-8') as handle:
+                        obj = navis.read_swc(handle)
+                    try:
+                        obj.id = int(Path(cache_path).name[:-len('.swc.gz')])
+                        obj.units = 'nm'
+                    except Exception:
+                        pass
+                    return obj
                 with open(cache_path, 'rb') as f:
                     return pickle.load(f)
             except Exception as e:
@@ -208,6 +277,24 @@ class CAVEDataFetcher:
         if self.cache_enabled:
             try:
                 os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                if str(cache_path).endswith('.swc.gz'):
+                    cache_path_obj = Path(cache_path)
+                    with tempfile.NamedTemporaryFile(
+                            suffix='.swc', dir=str(cache_path_obj.parent),
+                            delete=False) as handle:
+                        temp_swc = Path(handle.name)
+                    temp_gz = cache_path_obj.with_name(
+                        f'.{cache_path_obj.name}.{os.getpid()}.tmp')
+                    try:
+                        navis.write_swc(obj, temp_swc, write_meta=True)
+                        temp_gz.write_bytes(
+                            gzip.compress(temp_swc.read_bytes(),
+                                          compresslevel=6, mtime=0))
+                        os.replace(temp_gz, cache_path_obj)
+                    finally:
+                        temp_swc.unlink(missing_ok=True)
+                        temp_gz.unlink(missing_ok=True)
+                    return
                 with open(cache_path, 'wb') as f:
                     pickle.dump(obj, f)
             except Exception as e:
@@ -216,8 +303,9 @@ class CAVEDataFetcher:
     def fetch_mesh(self, body_id: int, use_cache: bool = False) -> Optional['navis.MeshNeuron']:
         """Fetch mesh for a neuron from CloudVolume.
         
-        Note: Meshes are NOT cached to save disk space. Only simplified skeletons
-        are cached (see fetch_skeleton). Each call will fetch the mesh fresh from API.
+        Note: Meshes are NOT cached to save disk space. Raw skeletons are
+        cached separately as compressed SWC (see ``fetch_skeleton``). Each
+        call fetches the mesh fresh from the API.
         
         Parameters
         ----------
@@ -231,7 +319,7 @@ class CAVEDataFetcher:
         navis.MeshNeuron or None
             The mesh neuron, or None if fetch failed
         """
-        body_id = int(body_id)
+        body_id = body_id_to_api_int(body_id)
         
         try:
             cv = self.cloudvolume
@@ -255,10 +343,118 @@ class CAVEDataFetcher:
             if self.verbose:
                 print(f"  ✗ Failed to fetch mesh: {body_id}: {e}")
             return None
+
+    def fetch_fafb_mesh(
+            self,
+            body_id: int,
+            use_cache: bool = True,
+            simplify_mesh: float = FLYWIRE_MESH_CACHE_SIMPLIFICATION,
+            soma_simplification: float = FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION,
+            soma_radius: float = FLYWIRE_MESH_CACHE_SOMA_RADIUS,
+            soma_pos=None,
+            ) -> Optional['navis.MeshNeuron']:
+        """Fetch, prepare, and cache one FlyWire/FAFB ``MeshNeuron``.
+
+        The prepared cache is intentionally mesh-native.  The default
+        settings match the visualization cache: remove 95% of branch-region
+        faces, remove 80% in the 20 µm soma region, and persist the resulting
+        ``MeshNeuron`` as a pickle.  A missing soma coordinate falls back to
+        the same uniform 95% simplification used by the visualizer.
+
+        ``use_cache=False`` is an online-only operation: it neither reads nor
+        writes the local mesh cache.
+        """
+        api_body_id = body_id_to_api_int(body_id)
+        mesh_cache = FlyWireMeshCache(
+            self._cache_dataset_name(),
+            project_root=self.project_root,
+            simplification=simplify_mesh,
+            soma_simplification=soma_simplification,
+            soma_radius=soma_radius,
+        )
+        cache_allowed = bool(use_cache and self.cache_enabled)
+
+        if cache_allowed:
+            cached = mesh_cache.load(body_id)
+            if cached is not None:
+                if self.verbose:
+                    print(f"  ✓ Loaded prepared mesh from cache: {body_id}")
+                return cached
+
+        # ``fetch_mesh`` is deliberately raw and never writes a mesh cache.
+        mesh = self.fetch_mesh(api_body_id, use_cache=False)
+        if mesh is None:
+            return None
+        if soma_pos is None:
+            soma_pos = getattr(mesh, 'soma_pos', None)
+
+        try:
+            prepared = prepare_flywire_mesh(
+                mesh,
+                body_id,
+                soma_pos=soma_pos,
+                simplification=simplify_mesh,
+                soma_simplification=soma_simplification,
+                soma_radius=soma_radius,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to prepare FlyWire mesh %s; using the fetched mesh: %s",
+                body_id, exc)
+            prepared = mesh
+
+        if cache_allowed and isinstance(prepared, navis.MeshNeuron):
+            mesh_cache.save({body_id: prepared})
+        if self.verbose:
+            try:
+                print(
+                    f"  ✓ Prepared FAFB mesh: {body_id} "
+                    f"({len(prepared.trimesh.faces)} faces)"
+                )
+            except Exception:
+                print(f"  ✓ Prepared FAFB mesh: {body_id}")
+        return prepared
+
+    def fetch_fafb_meshes(
+            self,
+            body_ids: List[int],
+            use_cache: bool = True,
+            simplify_mesh: float = FLYWIRE_MESH_CACHE_SIMPLIFICATION,
+            soma_simplification: float = FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION,
+            soma_radius: float = FLYWIRE_MESH_CACHE_SOMA_RADIUS,
+            soma_positions: Optional[Dict[object, object]] = None,
+            ) -> 'navis.NeuronList':
+        """Fetch prepared FlyWire meshes without skeletonization."""
+        from tqdm import tqdm
+
+        positions = soma_positions or {}
+        meshes = []
+        failed = []
+        iterator = body_ids
+        if self.verbose:
+            iterator = tqdm(body_ids, desc="Fetching FAFB meshes")
+        for body_id in iterator:
+            key = str(body_id)
+            soma_pos = positions.get(body_id, positions.get(key))
+            mesh = self.fetch_fafb_mesh(
+                body_id,
+                use_cache=use_cache,
+                simplify_mesh=simplify_mesh,
+                soma_simplification=soma_simplification,
+                soma_radius=soma_radius,
+                soma_pos=soma_pos,
+            )
+            if mesh is not None:
+                meshes.append(mesh)
+            else:
+                failed.append(body_id)
+        if failed and self.verbose:
+            print(f"  ⚠️  Failed to fetch {len(failed)}/{len(body_ids)} meshes")
+        return navis.NeuronList(meshes)
     
-    def fetch_skeleton(self, body_id: int, use_cache: bool = True, 
-                       simplify_mesh: float = 0.95,
-                       denoise_twigs: Optional[float] = 10000.0) -> Optional['navis.TreeNeuron']:
+    def fetch_skeleton(self, body_id: int, use_cache: bool = True,
+                       simplify_mesh: float = 0.0,
+                       denoise_twigs: Optional[float] = None) -> Optional['navis.TreeNeuron']:
         """Fetch skeleton for a neuron by skeletonizing the mesh.
         
         Since FlyWire doesn't have L2 cache for pcg_skel, we fetch the mesh
@@ -271,28 +467,39 @@ class CAVEDataFetcher:
         use_cache : bool
             Whether to use cached skeleton if available
         simplify_mesh : float
-            Mesh simplification factor before skeletonization (0.0-1.0).
-            Higher values remove more faces for faster skeletonization.
-            Default 0.95 removes 95% of faces. Cached skeletons use this level.
+            Legacy mesh preprocessing factor before skeletonization (0.0-1.0).
+            Raw DROCAT fetches use the default ``0.0``; visualization
+            simplification is applied after the raw skeleton is fetched.
         denoise_twigs : float or None
-            Length threshold (nm) for pruning terminal twigs after
-            skeletonization (``navis.prune_twigs``, recursive). FAFB
-            skeletonizations carry short twig artifacts that add noise to
-            morphology features; the denoising evaluation showed 5-10 µm
-            twig pruning improves same-type discrimination. ``None``
-            disables pruning. Default 10000 (10 µm).
+            Optional length threshold (nm) for transient terminal-twig
+            pruning after skeletonization. It is never written to the raw
+            cache. ``None`` (the default) leaves the fetched skeleton raw.
             
         Returns
         -------
         navis.TreeNeuron or None
             The skeleton, or None if fetch failed
         """
-        body_id = int(body_id)
+        body_id = body_id_to_api_int(body_id)
         cache_path = self._get_skeleton_cache_path(body_id)
         
+        # ``use_cache`` is a complete read/write policy for this operation:
+        # false means online-only and must not inspect or populate the local
+        # API skeleton cache, even when the fetcher itself has caching enabled
+        # for other calls.
+        cache_allowed = bool(use_cache and self.cache_enabled)
+
         # Try cache first
-        if use_cache:
+        if cache_allowed:
             cached = self._load_from_cache(cache_path)
+            if cached is None and str(cache_path).endswith('.swc.gz'):
+                # Read the former API-cache pickle once for a non-destructive
+                # migration, then converge on canonical raw SWC. The legacy
+                # file is intentionally retained for recoverability.
+                legacy_path = self._get_legacy_skeleton_cache_path(body_id)
+                cached = self._load_from_cache(legacy_path)
+                if cached is not None:
+                    self._save_to_cache(cached, cache_path)
             if cached is not None:
                 if denoise_twigs:
                     cached = self._denoise_skeleton(cached, denoise_twigs)
@@ -334,13 +541,14 @@ class CAVEDataFetcher:
             skeleton.name = str(body_id)
             skeleton.units = 'nm'
             
-            # Denoise: prune short terminal twigs (artifacts of mesh
-            # skeletonization), then cache the denoised skeleton.
+            # Persist the raw skeleton before any optional transient
+            # denoising. This keeps one representation in the cache while
+            # allowing callers to request a temporary cleanup.
+            if cache_allowed:
+                self._save_to_cache(skeleton, cache_path)
+
             if denoise_twigs:
                 skeleton = self._denoise_skeleton(skeleton, denoise_twigs)
-            
-            # Save to cache
-            self._save_to_cache(skeleton, cache_path)
             
             if self.verbose:
                 print(f"  ✓ Generated skeleton: {body_id} ({len(skeleton.nodes)} nodes)")
@@ -368,8 +576,8 @@ class CAVEDataFetcher:
             return neuron
     
     def fetch_skeletons(self, body_ids: List[int], use_cache: bool = True,
-                        simplify_mesh: float = 0.95,
-                        denoise_twigs: Optional[float] = 10000.0) -> 'navis.NeuronList':
+                        simplify_mesh: float = 0.0,
+                        denoise_twigs: Optional[float] = None) -> 'navis.NeuronList':
         """Fetch skeletons for multiple neurons.
         
         Parameters
@@ -379,11 +587,11 @@ class CAVEDataFetcher:
         use_cache : bool
             Whether to use cached skeletons if available
         simplify_mesh : float
-            Mesh simplification factor (0.0-1.0). Default 0.95 removes 95% of faces.
-            Cached skeletons use 0.95 simplification.
+            Legacy mesh preprocessing factor (0.0-1.0). Raw fetches default
+            to 0.0; render-time simplification is separate.
         denoise_twigs : float or None
-            Twig-pruning threshold in nm passed to ``fetch_skeleton``
-            (default 10000 = 10 µm; None disables).
+            Optional transient twig-pruning threshold passed to
+            ``fetch_skeleton``. The raw cache is not pruned.
             
         Returns
         -------
@@ -428,7 +636,7 @@ class CAVEDataFetcher:
             Synapse data with columns: pre_pt_root_id, post_pt_root_id, 
             pre_pt_position, post_pt_position, etc.
         """
-        body_id = int(body_id)
+        body_id = body_id_to_api_int(body_id)
         config = self._get_config()
         
         try:
@@ -470,6 +678,9 @@ class CAVEDataFetcher:
                 id_cols = [c for c in ['id', 'pre_pt_root_id', 'post_pt_root_id'] if c in result.columns]
                 if id_cols:
                     result = result.drop_duplicates(subset=id_cols)
+                normalize_flywire_id_columns(
+                    result, ['pre_pt_root_id', 'post_pt_root_id']
+                )
                 return result
             return None
             
@@ -502,7 +713,7 @@ class CAVEDataFetcher:
         pd.DataFrame or None
             Connections with columns: pre_pt_root_id, post_pt_root_id, weight
         """
-        body_ids = [int(bid) for bid in body_ids]
+        body_ids = [body_id_to_api_int(bid) for bid in body_ids]
         config = self._get_config()
         
         try:
@@ -572,6 +783,9 @@ class CAVEDataFetcher:
                 connections = all_synapses.groupby(
                     ['pre_pt_root_id', 'post_pt_root_id']
                 ).size().reset_index(name='weight')
+                normalize_flywire_id_columns(
+                    connections, ['pre_pt_root_id', 'post_pt_root_id']
+                )
                 
                 if self.verbose:
                     print(f"  ✓ Fetched {len(connections):,} unique connections for {n_neurons} neurons")
@@ -587,25 +801,16 @@ class CAVEDataFetcher:
     
     def fetch_neuron_info(self, body_ids: List[int], batch_size: int = 500, 
                           show_progress: bool = True) -> Optional[pd.DataFrame]:
-        """Fetch neuron annotations/info from CAVE.
-        
-        For large numbers of neurons, batches requests with a progress bar.
-        
-        Parameters
-        ----------
-        body_ids : list of int
-            List of root IDs
-        batch_size : int
-            Number of neurons per API request (default 500)
-        show_progress : bool
-            Whether to show progress bar for batched requests
-            
-        Returns
-        -------
-        pd.DataFrame or None
-            Neuron annotations with columns from hierarchical_neuron_annotations
+        """Fetch neuron annotations/info from CAVE by root ID.
+
+        ``hierarchical_neuron_annotations`` references
+        ``proofread_neurons`` by its internal row ID, so the two API tables
+        are queried in sequence.  This avoids the invalid ``pt_root_id``
+        filter that the annotation table itself does not accept.
         """
-        body_ids = [int(bid) for bid in body_ids]
+        body_ids = [body_id_to_api_int(bid) for bid in body_ids]
+        if not body_ids:
+            return pd.DataFrame()
         n_neurons = len(body_ids)
         n_batches = (n_neurons + batch_size - 1) // batch_size
         
@@ -637,17 +842,45 @@ class CAVEDataFetcher:
                 batch_end = min((i + 1) * batch_size, n_neurons)
                 batch_ids = body_ids[batch_start:batch_end]
                 
-                # Query hierarchical annotations for this batch
-                df = client.materialize.query_table(
-                    'hierarchical_neuron_annotations',
+                # Resolve root IDs to proofread-neuron reference IDs first.
+                proofread = client.materialize.query_table(
+                    'proofread_neurons',
                     filter_in_dict={'pt_root_id': batch_ids},
-                    materialization_version=self.materialization_version
+                    metadata=False,
+                    merge_reference=False,
+                    materialization_version=self.materialization_version,
                 )
-                if not df.empty:
-                    dfs.append(df)
+                if proofread is not None and not proofread.empty and 'id' in proofread.columns:
+                    target_ids = proofread['id'].dropna().astype(int).tolist()
+                    if target_ids:
+                        annotations = client.materialize.query_table(
+                            'hierarchical_neuron_annotations',
+                            filter_in_dict={'target_id': target_ids},
+                            metadata=False,
+                            merge_reference=True,
+                            materialization_version=self.materialization_version,
+                        )
+                        if annotations is not None and not annotations.empty:
+                            dfs.append(annotations)
+
+                # User tags are the online source for named cell types such as
+                # PPL101/aMe26 when the hierarchy only exposes broad classes.
+                tags = client.materialize.query_table(
+                    'neuron_information_v2',
+                    filter_in_dict={'pt_root_id': batch_ids},
+                    metadata=False,
+                    merge_reference=False,
+                    materialization_version=self.materialization_version,
+                )
+                if tags is not None and not tags.empty:
+                    dfs.append(tags)
             
             if dfs:
                 result = pd.concat(dfs, ignore_index=True)
+                normalize_flywire_id_columns(
+                    result,
+                    ['bodyId', 'body_id', 'pt_root_id', 'root_id'],
+                )
                 if self.verbose:
                     print(f"  ✓ Fetched annotations for {len(result):,}/{n_neurons:,} neurons")
                 return result
@@ -661,6 +894,64 @@ class CAVEDataFetcher:
             if self.verbose:
                 print(f"  ✗ Failed to fetch neuron info: {e}")
             return None
+
+    def fetch_neurons_by_types(
+        self, types: List[str], show_progress: bool = True
+    ) -> pd.DataFrame:
+        """Resolve named FlyWire types from online annotation tags.
+
+        The public CAVE materialization exposes user tags by root ID.  Query
+        each requested type as a regex in that table and return a normalized
+        ``bodyId/type/instance/post`` frame for DROCAT.
+        """
+        if not types:
+            return pd.DataFrame(columns=['bodyId', 'type', 'instance', 'post'])
+
+        try:
+            client = self.cave_client
+            frames = []
+            iterator = types
+            if show_progress and self.verbose and len(types) > 1:
+                try:
+                    from tqdm import tqdm
+                    iterator = tqdm(types, desc='  📋 FlyWire types', unit='type')
+                except ImportError:
+                    pass
+
+            for neuron_type in iterator:
+                tags = client.materialize.query_table(
+                    'neuron_information_v2',
+                    filter_regex_dict={'tag': re.escape(str(neuron_type))},
+                    metadata=False,
+                    merge_reference=False,
+                    materialization_version=self.materialization_version,
+                )
+                if tags is None or tags.empty or 'pt_root_id' not in tags.columns:
+                    continue
+                instances = (
+                    tags['tag'].fillna('').astype(str)
+                    if 'tag' in tags.columns
+                    else pd.Series('', index=tags.index)
+                )
+                result = pd.DataFrame({
+                    'bodyId': tags['pt_root_id'],
+                    'type': str(neuron_type),
+                    'instance': instances,
+                    'post': 0,
+                })
+                normalize_flywire_id_columns(result, ['bodyId'])
+                frames.append(result)
+
+            if not frames:
+                return pd.DataFrame(columns=['bodyId', 'type', 'instance', 'post'])
+            return pd.concat(frames, ignore_index=True).drop_duplicates(
+                subset=['bodyId', 'type']
+            )
+        except Exception as exc:
+            logger.error(f"Failed to fetch neurons by type: {exc}")
+            if self.verbose:
+                print(f"  ✗ Failed to fetch neurons by type: {exc}")
+            return pd.DataFrame(columns=['bodyId', 'type', 'instance', 'post'])
     
     def clear_cache(self, cache_type: str = 'all'):
         """Clear the API cache.

@@ -9,6 +9,11 @@ from tqdm import tqdm
 import concurrent.futures
 import multiprocessing
 
+try:
+    from .flywire_ids import normalize_flywire_id_columns
+except ImportError:
+    from flywire_ids import normalize_flywire_id_columns
+
 def _parse_swc_batch(zip_path, filenames):
     """Helper function to parse a batch of SWC files from a zip."""
     # Use column-oriented storage for memory efficiency
@@ -65,7 +70,11 @@ def process_neurons_to_parquet(read_path, save_path, save_csv_path=None, enrichm
     try:
         # Read classifications (Base)
         print("  Reading classification data...")
-        df = pd.read_csv(read_path, compression='gzip' if read_path.endswith('.gz') else None)
+        df = pd.read_csv(
+            read_path,
+            compression='gzip' if read_path.endswith('.gz') else None,
+            dtype={'root_id': 'string'},
+        )
         
         # Rename columns to match coana expectations
         rename_map = {
@@ -75,7 +84,7 @@ def process_neurons_to_parquet(read_path, save_path, save_csv_path=None, enrichm
             'side': 'hemisphere'
         }
         df = df.rename(columns=rename_map)
-        df['bodyId'] = df['bodyId'].astype(str)
+        normalize_flywire_id_columns(df, ['bodyId'])
         
         # Deduplicate base if needed
         if df.duplicated(subset=['bodyId']).any():
@@ -90,6 +99,7 @@ def process_neurons_to_parquet(read_path, save_path, save_csv_path=None, enrichm
                 print(f"  Merging names from {os.path.basename(fpath)}...")
                 df_names = pd.read_csv(fpath, compression='gzip' if fpath.endswith('.gz') else None, dtype={'root_id': str})
                 df_names = df_names.rename(columns={'root_id': 'bodyId', 'name': 'instance'})
+                normalize_flywire_id_columns(df_names, ['bodyId'])
                 if 'group' in df_names.columns: df_names = df_names.drop(columns=['group'])
                 df = pd.merge(df, df_names, on='bodyId', how='left')
 
@@ -99,6 +109,7 @@ def process_neurons_to_parquet(read_path, save_path, save_csv_path=None, enrichm
                 print(f"  Merging coordinates from {os.path.basename(fpath)}...")
                 df_coords = pd.read_csv(fpath, compression='gzip' if fpath.endswith('.gz') else None, dtype={'root_id': str})
                 df_coords = df_coords.rename(columns={'root_id': 'bodyId'})
+                normalize_flywire_id_columns(df_coords, ['bodyId'])
                 if 'supervoxel_id' in df_coords.columns: df_coords = df_coords.drop(columns=['supervoxel_id'])
                 df_coords = df_coords.drop_duplicates(subset=['bodyId'])
                 df = pd.merge(df, df_coords, on='bodyId', how='left')
@@ -109,6 +120,7 @@ def process_neurons_to_parquet(read_path, save_path, save_csv_path=None, enrichm
                 print(f"  Merging neurotransmitters from {os.path.basename(fpath)}...")
                 df_nt = pd.read_csv(fpath, compression='gzip' if fpath.endswith('.gz') else None, dtype={'root_id': str})
                 df_nt = df_nt.rename(columns={'root_id': 'bodyId'})
+                normalize_flywire_id_columns(df_nt, ['bodyId'])
                 if 'group' in df_nt.columns: df_nt = df_nt.drop(columns=['group'])
                 df = pd.merge(df, df_nt, on='bodyId', how='left')
 
@@ -118,6 +130,7 @@ def process_neurons_to_parquet(read_path, save_path, save_csv_path=None, enrichm
                 print(f"  Merging cell stats from {os.path.basename(fpath)}...")
                 df_stats = pd.read_csv(fpath, compression='gzip' if fpath.endswith('.gz') else None, dtype={'root_id': str})
                 df_stats = df_stats.rename(columns={'root_id': 'bodyId'})
+                normalize_flywire_id_columns(df_stats, ['bodyId'])
                 df = pd.merge(df, df_stats, on='bodyId', how='left')
 
             # 5. Cell Types (consolidated_cell_types.csv.gz)
@@ -132,6 +145,7 @@ def process_neurons_to_parquet(read_path, save_path, save_csv_path=None, enrichm
                     rename_dict['primary_type'] = 'type'
                 
                 df_types = df_types.rename(columns=rename_dict)
+                normalize_flywire_id_columns(df_types, ['bodyId'])
                 
                 # Merge all columns (keep all original col names, use suffix for conflicts)
                 df = pd.merge(df, df_types, on='bodyId', how='left', suffixes=(None, '_enriched'))
@@ -197,7 +211,16 @@ def process_connections_to_parquet(read_path, save_path):
         # Read connections (can be large, but usually fits in memory for FlyWire ~1GB compressed)
         # If too large, we might need chunking, but sorting requires full dataset or external sort.
         # For now, assume memory is sufficient as per coana.py assumption.
-        df = pd.read_csv(read_path, compression='gzip')
+        df = pd.read_csv(
+            read_path,
+            compression='gzip',
+            dtype={
+                'pre_root_id': 'string',
+                'post_root_id': 'string',
+                'bodyId_pre': 'string',
+                'bodyId_post': 'string',
+            },
+        )
         
         # Rename for consistency
         rename_map = {
@@ -209,8 +232,7 @@ def process_connections_to_parquet(read_path, save_path):
         df = df.rename(columns=rename_map)
         
         # Ensure strings
-        df['bodyId_pre'] = df['bodyId_pre'].astype(str)
-        df['bodyId_post'] = df['bodyId_post'].astype(str)
+        normalize_flywire_id_columns(df, ['bodyId_pre', 'bodyId_post'])
         
         # Aggregate weights and ROIs (sum weights, join ROIs)
         print("  Aggregating connections across ROIs...")
@@ -258,32 +280,42 @@ def process_synapse_table_to_parquet(read_path, save_path, chunksize=100000):
         compression = 'gzip' if read_path.endswith('.gz') else None
         
         chunks = []
-        pre_root_id_col = None
-        post_root_id_col = None
-        
-        with pd.read_csv(read_path, compression=compression, chunksize=chunksize) as reader:
+
+        # Discover the dynamic root-ID columns before parsing data. Reading
+        # them as strings at parser time is essential: an after-the-fact
+        # ``astype(str)`` cannot repair a rounded float.
+        header = pd.read_csv(read_path, compression=compression, nrows=0)
+        pre_cols = [c for c in header.columns if c.startswith('pre_root_id')]
+        post_cols = [c for c in header.columns if c.startswith('post_root_id')]
+        if not pre_cols or not post_cols:
+            print("  ⚠️ Error: Could not find root_id columns in CSV")
+            return False
+        pre_root_id_col = pre_cols[0]
+        post_root_id_col = post_cols[0]
+
+        with pd.read_csv(
+            read_path,
+            compression=compression,
+            chunksize=chunksize,
+            dtype={
+                pre_root_id_col: 'string',
+                post_root_id_col: 'string',
+            },
+        ) as reader:
             for i, chunk in enumerate(tqdm(reader, desc="  Reading chunks")):
                 # Work on a copy to avoid SettingWithCopyWarning and internal block manager issues
                 chunk = chunk.copy()
                 
-                # Identify ID columns dynamically (only once)
-                if pre_root_id_col is None:
-                    pre_cols = [c for c in chunk.columns if c.startswith('pre_root_id')]
-                    post_cols = [c for c in chunk.columns if c.startswith('post_root_id')]
-                    if pre_cols and post_cols:
-                        pre_root_id_col = pre_cols[0]
-                        post_root_id_col = post_cols[0]
-                    else:
-                        print("  ⚠️ Error: Could not find root_id columns in CSV")
-                        return False
-
-                # Ensure strings
-                chunk[pre_root_id_col] = chunk[pre_root_id_col].astype(str)
-                chunk[post_root_id_col] = chunk[post_root_id_col].astype(str)
+                normalize_flywire_id_columns(
+                    chunk, [pre_root_id_col, post_root_id_col]
+                )
                 
                 # Fix short IDs if needed (FlyWire specific issue)
                 # Check first row of chunk
-                if len(chunk[pre_root_id_col].iloc[0]) == 9:
+                if (
+                    not chunk.empty
+                    and len(chunk[pre_root_id_col].iloc[0]) == 9
+                ):
                     chunk[pre_root_id_col] = '720575940' + chunk[pre_root_id_col]
                     chunk[post_root_id_col] = '720575940' + chunk[post_root_id_col]
                 
@@ -445,12 +477,12 @@ def update_neuron_post_counts(neuron_path, conn_path, save_csv_path=None):
         # Calculate post counts
         print("  Calculating post counts...")
         # Ensure bodyId_post is string
-        df_conn['bodyId_post'] = df_conn['bodyId_post'].astype(str)
+        normalize_flywire_id_columns(df_conn, ['bodyId_post'])
         post_counts = df_conn.groupby('bodyId_post')['weight'].sum()
         
         # Update df_neuron
         # Ensure bodyId is string
-        df_neuron['bodyId'] = df_neuron['bodyId'].astype(str)
+        normalize_flywire_id_columns(df_neuron, ['bodyId'])
         
         # Map counts
         print("  Mapping counts to neurons...")

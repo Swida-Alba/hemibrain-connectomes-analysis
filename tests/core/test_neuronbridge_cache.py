@@ -73,6 +73,28 @@ def test_image_parquet_schema_and_deduplication(tmp_path):
     ]
 
 
+def test_flywire_image_cache_preserves_large_body_ids(tmp_path):
+    cache = NeuronBridgeParquetCache(tmp_path)
+    body_id = "72057594037927937"
+    frame = pd.DataFrame([
+        {
+            "bodyId": body_id,
+            "score": 0.8,
+            "image_id": "em-1",
+            "lm_sample": "lm-1",
+            "match_type": "cds",
+            "dataset": "flywire_FAFB_v783",
+        }
+    ])
+
+    cache.save_image("lm-1", "cds", frame)
+    loaded = cache.load_image("lm-1", "cds")
+
+    assert loaded is not None
+    assert loaded.iloc[0]["bodyId"] == body_id
+    assert isinstance(loaded.iloc[0]["bodyId"], str)
+
+
 def test_id_parquet_reload_preserves_score_order(tmp_path):
     cache = NeuronBridgeParquetCache(tmp_path)
     cache.save_id(

@@ -59,6 +59,40 @@ except ImportError:
     from utils.flywire_readiness import is_fafb_dataset, require_flywire_skeleton_access
 
 try:
+    from .flywire_ids import (
+        body_id_to_api_int,
+        is_flywire_dataset,
+        normalize_flywire_body_id,
+        normalize_flywire_id_columns,
+    )
+except ImportError:
+    from flywire_ids import (
+        body_id_to_api_int,
+        is_flywire_dataset,
+        normalize_flywire_body_id,
+        normalize_flywire_id_columns,
+    )
+
+try:
+    from .flywire_mesh_cache import (
+        FLYWIRE_MESH_CACHE_SIMPLIFICATION,
+        FLYWIRE_MESH_CACHE_SOMA_RADIUS,
+        FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION,
+        FlyWireMeshCache,
+        flywire_mesh_cache_key,
+        parse_soma_position,
+    )
+except ImportError:
+    from flywire_mesh_cache import (
+        FLYWIRE_MESH_CACHE_SIMPLIFICATION,
+        FLYWIRE_MESH_CACHE_SOMA_RADIUS,
+        FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION,
+        FlyWireMeshCache,
+        flywire_mesh_cache_key,
+        parse_soma_position,
+    )
+
+try:
     from .visualization_options import default_analysis_skeleton_mesh_simplification
 except ImportError:
     from visualization_options import default_analysis_skeleton_mesh_simplification
@@ -102,16 +136,15 @@ POPULATION_STATS_SAMPLE = 3000
 # then borrows them from a version sibling (e.g. male-cns:v1.0 <- v0.9).
 MIN_POPULATION_STATS_SKELETONS = 300
 
-# Vectorization levels ("basis"). Every vector cache holds ONE level; the
-# basis is decided by the M2.1 level sweep (raw won: simplification adds no
-# discrimination). NeuPrint's shared visualization skeletons remain fixed at
-# the 90%-simplified level, while the shared raw skeleton namespace is
-# raw-only; raw vectors are persisted at fetch time in that namespace.
+# Vectorization level ("basis"). Every morphology vector cache is built from
+# the raw skeleton returned by the source API. Visualization simplification is
+# a render-time concern and never changes the on-disk skeleton representation.
+# ``VECTOR_BASIS_SIMP90`` remains as a compatibility label for older callers;
+# it is not a valid persisted skeleton-cache level anymore.
 VECTOR_BASIS_RAW = "raw"
 VECTOR_BASIS_SIMP90 = "simp90"
-SKELETON_CACHE_LEVEL = VECTOR_BASIS_SIMP90   # on-disk NeuPrint cache level
-SKELETON_DOWNSAMPLE_FACTOR = 10             # navis.downsample_neuron factor
-                                            # (keeps ~10% of nodes)
+SKELETON_CACHE_LEVEL = VECTOR_BASIS_SIMP90   # legacy compatibility label
+SKELETON_DOWNSAMPLE_FACTOR = 10             # legacy compatibility constant
 
 # Keep the online NeuPrint fetch policy shared by visualization and similarity
 # workflows.  The request is batched at the application boundary, while
@@ -129,6 +162,22 @@ NEUPRINT_FETCH_MAX_THREADS = 3
 def _dataset_folder(dataset: str) -> str:
     """Map a dataset name to its cache folder (hemibrain:v1.2.1 -> hemibrain_v1_2_1)."""
     return dataset.replace(":", "_").replace(".", "_")
+
+
+def _canonical_dataset_body_id(dataset: str, body_id):
+    """Keep FlyWire IDs exact while retaining NeuPrint's integer contract."""
+
+    if is_flywire_dataset(dataset):
+        return normalize_flywire_body_id(body_id)
+    return int(body_id)
+
+
+def _api_dataset_body_id(dataset: str, body_id) -> int:
+    """Convert a dataset body ID only at a numeric third-party API boundary."""
+
+    if is_flywire_dataset(dataset):
+        return body_id_to_api_int(body_id)
+    return int(body_id)
 
 
 def _has_local_dataset_presence(dataset: str, root: Path) -> bool:
@@ -561,7 +610,8 @@ def _import_visualizer():
 
 
 def _load_neuron_type_map(dataset: str, project_root: Optional[str] = None
-                          ) -> Tuple[Dict[int, str], Dict[int, str]]:
+                          ) -> Tuple[Dict[Union[int, str], str],
+                                     Dict[Union[int, str], str]]:
     """bodyId -> type / instance maps for a dataset.
 
     Uses the allneurons neuron table (fullest coverage), falling back to the
@@ -571,14 +621,32 @@ def _load_neuron_type_map(dataset: str, project_root: Optional[str] = None
     """
     root = Path(project_root) if project_root else Path(__file__).parent.parent
     folder = _dataset_folder(dataset)
-    type_map: Dict[int, str] = {}
-    instance_map: Dict[int, str] = {}
+    flywire = is_flywire_dataset(dataset)
+    type_map: Dict[Union[int, str], str] = {}
+    instance_map: Dict[Union[int, str], str] = {}
 
-    csv_path = root / "datasets" / folder / f"{folder}_allneurons_neuron_df.csv"
-    if csv_path.exists():
+    dataset_dir = root / "datasets" / folder
+    table_candidates = [
+        dataset_dir / f"{folder}_allneurons_neuron_df.parquet",
+        dataset_dir / f"{folder}_allneurons_neuron_df.csv",
+    ]
+    table_path = next((path for path in table_candidates if path.exists()), None)
+    if table_path is not None:
         try:
-            tdf = pd.read_csv(csv_path, usecols=["bodyId", "type", "instance"])
-            tdf["bodyId"] = tdf["bodyId"].astype(np.int64)
+            if table_path.suffix.lower() == ".parquet":
+                tdf = pd.read_parquet(
+                    table_path, columns=["bodyId", "type", "instance"]
+                )
+            else:
+                tdf = pd.read_csv(
+                    table_path,
+                    usecols=["bodyId", "type", "instance"],
+                    dtype={"bodyId": "string"} if flywire else None,
+                )
+            if flywire:
+                normalize_flywire_id_columns(tdf, ["bodyId"])
+            else:
+                tdf["bodyId"] = tdf["bodyId"].astype(np.int64)
             type_map = dict(zip(tdf["bodyId"], tdf["type"].fillna("").astype(str)))
             instance_map = dict(zip(tdf["bodyId"], tdf["instance"].fillna("").astype(str)))
             return type_map, instance_map
@@ -589,7 +657,10 @@ def _load_neuron_type_map(dataset: str, project_root: Optional[str] = None
     if index_path.exists() and _has_local_dataset_presence(dataset, root):
         try:
             idx_df = pd.read_parquet(index_path, columns=["bodyId", "type", "instance"])
-            idx_df["bodyId"] = idx_df["bodyId"].astype(np.int64)
+            if flywire:
+                normalize_flywire_id_columns(idx_df, ["bodyId"])
+            else:
+                idx_df["bodyId"] = idx_df["bodyId"].astype(np.int64)
             type_map = dict(zip(idx_df["bodyId"], idx_df["type"].fillna("").astype(str)))
             instance_map = dict(zip(idx_df["bodyId"], idx_df["instance"].fillna("").astype(str)))
         except Exception:
@@ -665,12 +736,11 @@ def _read_fafb_zip_skeleton(zfile: "zipfile.ZipFile",
 
 def _skeleton_folder_level(dataset: str,
                            project_root: Optional[str] = None) -> str:
-    """Simplification level of a dataset's on-disk skeleton cache.
+    """Read a legacy folder-level marker for compatibility only.
 
-    Reads the ``skeletons/.level`` marker ("raw" | "simp90"). A missing
-    marker means the cache predates the level marker and holds RAW
-    skeletons, which is also the default for datasets that never simplify
-    (FlyWire/BANC mesh caches).
+    New raw SWC cache paths do not use ``skeletons/.level``. Older vector
+    cache/build callers may still inspect the marker, so a missing marker
+    conservatively resolves to ``raw``.
     """
     root = Path(project_root) if project_root else Path(__file__).parent.parent
     marker = root / "cache" / _dataset_folder(dataset) / "skeletons" / ".level"
@@ -685,11 +755,11 @@ def _skeleton_folder_level(dataset: str,
 
 def _write_skeleton_level_marker(dataset: str,
                                  project_root: Optional[str] = None):
-    """Write the ``skeletons/.level`` marker (= the simplified cache level).
+    """Legacy marker writer retained for old integrations and tests.
 
-    Idempotent: once a folder is marked simplified it stays so; the marker
-    is never downgraded, so a partially-simplified migration cannot
-    silently revert to raw.
+    Production fetch/pull paths never call this function: raw skeletons are
+    represented by compressed SWC and have no folder-level simplification
+    marker.
     """
     root = Path(project_root) if project_root else Path(__file__).parent.parent
     marker = root / "cache" / _dataset_folder(dataset) / "skeletons" / ".level"
@@ -832,27 +902,48 @@ def _sorted_candidates(candidates: pd.DataFrame) -> pd.DataFrame:
 class SkeletonVectorCache:
     """Per-dataset cache of vectorized skeletons (parquet + meta.json).
 
-    ``raw_only=True`` creates the shared raw skeleton cache used by
+    ``raw_only=True`` creates the shared raw NeuPrint skeleton cache used by
     visualization and morphology comparison. Its files live below
-    ``cache/{dataset}/skeletons/raw_skeletons/`` and never overlap the
-    visualization cache's legacy simp90 pickles. The former
-    ``find_similar/raw_skeletons`` directory is read as a migration fallback.
+    ``cache/{dataset}/skeletons/raw_skeletons/``. ``representation="mesh"``
+    creates the separate FlyWire/FAFB prepared-mesh cache; it never writes
+    SWC and reads the former visualization mesh folder as a migration source.
     """
 
     def __init__(self, dataset: str, project_root: Optional[str] = None,
                  n_workers: int = 8, verbose: bool = True,
-                 raw_only: bool = False, raw_format: str = "pkl"):
+                 raw_only: bool = False, raw_format: str = "swc.gz",
+                 representation: Optional[str] = None):
         self.dataset = dataset
         self.project_root = Path(project_root) if project_root else Path(__file__).parent.parent
         self.n_workers = max(1, int(n_workers))
         self.verbose = verbose
         self.raw_only = bool(raw_only)
-        raw_format = str(raw_format or "pkl").strip().lower()
+        self.representation = str(representation or "").strip().lower()
+        if self.representation not in {"", "mesh", "skeleton"}:
+            raise ValueError("representation must be 'mesh', 'skeleton', or None")
+        if self.raw_only and self.representation == "mesh":
+            raise ValueError("raw_only cache cannot use mesh representation")
+        self.mesh_only = self.representation == "mesh"
+        self._flywire_ids = is_flywire_dataset(dataset)
+        # Raw skeleton caches are portable compressed SWC by default.  The
+        # legacy non-raw cache may still be explicitly opened as pickle for
+        # migration/mesh compatibility, but new raw callers converge here.
+        raw_format = str(raw_format or "swc.gz").strip().lower()
         if raw_format not in {"pkl", "swc.gz"}:
             raise ValueError("raw_format must be 'pkl' or 'swc.gz'")
         self.raw_format = raw_format
         folder = _dataset_folder(dataset)
-        if self.raw_only:
+        if self.mesh_only:
+            base = self.project_root / "cache" / folder
+            self.morph_dir = base / "find_similar" / "morphology"
+            mesh_key = flywire_mesh_cache_key(
+                FLYWIRE_MESH_CACHE_SIMPLIFICATION,
+                FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION,
+                FLYWIRE_MESH_CACHE_SOMA_RADIUS,
+            )
+            self.skeleton_dir = base / "meshes" / mesh_key
+            self.legacy_skeleton_dir = base / "skeletons" / mesh_key
+        elif self.raw_only:
             base = self.project_root / "cache" / folder
             self.morph_dir = base / "find_similar" / "morphology"
             self.skeleton_dir = base / "skeletons" / "raw_skeletons"
@@ -863,8 +954,18 @@ class SkeletonVectorCache:
             self.morph_dir = self.project_root / "cache" / folder / "morphology"
             self.skeleton_dir = self.project_root / "cache" / folder / "skeletons"
             self.legacy_skeleton_dir = None
-        self.parquet_path = self.morph_dir / "skeleton_vectors.parquet"
-        self.meta_path = self.morph_dir / "meta.json"
+        vector_name = "mesh_vectors.parquet" if self.mesh_only \
+            else "skeleton_vectors.parquet"
+        meta_name = "mesh_meta.json" if self.mesh_only else "meta.json"
+        self.parquet_path = self.morph_dir / vector_name
+        self.meta_path = self.morph_dir / meta_name
+
+    def _canonical_body_id(self, body_id):
+        """Canonical cache key: exact strings for FlyWire, ints for NeuPrint."""
+
+        if self._flywire_ids:
+            return normalize_flywire_body_id(body_id)
+        return int(body_id)
 
     # ------------------------------------------------------------------ paths
     def cache_exists(self) -> bool:
@@ -873,7 +974,8 @@ class SkeletonVectorCache:
     def _discover_skeleton_files(self) -> List[str]:
         """All cached skeleton/mesh files, including nested bulk folders."""
         directories = [self.skeleton_dir]
-        if self.raw_only and self.legacy_skeleton_dir is not None:
+        if (self.raw_only or self.mesh_only) \
+                and self.legacy_skeleton_dir is not None:
             directories.append(self.legacy_skeleton_dir)
         directories = [directory for directory in directories
                        if directory.exists()]
@@ -907,7 +1009,7 @@ class SkeletonVectorCache:
                 preferred[body_id] = path
         return sorted(str(path) for path in preferred.values())
 
-    def find_skeleton_file(self, body_id: int) -> Optional[Path]:
+    def find_skeleton_file(self, body_id: Union[int, str]) -> Optional[Path]:
         """Find a skeleton belonging to this cache namespace.
 
         The raw cache must never fall back to the shared simp90 pickle files.
@@ -915,8 +1017,8 @@ class SkeletonVectorCache:
         historical Find Similar raw files are accepted only as a migration
         fallback.
         """
-        body_id = int(body_id)
-        if self.raw_only:
+        body_id = self._canonical_body_id(body_id)
+        if self.raw_only or self.mesh_only:
             directories = [self.skeleton_dir]
             if self.legacy_skeleton_dir is not None:
                 directories.append(self.legacy_skeleton_dir)
@@ -943,9 +1045,16 @@ class SkeletonVectorCache:
             return None
         try:
             neuron = _load_cached_skeleton_file(path)
-            allowed = ("TreeNeuron",) if self.raw_only else ("TreeNeuron", "MeshNeuron")
+            if self.mesh_only:
+                allowed = ("MeshNeuron",)
+            elif self.raw_only:
+                allowed = ("TreeNeuron",)
+            else:
+                allowed = ("TreeNeuron", "MeshNeuron")
             if type(neuron).__name__ not in allowed:
                 return None
+            if self.mesh_only and self.skeleton_dir not in path.parents:
+                self.persist_skeletons({self._canonical_body_id(body_id): neuron})
             if (self.raw_only and self.raw_format == "swc.gz"
                     and (self.skeleton_dir not in path.parents
                          or not str(path).endswith(".swc.gz"))):
@@ -953,12 +1062,12 @@ class SkeletonVectorCache:
                 # pickle, to the canonical shared compressed-SWC namespace on
                 # first successful load. The old file is intentionally kept
                 # recoverable as a non-destructive fallback.
-                self.persist_skeletons({int(body_id): neuron})
+                self.persist_skeletons({self._canonical_body_id(body_id): neuron})
             return neuron
         except Exception:
             return None
 
-    def persist_skeletons(self, neurons: Dict[int, object]) -> int:
+    def persist_skeletons(self, neurons: Dict[Union[int, str], object]) -> int:
         """Persist neurons in this cache's skeleton namespace.
 
         Shared raw caches store the fetched TreeNeuron unchanged as portable
@@ -973,13 +1082,19 @@ class SkeletonVectorCache:
         written = 0
         for body_id, neuron in neurons.items():
             try:
+                body_id = self._canonical_body_id(body_id)
+                if self.mesh_only and _neuron_rep(neuron) != "mesh":
+                    continue
                 if self.raw_only and _neuron_rep(neuron) != "skeleton":
                     continue
-                if self.raw_only and self.raw_format == "swc.gz":
+                if self.mesh_only:
+                    with open(self.skeleton_dir / f"{body_id}.pkl", "wb") as handle:
+                        pickle.dump(neuron, handle)
+                elif self.raw_only and self.raw_format == "swc.gz":
                     _write_compressed_swc(
-                        self.skeleton_dir / f"{int(body_id)}.swc.gz", neuron)
+                        self.skeleton_dir / f"{body_id}.swc.gz", neuron)
                 else:
-                    with open(self.skeleton_dir / f"{int(body_id)}.pkl", "wb") as handle:
+                    with open(self.skeleton_dir / f"{body_id}.pkl", "wb") as handle:
                         pickle.dump(neuron, handle)
                 written += 1
             except Exception:
@@ -1034,15 +1149,20 @@ class SkeletonVectorCache:
         # FAFB v783: the healed bundle is the full skeleton source.
         use_bundle = False
         bundle_zip: Optional[str] = None
-        bundle_ids: List[int] = []
-        if is_fafb_dataset(self.dataset):
+        bundle_ids: List[Union[int, str]] = []
+        if not self.mesh_only and is_fafb_dataset(self.dataset):
             bundle_zip = _fafb_skeleton_zip_path(
                 self.dataset, str(self.project_root))
             if bundle_zip is not None:
                 import zipfile
                 with zipfile.ZipFile(bundle_zip, "r") as z:
                     bundle_ids = sorted(
-                        {int(n[:-4]) for n in z.namelist() if n.endswith(".swc")})
+                        {
+                            normalize_flywire_body_id(n[:-4])
+                            if self._flywire_ids else int(n[:-4])
+                            for n in z.namelist() if n.endswith(".swc")
+                        }
+                    )
                 use_bundle = True
 
         existing: Dict[int, dict] = {}
@@ -1062,8 +1182,10 @@ class SkeletonVectorCache:
                             "skeleton bundle.")
                         df_old = None
                 if df_old is not None:
-                    existing = {int(r["bodyId"]): r
-                                for r in df_old.to_dict("records")}
+                    existing = {
+                        self._canonical_body_id(r["bodyId"]): r
+                        for r in df_old.to_dict("records")
+                    }
             except Exception:
                 existing = {}
 
@@ -1082,11 +1204,18 @@ class SkeletonVectorCache:
         # Candidate skeletons not yet vectorized.
         if use_bundle:
             files: List[str] = []
-            pending = [int(b) for b in bundle_ids if int(b) not in existing]
+            pending = [
+                self._canonical_body_id(b)
+                for b in bundle_ids
+                if self._canonical_body_id(b) not in existing
+            ]
         else:
             files = self._discover_skeleton_files()
             files = [f for f in files if folder_level == basis]
-            pending = [f for f in files if _skeleton_body_id(f) not in existing]
+            pending = [
+                f for f in files
+                if self._canonical_body_id(_skeleton_body_id(f)) not in existing
+            ]
 
         # Optional on-demand fetch to extend coverage (cap applies).
         # fetch_skeleton_on_demand already vectorizes at fetch time (raw
@@ -1101,15 +1230,23 @@ class SkeletonVectorCache:
             ):
                 try:
                     idx_df = pd.read_parquet(index_path, columns=["bodyId"])
-                    index = [int(b) for b in idx_df["bodyId"].tolist()]
+                    index = (
+                        [normalize_flywire_body_id(b)
+                         for b in idx_df["bodyId"].tolist()]
+                        if self._flywire_ids else
+                        [int(b) for b in idx_df["bodyId"].tolist()]
+                    )
                 except Exception:
                     index = []
             if index:
-                have = {int(b) for b in list(existing)}
+                have = {self._canonical_body_id(b) for b in list(existing)}
                 if use_bundle:
                     have |= set(bundle_ids)
                 else:
-                    have |= {_skeleton_body_id(f) for f in files}
+                    have |= {
+                        self._canonical_body_id(_skeleton_body_id(f))
+                        for f in files
+                    }
                 missing = [b for b in index if b not in have]
                 fetched_map = fetch_skeletons_on_demand_batch(
                     self.dataset,
@@ -1117,8 +1254,8 @@ class SkeletonVectorCache:
                     project_root=str(self.project_root),
                     persist=True,
                     level=VECTOR_BASIS_RAW,
-                    raw_cache=self if self.raw_only else None,
-                    vector_cache=self if self.raw_only else None,
+                    raw_cache=self if (self.raw_only or self.mesh_only) else None,
+                    vector_cache=self if (self.raw_only or self.mesh_only) else None,
                 )
                 fetched_new = len(fetched_map)
             if fetched_new:
@@ -1129,16 +1266,26 @@ class SkeletonVectorCache:
                 # dropped by the merge below.
                 try:
                     df_old = pd.read_parquet(self.parquet_path)
-                    existing = {int(r["bodyId"]): r for r in df_old.to_dict("records")}
+                    existing = {
+                        self._canonical_body_id(r["bodyId"]): r
+                        for r in df_old.to_dict("records")
+                    }
                 except Exception:
                     pass
                 if use_bundle:
-                    pending = [int(b) for b in bundle_ids
-                               if int(b) not in existing]
+                    pending = [
+                        self._canonical_body_id(b)
+                        for b in bundle_ids
+                        if self._canonical_body_id(b) not in existing
+                    ]
                 else:
                     files = self._discover_skeleton_files()
                     files = [f for f in files if folder_level == basis]
-                    pending = [f for f in files if _skeleton_body_id(f) not in existing]
+                    pending = [
+                        f for f in files
+                        if self._canonical_body_id(_skeleton_body_id(f))
+                        not in existing
+                    ]
 
         rows = []
         if pending:
@@ -1195,13 +1342,16 @@ class SkeletonVectorCache:
         records = []
         for bid, rec in existing.items():
             row = {k: v for k, v in rec.items() if k not in ("type", "instance")}
-            row["bodyId"] = int(bid)
+            row["bodyId"] = self._canonical_body_id(bid)
             records.append(row)
         for row in rows:
             if row is None:
                 continue
             bid, morph_vals, pv_vals, row_rep = row
-            record = {"bodyId": bid, "rep": row_rep}
+            record = {
+                "bodyId": self._canonical_body_id(bid),
+                "rep": row_rep,
+            }
             for name, val in zip(MORPHOMETRIC_FEATURES, morph_vals):
                 record[name] = float(val)
             for i, val in enumerate(pv_vals):
@@ -1214,7 +1364,10 @@ class SkeletonVectorCache:
                              vector_basis=basis)
             return {"rows": 0, "new": 0, "fetched": 0}
 
-        df = pd.DataFrame(records).sort_values("bodyId").reset_index(drop=True)
+        df = pd.DataFrame(records)
+        if self._flywire_ids:
+            normalize_flywire_id_columns(df, ["bodyId"])
+        df = df.sort_values("bodyId").reset_index(drop=True)
 
         # Attach type/instance (used by type-level aggregation and result
         # reporting). The allneurons neuron table has the fullest bodyId ->
@@ -1288,6 +1441,8 @@ class SkeletonVectorCache:
         df = pd.read_parquet(self.parquet_path)
         if df.empty:
             return None
+        if self._flywire_ids:
+            normalize_flywire_id_columns(df, ["bodyId"])
         meta = self._load_meta() or {}
         raw = self._raw_matrix(df)
         mean = np.asarray(meta.get("mean") or raw.mean(axis=0), dtype=float)
@@ -1300,12 +1455,17 @@ class SkeletonVectorCache:
             dataset_rep = Counter(reps).most_common(1)[0][0]
         else:
             dataset_rep = _infer_dataset_rep(self.dataset, self.project_root)
+        body_ids = (
+            df["bodyId"].astype("string").to_numpy(dtype=object)
+            if self._flywire_ids else
+            df["bodyId"].astype(np.int64).to_numpy()
+        )
         return {
             "meta": meta,
             "df": df,
             "raw": raw,
             "X": X,
-            "bodyIds": df["bodyId"].astype(np.int64).to_numpy(),
+            "bodyIds": body_ids,
             "types": df.get("type", pd.Series([""] * len(df))).fillna("").astype(str).tolist(),
             "instances": df.get("instance", pd.Series([""] * len(df))).fillna("").astype(str).tolist(),
             "rep": reps,
@@ -1384,7 +1544,7 @@ class SkeletonVectorCache:
             for bid, vec, rep in records:
                 if self.raw_only and str(rep) != "skeleton":
                     continue
-                bid = int(bid)
+                bid = self._canonical_body_id(bid)
                 row = {"bodyId": bid, "rep": rep}
                 for i, name in enumerate(MORPHOMETRIC_FEATURES):
                     row[name] = float(vec[i])
@@ -1411,8 +1571,15 @@ class SkeletonVectorCache:
                 old = existing["df"]
                 keep_cols = [c for c in old.columns]
                 df_new = df_new[[c for c in keep_cols if c in df_new.columns]]
-                known = set(old["bodyId"].astype(np.int64))
-                df_new = df_new[~df_new["bodyId"].astype(np.int64).isin(known)]
+                if self._flywire_ids:
+                    normalize_flywire_id_columns(old, ["bodyId"])
+                    normalize_flywire_id_columns(df_new, ["bodyId"])
+                    known = set(old["bodyId"].tolist())
+                else:
+                    known = set(old["bodyId"].astype(np.int64))
+                df_new = df_new[
+                    ~df_new["bodyId"].isin(known)
+                ]
                 if df_new.empty:
                     return 0
                 df = pd.concat([old, df_new], ignore_index=True)
@@ -1479,14 +1646,17 @@ class SkeletonVectorCache:
         where ``reps`` carries each row's representation ('skeleton' |
         'mesh' | '').
         """
-        body_ids = [int(b) for b in body_ids]
+        body_ids = [self._canonical_body_id(b) for b in body_ids]
         data = self.load()
         known: Dict[int, int] = {}
         X = np.zeros((0, VECTOR_DIM))
         dataset_rep = ""
         basis = VECTOR_BASIS_RAW
         if data is not None:
-            known = {int(b): i for i, b in enumerate(data["bodyIds"])}
+            known = {
+                self._canonical_body_id(b): i
+                for i, b in enumerate(data["bodyIds"])
+            }
             X = data["X"]
             dataset_rep = data.get("dataset_rep", "")
             basis = ((data.get("meta") or {}).get("vector_basis")
@@ -1506,7 +1676,7 @@ class SkeletonVectorCache:
                 # (post-cleanup NeuPrint caches hold simp90 files while
                 # the basis is raw -> never vectorized here).
                 pkl = None
-                if (self.raw_only or
+                if (self.raw_only or self.mesh_only or
                         _skeleton_folder_level(
                             self.dataset, str(self.project_root)) == basis):
                     pkl = self.find_skeleton_file(bid)
@@ -1515,6 +1685,8 @@ class SkeletonVectorCache:
                         neuron = _load_cached_skeleton_file(pkl)
                         row_rep = _neuron_rep(neuron)
                         if self.raw_only and row_rep != "skeleton":
+                            continue
+                        if self.mesh_only and row_rep != "mesh":
                             continue
                         if dataset_rep and row_rep != dataset_rep:
                             continue  # different representation: never mix
@@ -1555,13 +1727,31 @@ def find_similar_raw_cache(dataset: str,
     )
 
 
+def find_similar_flywire_mesh_cache(
+        dataset: str,
+        project_root: Optional[str] = None,
+        n_workers: int = 8,
+        verbose: bool = True,
+        ) -> SkeletonVectorCache:
+    """Return the separate prepared-mesh/vector cache for FlyWire."""
+    if not is_flywire_dataset(dataset):
+        raise ValueError("FlyWire mesh cache requires a FlyWire/FAFB dataset")
+    return SkeletonVectorCache(
+        dataset,
+        project_root=project_root,
+        n_workers=n_workers,
+        verbose=verbose,
+        representation="mesh",
+    )
+
+
 def cache_fetched_skeleton_vectors(
         dataset: str, neurons, project_root: Optional[str] = None,
         vector_cache: Optional[SkeletonVectorCache] = None,
         progress_callback=None, progress_offset: int = 0,
         progress_total: Optional[int] = None, verbose: bool = False
         ) -> Dict[str, object]:
-    """Vectorize and persist freshly fetched raw skeletons synchronously.
+    """Vectorize and persist freshly fetched skeletons or FlyWire meshes.
 
     This is the cache transaction shared by the morphology batch fetcher and
     the visualizer's own NeuPrint batch loop.  The function returns only after
@@ -1597,10 +1787,16 @@ def cache_fetched_skeleton_vectors(
     failures = 0
     for index, (body_id, neuron) in enumerate(items, start=1):
         try:
-            if _neuron_rep(neuron) != "skeleton":
-                raise TypeError(f"expected TreeNeuron, got {type(neuron).__name__}")
+            rep = _neuron_rep(neuron)
+            if rep not in {"skeleton", "mesh"}:
+                raise TypeError(
+                    f"expected TreeNeuron or MeshNeuron, got {type(neuron).__name__}")
             _, vector = vectorize_neuron(neuron)
-            rows.append((int(body_id), vector, "skeleton"))
+            rows.append((
+                _canonical_dataset_body_id(dataset, body_id),
+                vector,
+                rep,
+            ))
         except Exception as exc:
             failures += 1
             if verbose:
@@ -1613,8 +1809,14 @@ def cache_fetched_skeleton_vectors(
     cached = 0
     cache_error = None
     if rows:
-        target = vector_cache or SkeletonVectorCache(
-            dataset, project_root=project_root, verbose=False)
+        if vector_cache is not None:
+            target = vector_cache
+        elif all(row[2] == "mesh" for row in rows):
+            target = find_similar_flywire_mesh_cache(
+                dataset, project_root=project_root, verbose=False)
+        else:
+            target = SkeletonVectorCache(
+                dataset, project_root=project_root, verbose=False)
         try:
             cached = int(target.append_vectors(
                 rows, vector_basis=VECTOR_BASIS_RAW))
@@ -1866,11 +2068,19 @@ def _fetch_neuprint_skeleton(dataset: str, body_id: int):
         return None
 
 
-def _fetch_cave_skeleton(dataset: str, body_id: int):
+def _fetch_cave_skeleton(dataset: str, body_id: int,
+                         project_root: Optional[str] = None,
+                         use_cache: bool = True):
     """Fetch one skeleton from a FlyWire/CAVE dataset."""
     from cave_data_fetcher import CAVEDataFetcher
-    fetcher = CAVEDataFetcher(dataset=_dataset_folder(dataset), verbose=False)
-    return fetcher.fetch_skeleton(body_id, use_cache=True)
+    fetcher = CAVEDataFetcher(
+        dataset=_dataset_folder(dataset), project_root=project_root,
+        verbose=False,
+    )
+    return fetcher.fetch_skeleton(
+        body_id_to_api_int(body_id), use_cache=use_cache,
+        simplify_mesh=0.0, denoise_twigs=None,
+    )
 
 
 def fetch_skeleton_on_demand(dataset: str, body_id: int,
@@ -1883,38 +2093,35 @@ def fetch_skeleton_on_demand(dataset: str, body_id: int,
     """Fetch a neuron skeleton if missing (reusing any cached file).
 
     NeuPrint datasets use ``neuprint.fetch_skeleton``; FlyWire/CAVE datasets
-    use ``CAVEDataFetcher.fetch_skeleton`` (which caches itself). Raw requests
-    persist the fetched neuron as portable
-    ``cache/{dataset}/skeletons/raw_skeletons/{body_id}.swc.gz`` so all
-    workflows share one source. ``persist=False`` remains a low-level
-    compatibility escape hatch for callers that explicitly request a
-    transient fetch; normal visualization, comparison, and Settings paths
-    always pass ``persist=True``.
+    use ``CAVEDataFetcher.fetch_skeleton`` (which caches itself). Every fetch
+    returns the RAW skeleton and uses the shared raw-skeleton namespace.
+    Persisted files are portable compressed SWC at
+    ``cache/{dataset}/skeletons/raw_skeletons/{body_id}.swc.gz``. The
+    visualization's ``fast``/``fine`` choice is applied later to an in-memory
+    copy and never changes this fetch/cache contract.
 
-    ``raw_cache`` optionally supplies the shared raw-skeleton namespace. When
-    omitted for a raw request, the shared cache is created automatically. The
-    legacy visualization simp90 cache is never used as a raw source.
+    ``persist=False`` remains a low-level compatibility escape hatch for
+    callers that explicitly request a transient skeleton; vectors may still
+    be appended because they are independent of raw-file persistence.
 
-    ``level`` selects the consumer's simplification level:
-
-    - ``"raw"`` (default): returns the RAW skeleton. With ``raw_cache`` it
-      reuses a persisted raw TreeNeuron; without it, raw is never served from
-      the shared visualization disk cache.
-    - ``"simp90"``: hits the simplified cache file when present.
+    ``level`` is retained for compatibility with older callers, but is
+    deliberately ignored after validation: even ``level="simp90"`` returns
+    and caches the raw skeleton. There is no fetch-level simplified cache.
 
     Every online fetch vectorizes the RAW skeleton immediately and persists
     the vector (basis ``VECTOR_BASIS_RAW``), so later comparisons reuse it.
     Raw TreeNeuron persistence is written to the shared cache when
     ``persist=True``.
     """
-    body_id = int(body_id)
+    body_id = _canonical_dataset_body_id(dataset, body_id)
     level = str(level).lower()
     if level not in (VECTOR_BASIS_RAW, VECTOR_BASIS_SIMP90):
         raise ValueError(f"Invalid level: {level} (raw|simp90)")
     root = Path(project_root) if project_root else Path(__file__).parent.parent
-    cache_dir = root / "cache" / _dataset_folder(dataset) / "skeletons"
 
-    if level == VECTOR_BASIS_RAW and raw_cache is None:
+    # Every fetch-level caller uses the same raw cache, regardless of the
+    # legacy level value supplied by an older visualization caller.
+    if raw_cache is None:
         try:
             raw_cache = find_similar_raw_cache(
                 dataset, project_root=str(root), verbose=False,
@@ -1922,7 +2129,7 @@ def fetch_skeleton_on_demand(dataset: str, body_id: int,
         except Exception:
             raw_cache = None
 
-    if raw_cache is not None and level == VECTOR_BASIS_RAW:
+    if raw_cache is not None:
         cached = raw_cache.load_skeleton(body_id)
         if cached is not None:
             # A raw-file hit should also populate the raw vector cache when
@@ -1933,26 +2140,23 @@ def fetch_skeleton_on_demand(dataset: str, body_id: int,
             )
             return cached
 
-    # The raw namespace was checked above when supplied.  Only simp90
-    # consumers may consult the shared visualization skeleton cache here;
-    # a raw request without a raw-cache hit must go to the server.
-    if level == VECTOR_BASIS_SIMP90:
-        existing = _find_skeleton_file(dataset, body_id, project_root=str(root))
-        if existing is not None:
-            try:
-                neuron = _load_cached_skeleton_file(existing)
-                if type(neuron).__name__ in ("TreeNeuron", "MeshNeuron"):
-                    return neuron
-            except Exception:
-                pass
-            # Unsupported/corrupt pickle: drop it and fetch fresh.
-            existing.unlink(missing_ok=True)
-
     dataset_l = dataset.lower()
     if any(k in dataset_l for k in ("flywire", "fafb", "banc")):
-        neuron = _fetch_cave_skeleton(dataset, body_id)
+        try:
+            neuron = _fetch_cave_skeleton(
+                dataset, body_id, project_root=str(root), use_cache=persist,
+            )
+        except TypeError as exc:
+            # Preserve older integrations that replaced the two-argument
+            # CAVE seam; production uses the project-root-aware raw path.
+            if not any(name in str(exc)
+                       for name in ("project_root", "use_cache")):
+                raise
+            neuron = _fetch_cave_skeleton(dataset, body_id)
     else:
-        neuron = _fetch_neuprint_skeleton(dataset, body_id)
+        neuron = _fetch_neuprint_skeleton(
+            dataset, _api_dataset_body_id(dataset, body_id)
+        )
 
     if neuron is None:
         return None
@@ -1964,21 +2168,8 @@ def fetch_skeleton_on_demand(dataset: str, body_id: int,
         vector_cache=vector_cache or raw_cache, verbose=False,
     )
 
-    if persist and raw_cache is not None and level == VECTOR_BASIS_RAW:
+    if persist and raw_cache is not None:
         raw_cache.persist_skeletons({body_id: neuron})
-    elif persist:
-        # Legacy visualization callers persist ONLY the simplified skeleton
-        # and mark the folder's level so level guards can enforce the
-        # invariant. Raw callers take the branch above.
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        with open(cache_dir / f"{body_id}.pkl", "wb") as f:
-            pickle.dump(_downsample_for_cache(neuron), f)
-        _write_skeleton_level_marker(dataset, str(root))
-        if level == VECTOR_BASIS_SIMP90:
-            try:
-                return _downsample_for_cache(neuron)
-            except Exception:
-                pass
     return neuron
 
 
@@ -1999,13 +2190,11 @@ def fetch_skeletons_on_demand_batch(
     """Fetch a set of skeletons through one cache-aware online phase.
 
     The NeuPrint path is deliberately shared by Find Similar, full-dataset
-    cache builds, and other non-visual callers.  It deduplicates the request,
-    loads any requested files from the appropriate cache namespace first,
-    fetches the remaining raw skeletons in bounded batches, vectorizes them,
-    and writes the selected cache in one persistence phase. ``raw`` requests
-    never read a simp90 pickle. Raw reads and writes use the shared raw cache;
-    an explicitly supplied ``raw_cache`` can provide an alternate compatible
-    namespace for integrations.
+    pulls, visualization, and other non-visual callers. It deduplicates the
+    request, loads raw files from the shared namespace first, fetches the
+    remaining raw skeletons in bounded batches, vectorizes them, and writes
+    raw ``.swc.gz`` files in one persistence phase. No fetch-level simplified
+    pickle or level marker is read or written.
 
     ``progress_callback(done, total, message)`` is optional and is called at
     batch boundaries.  The returned mapping is keyed by integer body ID and
@@ -2016,7 +2205,7 @@ def fetch_skeletons_on_demand_batch(
     if body_ids is not None:
         for body_id in body_ids:
             try:
-                bid = int(body_id)
+                bid = _canonical_dataset_body_id(dataset, body_id)
             except (TypeError, ValueError):
                 continue
             if bid not in seen:
@@ -2030,15 +2219,13 @@ def fetch_skeletons_on_demand_batch(
         return {}
 
     root = Path(project_root) if project_root else Path(__file__).parent.parent
-    cache_dir = root / "cache" / _dataset_folder(dataset) / "skeletons"
     loaded: Dict[int, object] = {}
     missing = []
     raw_lookup_cache = raw_cache
-    if level == VECTOR_BASIS_RAW and raw_lookup_cache is None:
-        # Every raw-skeleton caller, including visualization/statvis callers
-        # that do not explicitly request persistence, gets the same first
-        # lookup into the shared raw cache. The same cache is also the raw-file
-        # write target, so every raw caller converges on one namespace.
+    if raw_lookup_cache is None:
+        # Every caller gets the same first lookup into the shared raw cache.
+        # The same cache is also the raw-file write target, so every workflow
+        # converges on one namespace regardless of its render mode.
         try:
             raw_lookup_cache = find_similar_raw_cache(
                 dataset, project_root=str(root), verbose=False)
@@ -2047,31 +2234,16 @@ def fetch_skeletons_on_demand_batch(
         if raw_cache is None:
             raw_cache = raw_lookup_cache
 
-    if level == VECTOR_BASIS_RAW and raw_lookup_cache is not None:
+    if raw_lookup_cache is not None:
         for bid in requested:
             neuron = raw_lookup_cache.load_skeleton(bid)
             if neuron is None:
                 missing.append(bid)
             else:
                 loaded[bid] = neuron
-    # Only a simp90 consumer may use the shared visualization skeleton.  A
-    # A raw consumer without a usable shared raw-cache object must fetch raw;
-    # the shared visualization cache is simplified and is never a raw source.
-    elif level == VECTOR_BASIS_SIMP90:
-        for bid in requested:
-            existing = _find_skeleton_file(
-                dataset, bid, project_root=str(root))
-            if existing is None:
-                missing.append(bid)
-                continue
-            try:
-                neuron = _load_cached_skeleton_file(existing)
-                if type(neuron).__name__ not in ("TreeNeuron", "MeshNeuron"):
-                    raise TypeError(type(neuron).__name__)
-                loaded[bid] = neuron
-            except Exception:
-                missing.append(bid)
     else:
+        # If cache construction failed, still fetch online; persistence is
+        # best-effort and the in-memory result remains usable.
         missing = list(requested)
 
     if progress_callback:
@@ -2081,14 +2253,11 @@ def fetch_skeletons_on_demand_batch(
     if missing:
         dataset_l = dataset.lower()
         fetched_by_id: Dict[int, object] = {}
-        using_single_override = False
-
         if fetch_skeleton_on_demand is not _SINGLE_FETCH_IMPLEMENTATION:
             # Preserve an explicit singular-fetch override. This is useful
             # for offline clients and keeps downstream integrations that
             # monkeypatch the old public seam working while production uses
             # the batch API below.
-            using_single_override = True
             for bid in missing:
                 try:
                     neuron = fetch_skeleton_on_demand(
@@ -2113,7 +2282,9 @@ def fetch_skeletons_on_demand_batch(
                         neuron = fetch_skeleton_on_demand(
                             dataset, bid, project_root=str(root))
                 if neuron is not None:
-                    fetched_by_id[int(bid)] = neuron
+                    fetched_by_id[
+                        _canonical_dataset_body_id(dataset, bid)
+                    ] = neuron
             if progress_callback:
                 progress_callback(
                     len(loaded) + len(fetched_by_id), len(requested),
@@ -2125,13 +2296,18 @@ def fetch_skeletons_on_demand_batch(
             from cave_data_fetcher import CAVEDataFetcher
             fetcher = CAVEDataFetcher(
                 dataset=_dataset_folder(dataset), verbose=False)
-            neurons = fetcher.fetch_skeletons(missing, use_cache=True)
+            neurons = fetcher.fetch_skeletons(
+                [body_id_to_api_int(bid) for bid in missing],
+                use_cache=True, simplify_mesh=0.0, denoise_twigs=None,
+            )
             for neuron in neurons or []:
                 neuron_id = getattr(neuron, "id", None)
                 if neuron_id is None:
                     continue
                 try:
-                    fetched_by_id[int(neuron_id)] = neuron
+                    fetched_by_id[
+                        _canonical_dataset_body_id(dataset, neuron_id)
+                    ] = neuron
                 except (TypeError, ValueError):
                     continue
         else:
@@ -2171,7 +2347,9 @@ def fetch_skeletons_on_demand_batch(
                     if neuron_id is None and index < len(batch_ids):
                         neuron_id = batch_ids[index]
                     try:
-                        fetched_by_id[int(neuron_id)] = neuron
+                        fetched_by_id[
+                            _canonical_dataset_body_id(dataset, neuron_id)
+                        ] = neuron
                     except (TypeError, ValueError):
                         continue
                 if progress_callback:
@@ -2188,11 +2366,13 @@ def fetch_skeletons_on_demand_batch(
             try:
                 if not isinstance(neuron, navis.TreeNeuron):
                     neuron = navis.TreeNeuron(neuron)
-                neuron.id = int(fallback_id)
+                neuron.id = _api_dataset_body_id(dataset, fallback_id)
                 soma = getattr(neuron, "soma", None)
                 if soma is not None and hasattr(soma, "__len__") and len(soma) > 1:
                     neuron.soma = None
-                fetched_by_id[int(fallback_id)] = neuron
+                fetched_by_id[
+                    _canonical_dataset_body_id(dataset, fallback_id)
+                ] = neuron
             except Exception:
                 continue
 
@@ -2215,29 +2395,10 @@ def fetch_skeletons_on_demand_batch(
                 f"{vector_stats['cache_error']}"
             )
 
-        if persist and fetched_by_id and raw_cache is not None \
-                and level == VECTOR_BASIS_RAW:
+        if persist and fetched_by_id and raw_cache is not None:
             raw_cache.persist_skeletons(fetched_by_id)
-        elif persist and fetched_by_id and not using_single_override:
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            for bid, neuron in fetched_by_id.items():
-                try:
-                    with open(cache_dir / f"{int(bid)}.pkl", "wb") as handle:
-                        pickle.dump(_downsample_for_cache(neuron), handle)
-                except Exception:
-                    # A vector or an in-memory visualization should not fail
-                    # only because one optional disk write was unavailable.
-                    continue
-            if any(k not in dataset_l for k in ("flywire", "fafb", "banc")):
-                _write_skeleton_level_marker(dataset, str(root))
 
         loaded.update(fetched_by_id)
-        if level == VECTOR_BASIS_SIMP90:
-            for bid in list(fetched_by_id):
-                try:
-                    loaded[bid] = _downsample_for_cache(fetched_by_id[bid])
-                except Exception:
-                    pass
 
     if progress_callback:
         progress_callback(len(loaded), len(requested),
@@ -2250,25 +2411,20 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
                            max_workers: int = 8, limit: Optional[int] = None,
                            progress_callback=None, cancel_event=None,
                            verbose: bool = True,
-                           raw: bool = False, mode: Optional[str] = None,
+                           raw: bool = True, mode: Optional[str] = None,
                            raw_format: str = "swc.gz") -> Dict[str, object]:
     """Download every missing skeleton of a dataset to the local cache.
 
-    Mirrors the Settings-panel full dataset pull. ``mode`` is one of:
+    Mirrors the Settings-panel full dataset pull. Every pull fetches and
+    persists RAW skeletons in the shared
+    ``skeletons/raw_skeletons/{bodyId}.swc.gz`` namespace. Visualization
+    simplification modes (including ``fast``) are not pull modes.
 
-    - ``"raw"``: full raw TreeNeurons plus raw vectors in the shared dataset
-      skeleton cache. New bulk pulls default to portable ``.swc.gz`` files;
-      historical raw pickles remain readable.
-    - ``"fine"``: full raw TreeNeurons plus raw vectors in the shared dataset
-      skeleton cache. This is the prefetch option for 95% fine
-      visualization; the FAFB-style transform, tube mesh, and simplification
-      are deliberately performed after loading during visualization and are
-      never persisted as a mesh cache.
-    - ``"fast"``: the legacy shared 90%-simplified visualization cache.
-
-    ``raw=True`` remains a compatibility alias for ``mode="raw"``. NeuPrint
-    requests use bounded online batches; the FlyWire/CAVE fallback retains its
-    local-bundle behavior.
+    ``mode`` and ``raw`` remain compatibility parameters for older callers;
+    any accepted mode is normalized to ``"raw"``. NeuPrint requests use
+    bounded online batches; the FlyWire/CAVE fallback retains its local-bundle
+    behavior. ``raw_format`` is likewise retained but new pulls always use
+    compressed SWC.
     ``progress_callback(current, total, info)`` and
     ``cancel_event`` (threading.Event) drive the UI; ``limit`` bounds the
     download (tests / smoke runs). Returns a summary dict.
@@ -2284,62 +2440,74 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
 
     root = Path(project_root) if project_root else Path(__file__).parent.parent
     folder = _dataset_folder(dataset)
-    if mode is None:
-        mode = "raw" if raw else "fast"
-    mode = str(mode).strip().lower()
-    mode = {"raw_skeletons": "raw", "fine95": "fine",
-            "fine_skeletons": "fine", "simp90": "fast"}.get(mode, mode)
-    if mode not in {"raw", "fine", "fast"}:
-        raise ValueError("mode must be 'raw', 'fine', or 'fast'")
-    raw_mode = mode == "raw"
-    fine_mode = mode == "fine"
-    # Both the explicit raw pull and the fine-prefetch pull write the same
-    # portable raw TreeNeuron namespace. Fine is a rendering choice, not a
-    # second on-disk representation.
+    requested_mode = str(mode or "raw").strip().lower()
+    requested_mode = {
+        "raw_skeletons": "raw", "fine95": "fine",
+        "fine_skeletons": "fine", "simp90": "fast",
+    }.get(requested_mode, requested_mode)
+    if requested_mode not in {"raw", "fine", "fast"}:
+        raise ValueError("mode must be 'raw', 'fine', or 'fast' (compatibility only)")
+    # Pulling is representation-only. ``fast`` and ``fine`` are visualization
+    # simplification choices and must never select a different disk format.
+    mode = "raw"
     raw_cache = (find_similar_raw_cache(
         dataset, project_root=str(root), n_workers=max_workers,
-        verbose=verbose, raw_format=raw_format
-    ) if (raw_mode or fine_mode) else None)
-    if raw_mode or fine_mode:
-        skeleton_dir = raw_cache.skeleton_dir
-    else:
-        skeleton_dir = root / "cache" / folder / "skeletons"
+        verbose=verbose, raw_format="swc.gz"
+    ))
+    skeleton_dir = raw_cache.skeleton_dir
     skeleton_dir.mkdir(parents=True, exist_ok=True)
 
-    # Index of all bodyIds.
-    index: List[int] = []
-    csv_path = root / "datasets" / folder / f"{folder}_allneurons_neuron_df.csv"
-    if csv_path.exists():
+    # Index of all bodyIds. Read FlyWire IDs as strings before any operation
+    # that could route through pandas/Polars numeric inference.
+    index: List[Union[int, str]] = []
+    table_candidates = [
+        root / "datasets" / folder / f"{folder}_allneurons_neuron_df.parquet",
+        root / "datasets" / folder / f"{folder}_allneurons_neuron_df.csv",
+    ]
+    table_path = next((path for path in table_candidates if path.exists()), None)
+    if table_path is not None:
         try:
-            import polars as pl
-            index = pl.read_csv(csv_path, columns=["bodyId"])["bodyId"] \
-                .cast(pl.Int64).to_list()
+            if table_path.suffix.lower() == ".parquet":
+                index_frame = pd.read_parquet(table_path, columns=["bodyId"])
+            else:
+                index_frame = pd.read_csv(
+                    table_path,
+                    usecols=["bodyId"],
+                    dtype={"bodyId": "string"}
+                    if is_flywire_dataset(dataset) else None,
+                )
+            index = (
+                [normalize_flywire_body_id(b)
+                 for b in index_frame["bodyId"].tolist()]
+                if is_flywire_dataset(dataset) else
+                [int(b) for b in index_frame["bodyId"].tolist()]
+            )
         except Exception:
             index = []
     if not index:
         index_path = root / "neuron_indexes" / folder / "neuron_index.parquet"
         if index_path.exists() and _has_local_dataset_presence(dataset, root):
             try:
-                index = pd.read_parquet(index_path, columns=["bodyId"])["bodyId"] \
-                    .astype(np.int64).tolist()
+                index_frame = pd.read_parquet(index_path, columns=["bodyId"])
+                index = (
+                    [normalize_flywire_body_id(b)
+                     for b in index_frame["bodyId"].tolist()]
+                    if is_flywire_dataset(dataset) else
+                    [int(b) for b in index_frame["bodyId"].tolist()]
+                )
             except Exception:
                 index = []
 
-    if raw_mode or fine_mode:
-        # The raw cache has its own namespace below skeletons/.  Include the
-        # legacy Find Similar directory through the cache's migration-aware
-        # discovery helper so moving the cache does not trigger duplicate
-        # downloads.
-        existing_paths = [Path(path) for path in raw_cache._discover_skeleton_files()]
-    else:
-        # Fast mode uses the legacy simp90 pickles.  Do not count the shared
-        # raw .swc.gz files as fast-cache hits.
-        existing_paths = [path for path in skeleton_dir.rglob("*.pkl")
-                          if "raw_skeletons" not in path.parts]
+    # Only canonical raw files and migration-aware legacy raw files count as
+    # available. Visualization pickles in ``skeletons/`` are intentionally
+    # excluded because their simplification level is not trustworthy.
+    existing_paths = [Path(path) for path in raw_cache._discover_skeleton_files()]
     existing = set()
     for path in existing_paths:
         try:
-            existing.add(_skeleton_body_id(path))
+            existing.add(
+                _canonical_dataset_body_id(dataset, _skeleton_body_id(path))
+            )
         except (TypeError, ValueError):
             continue
 
@@ -2354,13 +2522,18 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
                 import zipfile
                 with zipfile.ZipFile(zip_path, "r") as z:
                     local_bundle_ids = {
-                        int(n[:-4]) for n in z.namelist() if n.endswith(".swc")
+                        _canonical_dataset_body_id(dataset, n[:-4])
+                        for n in z.namelist() if n.endswith(".swc")
                     }
             except Exception:
                 local_bundle_ids = set()
 
-    missing = [int(b) for b in index
-               if int(b) not in existing and int(b) not in local_bundle_ids]
+    missing = [
+        _canonical_dataset_body_id(dataset, b)
+        for b in index
+        if _canonical_dataset_body_id(dataset, b) not in existing
+        and _canonical_dataset_body_id(dataset, b) not in local_bundle_ids
+    ]
     if limit is not None:
         missing = missing[: int(limit)]
     total = len(missing)
@@ -2390,7 +2563,7 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
     # visualization and similarity workflows. Keep FlyWire's legacy worker
     # path below because its local-bundle/API fallback has per-neuron
     # cancellation semantics that are independent of NeuPrint's SWC API.
-    if not is_fafb_dataset(dataset) and 'flywire' not in dataset.lower():
+    if not is_flywire_dataset(dataset):
         if cancel_event.is_set():
             cancelled = True
         else:
@@ -2437,38 +2610,38 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
                   f"fetched, {errors} errors, cancelled={cancelled}")
         return summary
 
-    def _fetch_one(bid: int) -> bool:
+    def _fetch_one(bid: Union[int, str]) -> bool:
         if cancel_event.is_set():
             return False
         try:
             fetch_kwargs = {
                 "project_root": str(root),
                 "persist": True,
+                "level": VECTOR_BASIS_RAW,
             }
-            if raw_mode or fine_mode:
+            if raw_cache is not None:
                 fetch_kwargs.update({"raw_cache": raw_cache,
                                      "vector_cache": raw_cache})
             try:
                 nrn = fetch_skeleton_on_demand(dataset, bid, **fetch_kwargs)
             except TypeError as exc:
-                # Keep raw Download All compatible with older integrations
-                # that still expose the pre-namespace singular fetcher.
-                if not (raw_mode or fine_mode) or not any(
-                        k in str(exc) for k in ("raw_cache", "vector_cache")):
+                # Keep Download All compatible with older integrations that
+                # still expose the pre-namespace singular fetcher.
+                if not any(k in str(exc) for k in (
+                        "level", "raw_cache", "vector_cache")):
                     raise
                 nrn = fetch_skeleton_on_demand(
                     dataset, bid, project_root=str(root),
                     persist=True,
                 )
-            if (raw_mode or fine_mode) and nrn is not None \
-                    and raw_cache is not None:
+            if nrn is not None and raw_cache is not None:
                 try:
-                    raw_cache.persist_skeletons({int(bid): nrn})
+                    raw_cache.persist_skeletons({
+                        _canonical_dataset_body_id(dataset, bid): nrn
+                    })
                 except Exception:
                     pass
-            ok = nrn is not None and (
-                not (raw_mode or fine_mode) or _neuron_rep(nrn) == "skeleton"
-            )
+            ok = nrn is not None and _neuron_rep(nrn) == "skeleton"
         except Exception:
             ok = False
         with lock:
@@ -2629,6 +2802,16 @@ class MorphologyComparer:
         d = (self.dataset or "").lower()
         return any(k in d for k in ("flywire", "fafb", "banc"))
 
+    def _body_id(self, value):
+        """Return the comparison-layer body-ID representation."""
+
+        return _canonical_dataset_body_id(self.dataset, value)
+
+    def _body_ids(self, values):
+        """Canonicalize a body-ID iterable for this dataset."""
+
+        return [self._body_id(value) for value in values]
+
     def _resolved_candidate_source(self) -> str:
         if self.candidate_source != "auto":
             return self.candidate_source
@@ -2705,7 +2888,9 @@ class MorphologyComparer:
         if df is None or len(df) == 0:
             raise ValueError(f"Query '{self.query}' not found in {self.dataset}")
         out = df[["bodyId"]].copy()
-        out["bodyId"] = out["bodyId"].astype(np.int64)
+        out["bodyId"] = self._body_ids(out["bodyId"].tolist())
+        if not self._is_flywire():
+            out["bodyId"] = out["bodyId"].astype(np.int64)
         out["type"] = df.get("type", pd.Series([""] * len(df))).fillna("").astype(str)
         out["instance"] = df.get("instance", pd.Series([""] * len(df))).fillna("").astype(str)
         return out.reset_index(drop=True)
@@ -2795,8 +2980,8 @@ class MorphologyComparer:
             self._progress(2, CACHE_DIRECT_TOTAL_STEPS, "Loading vector cache")
             cache.ensure(fetch_missing=0)
             data = cache.load()
-            query_ids = [int(b) for b in query_df["bodyId"].tolist()]
-            cached_ids = (set(int(b) for b in data["bodyIds"])
+            query_ids = self._body_ids(query_df["bodyId"].tolist())
+            cached_ids = (set(self._body_ids(data["bodyIds"]))
                           if data is not None else set())
             missing_query = [bid for bid in query_ids if bid not in cached_ids]
             if missing_query:
@@ -2824,7 +3009,7 @@ class MorphologyComparer:
                         if _neuron_rep(neuron) != "skeleton":
                             continue
                         _, vec = vectorize_neuron(neuron)
-                        rows.append((int(bid), vec, "skeleton"))
+                        rows.append((self._body_id(bid), vec, "skeleton"))
                     except Exception:
                         continue
                 if rows:
@@ -2919,15 +3104,23 @@ class MorphologyComparer:
             else:
                 conn = conn.filter(pl.col("roi").is_in(pl.Series("roi_filter", roi_filter).implode()))
 
-        query_ids = [int(b) for b in query_df["bodyId"].tolist()]
-        q = pl.Series("q", query_ids, dtype=pl.Int64)
+        query_ids = self._body_ids(query_df["bodyId"].tolist())
+        id_dtype = pl.Utf8 if self._is_flywire() else pl.Int64
+        q = pl.Series("q", query_ids, dtype=id_dtype)
         # implode() marks the Series unambiguously as a single membership
         # collection (polars >=1.30 deprecates same-dtype scalar semantics).
         q_coll = q.implode()
-        conn = conn.with_columns([
-            pl.col("bodyId_pre").cast(pl.Int64, strict=False),
-            pl.col("bodyId_post").cast(pl.Int64, strict=False),
-        ]).drop_nulls(["bodyId_pre", "bodyId_post"])
+        if self._is_flywire():
+            conn = conn.with_columns([
+                pl.col("bodyId_pre").cast(pl.Utf8, strict=False),
+                pl.col("bodyId_post").cast(pl.Utf8, strict=False),
+            ])
+        else:
+            conn = conn.with_columns([
+                pl.col("bodyId_pre").cast(pl.Int64, strict=False),
+                pl.col("bodyId_post").cast(pl.Int64, strict=False),
+            ])
+        conn = conn.drop_nulls(["bodyId_pre", "bodyId_post"])
         conn = conn.filter(pl.col("weight") >= min_weight)
 
         up = conn.filter(pl.col("bodyId_post").is_in(q_coll))      # partners -> query
@@ -2974,7 +3167,7 @@ class MorphologyComparer:
         out["profile_similarity"] = out["shared_count"] / max_shared
         type_map, _ = _load_neuron_type_map(self.dataset, str(self.project_root))
         out["target_type"] = out["target_bodyId"].map(
-            lambda b: type_map.get(int(b), "")
+            lambda b: type_map.get(self._body_id(b), "")
         )
         return out
 
@@ -3125,7 +3318,7 @@ class MorphologyComparer:
         # The scoring pool: the sorted candidate list truncated to the cap.
         # Untyped candidates stay in — they are comparable neurons, their
         # rows just carry an empty target_type.
-        pool_ids = [int(b) for b in candidates["target_bodyId"].tolist()]
+        pool_ids = self._body_ids(candidates["target_bodyId"].tolist())
         pool_ids = pool_ids[: self.candidate_cap]
         n_screened = len(candidates)
         self._log(f"Step 3/6 — Selecting the scoring pool: top {len(pool_ids)} "
@@ -3134,22 +3327,22 @@ class MorphologyComparer:
                        f"Selecting top {len(pool_ids)} candidates for scoring")
 
         prof_by_id = {
-            int(b): float(v)
+            self._body_id(b): float(v)
             for b, v in zip(candidates["target_bodyId"], candidates["profile_similarity"])
             if np.isfinite(v)
         }
         roi_by_id = {
-            int(b): float(v)
+            self._body_id(b): float(v)
             for b, v in zip(candidates["target_bodyId"], candidates["roi_similarity"])
             if np.isfinite(v)
         }
 
         self._log("Step 4/6 — Loading & vectorizing skeletons")
         self._progress(4, PROFILE_FIRST_TOTAL_STEPS, "Loading & vectorizing skeletons")
-        query_ids = [int(b) for b in query_df["bodyId"].tolist()]
+        query_ids = self._body_ids(query_df["bodyId"].tolist())
 
         cache_data = cache.load()
-        cache_ids = (set(int(b) for b in cache_data["bodyIds"])
+        cache_ids = (set(self._body_ids(cache_data["bodyIds"]))
                      if cache_data is not None else set())
         cache_rep = cache_data.get("dataset_rep", "") if cache_data is not None else ""
         cache_basis = (((cache_data.get("meta") or {}).get("vector_basis")
@@ -3163,7 +3356,7 @@ class MorphologyComparer:
         all_load_ids = []
         seen_load_ids = set()
         for bid in query_ids + pool_ids:
-            bid = int(bid)
+            bid = self._body_id(bid)
             if bid not in seen_load_ids:
                 seen_load_ids.add(bid)
                 all_load_ids.append(bid)
@@ -3196,8 +3389,8 @@ class MorphologyComparer:
         ) if missing_ids else {}
 
         query_neurons = {
-            int(bid): fetched_all[int(bid)]
-            for bid in query_ids if int(bid) in fetched_all
+            self._body_id(bid): fetched_all[self._body_id(bid)]
+            for bid in query_ids if self._body_id(bid) in fetched_all
         }
 
         # The comparison's representation: the majority among the query
@@ -3205,10 +3398,10 @@ class MorphologyComparer:
         from collections import Counter
         known_q = []
         for bid in query_ids:
-            if int(bid) in cache_ids:
+            if self._body_id(bid) in cache_ids:
                 known_q.append(cache_rep)
-            elif int(bid) in query_neurons:
-                known_q.append(_neuron_rep(query_neurons[int(bid)]))
+            elif self._body_id(bid) in query_neurons:
+                known_q.append(_neuron_rep(query_neurons[self._body_id(bid)]))
         q_rep = Counter(r for r in known_q if r).most_common(1)[0][0] \
             if any(known_q) else ""
         if not q_rep:
@@ -3221,9 +3414,9 @@ class MorphologyComparer:
         # Filter only after q_rep is known so the representation guard remains
         # identical to the former query-then-pool implementation.
         pool_neurons = {
-            int(bid): fetched_all[int(bid)]
-            for bid in pool_ids if int(bid) in fetched_all
-            and (not q_rep or _neuron_rep(fetched_all[int(bid)]) == q_rep)
+            self._body_id(bid): fetched_all[self._body_id(bid)]
+            for bid in pool_ids if self._body_id(bid) in fetched_all
+            and (not q_rep or _neuron_rep(fetched_all[self._body_id(bid)]) == q_rep)
         }
         self._log(f"Profile-first: {len(pool_ids)} pool neurons, "
                   f"{len(pool_neurons)} skeletons fetched (transient)")
@@ -3232,13 +3425,13 @@ class MorphologyComparer:
         # fetcher normally appends these rows itself; this append is a
         # deduplicating compatibility path for singular-fetch overrides and
         # offline fixtures.  It also makes the subsequent snapshot complete.
-        fetched_vectors: List[Tuple[int, np.ndarray, str]] = []
+        fetched_vectors: List[Tuple[Union[int, str], np.ndarray, str]] = []
         for bid, neuron in fetched_all.items():
             try:
                 _, vec = vectorize_neuron(neuron)
                 rep = _neuron_rep(neuron)
                 if not q_rep or rep == q_rep:
-                    fetched_vectors.append((int(bid), vec, rep))
+                    fetched_vectors.append((self._body_id(bid), vec, rep))
             except Exception:
                 continue
         if fetched_vectors:
@@ -3255,7 +3448,7 @@ class MorphologyComparer:
             all_load_ids, compute_missing=True
         )
         cache_data = cache.load()
-        cache_ids = (set(int(b) for b in cache_data["bodyIds"])
+        cache_ids = (set(self._body_ids(cache_data["bodyIds"]))
                      if cache_data is not None else set())
         cache_rep = (cache_data.get("dataset_rep", "")
                      if cache_data is not None else "")
@@ -3266,16 +3459,16 @@ class MorphologyComparer:
         snapshot_rows = {}
         if cache_data is not None:
             snapshot_rows = {
-                int(bid): i for i, bid in enumerate(cache_data["bodyIds"])
+                self._body_id(bid): i for i, bid in enumerate(cache_data["bodyIds"])
             }
-        pre_rows = {int(bid): i for i, bid in enumerate(all_load_ids)}
+        pre_rows = {self._body_id(bid): i for i, bid in enumerate(all_load_ids)}
 
         def _snapshot_vectors(ids):
             vectors = np.full((len(ids), VECTOR_DIM), np.nan)
             mask = np.zeros(len(ids), dtype=bool)
             reps = [""] * len(ids)
             for i, bid in enumerate(ids):
-                bid = int(bid)
+                bid = self._body_id(bid)
                 row = snapshot_rows.get(bid)
                 if row is not None and cache_data is not None:
                     candidate = cache_data["X"][row]
@@ -3352,9 +3545,9 @@ class MorphologyComparer:
                 sd = all_rows.std(axis=0)
                 sd = np.where(sd <= 0, 1.0, sd)
 
-            cache_q = (np.array([int(b) in cache_ids for b in query_ids])
+            cache_q = (np.array([self._body_id(b) in cache_ids for b in query_ids])
                        & mask_q)
-            cache_c = (np.array([int(b) in cache_ids for b in pool_ids])
+            cache_c = (np.array([self._body_id(b) in cache_ids for b in pool_ids])
                        & mask_c)
             if using_cache_stats:
                 # Cache rows already use these stats; transform only the
@@ -3394,10 +3587,10 @@ class MorphologyComparer:
         )
         if cache_data is not None:
             id_to_type.update(
-                {int(b): t for b, t in zip(cache_data["bodyIds"], cache_data["types"])}
+                {self._body_id(b): t for b, t in zip(cache_data["bodyIds"], cache_data["types"])}
             )
             id_to_instance.update(
-                {int(b): i for b, i in zip(cache_data["bodyIds"], cache_data["instances"])}
+                {self._body_id(b): i for b, i in zip(cache_data["bodyIds"], cache_data["instances"])}
             )
         intra = float("nan")
         # Type queries are resolved to all members of the queried type. Use
@@ -3408,7 +3601,10 @@ class MorphologyComparer:
             query_ok = np.where(mask_q)[0]
             intra = self._intra_type_similarity(
                 query_type,
-                np.asarray([query_ids[i] for i in query_ok], dtype=np.int64),
+                np.asarray(
+                    [query_ids[i] for i in query_ok],
+                    dtype=object if self._is_flywire() else np.int64,
+                ),
                 [query_type for _ in query_ok],
                 X_q[query_ok],
                 self.metric,
@@ -3424,7 +3620,10 @@ class MorphologyComparer:
             ok = np.where(mask_q)[0]
             intra = self._intra_type_similarity(
                 query_type,
-                np.array([query_ids[i] for i in ok], dtype=np.int64),
+                np.array(
+                    [query_ids[i] for i in ok],
+                    dtype=object if self._is_flywire() else np.int64,
+                ),
                 [str(query_df["type"].iloc[i]).strip() if i < len(query_df) else ""
                  for i in ok],
                 X_q[ok], self.metric,
@@ -3439,7 +3638,7 @@ class MorphologyComparer:
             candidate_indices = [i for i, ok in enumerate(keep) if ok]
             query_indices = [i for i, ok in enumerate(mask_q) if ok]
             for query_i in query_indices:
-                q_bid = int(query_ids[query_i])
+                q_bid = self._body_id(query_ids[query_i])
                 raw_q_type = query_df["type"].iloc[query_i]
                 q_type = "" if pd.isna(raw_q_type) else str(raw_q_type).strip()
                 q_scores = np.full(len(pool_ids), np.nan)
@@ -3448,7 +3647,7 @@ class MorphologyComparer:
                         X_q[query_i], X_c[candidate_indices], self.metric
                     )
                 for candidate_i in range(len(pool_ids)):
-                    bid = int(pool_ids[candidate_i])
+                    bid = self._body_id(pool_ids[candidate_i])
                     if bid in query_ids_set:
                         continue
                     target_type = str(id_to_type.get(bid, "") or "").strip()
@@ -3474,7 +3673,7 @@ class MorphologyComparer:
             # Every pool candidate gets a row: comparable ones carry their
             # similarity, the rest a NaN (sorted last, never rendered).
             for i, bid in enumerate(pool_ids):
-                bid = int(bid)
+                bid = self._body_id(bid)
                 target_type = str(id_to_type.get(bid, "") or "").strip()
                 if bid in query_ids_set:
                     continue
@@ -3563,17 +3762,17 @@ class MorphologyComparer:
                        neurons: Optional[Dict[int, "navis.TreeNeuron"]] = None) -> pd.DataFrame:
         """Replace vector scores with NBLAST scores for the fetched candidates."""
         self._progress(5, PROFILE_FIRST_TOTAL_STEPS, "Refining scores with NBLAST")
-        query_ids = {int(b) for b in query_df["bodyId"].tolist()}
+        query_ids = set(self._body_ids(query_df["bodyId"].tolist()))
         # Type-level results also contain intra-type rows whose target
         # is another query member.  They are reference pairs, not candidates
         # for refinement; keep their vector similarity below.
         cand_ids = [
-            int(b) for b, s in zip(results["target_bodyId"],
-                                   results["similarity"])
-            if int(b) not in query_ids and pd.notna(s)
+            self._body_id(b) for b, s in zip(results["target_bodyId"],
+                                             results["similarity"])
+            if self._body_id(b) not in query_ids and pd.notna(s)
         ]
         query_dp = self._dotprops_for_ids(
-            [int(b) for b in query_df["bodyId"].tolist()], neurons=neurons
+            self._body_ids(query_df["bodyId"].tolist()), neurons=neurons
         )
         if not query_dp:
             self._log("NBLAST: query dotprops unavailable; keeping vector scores.")
@@ -3593,9 +3792,9 @@ class MorphologyComparer:
         # those rows into NaN during refinement.
         results["similarity"] = results.apply(
             lambda row: nblast_scores.get(
-                int(row["target_bodyId"]), row["similarity"]
+                self._body_id(row["target_bodyId"]), row["similarity"]
             ) if bool(row.get("is_same_type", False))
-            else nblast_scores.get(int(row["target_bodyId"]), np.nan),
+            else nblast_scores.get(self._body_id(row["target_bodyId"]), np.nan),
             axis=1,
         )
         results = results.sort_values(
@@ -3628,8 +3827,7 @@ class MorphologyComparer:
         total = float(pair.sum()) - n  # drop the diagonal (self = 1)
         return total / (n * (n - 1))
 
-    @staticmethod
-    def _type_member_count(type_name: str, id_to_type: Dict[int, str],
+    def _type_member_count(self, type_name: str, id_to_type: Dict[int, str],
                            query_df: Optional[pd.DataFrame] = None) -> int:
         """Count the bodyIds belonging to a type without relying on a cache.
 
@@ -3643,7 +3841,7 @@ class MorphologyComparer:
         for bid, t in (id_to_type or {}).items():
             if str(t or "").strip() == str(type_name or "").strip():
                 try:
-                    member_ids.add(int(bid))
+                    member_ids.add(self._body_id(bid))
                 except (TypeError, ValueError):
                     continue
         if query_df is not None and not query_df.empty:
@@ -3651,7 +3849,7 @@ class MorphologyComparer:
                 if str(row.get("type", "") or "").strip() != str(type_name or "").strip():
                     continue
                 try:
-                    member_ids.add(int(row.get("bodyId")))
+                    member_ids.add(self._body_id(row.get("bodyId")))
                 except (TypeError, ValueError):
                     continue
         return len(member_ids)
@@ -3682,7 +3880,7 @@ class MorphologyComparer:
             if i >= len(mask) or not bool(mask[i]):
                 continue
             try:
-                bid = int(row["bodyId"])
+                bid = self._body_id(row["bodyId"])
             except (KeyError, TypeError, ValueError):
                 continue
             raw_type = row.get("type", "")
@@ -3761,7 +3959,7 @@ class MorphologyComparer:
             if not values:
                 continue
             target_ids = {
-                int(row["target_bodyId"])
+                self._body_id(row["target_bodyId"])
                 for row in subrows
                 if row.get("target_bodyId") is not None
                 and pd.notna(row.get("similarity"))
@@ -3845,13 +4043,16 @@ class MorphologyComparer:
         if self.level == "type" and query_type:
             ordered = sorted(
                 rows,
-                key=lambda row: (_sim_key(row), int(row["source_bodyId"]),
-                                 int(row["target_bodyId"])),
+                key=lambda row: (
+                    _sim_key(row),
+                    self._body_id(row["source_bodyId"]),
+                    self._body_id(row["target_bodyId"]),
+                ),
             )
         else:
             ordered = sorted(
                 rows,
-                key=lambda row: (_sim_key(row), int(row["target_bodyId"])),
+                key=lambda row: (_sim_key(row), self._body_id(row["target_bodyId"])),
             )
         result = pd.DataFrame(ordered).reset_index(drop=True)
         result.insert(0, "rank", np.arange(1, len(result) + 1))
@@ -3871,7 +4072,7 @@ class MorphologyComparer:
         body_ids = data["bodyIds"]
         types = data["types"]
         X = data["X"]
-        query_ids = [int(b) for b in query_df["bodyId"].tolist()]
+        query_ids = self._body_ids(query_df["bodyId"].tolist())
         query_ids_set = set(query_ids)
         q_type = ""
         if len(query_df):
@@ -3900,7 +4101,7 @@ class MorphologyComparer:
             )
             query_pair_mask = np.zeros(len(query_df), dtype=bool)
             for query_i, qrow in enumerate(query_df.itertuples(index=False)):
-                q_bid = int(qrow.bodyId)
+                q_bid = self._body_id(qrow.bodyId)
                 q_idx = np.where(body_ids == q_bid)[0]
                 if not len(q_idx):
                     continue
@@ -3910,7 +4111,7 @@ class MorphologyComparer:
                 scores = similarity_matrix(q_vec, X, self.metric)
                 source_type = str(getattr(qrow, "type", q_type) or "").strip()
                 for i, bid in enumerate(body_ids):
-                    bid = int(bid)
+                    bid = self._body_id(bid)
                     if bid in query_ids_set:
                         continue
                     target_type = str(types[i] or "").strip()
@@ -3934,7 +4135,9 @@ class MorphologyComparer:
             # Multi-query support: each query row is ranked independently
             # (self and any co-query neurons excluded from its rows).
             for _, qrow in query_df.iterrows():
-                q_vec = self._vector_for_body_id(int(qrow["bodyId"]), body_ids, X)
+                q_vec = self._vector_for_body_id(
+                    self._body_id(qrow["bodyId"]), body_ids, X
+                )
                 if q_vec is None:
                     continue
                 scores = similarity_matrix(q_vec, X, self.metric)
@@ -3942,12 +4145,13 @@ class MorphologyComparer:
                     qrow["type"], body_ids, types, X, self.metric
                 )
                 for i, bid in enumerate(body_ids):
-                    if int(bid) in query_ids_set:
+                    bid = self._body_id(bid)
+                    if bid in query_ids_set:
                         continue
                     rows.append({
-                        "source_bodyId": int(qrow["bodyId"]),
+                        "source_bodyId": self._body_id(qrow["bodyId"]),
                         "source_type": str(qrow["type"] or "").strip(),
-                        "target_bodyId": int(bid),
+                        "target_bodyId": bid,
                         "target_type": str(types[i] or "").strip(),
                         "target_instance": data["instances"][i],
                         "similarity": float(scores[i]),
@@ -4051,12 +4255,14 @@ class MorphologyComparer:
         # Vector prefilter: top-K candidate bodyIds by cosine, excluding the
         # query itself. Same-type members stay in (they provide the intra-type
         # reference data at the type level).
-        query_ids = set(int(b) for b in query_df["bodyId"].tolist())
+        query_ids = set(self._body_ids(query_df["bodyId"].tolist()))
         candidate_mask = ~np.isin(body_ids, list(query_ids))
 
         scores = np.full(len(body_ids), -np.inf)
         for _, qrow in query_df.iterrows():
-            q_vec = self._vector_for_body_id(int(qrow["bodyId"]), body_ids, X)
+            q_vec = self._vector_for_body_id(
+                self._body_id(qrow["bodyId"]), body_ids, X
+            )
             if q_vec is None:
                 continue
             s = similarity_matrix(q_vec, X, "cosine")
@@ -4071,13 +4277,14 @@ class MorphologyComparer:
         # Build dotprops for query + candidates in one load/fetch phase
         # (in microns; NEVER cached). Splitting after construction prevents a
         # query/candidate overlap from triggering two online batch requests.
-        cand_ids = [int(body_ids[i]) for i in prefilter_idx]
+        cand_ids = [self._body_id(body_ids[i]) for i in prefilter_idx]
         all_dotprop_ids = []
         seen_dotprop_ids = set()
         for bid in list(query_ids) + cand_ids:
-            if int(bid) not in seen_dotprop_ids:
-                seen_dotprop_ids.add(int(bid))
-                all_dotprop_ids.append(int(bid))
+            bid = self._body_id(bid)
+            if bid not in seen_dotprop_ids:
+                seen_dotprop_ids.add(bid)
+                all_dotprop_ids.append(bid)
         all_dp = self._dotprops_for_ids(all_dotprop_ids)
         query_dp = {bid: all_dp.get(bid) for bid in query_ids
                     if all_dp.get(bid) is not None}
@@ -4093,8 +4300,10 @@ class MorphologyComparer:
 
         # Rank candidates by NBLAST score.
         ranked = sorted(nblast_scores.items(), key=lambda kv: (-kv[1], kv[0]))
-        id_to_type = {int(b): t for b, t in zip(body_ids, types)}
-        id_to_inst = {int(b): i for b, i in zip(body_ids, data["instances"])}
+        id_to_type = {self._body_id(b): t for b, t in zip(body_ids, types)}
+        id_to_inst = {
+            self._body_id(b): i for b, i in zip(body_ids, data["instances"])
+        }
 
         query_type = ""
         if len(query_df):
@@ -4126,7 +4335,7 @@ class MorphologyComparer:
                 continue
             t = str(id_to_type.get(bid, "") or "").strip()
             rows.append({
-                "source_bodyId": int(query_df["bodyId"].iloc[0]),
+                "source_bodyId": self._body_id(query_df["bodyId"].iloc[0]),
                 "source_type": query_type,
                 "target_bodyId": bid,
                 "target_type": t,
@@ -4143,7 +4352,7 @@ class MorphologyComparer:
             )
             query_pair_mask = np.zeros(len(query_df), dtype=bool)
             for query_i, qrow in enumerate(query_df.itertuples(index=False)):
-                q_idx = np.where(body_ids == int(qrow.bodyId))[0]
+                q_idx = np.where(body_ids == self._body_id(qrow.bodyId))[0]
                 if len(q_idx):
                     query_pair_X[query_i] = X[q_idx[0]]
                     query_pair_mask[query_i] = True
@@ -4297,7 +4506,8 @@ class MorphologyComparer:
                 dataset=_dataset_folder(self.dataset), verbose=False
             )
             neurons = fetcher.fetch_skeletons(
-                [int(b) for b in body_ids], use_cache=True
+                [int(b) for b in body_ids], use_cache=True,
+                simplify_mesh=0.0, denoise_twigs=None,
             )
             for n in neurons:
                 bid = getattr(n, "id", None)
@@ -4475,7 +4685,11 @@ class MorphologyComparer:
                     verbose=False,
                 ).parquet_path
             ),
-            "query_bodyIds": [int(b) for b in query_df["bodyId"].tolist()],
+            "query_bodyIds": (
+                self._body_ids(query_df["bodyId"].tolist())
+                if self._is_flywire()
+                else [int(b) for b in query_df["bodyId"].tolist()]
+            ),
             "n_bodyid_rows": len(bodyid_df),
             "n_type_rows": len(type_df),
             "primary_level": self.level,
@@ -4536,24 +4750,24 @@ class MorphologyComparer:
         if "similarity" in work.columns:
             work = work[work["similarity"].notna()]
 
-        layers: List[List[int]] = []
+        layers: List[List[Union[int, str]]] = []
         names: List[str] = []
 
-        def _body_ids(frame: pd.DataFrame) -> List[int]:
+        def _body_ids(frame: pd.DataFrame) -> List[Union[int, str]]:
             values = frame.get("bodyId", pd.Series(dtype=object)).tolist()
-            ids: List[int] = []
+            ids: List[Union[int, str]] = []
             for value in values:
                 try:
                     if pd.isna(value):
                         continue
-                    ids.append(int(value))
+                    ids.append(self._body_id(value))
                 except (TypeError, ValueError):
                     continue
             return list(dict.fromkeys(ids))
 
         def _body_id_in(value, ids: set) -> bool:
             try:
-                return not pd.isna(value) and int(value) in ids
+                return not pd.isna(value) and self._body_id(value) in ids
             except (TypeError, ValueError):
                 return False
 
@@ -4618,7 +4832,7 @@ class MorphologyComparer:
                 if rank >= self.visualize_top_n:
                     break
                 try:
-                    bid = int(row.get("target_bodyId"))
+                    bid = self._body_id(row.get("target_bodyId"))
                 except (TypeError, ValueError):
                     continue
                 if bid in query_body_ids:
@@ -4695,7 +4909,7 @@ class MorphologyComparer:
         except Exception as ex:
             self._log(f"3D visualization failed (search results kept): {ex}")
 
-    def _type_members_from_cache(self, type_name: str) -> List[int]:
+    def _type_members_from_cache(self, type_name: str) -> List[Union[int, str]]:
         """Member bodyIds of a type from the vector cache (capped to the
         per-type sample size so type-level renders stay bounded); falls back
         to the neuron table / index when the dataset has no vector cache."""
@@ -4704,15 +4918,17 @@ class MorphologyComparer:
                 self.dataset, project_root=str(self.project_root),
                 n_workers=self.n_workers, verbose=False,
             ).load()
-            members: List[int] = []
+            members: List[Union[int, str]] = []
             if data is not None:
-                members = [int(b) for b, t in zip(data["bodyIds"], data["types"])
+                members = [self._body_id(b)
+                           for b, t in zip(data["bodyIds"], data["types"])
                            if t == type_name]
             if not members:
                 type_map, _ = _load_neuron_type_map(
                     self.dataset, str(self.project_root)
                 )
-                members = [int(b) for b, t in type_map.items() if t == type_name]
+                members = [self._body_id(b) for b, t in type_map.items()
+                           if t == type_name]
             return members[: TYPE_MEMBER_SAMPLE_CAP]
         except Exception:
             return []
@@ -4742,15 +4958,29 @@ def enrich_homolog_results(
     if not needed.issubset(results_df.columns):
         return results_df
 
-    def _vectors(dataset: str, bids: List[int]) -> Tuple[np.ndarray, np.ndarray]:
+    def _vectors(
+        dataset: str, bids: List[Union[int, str]]
+    ) -> Tuple[np.ndarray, np.ndarray]:
         cache = find_similar_raw_cache(
             dataset, project_root=project_root, verbose=verbose
         )
         X, ok, _ = cache.vectors_for(bids, compute_missing=True)
         return X, ok
 
-    src_ids = [int(b) for b in results_df["source_bodyId"].tolist()]
-    tgt_ids = [int(b) for b in results_df["target_bodyId"].tolist()]
+    src_ids = [
+        _canonical_dataset_body_id(source_dataset, b)
+        for b in results_df["source_bodyId"].tolist()
+    ]
+    tgt_ids = [
+        _canonical_dataset_body_id(target_dataset, b)
+        for b in results_df["target_bodyId"].tolist()
+    ]
+    # Keep the public result frame aligned with the same dataset-aware
+    # representation used by the vector cache lookup.  NeuPrint retains its
+    # historical integer output; FlyWire/FAFB/BANC results are strings.
+    results_df = results_df.copy()
+    results_df["source_bodyId"] = src_ids
+    results_df["target_bodyId"] = tgt_ids
     try:
         src_X, src_ok = _vectors(source_dataset, src_ids)
         tgt_X, tgt_ok = _vectors(target_dataset, tgt_ids)
@@ -4771,7 +5001,6 @@ def enrich_homolog_results(
         cos[i] = float(similarity_matrix(q, t.reshape(1, -1), "cosine")[0])
         pears[i] = float(similarity_matrix(q, t.reshape(1, -1), "pearson")[0])
 
-    results_df = results_df.copy()
     results_df["morph_cosine"] = cos
     results_df["morph_pearson"] = pears
     return results_df

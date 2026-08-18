@@ -4594,7 +4594,9 @@ class NeuronBridgeFinder:
         if not os.path.exists(cache_path):
             return None
         try:
-            return pd.read_parquet(cache_path)
+            return self._get_parquet_cache().normalize_image(
+                pd.read_parquet(cache_path)
+            )
         except Exception as exc:
             warnings.warn(f"Failed to read NeuronBridge image cache {cache_path}: {exc}")
             return None
@@ -5516,7 +5518,11 @@ class NeuronBridgeFinder:
             ds_name = self._folder_to_dataset_name(ds_folder)
             for body_id in body_ids:
                 shared_results.append({
-                    "bodyId": str(body_id),
+                    "bodyId": (
+                        normalize_flywire_body_id(body_id)
+                        if is_flywire_dataset(ds_folder)
+                        else str(body_id)
+                    ),
                     "dataset": ds_name,
                     "dataset_folder": ds_folder,
                 })

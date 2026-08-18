@@ -30,6 +30,21 @@ from neuprint import *
 from neuprint import Client, fetch_neurons
 from tqdm import tqdm
 
+try:
+    from .flywire_ids import (
+        is_flywire_dataset,
+        normalize_flywire_body_id,
+        normalize_flywire_id_columns,
+        resolve_flywire_dataset_dir,
+    )
+except ImportError:
+    from flywire_ids import (
+        is_flywire_dataset,
+        normalize_flywire_body_id,
+        normalize_flywire_id_columns,
+        resolve_flywire_dataset_dir,
+    )
+
 # FlyWire client support removed
 
 
@@ -115,6 +130,20 @@ _NEURON_DF_CACHE = {}
 _DATASET_DOWNLOAD_LOCKS = {}
 _FAILED_DATASET_DOWNLOADS = set()
 
+
+def _flywire_neuron_table_path(dataset: str, project_root: str):
+    """Resolve a FlyWire-family neuron table without cross-dataset fallback."""
+
+    data_dir = resolve_flywire_dataset_dir(project_root, dataset)
+    if data_dir is None:
+        return None
+    dataset_name = data_dir.name
+    candidates = [
+        data_dir / f"{dataset_name}_allneurons_neuron_df.parquet",
+        data_dir / f"{dataset_name}_allneurons_neuron_df.csv",
+    ]
+    return next((str(path) for path in candidates if path.exists()), None)
+
 # Polars is a hard dependency (pinned in requirements.txt and imported at
 # module scope above); HAS_POLARS is kept for the legacy fast-loader preference.
 HAS_POLARS = True
@@ -153,7 +182,12 @@ def _load_dataframe_fast(file_path: str, dtype_overrides: dict = None) -> pd.Dat
             except OSError:
                 parquet_is_current = False
     if parquet_is_current:
-        return pd.read_parquet(parquet_path)
+        df = pd.read_parquet(parquet_path)
+        if dtype_overrides:
+            for col, dtype in dtype_overrides.items():
+                if col in df.columns:
+                    df[col] = df[col].astype(dtype)
+        return df
     
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
@@ -162,7 +196,19 @@ def _load_dataframe_fast(file_path: str, dtype_overrides: dict = None) -> pd.Dat
     if HAS_POLARS:
         try:
             # Polars reads CSV very fast
-            pl_df = pl.read_csv(file_path, infer_schema_length=10000)
+            schema_overrides = None
+            if dtype_overrides:
+                string_columns = {
+                    col: pl.Utf8
+                    for col, dtype in dtype_overrides.items()
+                    if dtype is str or str(dtype).lower() in {'string', 'object'}
+                }
+                schema_overrides = string_columns or None
+            pl_df = pl.read_csv(
+                file_path,
+                infer_schema_length=10000,
+                schema_overrides=schema_overrides,
+            )
             df = pl_df.to_pandas()
             # Apply dtype overrides after conversion
             if dtype_overrides:
@@ -209,18 +255,22 @@ def _get_cached_neuron_df(dataset: str, dataset_path_body: str):
     ndf = _load_dataframe_fast(neuron_csv)
     rdf = _load_dataframe_fast(roi_table)
     
-    # Ensure bodyId is int64 for neuprint/navis compatibility
-    # This prevents "No neurons matching the given criteria" errors
-    if 'bodyId' in ndf.columns:
-        try:
-            ndf['bodyId'] = ndf['bodyId'].astype('int64')
-        except (ValueError, TypeError):
-            pass  # Keep original type if conversion fails (e.g., FAFB has large IDs as strings)
-    if 'bodyId' in rdf.columns:
-        try:
-            rdf['bodyId'] = rdf['bodyId'].astype('int64')
-        except (ValueError, TypeError):
-            pass
+    if is_flywire_dataset(dataset):
+        normalize_flywire_id_columns(ndf, ['bodyId'])
+        normalize_flywire_id_columns(rdf, ['bodyId'])
+    else:
+        # NeuPrint's legacy client expects integer body IDs. This conversion
+        # is intentionally restricted to non-FlyWire datasets.
+        if 'bodyId' in ndf.columns:
+            try:
+                ndf['bodyId'] = ndf['bodyId'].astype('int64')
+            except (ValueError, TypeError):
+                pass
+        if 'bodyId' in rdf.columns:
+            try:
+                rdf['bodyId'] = rdf['bodyId'].astype('int64')
+            except (ValueError, TypeError):
+                pass
     
     # Cache in memory
     _NEURON_DF_CACHE[dataset] = {
@@ -398,9 +448,9 @@ def _get_neuron_df(dataset: str = 'male-cns:v0.9', verbose: bool = False) -> pd.
     # Normalize dataset name
     dataset_normalized = dataset.replace(':', '_').replace('.', '_')
     
-    # Special handling for FlyWire/FAFB/BANC
-    if 'flywire' in dataset.lower() or 'fafb' in dataset.lower() or 'banc' in dataset.lower():
-        cache_key = f"fafb_{dataset}"
+    # Special handling for the complete FlyWire family (FAFB and BANC).
+    if is_flywire_dataset(dataset):
+        cache_key = f"flywire_{dataset}"
         if cache_key in _NEURON_DF_CACHE:
             return _NEURON_DF_CACHE[cache_key]['neuron_df'].copy()
         
@@ -408,15 +458,13 @@ def _get_neuron_df(dataset: str = 'male-cns:v0.9', verbose: bool = False) -> pd.
         try:
             import fafb_utils
             project_root = os.path.dirname(os.path.dirname(__file__))
-            data_dir = os.path.join(project_root, "datasets", dataset_normalized)
-            if not os.path.exists(data_dir):
-                data_dir = os.path.join(project_root, "datasets", "flywire_FAFB_v783")
-            
-            if os.path.exists(data_dir):
-                neuron_file, _ = fafb_utils.prepare_fafb_data(data_dir)
+            data_dir = resolve_flywire_dataset_dir(project_root, dataset)
+
+            if data_dir is not None:
+                neuron_file, _ = fafb_utils.prepare_flywire_data(data_dir)
                 full_neuron_df = _load_dataframe_fast(neuron_file, dtype_overrides={'bodyId': str})
                 if 'bodyId' in full_neuron_df.columns:
-                    full_neuron_df['bodyId'] = full_neuron_df['bodyId'].astype(str)
+                    normalize_flywire_id_columns(full_neuron_df, ['bodyId'])
                 _NEURON_DF_CACHE[cache_key] = {'neuron_df': full_neuron_df}
                 return full_neuron_df.copy()
         except Exception as e:
@@ -1599,7 +1647,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
         nf = NeuronFilter(requiredNeurons)
         
         # Load the dataset first
-        if 'flywire' in dataset.lower() or 'fafb' in dataset.lower() or 'banc' in dataset.lower():
+        if is_flywire_dataset(dataset):
             ndf = _get_neuron_df(dataset, verbose=verbose)
         else:
             # Standard neuprint datasets
@@ -1628,26 +1676,21 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
     # Original getNeurons logic for legacy formats
     from neuprint import NeuronCriteria as NC
     
-    # Special handling for FlyWire/FAFB/BANC
-    if 'flywire' in dataset.lower() or 'fafb' in dataset.lower() or 'banc' in dataset.lower():
+    # Special handling for the complete FlyWire family (FAFB and BANC)
+    if is_flywire_dataset(dataset):
         # Try to use local data first
         try:
             import fafb_utils
             # Go up from src/ to project root, then into datasets/
             project_root = os.path.dirname(os.path.dirname(__file__))
-            
-            # Try to find dataset directory by name
-            data_dir = os.path.join(project_root, "datasets", dataset)
-            if not os.path.exists(data_dir):
-                # Fallback to default FAFB directory
-                data_dir = os.path.join(project_root, "datasets", "flywire_FAFB_v783")
-            
-            if os.path.exists(data_dir):
+            data_dir = resolve_flywire_dataset_dir(project_root, dataset)
+
+            if data_dir is not None:
                 # Use dataset name in message instead of hardcoded "FAFB"
                 dataset_short = dataset.split('_')[1] if '_' in dataset else dataset
                 
                 # Check if already cached
-                cache_key = f"fafb_{dataset}"
+                cache_key = f"flywire_{dataset}"
                 if cache_key in _NEURON_DF_CACHE:
                     if verbose:
                         print(f"Using cached {dataset_short} data...")
@@ -1655,14 +1698,13 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                 else:
                     if verbose:
                         print(f"Loading {dataset_short} data from {data_dir}...")
-                    neuron_file, _ = fafb_utils.prepare_fafb_data(data_dir)
+                    neuron_file, _ = fafb_utils.prepare_flywire_data(data_dir)
                     
                     # Load using fast loader (polars if available)
                     full_neuron_df = _load_dataframe_fast(neuron_file, dtype_overrides={'bodyId': str})
                     
                     # Ensure bodyId is string
-                    if 'bodyId' in full_neuron_df.columns:
-                        full_neuron_df['bodyId'] = full_neuron_df['bodyId'].astype(str)
+                    normalize_flywire_id_columns(full_neuron_df, ['bodyId'])
                     
                     # Cache for future calls
                     _NEURON_DF_CACHE[cache_key] = {'neuron_df': full_neuron_df}
@@ -5846,16 +5888,19 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
     ndf_complete = None
     if dataset and script_path:
         dataset_clean = dataset.replace(':', '_').replace('.', '_')
-        # Prioritize subdirectory structure
-        dataset_path = os.path.join(
-            script_path,
-            'datasets',
-            dataset_clean,
-            f"{dataset_clean}_allneurons_neuron_df.csv"
+        dataset_path = (
+            _flywire_neuron_table_path(dataset, script_path)
+            if is_flywire_dataset(dataset) else
+            os.path.join(
+                script_path,
+                'datasets',
+                dataset_clean,
+                f"{dataset_clean}_allneurons_neuron_df.csv"
+            )
         )
         
         # Enhanced dataset discovery logic
-        if not os.path.exists(dataset_path):
+        if dataset_path is not None and not os.path.exists(dataset_path):
             # Fallback: Try root datasets folder (legacy)
             legacy_path = os.path.join(
                 script_path,
@@ -5873,11 +5918,18 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
                     if candidates:
                         dataset_path = candidates[0]
 
-        if os.path.exists(dataset_path):
+        if dataset_path is not None and os.path.exists(dataset_path):
             use_local = True
             # Handle FlyWire/FAFB which might use string bodyIds
-            if 'flywire' in dataset.lower() or 'fafb' in dataset.lower():
-                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
+            if is_flywire_dataset(dataset):
+                if str(dataset_path).lower().endswith('.parquet'):
+                    ndf_complete = pd.read_parquet(dataset_path)
+                else:
+                    ndf_complete = pd.read_csv(
+                        dataset_path, header=0, index_col=None,
+                        dtype={'bodyId': 'string'}, low_memory=False
+                    )
+                normalize_flywire_id_columns(ndf_complete, ['bodyId'])
             else:
                 # Read robustly instead of hard-coding index_col=0: the
                 # coana-saved CSVs carry a leading unnamed index column, but
@@ -6611,10 +6663,14 @@ def Vis3S(data_df,**kwargs):
             import io
             
             if op.data_folder is None:
-                 project_root = os.path.dirname(os.path.dirname(__file__))
-                 op.data_folder = os.path.join(project_root, "datasets", "flywire_FAFB_v783")
-            
-            zip_path = fafb_utils.get_fafb_skeleton_zip(op.data_folder)
+                project_root = os.path.dirname(os.path.dirname(__file__))
+                resolved_dir = resolve_flywire_dataset_dir(project_root, op.dataset)
+                op.data_folder = str(resolved_dir) if resolved_dir is not None else None
+
+            zip_path = (
+                fafb_utils.get_fafb_skeleton_zip(op.data_folder)
+                if op.data_folder is not None else None
+            )
             if zip_path:
                 print(f"Loading skeletons from {zip_path}...")
                 try:
@@ -6981,14 +7037,32 @@ def _load_local_neuron_df_cached(dataset_path: str, is_fafb: bool) -> pl.DataFra
     if cached is not None:
         return cached
 
-    # Handle FlyWire/FAFB which might use string bodyIds.
+    # Handle FlyWire-family tables which might use exact string bodyIds.
     # NOTE: polars >= 1.0 removed the `dtypes=` kwarg (use schema_overrides).
-    if is_fafb:
-        ndf = pl.read_csv(dataset_path, infer_schema_length=10000, schema_overrides={'bodyId': pl.Utf8})
+    if str(dataset_path).lower().endswith('.parquet'):
+        ndf = pl.read_parquet(dataset_path)
+    elif is_fafb:
+        ndf = pl.read_csv(
+            dataset_path,
+            infer_schema_length=10000,
+            schema_overrides={'bodyId': pl.Utf8},
+        )
     else:
         ndf = pl.read_csv(dataset_path, infer_schema_length=10000)
         if 'bodyId' in ndf.columns:
             ndf = ndf.with_columns(pl.col('bodyId').cast(pl.Utf8))
+
+    if is_fafb and 'bodyId' in ndf.columns:
+        # A numeric parquet column may already have lost precision before it
+        # reached this reader, but any exact integer/string representation is
+        # still validated here.  Keep the Polars enrichment path consistent
+        # with the pandas reader instead of merely changing the display dtype.
+        ndf = ndf.with_columns(
+            pl.col('bodyId').map_elements(
+                lambda value: normalize_flywire_body_id(value, field='bodyId'),
+                return_dtype=pl.Utf8,
+            ).alias('bodyId')
+        )
 
     if len(_PL_NEURON_DF_CACHE) >= _PL_NEURON_DF_CACHE_MAX:
         _PL_NEURON_DF_CACHE.pop(next(iter(_PL_NEURON_DF_CACHE)))
@@ -7426,16 +7500,19 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
     ndf_complete = None
     if dataset and script_path:
         dataset_clean = dataset.replace(':', '_').replace('.', '_')
-        # Prioritize subdirectory structure
-        dataset_path = os.path.join(
-            script_path,
-            'datasets',
-            dataset_clean,
-            f"{dataset_clean}_allneurons_neuron_df.csv"
+        dataset_path = (
+            _flywire_neuron_table_path(dataset, script_path)
+            if is_flywire_dataset(dataset) else
+            os.path.join(
+                script_path,
+                'datasets',
+                dataset_clean,
+                f"{dataset_clean}_allneurons_neuron_df.csv"
+            )
         )
         
         # Enhanced dataset discovery logic
-        if not os.path.exists(dataset_path):
+        if dataset_path is not None and not os.path.exists(dataset_path):
             # Fallback: Try root datasets folder (legacy)
             legacy_path = os.path.join(
                 script_path,
@@ -7453,9 +7530,9 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
                     if candidates:
                         dataset_path = candidates[0]
 
-        if os.path.exists(dataset_path):
+        if dataset_path is not None and os.path.exists(dataset_path):
             use_local = True
-            is_fafb = 'flywire' in dataset.lower() or 'fafb' in dataset.lower()
+            is_fafb = is_flywire_dataset(dataset)
             ndf_complete = _load_local_neuron_df_cached(dataset_path, is_fafb)
     
     # Step 3: Build complete bodyId → std_label map from label_mapper
@@ -7608,6 +7685,15 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
         if 'post' not in conn_df.columns:
             conn_df = conn_df.with_columns(pl.lit(0).alias('post'))
     
+    # Normalize numeric columns at the engine boundary. Empty pandas frames
+    # (for example a no-cache FAFB fallback) can otherwise arrive as Polars
+    # String columns and make the ratio division fail even when the local
+    # connection weights are numeric.
+    if 'weight' in conn_df.columns:
+        conn_df = conn_df.with_columns(
+            pl.col('weight').cast(pl.Float64, strict=False).alias('weight')
+        )
+
     # Check if connection_ratio already exists and has valid values (from coana.py global calculation)
     # If so, preserve it to maintain the correct global ratio calculation
     has_valid_ratio = False
@@ -7630,6 +7716,12 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
             global_incoming_body_pl = global_incoming_body_pl.with_columns(
                 pl.col('bodyId_post').cast(pl.Utf8)
             )
+        if 'total_incoming_weight' in global_incoming_body_pl.columns:
+            global_incoming_body_pl = global_incoming_body_pl.with_columns(
+                pl.col('total_incoming_weight')
+                .cast(pl.Float64, strict=False)
+                .alias('total_incoming_weight')
+            )
     
     if not has_valid_ratio:
         # Only recalculate if ratio doesn't exist or has no valid values.
@@ -7649,6 +7741,7 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
         conn_df = conn_df.join(local_totals, on='bodyId_post', how='left')
         conn_df = conn_df.with_columns(
             pl.coalesce([pl.col('total_incoming_weight'), pl.col('_local_total')])
+            .cast(pl.Float64, strict=False)
             .alias('total_incoming_weight')
         ).drop('_local_total')
         
@@ -7747,6 +7840,12 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
             global_incoming_pl = global_incoming_pl.with_columns(
                 pl.col('type_post').cast(pl.Utf8, strict=False).alias('type_post')
             )
+        if 'total_incoming_weight' in global_incoming_pl.columns:
+            global_incoming_pl = global_incoming_pl.with_columns(
+                pl.col('total_incoming_weight')
+                .cast(pl.Float64, strict=False)
+                .alias('total_incoming_weight')
+            )
     
     # Check if nt_type exists
     has_nt_type = 'nt_type' in bodyid_pairs.columns
@@ -7842,6 +7941,7 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
         agg_df = agg_df.join(local_totals, on=group_post_col, how='left')
         agg_df = agg_df.with_columns(
             pl.coalesce([pl.col('total_incoming_weight'), pl.col('_local_total')])
+            .cast(pl.Float64, strict=False)
             .alias('total_incoming_weight')
         ).drop('_local_total')
         

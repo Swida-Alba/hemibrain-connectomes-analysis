@@ -25,6 +25,11 @@ from typing import Any, Iterable, Optional
 
 import pandas as pd
 
+try:
+    from .flywire_ids import is_flywire_dataset, normalize_flywire_body_id
+except ImportError:
+    from flywire_ids import is_flywire_dataset, normalize_flywire_body_id
+
 
 PARQUET_CACHE_VERSION = 1
 
@@ -151,7 +156,9 @@ class NeuronBridgeParquetCache:
         if not path.exists():
             return None
         try:
-            return pd.read_parquet(path)
+            # Normalize on read as well as on write so caches created before
+            # the string-ID contract cannot reintroduce numeric FlyWire IDs.
+            return self.normalize_image(pd.read_parquet(path))
         except Exception:
             return None
 
@@ -188,10 +195,12 @@ class NeuronBridgeParquetCache:
 
         if frame is None or frame.empty:
             return pd.DataFrame(columns=IMAGE_COLUMNS)
+        # Do not stringify bodyId before validating it: converting an unsafe
+        # FlyWire float to text first would preserve the already-rounded value
+        # and make the precision loss impossible to detect.
         frame = _empty_string_columns(
             frame,
             [
-                "bodyId",
                 "image_id",
                 "lm_sample",
                 "match_type",
@@ -202,12 +211,20 @@ class NeuronBridgeParquetCache:
                 "status",
             ],
         )
+        if "bodyId" not in frame.columns:
+            frame["bodyId"] = ""
+        frame["bodyId"] = [
+            normalize_flywire_body_id(value, field="bodyId")
+            if is_flywire_dataset(dataset)
+            else str(value)
+            for value, dataset in zip(frame["bodyId"], frame["dataset"])
+        ]
         if "score" not in frame.columns:
             frame["score"] = 0.0
         frame["score"] = pd.to_numeric(frame["score"], errors="coerce").fillna(0.0)
         # Body IDs are identifiers, not quantities.  Keeping them as strings
         # avoids integer inference changing between files or platforms.
-        frame["bodyId"] = frame["bodyId"].astype(str)
+        frame["bodyId"] = frame["bodyId"].astype("string")
         frame = frame[IMAGE_COLUMNS].copy()
 
         # A repeated API lookup can return the same edge more than once.  Keep

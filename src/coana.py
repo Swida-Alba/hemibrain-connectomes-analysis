@@ -395,6 +395,27 @@ def clear_fnc_cache(dataset: str = None):
 
 from core.fast_graph import FastGraph
 
+try:
+    from .flywire_ids import (
+        body_id_to_api_int,
+        dataset_folder,
+        is_banc_dataset,
+        is_flywire_dataset,
+        normalize_flywire_body_ids,
+        normalize_flywire_id_columns,
+        resolve_flywire_dataset_dir,
+    )
+except ImportError:
+    from flywire_ids import (
+        body_id_to_api_int,
+        dataset_folder,
+        is_banc_dataset,
+        is_flywire_dataset,
+        normalize_flywire_body_ids,
+        normalize_flywire_id_columns,
+        resolve_flywire_dataset_dir,
+    )
+
 
 def _format_decimal_for_folder(value):
     """Format a decimal number as a folder-safe string: '.' -> '_' and '-' -> 'neg'.
@@ -424,16 +445,29 @@ def load_flywire_merged_connections(conn_file: str) -> 'pd.DataFrame':
     if conn_file.endswith('.parquet'):
         df = pd.read_parquet(conn_file)
     else:
-        df = pd.read_csv(conn_file, dtype={'pre_root_id': str, 'post_root_id': str},
-                         encoding='utf-8')
+        df = pd.read_csv(
+            conn_file,
+            dtype={
+                'pre_root_id': 'string',
+                'post_root_id': 'string',
+                'bodyId_pre': 'string',
+                'bodyId_post': 'string',
+            },
+            encoding='utf-8',
+        )
     df = df.rename(columns={
         'pre_root_id': 'bodyId_pre',
         'post_root_id': 'bodyId_post',
         'syn_count': 'weight',
     })
-    for col in ('bodyId_pre', 'bodyId_post'):
-        if col in df.columns:
-            df[col] = df[col].astype(str)
+    normalize_flywire_id_columns(df, ['bodyId_pre', 'bodyId_post'])
+    if 'weight' in df.columns:
+        # Older converted FAFB tables may store synapse counts as strings.
+        # Keep the connection frame numeric so ratio/probability enrichment
+        # works even when the result is held only in memory.
+        df['weight'] = pd.to_numeric(df['weight'], errors='coerce')
+        df = df[df['weight'].notna()].copy()
+        df['weight'] = df['weight'].astype('int64')
     return df
 
 
@@ -970,7 +1004,7 @@ class FindNeuronConnection:
                     if df is not None:
                         f.write(','.join(df.columns) + '\n')
                 return
-                
+
             try:
                 import polars as pl
                 # If index is True, reset index to make it a column
@@ -1219,12 +1253,17 @@ class FindNeuronConnection:
         if cached is not None and cached[0] == mtime:
             return cached[1]
 
-        if is_fafb:
+        if str(dataset_path).lower().endswith('.parquet'):
+            ndf_complete = pd.read_parquet(dataset_path)
+            if is_fafb:
+                normalize_flywire_id_columns(ndf_complete, ['bodyId', 'root_id'])
+        elif is_fafb:
             ndf_complete = self._read_csv(
                 dataset_path, header=0, index_col=None,
-                dtype={'bodyId': str}, low_memory=False,
+                dtype={'bodyId': 'string', 'root_id': 'string'},
+                low_memory=False,
             )
-            ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
+            normalize_flywire_id_columns(ndf_complete, ['bodyId', 'root_id'])
         else:
             ndf_complete = self._read_csv(
                 dataset_path, header=0, index_col=0, low_memory=False,
@@ -1319,14 +1358,33 @@ class FindNeuronConnection:
         if self.client_type != 'flywire':
             return
 
-        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+        # ``use_cache=False`` is an online-only mode.  Do not inspect the
+        # persistent connection/index cache or prepare/read converted FlyWire
+        # tables here; FAFB connections are fetched through CAVE instead.
+        # BANC has no supported public CAVE path, so fail clearly rather than
+        # silently falling back to local data and violating the setting.
+        if not self.use_cache:
+            if is_banc_dataset(self.dataset):
+                raise RuntimeError(
+                    "use_cache=False requires an online FlyWire API fetch, "
+                    "but BANC does not support CAVE API connectivity."
+                )
+            self.force_API_fetching = True
+            self._vprint(
+                "use_cache=False: FlyWire is in online-only mode; "
+                "local connection/index caches will not be used.",
+                level='simple',
+            )
+            return
+
+        dataset_safe = dataset_folder(self.dataset)
         dataset_dir = os.path.join(self.script_path, 'datasets', dataset_safe)
         cache_dir = os.path.join(self.script_path, 'cache', dataset_safe)
         
         # If force_API_fetching is True for FAFB, we'll use CAVE API instead of local files
         # Note: BANC does not support force_API_fetching due to API access restrictions
         if self.force_API_fetching:
-            if 'BANC' in self.dataset:
+            if is_banc_dataset(self.dataset):
                 self._vprint("⚠️  force_API_fetching=True is not supported for BANC (API access restricted).", level='simple')
                 self._vprint("   Falling back to local data mode.", level='simple')
                 self.force_API_fetching = False
@@ -1335,7 +1393,7 @@ class FindNeuronConnection:
                 api_cache_dir = os.path.join(cache_dir, 'API_cache')
                 api_conn_cache = os.path.join(api_cache_dir, 'connections.parquet')
                 api_index_cache = os.path.join(api_cache_dir, 'neuron_index.parquet')
-                
+
                 if os.path.exists(api_conn_cache) and os.path.exists(api_index_cache):
                     self._vprint(f"Using API cache for {self.dataset}", level='simple')
                     return
@@ -1363,7 +1421,7 @@ class FindNeuronConnection:
                 self._vprint(f"Cache exists but invalid, will rebuild: {e}", level='simple')
         
         # Use the converter module to ensure data is ready
-        if 'BANC' in self.dataset:
+        if is_banc_dataset(self.dataset):
             success = BANC_file_converter.ensure_banc_data(self.dataset, dataset_dir)
         else:
             success = FAFB_file_converter.ensure_flywire_data(self.dataset, dataset_dir)
@@ -1441,6 +1499,8 @@ class FindNeuronConnection:
     When True, use CAVE API to fetch FlyWire data (FAFB only, requires CAVE token).
     This fetches connection data directly from the CAVE API instead of local files.
     When False (default), use local data from datasets/ folder via file converter.
+    ``use_cache=False`` also forces the online-only CAVE path and does not read
+    or write DROCAT/FlyWire cache files.
     Note: BANC currently does not support force_API_fetching due to API access restrictions.
     '''
     
@@ -1873,6 +1933,10 @@ class FindNeuronConnection:
     def __post_init__(self):
         if self.verbose is not None:
             self.verbose_mode = 'full' if self.verbose else 'silent'
+        # ``use_cache=False`` is an explicit online-only contract.  Do not
+        # allow the separate cache_only flag to turn that into an offline run.
+        if not self.use_cache:
+            self.cache_only = False
         # Normalize hemisphere_filter ('left'/'right'/'both'; accept aliases).
         _hf = str(self.hemisphere_filter or 'both').strip().lower()
         if _hf in ('l', 'left', 'lhs', 'left hemisphere'):
@@ -1924,7 +1988,7 @@ class FindNeuronConnection:
         self._vprint('Initializing...', level='full')
         
         # Auto-detect client_type from dataset if not explicitly set to flywire
-        if self.client_type == 'neuprint' and ('flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()):
+        if self.client_type == 'neuprint' and is_flywire_dataset(self.dataset):
             self.client_type = 'flywire'
             self._vprint(f"Auto-detected client_type='flywire' from dataset '{self.dataset}'", level='full')
 
@@ -1942,7 +2006,7 @@ class FindNeuronConnection:
             self._prepare_flywire_data()
         
         # Initialize cache folder early (needed for cache check)
-        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+        dataset_safe = dataset_folder(self.dataset)
         self._dataset_safe = dataset_safe
         
         # Initialize NeuPrint client if needed
@@ -1951,10 +2015,25 @@ class FindNeuronConnection:
             
             # Check if this dataset is already known to be cache-only (from previous instances)
             global _CACHE_ONLY_DATASETS
-            already_cache_only = self.dataset in _CACHE_ONLY_DATASETS and _CACHE_ONLY_DATASETS[self.dataset].get('cache_only', False)
+            already_cache_only = (
+                self.use_cache
+                and self.dataset in _CACHE_ONLY_DATASETS
+                and _CACHE_ONLY_DATASETS[self.dataset].get('cache_only', False)
+            )
             
             # Check cache status before attempting server connection
-            cache_status = self._check_cache_exists()
+            cache_status = (
+                self._check_cache_exists()
+                if self.use_cache
+                else {
+                    'has_connections': False,
+                    'has_neuron_index': False,
+                    'has_dataset': False,
+                    'is_usable': False,
+                    'connection_count': 0,
+                    'neuron_count': 0,
+                }
+            )
             
             if self.cache_only:
                 # User explicitly requested cache-only mode - no warning needed
@@ -2051,7 +2130,7 @@ class FindNeuronConnection:
         
         # Check module-level cache first
         global _FNC_CACHE
-        if dataset_safe in _FNC_CACHE:
+        if self.use_cache and dataset_safe in _FNC_CACHE:
             cache = _FNC_CACHE[dataset_safe]
             self._conn_df_cache = cache.get('conn_df')
             self._conn_index = cache.get('conn_index')
@@ -2132,6 +2211,8 @@ class FindNeuronConnection:
             set_default_client(self.client_hemibrain)
         except (RuntimeError, Exception) as e:
             # Server connection failed - check if we can fall back to cache
+            if not self.use_cache:
+                raise
             cache_status = self._check_cache_exists()
             if cache_status['is_usable']:
                 self._vprint(f"⚠️  Server connection failed: {e}", level='always')
@@ -2203,10 +2284,17 @@ class FindNeuronConnection:
             - 'connection_count': int - Number of connections in cache (0 if not loaded)
             - 'neuron_count': int - Number of neurons indexed (0 if not loaded)
         '''
-        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+        dataset_safe = dataset_folder(self.dataset)
         cache_folder = os.path.join(self.script_path, 'cache', dataset_safe)
         index_folder = os.path.join(self.script_path, 'neuron_indexes', dataset_safe)
-        datasets_folder = os.path.join(self.script_path, 'datasets', dataset_safe)
+        datasets_folder = (
+            resolve_flywire_dataset_dir(self.script_path, self.dataset)
+            if is_flywire_dataset(self.dataset)
+            else Path(self.script_path) / 'datasets' / dataset_safe
+        )
+        datasets_folder = Path(datasets_folder) if datasets_folder is not None else (
+            Path(self.script_path) / 'datasets' / dataset_safe
+        )
         
         conn_path = os.path.join(cache_folder, 'connections.parquet')
         batch_dir = os.path.join(cache_folder, '_batch_files')
@@ -2218,12 +2306,15 @@ class FindNeuronConnection:
                 if name.startswith('batch_') and name.endswith('.parquet')
             )
         index_path = os.path.join(index_folder, 'neuron_index.parquet')
-        neuron_csv = os.path.join(datasets_folder, f"{dataset_safe}_allneurons_neuron_df.csv")
+        neuron_tables = [
+            Path(datasets_folder) / f"{dataset_safe}_allneurons_neuron_df.parquet",
+            Path(datasets_folder) / f"{dataset_safe}_allneurons_neuron_df.csv",
+        ]
         
         connection_files = ([conn_path] if os.path.exists(conn_path) else []) + batch_files
         has_connections = bool(connection_files)
         has_neuron_index = os.path.exists(index_path)
-        has_dataset = os.path.exists(neuron_csv)
+        has_dataset = any(path.exists() for path in neuron_tables)
         
         # Cache is usable if we have connection data and neuron index
         is_usable = has_connections and has_neuron_index
@@ -2286,6 +2377,8 @@ class FindNeuronConnection:
         rebuilt when the authoritative index schema/rows change. It is
         independent of the frequently updated connection-progress state.
         """
+        if not self.use_cache:
+            return
         import polars as pl
 
         path = self._get_neuron_search_cache_path()
@@ -2321,6 +2414,8 @@ class FindNeuronConnection:
         upgrading to the persistent ``neuron_indexes/`` layout; the move is
         skipped when that location is already populated.
         '''
+        if not self.use_cache:
+            return
         cache_folder = getattr(self, 'cache_folder', None)
         if not cache_folder:
             return
@@ -2351,6 +2446,11 @@ class FindNeuronConnection:
         sidecar is deliberately transparent to callers: they still receive
         one pandas frame with the historical schema.
         """
+        if not self.use_cache:
+            return pd.DataFrame(columns=[
+                'bodyId', 'type', 'instance', 'post',
+                'downstream_complete', 'last_fetched', 'connection_count',
+            ])
         index_path = self._get_neuron_index_path()
         state_path = self._get_neuron_index_state_path()
         index_columns = [
@@ -2433,6 +2533,12 @@ class FindNeuronConnection:
 
     def _save_neuron_index_state(self, index_df):
         """Persist only cache-progress fields and refresh in-memory indexes."""
+        # ``use_cache=False`` must keep the complete fetch pipeline in memory.
+        # Guard the low-level writer as well as its callers because enrichment
+        # and legacy code paths can reach the state update helper directly.
+        if not self.use_cache:
+            return
+
         state_columns = [
             column for column in self._neuron_index_state_columns()
             if column in index_df.columns
@@ -2632,6 +2738,8 @@ class FindNeuronConnection:
 
     def _materialize_neuron_index(self, remove_state=True):
         """Fold progress state into the canonical index after a pull."""
+        if not self.use_cache:
+            return False
         frame = self._read_neuron_index_disk()
         if frame.empty or 'bodyId' not in frame.columns:
             return False
@@ -2660,6 +2768,8 @@ class FindNeuronConnection:
         with zeroed flags, atomically; the search sidecar is metadata-derived
         and stays untouched.
         """
+        if not self.use_cache:
+            return
         index_path = self._get_neuron_index_path()
         if not os.path.exists(index_path):
             return
@@ -2693,7 +2803,7 @@ class FindNeuronConnection:
             )
 
     @staticmethod
-    def _scan_connection_cache_file(path):
+    def _scan_connection_cache_file(path, normalize_ids=False):
         """Return a normalized lazy frame for one connection-cache parquet.
 
         Cache files written by older DROCAT versions do not all have the same
@@ -2711,9 +2821,25 @@ class FindNeuronConnection:
                 f'{sorted(missing)}'
             )
 
+        id_pre = (
+            pl.col('bodyId_pre').map_elements(
+                lambda value: normalize_flywire_body_id(value, field='bodyId_pre'),
+                return_dtype=pl.Utf8,
+            )
+            if normalize_ids else
+            pl.col('bodyId_pre').cast(pl.Utf8, strict=False)
+        ).alias('bodyId_pre')
+        id_post = (
+            pl.col('bodyId_post').map_elements(
+                lambda value: normalize_flywire_body_id(value, field='bodyId_post'),
+                return_dtype=pl.Utf8,
+            )
+            if normalize_ids else
+            pl.col('bodyId_post').cast(pl.Utf8, strict=False)
+        ).alias('bodyId_post')
         expressions = [
-            pl.col('bodyId_pre').cast(pl.Utf8, strict=False).alias('bodyId_pre'),
-            pl.col('bodyId_post').cast(pl.Utf8, strict=False).alias('bodyId_post'),
+            id_pre,
+            id_post,
             pl.col('weight').cast(pl.Int64, strict=False).alias('weight'),
         ]
         if 'roi' in names:
@@ -2748,6 +2874,22 @@ class FindNeuronConnection:
         --------
         pl.DataFrame : Connection database (Polars)
         '''
+        # Online-only runs must not even consult an in-memory frame that was
+        # populated by another cache-enabled instance. Their connection data
+        # is owned by the current API result instead.
+        if not self.use_cache:
+            empty = pl.DataFrame(schema={
+                'bodyId_pre': pl.Utf8,
+                'bodyId_post': pl.Utf8,
+                'weight': pl.Int64,
+                'roi': pl.Utf8,
+                'cached_date': pl.Utf8,
+            })
+            self._conn_df_cache = empty
+            self._conn_index = {}
+            self._conn_index_post = {}
+            return empty
+
         # Return cached DataFrame if available
         if self._conn_df_cache is not None and not force_reload:
             # Boundary normalization: the shared _FNC_CACHE stores pandas (for
@@ -2761,6 +2903,19 @@ class FindNeuronConnection:
                     self._conn_df_cache = pl.from_pandas(self._conn_df_cache)
                 except Exception:
                     pass
+            if is_flywire_dataset(self.dataset) and hasattr(
+                self._conn_df_cache, 'with_columns'
+            ):
+                self._conn_df_cache = self._conn_df_cache.with_columns([
+                    pl.col(column).map_elements(
+                        lambda value, _column=column: normalize_flywire_body_id(
+                            value, field=_column
+                        ),
+                        return_dtype=pl.Utf8,
+                    )
+                    for column in ('bodyId_pre', 'bodyId_post')
+                    if column in self._conn_df_cache.columns
+                ])
             return self._conn_df_cache
         
         db_path = self._get_connection_db_path()
@@ -2771,12 +2926,17 @@ class FindNeuronConnection:
             self._vprint(f'  ⏳ FlyWire cache missing. Importing from local merged-connections table...', level='full')
 
             csv_path = None
-            dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
-            dataset_dir = os.path.join(self.script_path, 'datasets', dataset_safe)
+            dataset_safe = dataset_folder(self.dataset)
+            dataset_dir = (
+                resolve_flywire_dataset_dir(self.script_path, self.dataset)
+                if is_flywire_dataset(self.dataset)
+                else Path(self.script_path) / 'datasets' / dataset_safe
+            )
 
             import glob
             for pattern in ("*_merged_connections.parquet", "*_merged_connections.csv"):
-                merged_candidates = glob.glob(os.path.join(dataset_dir, pattern))
+                merged_candidates = glob.glob(os.path.join(str(dataset_dir), pattern)) \
+                    if dataset_dir is not None else []
                 if merged_candidates:
                     csv_path = merged_candidates[0]
                     break
@@ -2792,7 +2952,15 @@ class FindNeuronConnection:
                     else:
                         df = pl.read_csv(
                             csv_path,
-                            infer_schema_length=10000
+                            infer_schema_length=10000,
+                            schema_overrides={
+                                'pre_root_id': pl.Utf8,
+                                'post_root_id': pl.Utf8,
+                                'bodyId_pre': pl.Utf8,
+                                'bodyId_post': pl.Utf8,
+                                'pre': pl.Utf8,
+                                'post': pl.Utf8,
+                            },
                         )
                     
                     column_map = {
@@ -2822,8 +2990,18 @@ class FindNeuronConnection:
                     df = df.select(cols_to_keep)
                     
                     df = df.with_columns([
-                        pl.col('bodyId_pre').cast(pl.Utf8),
-                        pl.col('bodyId_post').cast(pl.Utf8)
+                        pl.col('bodyId_pre').map_elements(
+                            lambda value: normalize_flywire_body_id(
+                                value, field='bodyId_pre'
+                            ),
+                            return_dtype=pl.Utf8,
+                        ),
+                        pl.col('bodyId_post').map_elements(
+                            lambda value: normalize_flywire_body_id(
+                                value, field='bodyId_post'
+                            ),
+                            return_dtype=pl.Utf8,
+                        ),
                     ])
                     
                     self._vprint(f'  ✓ Imported {len(df):,} connections from CSV', level='full')
@@ -2871,7 +3049,12 @@ class FindNeuronConnection:
                 failed_files = []
                 for path in cache_files:
                     try:
-                        lazy_frames.append(self._scan_connection_cache_file(path))
+                        lazy_frames.append(
+                            self._scan_connection_cache_file(
+                                path,
+                                normalize_ids=is_flywire_dataset(self.dataset),
+                            )
+                        )
                     except Exception as exc:
                         failed_files.append((path, exc))
                         self._vprint(
@@ -2914,12 +3097,67 @@ class FindNeuronConnection:
         self._conn_index_post = {}
         return self._conn_df_cache
 
+    def _get_cached_upstream_bodyids(self, force_reload: bool = False) -> set:
+        """Return upstream bodyIds present in the current connection cache.
+
+        The neuron index is a progress sidecar and can outlive, or briefly
+        get ahead of, ``connections.parquet``. Cache-resume decisions must
+        therefore consult the actual connection files as well as the
+        ``downstream_complete`` flag. This helper reads only the
+        ``bodyId_pre`` column when a fresh disk check is requested, avoiding a
+        full connection-table load during Settings-tab cache pulls.
+        """
+        if not self.use_cache:
+            return set()
+
+        if not force_reload and self._conn_index is not None:
+            return {str(body_id) for body_id in self._conn_index}
+
+        db_path = self._get_connection_db_path()
+        cache_dir = os.path.dirname(db_path)
+        batch_dir = os.path.join(cache_dir, '_batch_files')
+        cache_files = ([db_path] if os.path.exists(db_path) else [])
+        if os.path.isdir(batch_dir):
+            cache_files.extend(
+                os.path.join(batch_dir, name)
+                for name in sorted(os.listdir(batch_dir))
+                if name.startswith('batch_') and name.endswith('.parquet')
+            )
+
+        upstream_bodyids = set()
+        for path in cache_files:
+            try:
+                ids = (
+                    self._scan_connection_cache_file(
+                        path,
+                        normalize_ids=is_flywire_dataset(self.dataset),
+                    )
+                    .select('bodyId_pre')
+                    .filter(pl.col('bodyId_pre').is_not_null())
+                    .unique()
+                    .collect()
+                    .get_column('bodyId_pre')
+                    .to_list()
+                )
+                upstream_bodyids.update(str(body_id) for body_id in ids)
+            except Exception as exc:
+                self._vprint(
+                    f'  ⚠️ Could not inspect cached upstream IDs in {path}: {exc}',
+                    level='full',
+                )
+
+        return upstream_bodyids
+
     def _build_conn_index(self):
         '''
         Build dict indexes for O(1) connection lookups by bodyId_pre and bodyId_post.
         Called after loading connection database from disk.
         Also updates the module-level shared cache.
         '''
+        if not self.use_cache:
+            self._conn_index = {}
+            self._conn_index_post = {}
+            return
         if self._conn_df_cache is None or self._conn_df_cache.is_empty():
             self._conn_index = {}
             self._conn_index_post = {}
@@ -3006,6 +3244,8 @@ class FindNeuronConnection:
         Also updates the in-memory cache and rebuilds the index.
         Uses Polars for efficient writing.
         '''
+        if not self.use_cache:
+            return
         db_path = self._get_connection_db_path()
         try:
             import polars as pl
@@ -3043,6 +3283,9 @@ class FindNeuronConnection:
             Default False: prevents marking neurons complete when API might have failed.
         """
         import os
+
+        if not self.use_cache:
+            return
         
         if connections.empty:
             # FIXED: Only mark as complete if explicitly requested
@@ -3107,6 +3350,9 @@ class FindNeuronConnection:
         """
         import os
         import gc
+
+        if not self.use_cache:
+            return 0
         
         cache_dir = os.path.dirname(self._get_connection_db_path())
         batch_dir = os.path.join(cache_dir, '_batch_files')
@@ -3138,7 +3384,12 @@ class FindNeuronConnection:
             
             # Normalize each file independently so old main caches and new
             # batch files can be consolidated even when their schemas differ.
-            lazy_frames = [self._scan_connection_cache_file(f) for f in all_files]
+            lazy_frames = [
+                self._scan_connection_cache_file(
+                    f, normalize_ids=is_flywire_dataset(self.dataset)
+                )
+                for f in all_files
+            ]
             combined = pl.concat(lazy_frames, how='diagonal_relaxed')
             
             # Deduplicate if requested (using lazy API)
@@ -3226,6 +3477,17 @@ class FindNeuronConnection:
         --------
         pd.DataFrame : Neuron index
         '''
+        # Online-only runs must not read an existing local index, even when a
+        # previous cached run populated the module-level/shared state.
+        if not self.use_cache:
+            if getattr(self, '_neuron_index_cache', None) is None:
+                self._neuron_index_cache = pd.DataFrame(columns=[
+                    'bodyId', 'type', 'instance', 'post', 'downstream_complete',
+                    'last_fetched', 'connection_count'
+                ])
+            self._neuron_index_dict = {}
+            return self._neuron_index_cache
+
         # Return cached DataFrame if available
         if self._neuron_index_cache is not None and not force_reload:
             return self._neuron_index_cache
@@ -3233,16 +3495,38 @@ class FindNeuronConnection:
         self._migrate_legacy_index()
         index_path = self._get_neuron_index_path()
         
-        # Special handling for FlyWire: Import from enriched CSV if cache missing
-        if not os.path.exists(index_path) and self.client_type == 'flywire':
+        # Special handling for FlyWire: Import from enriched CSV if cache
+        # missing. A no-cache run may read an existing index, but must not
+        # materialize a new one as a side effect.
+        if (not os.path.exists(index_path)
+                and self.client_type == 'flywire'
+                and self.use_cache):
             self._vprint(f'  ⏳ FlyWire index missing. Importing from enriched CSV...', level='full')
-            dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
-            csv_path = os.path.join(self.script_path, 'datasets', dataset_safe, f"{dataset_safe}_allneurons_neuron_df.csv")
-            
-            if os.path.exists(csv_path):
+            dataset_safe = dataset_folder(self.dataset)
+            dataset_dir = resolve_flywire_dataset_dir(self.script_path, self.dataset)
+            metadata_candidates = []
+            if dataset_dir is not None:
+                metadata_candidates = [
+                    dataset_dir / f"{dataset_dir.name}_allneurons_neuron_df.parquet",
+                    dataset_dir / f"{dataset_dir.name}_allneurons_neuron_df.csv",
+                    dataset_dir / f"{dataset_safe}_allneurons_neuron_df.parquet",
+                    dataset_dir / f"{dataset_safe}_allneurons_neuron_df.csv",
+                ]
+            metadata_path = next(
+                (path for path in metadata_candidates if path.exists()), None
+            )
+
+            if metadata_path is not None:
                 try:
-                    self._vprint(f'  ⏳ Reading {csv_path}...', level='full')
-                    df = self._read_csv(csv_path, dtype={'bodyId': str})
+                    self._vprint(f'  ⏳ Reading {metadata_path}...', level='full')
+                    if str(metadata_path).endswith('.parquet'):
+                        df = pd.read_parquet(metadata_path)
+                    else:
+                        df = self._read_csv(
+                            str(metadata_path),
+                            dtype={'bodyId': 'string', 'root_id': 'string'},
+                        )
+                    normalize_flywire_id_columns(df, ['bodyId', 'root_id'])
                     
                     if 'instance' not in df.columns:
                         df['instance'] = df['name'] if 'name' in df.columns else ''
@@ -3276,6 +3560,8 @@ class FindNeuronConnection:
                 if file_size_mb > 1:
                     self._vprint(f'  ⏳ Loading neuron index ({file_size_mb:.1f} MB)...', level='full')
                 df = self._read_neuron_index_disk()
+                if is_flywire_dataset(self.dataset):
+                    normalize_flywire_id_columns(df, ['bodyId'])
                 
                 if file_size_mb > 1:
                     self._vprint(f'  ✓ Loaded index for {len(df):,} neurons', level='full')
@@ -3306,6 +3592,9 @@ class FindNeuronConnection:
         Called after loading neuron index from disk.
         Also updates the module-level shared cache.
         '''
+        if not self.use_cache:
+            self._neuron_index_dict = {}
+            return
         if self._neuron_index_cache is None or self._neuron_index_cache.empty:
             self._neuron_index_dict = {}
             return
@@ -3350,6 +3639,8 @@ class FindNeuronConnection:
         Save neuron index with compression.
         Also updates the in-memory cache and rebuilds the dict.
         '''
+        if not self.use_cache:
+            return
         index_path = self._get_neuron_index_path()
         try:
             os.makedirs(os.path.dirname(index_path), exist_ok=True)
@@ -3427,21 +3718,23 @@ class FindNeuronConnection:
             if neuron_data is not None:
                 is_complete = neuron_data.get('downstream_complete', False)
                 
-                # STRICTER VALIDATION: Even if marked complete, verify it has connections OR
-                # is explicitly marked with connection_count (to handle legitimate 0-connection neurons)
+                # A completion flag describes the connection cache as it
+                # existed when the neuron was fetched. It is not sufficient
+                # by itself after a cache rebuild/replacement. Validate it
+                # against the current connection table, while preserving the
+                # legitimate zero-outdegree case via connection_count == 0.
                 conn_count = neuron_data.get('connection_count', -1)
                 
-                # Trust the cache if:
-                # 1. Marked complete AND has connections in cache, OR
-                # 2. Marked complete AND explicitly has connection_count >= 0 (including 0)
                 if is_complete:
                     has_connections = bodyId in neurons_with_connections
-                    has_valid_count = conn_count >= 0
-                    
-                    if has_connections or has_valid_count:
+                    has_zero_connections = conn_count == 0
+
+                    # A positive historical count with no current rows is a
+                    # stale completion flag and must be refetched.
+                    if has_connections or has_zero_connections:
                         cached_upstream.append(bodyId)
                     else:
-                        # Marked complete but no connections and no valid count - needs refetch
+                        # Marked complete but absent from the current cache.
                         uncached_upstream.append(bodyId)
                 else:
                     uncached_upstream.append(bodyId)
@@ -3495,6 +3788,14 @@ class FindNeuronConnection:
         upstream_bodyIds : list
             List of upstream neurons that were queried (not marked as cached yet)
         '''
+        # ``use_cache=False`` is a read/write policy, not merely a read
+        # policy. The API fetch path still reaches this helper after it has
+        # obtained data, so guard here as well as at the caller. Without this
+        # guard an empty ``cache_folder`` can create a stray
+        # ``connections.parquet`` in the process working directory.
+        if not self.use_cache:
+            return
+
         is_new_empty = new_connections.is_empty() if hasattr(new_connections, 'is_empty') else new_connections.empty
         if is_new_empty:
             self._vprint(f'  📂 No connections found for {len(upstream_bodyIds)} neurons', level='full')
@@ -3558,6 +3859,13 @@ class FindNeuronConnection:
         downstream_bodyIds : list or None
             If None, marks neurons as downstream_complete. If list, doesn't mark as complete.
         '''
+        # Do not create or mutate cache state when caching is explicitly
+        # disabled. This method is called after API data has been enriched,
+        # so the initial cache-read decision is too early to protect this
+        # write path by itself.
+        if not self.use_cache:
+            return
+
         # If connections is empty, all neurons have 0 connections - that's valid, mark them all
         if connections.empty:
             self._update_neuron_index_after_fetch(connections, upstream_bodyIds, downstream_bodyIds)
@@ -3586,7 +3894,11 @@ class FindNeuronConnection:
         
         # Prefer the already materialized compact index.  This avoids opening
         # the large pulled CSV during every fetch/update call.
-        upstream_ids = {str(body_id) for body_id in upstream_bodyIds}
+        upstream_ids = set(
+            normalize_flywire_body_ids(upstream_bodyIds)
+            if is_flywire_dataset(self.dataset)
+            else [str(body_id) for body_id in upstream_bodyIds]
+        )
         if (
             not neuron_index.empty
             and {'bodyId', 'type', 'instance', 'post'}.issubset(neuron_index.columns)
@@ -3603,30 +3915,46 @@ class FindNeuronConnection:
         # Legacy/API-only caches may not have the compact metadata projection.
         # Keep the old fallback for those entries, but only fetch missing IDs.
         if missing_ids:
-            dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
-            dataset_path = os.path.join(
-                self.script_path,
-                'datasets',
-                dataset_safe,
-                f"{dataset_safe}_allneurons_neuron_df.csv"
+            dataset_safe = dataset_folder(self.dataset)
+            if is_flywire_dataset(self.dataset):
+                dataset_dir = resolve_flywire_dataset_dir(
+                    self.script_path, self.dataset
+                )
+            else:
+                dataset_dir = Path(self.script_path) / 'datasets' / dataset_safe
+            dataset_dir = Path(dataset_dir) if dataset_dir is not None else None
+            table_candidates = (
+                [
+                    dataset_dir / f"{dataset_dir.name}_allneurons_neuron_df.parquet",
+                    dataset_dir / f"{dataset_dir.name}_allneurons_neuron_df.csv",
+                    dataset_dir / f"{dataset_safe}_allneurons_neuron_df.parquet",
+                    dataset_dir / f"{dataset_safe}_allneurons_neuron_df.csv",
+                ]
+                if dataset_dir is not None else []
+            )
+            dataset_path = next(
+                (str(path) for path in table_candidates if path.exists()), None
             )
             self._vprint(f'  ⏳ Loading neuron metadata for {len(missing_ids):,} neurons...', level='full')
-            if os.path.exists(dataset_path):
-                is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
-                if is_fafb:
-                    ndf_complete = self._read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
-                else:
-                    ndf_complete = self._read_csv(dataset_path, header=0, index_col=0, low_memory=False)
-                if 'bodyId' in ndf_complete.columns:
-                    ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
+            if dataset_path is not None:
+                ndf_complete = self._load_local_neuron_df(
+                    dataset_path, is_flywire_dataset(self.dataset)
+                )
                 extra = ndf_complete[
-                    ndf_complete['bodyId'].isin(missing_ids)
+                    ndf_complete['bodyId'].astype(str).isin(missing_ids)
                 ][['bodyId', 'type', 'instance', 'post']].copy()
                 neuron_info = pd.concat([neuron_info, extra], ignore_index=True)
             else:
                 # Fallback: fetch from API (batched to bound query/response size)
                 try:
-                    ndf = self._fetch_neurons_batched(list(missing_ids))
+                    ndf = (
+                        self._fetch_flywire_neurons_online(
+                            list(missing_ids),
+                            columns=['bodyId', 'type', 'instance', 'post'],
+                        )
+                        if is_flywire_dataset(self.dataset)
+                        else self._fetch_neurons_batched(list(missing_ids))
+                    )
                     extra = ndf[['bodyId', 'type', 'instance', 'post']].copy()
                     neuron_info = pd.concat([neuron_info, extra], ignore_index=True)
                 except Exception:
@@ -3714,7 +4042,11 @@ class FindNeuronConnection:
         '''
         neuron_index = self._load_neuron_index()
         
-        bodyids_str = [str(x) for x in bodyids]
+        bodyids_str = (
+            normalize_flywire_body_ids(bodyids)
+            if is_flywire_dataset(self.dataset)
+            else [str(x) for x in bodyids]
+        )
         bodyids_set = set(bodyids_str)
 
         # The compact index already contains the metadata projection.  Reuse
@@ -3734,21 +4066,30 @@ class FindNeuronConnection:
         # Legacy/API-only caches retain the local table fallback, but only for
         # IDs absent from the compact index.
         if missing_ids:
-            dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
-            dataset_path = os.path.join(
-                self.script_path,
-                'datasets',
-                dataset_safe,
-                f"{dataset_safe}_allneurons_neuron_df.csv"
+            dataset_safe = dataset_folder(self.dataset)
+            if is_flywire_dataset(self.dataset):
+                dataset_dir = resolve_flywire_dataset_dir(
+                    self.script_path, self.dataset
+                )
+            else:
+                dataset_dir = Path(self.script_path) / 'datasets' / dataset_safe
+            dataset_dir = Path(dataset_dir) if dataset_dir is not None else None
+            table_candidates = (
+                [
+                    dataset_dir / f"{dataset_dir.name}_allneurons_neuron_df.parquet",
+                    dataset_dir / f"{dataset_dir.name}_allneurons_neuron_df.csv",
+                    dataset_dir / f"{dataset_safe}_allneurons_neuron_df.parquet",
+                    dataset_dir / f"{dataset_safe}_allneurons_neuron_df.csv",
+                ]
+                if dataset_dir is not None else []
             )
-            parquet_path = dataset_path.replace('.csv', '.parquet')
-            if os.path.exists(parquet_path):
-                ndf_complete = pd.read_parquet(parquet_path)
-                if 'bodyId' in ndf_complete.columns:
-                    ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
-            elif os.path.exists(dataset_path):
-                is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
-                ndf_complete = self._load_local_neuron_df(dataset_path, is_fafb)
+            dataset_path = next(
+                (str(path) for path in table_candidates if path.exists()), None
+            )
+            if dataset_path is not None:
+                ndf_complete = self._load_local_neuron_df(
+                    dataset_path, is_flywire_dataset(self.dataset)
+                )
             else:
                 ndf_complete = pd.DataFrame(columns=['bodyId', 'type', 'instance', 'post'])
             if not ndf_complete.empty and 'bodyId' in ndf_complete.columns:
@@ -3830,59 +4171,97 @@ class FindNeuronConnection:
         
         self._vprint(f'  ⏳ Enriching {len(conn_df):,} connections with neuron info...', level='full')
         # Get unique bodyIds that need enrichment
-        all_bodyids = list(set(conn_df['bodyId_pre'].tolist() + conn_df['bodyId_post'].tolist()))
-        
-        # Load from complete dataset (includes type=None neurons)
-        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
-        dataset_path = os.path.join(
-            self.script_path,
-            'datasets',
-            dataset_safe,
-            f"{dataset_safe}_allneurons_neuron_df.csv"
+        all_bodyids = list(
+            set(
+                normalize_flywire_body_ids(
+                    conn_df['bodyId_pre'].tolist()
+                    + conn_df['bodyId_post'].tolist()
+                )
+                if is_flywire_dataset(self.dataset) else
+                [str(body_id) for body_id in
+                 conn_df['bodyId_pre'].tolist()
+                 + conn_df['bodyId_post'].tolist()]
+            )
         )
         
-        # Check for dataset in subfolder (common for FlyWire/FAFB)
-        if not os.path.exists(dataset_path):
-            # Fallback for legacy or different naming
-            subfolder_path = os.path.join(
-                self.script_path,
-                'datasets',
-                self.dataset,
-                f"{self.dataset}_allneurons_neuron_df.csv"
+        # Load from complete dataset (includes type=None neurons)
+        is_flywire = is_flywire_dataset(self.dataset)
+        dataset_safe = dataset_folder(self.dataset)
+        if is_flywire:
+            dataset_dir = resolve_flywire_dataset_dir(
+                self.script_path, self.dataset
             )
-            if os.path.exists(subfolder_path):
-                dataset_path = subfolder_path
-        
-        if not os.path.exists(dataset_path):
-            # Fallback: fetch from API
-            self._vprint(f'  ⚠️ Warning: Local neuron table not found, fetching from API...', level='full')
-            neuron_df = self._fetch_neurons_local_or_api(all_bodyids, columns=['bodyId', 'type', 'instance'])
         else:
-            # Load complete dataset from CSV via the mtime-aware instance
-            # cache. Enrichment runs on EVERY connection fetch (each path
-            # layer, FindDirect, ...); re-reading the multi-MB neuron CSV
-            # from disk each time was a major hot path.
-            is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
-            ndf_complete = self._load_local_neuron_df(dataset_path, is_fafb)
+            dataset_dir = Path(self.script_path) / 'datasets' / dataset_safe
+        dataset_dir = Path(dataset_dir) if dataset_dir is not None else None
+        table_candidates = (
+            [
+                dataset_dir / f"{dataset_dir.name}_allneurons_neuron_df.parquet",
+                dataset_dir / f"{dataset_dir.name}_allneurons_neuron_df.csv",
+                dataset_dir / f"{dataset_safe}_allneurons_neuron_df.parquet",
+                dataset_dir / f"{dataset_safe}_allneurons_neuron_df.csv",
+            ]
+            if dataset_dir is not None else []
+        )
+        dataset_path = next(
+            (str(path) for path in table_candidates if path.exists()), None
+        )
 
-            # Filter to only neurons we need (copy: the cached frame is shared)
-            neuron_df = ndf_complete[ndf_complete['bodyId'].isin(all_bodyids)].copy()
-            
-            # Check for missing neurons and fetch from API if needed
-            found_bodyids = set(neuron_df['bodyId'].unique())
-            missing_bodyids = set(all_bodyids) - found_bodyids
-            
-            if missing_bodyids:
-                self._vprint(f'  ℹ️  {len(missing_bodyids)} neurons not in local dataset, fetching from API...', level='full')
-                missing_neuron_df = self._fetch_neurons_local_or_api(
-                    list(missing_bodyids), 
-                    columns=['bodyId', 'type', 'instance']
-                )
-                if not missing_neuron_df.empty:
-                    neuron_df = pd.concat([neuron_df, missing_neuron_df], ignore_index=True)
-
-            # Ensure hemisphere columns exist
+        # Online-only runs must enrich from the API too; do not inspect the
+        # converted local neuron table just because it happens to exist.
+        if not self.use_cache:
+            self._vprint(
+                '  🌐 Online-only mode: fetching neuron metadata from API...',
+                level='full',
+            )
+            neuron_df = self._fetch_neurons_local_or_api(
+                all_bodyids,
+                columns=['bodyId', 'type', 'instance'],
+            )
             neuron_df = self._ensure_hemisphere_columns(neuron_df)
+        else:
+            # Check for dataset in subfolder (common for FlyWire/FAFB)
+            if dataset_path is not None and not os.path.exists(dataset_path):
+                # Fallback for legacy or different naming
+                subfolder_path = os.path.join(
+                    self.script_path,
+                    'datasets',
+                    self.dataset,
+                    f"{self.dataset}_allneurons_neuron_df.csv"
+                )
+                if os.path.exists(subfolder_path):
+                    dataset_path = subfolder_path
+
+            if dataset_path is None or not os.path.exists(dataset_path):
+                # Fallback: fetch from API
+                self._vprint(f'  ⚠️ Warning: Local neuron table not found, fetching from API...', level='full')
+                neuron_df = self._fetch_neurons_local_or_api(all_bodyids, columns=['bodyId', 'type', 'instance'])
+            else:
+                # Load complete dataset from CSV via the mtime-aware instance
+                # cache. Enrichment runs on EVERY connection fetch (each path
+                # layer, FindDirect, ...); re-reading the multi-MB neuron CSV
+                # from disk each time was a major hot path.
+                is_fafb = is_flywire
+                ndf_complete = self._load_local_neuron_df(dataset_path, is_fafb)
+
+                # Filter to only neurons we need (copy: the cached frame is shared)
+                neuron_df = ndf_complete[ndf_complete['bodyId'].isin(all_bodyids)].copy()
+
+                # Check for missing neurons and fetch from API if needed
+                found_bodyids = set(neuron_df['bodyId'].unique())
+                missing_bodyids = set(all_bodyids) - found_bodyids
+
+                if missing_bodyids:
+                    self._vprint(f'  ℹ️  {len(missing_bodyids)} neurons not in local dataset, fetching from API...', level='full')
+                    missing_neuron_df = self._fetch_neurons_local_or_api(
+                        list(missing_bodyids),
+                        columns=['bodyId', 'type', 'instance']
+                    )
+                    if not missing_neuron_df.empty:
+                        neuron_df = pd.concat([neuron_df, missing_neuron_df], ignore_index=True)
+
+                # Ensure hemisphere columns exist
+                neuron_df = self._ensure_hemisphere_columns(neuron_df)
         
         # Extract base columns: bodyId, type, instance, hemisphere
         base_cols = ['bodyId', 'type', 'instance', 'hemisphere', 'hemisphere_code']
@@ -4093,6 +4472,8 @@ class FindNeuronConnection:
     def _fetch_neurons_local_or_api(self, bodyIds, columns=None):
         '''
         Fetch neuron information from cache, local dataset, or API (in that order).
+
+        With ``use_cache=False``, only the online API branch is used.
         
         Parameters:
         -----------
@@ -4108,6 +4489,9 @@ class FindNeuronConnection:
         if not bodyIds:
             return pd.DataFrame()
 
+        if is_flywire_dataset(self.dataset):
+            bodyIds = normalize_flywire_body_ids(bodyIds)
+
         # Ensure hemisphere info available when separating hemispheres
         if columns and self.separate_hemispheres:
             extra_cols = ['instance', 'hemisphere', 'hemisphere_code']
@@ -4115,8 +4499,10 @@ class FindNeuronConnection:
                 if col not in columns:
                     columns.append(col)
         
-        # 1. Try to load from neuron index cache first (fastest)
-        neuron_index = self._load_neuron_index()
+        # 1. Try to load from neuron index cache first (fastest).  In
+        # online-only mode this branch is deliberately skipped: the caller
+        # must get fresh metadata from the API as well as fresh connections.
+        neuron_index = self._load_neuron_index() if self.use_cache else pd.DataFrame()
         if not neuron_index.empty:
             # Filter to requested bodyIds
             cached_neurons = neuron_index[neuron_index['bodyId'].isin(bodyIds)].copy()
@@ -4152,7 +4538,95 @@ class FindNeuronConnection:
         
         # 2. Cache miss - fetch from dataset or API
         return self._fetch_from_dataset_or_api(bodyIds, columns)
-    
+
+    def _fetch_flywire_neurons_online(self, bodyIds, columns=None):
+        """Fetch FlyWire neuron metadata without reading local tables.
+
+        The CAVE annotation API exposes root IDs through the proofread-neuron
+        reference and annotations through ``hierarchical_neuron_annotations``.
+        ``CAVEDataFetcher`` normalizes those two tables for this caller.  A
+        caller-supplied legacy FlyWire adapter remains supported.
+        """
+        body_ids = normalize_flywire_body_ids(bodyIds)
+        if self.client_flywire is not None:
+            criteria = SimpleNamespace(bodyId=body_ids)
+            neuron_df, _ = self.client_flywire.fetch_neurons(criteria)
+        else:
+            fetcher = self._get_cave_fetcher()
+            neuron_df = fetcher.fetch_neuron_info(
+                [body_id_to_api_int(body_id) for body_id in body_ids],
+                show_progress=self.verbose_mode == 'full',
+            )
+
+        if neuron_df is None or neuron_df.empty:
+            return pd.DataFrame(columns=columns if columns else [])
+
+        neuron_df = neuron_df.copy()
+        id_column = next(
+            (column for column in ('bodyId', 'body_id', 'pt_root_id', 'root_id')
+             if column in neuron_df.columns),
+            None,
+        )
+        if id_column is None:
+            return pd.DataFrame(columns=columns if columns else [])
+        if id_column != 'bodyId':
+            neuron_df = neuron_df.rename(columns={id_column: 'bodyId'})
+        normalize_flywire_id_columns(neuron_df, ['bodyId'])
+
+        if 'type' not in neuron_df.columns:
+            if 'cell_type' in neuron_df.columns:
+                neuron_df['type'] = neuron_df['cell_type']
+            else:
+                neuron_df['type'] = ''
+        if 'tag' in neuron_df.columns:
+            # The tag table contains the named FlyWire types used by DROCAT
+            # (for example PPL101/aMe26), while hierarchy rows can contain
+            # only broad classes. Prefer a non-empty tag when the hierarchy
+            # does not provide a specific type.
+            type_values = neuron_df['type'].fillna('').astype(str)
+            tag_values = neuron_df['tag'].fillna('').astype(str)
+            neuron_df['type'] = type_values.where(
+                type_values.str.strip().ne(''), tag_values
+            )
+        if 'instance' not in neuron_df.columns:
+            neuron_df['instance'] = (
+                neuron_df['tag'] if 'tag' in neuron_df.columns else ''
+            )
+        if 'post' not in neuron_df.columns:
+            neuron_df['post'] = 0
+
+        # ``fetch_neuron_info`` combines hierarchy and tag rows. Keep one
+        # metadata row per root ID before merging with connections, preferring
+        # the named tag row so enrichment cannot multiply an edge.
+        type_values = neuron_df['type'].fillna('').astype(str)
+        instance_values = neuron_df['instance'].fillna('').astype(str)
+        tag_values = (
+            neuron_df['tag'].fillna('').astype(str)
+            if 'tag' in neuron_df.columns
+            else pd.Series('', index=neuron_df.index)
+        )
+        neuron_df['_online_metadata_rank'] = np.select(
+            [tag_values.str.strip().ne(''),
+             type_values.str.strip().ne(''),
+             instance_values.str.strip().ne('')],
+            [0, 1, 2],
+            default=3,
+        )
+        neuron_df = (
+            neuron_df.sort_values(
+                ['bodyId', '_online_metadata_rank'], kind='stable'
+            )
+            .drop_duplicates(subset=['bodyId'], keep='first')
+            .drop(columns=['_online_metadata_rank'])
+        )
+
+        if columns:
+            for column in columns:
+                if column not in neuron_df.columns:
+                    neuron_df[column] = 1000 if column == 'post' else ''
+            return neuron_df[columns].copy()
+        return neuron_df
+
     def _fetch_from_dataset_or_api(self, bodyIds, columns=None):
         '''
         Helper function to fetch neurons from local dataset or API.
@@ -4168,28 +4642,35 @@ class FindNeuronConnection:
         --------
         pd.DataFrame : Neuron information dataframe
         '''
-        # Try local dataset first
-        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
-        dataset_path = os.path.join(
-            self.script_path,
-            'datasets',
-            dataset_safe,
-            f"{dataset_safe}_allneurons_neuron_df.csv"
+        is_flywire = is_flywire_dataset(self.dataset)
+
+        # ``use_cache=False`` is online-only.  Do not inspect converted
+        # neuron tables; use the dataset API below instead.
+        dataset_safe = dataset_folder(self.dataset)
+        dataset_dir = (
+            resolve_flywire_dataset_dir(self.script_path, self.dataset)
+            if is_flywire else Path(self.script_path) / 'datasets' / dataset_safe
         )
-        
-        # Check for FAFB specific path if generic path doesn't exist
-        if not os.path.exists(dataset_path) and ('fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()):
-            fafb_path = os.path.join(self.script_path, 'datasets', 'flywire_FAFB_v783', 'flywire_v783_allneurons_neuron_df.csv')
-            if os.path.exists(fafb_path):
-                dataset_path = fafb_path
-        
-        if os.path.exists(dataset_path):
-            # Fast: Load from local CSV (cached per file - avoids re-reading
+        dataset_dir = Path(dataset_dir) if dataset_dir is not None else (
+            Path(self.script_path) / 'datasets' / dataset_safe
+        )
+        neuron_candidates = [
+            dataset_dir / f"{dataset_dir.name}_allneurons_neuron_df.parquet",
+            dataset_dir / f"{dataset_dir.name}_allneurons_neuron_df.csv",
+            dataset_dir / f"{dataset_safe}_allneurons_neuron_df.parquet",
+            dataset_dir / f"{dataset_safe}_allneurons_neuron_df.csv",
+        ]
+        dataset_path = next(
+            (str(path) for path in neuron_candidates if path.exists()),
+            str(neuron_candidates[-1]),
+        )
+
+        if self.use_cache and os.path.exists(dataset_path):
+            # Fast: Load from local table (cached per file - avoids re-reading
             # the full neuron table on every per-layer call)
-            is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
-            if is_fafb:
-                bodyIds = [str(b) for b in bodyIds]
-            ndf_complete = self._load_local_neuron_df(dataset_path, is_fafb)
+            if is_flywire:
+                bodyIds = normalize_flywire_body_ids(bodyIds)
+            ndf_complete = self._load_local_neuron_df(dataset_path, is_flywire)
             
             neuron_df = ndf_complete[ndf_complete['bodyId'].isin(bodyIds)].copy()
             if columns:
@@ -4204,7 +4685,10 @@ class FindNeuronConnection:
             return neuron_df
         else:
             # Check if we should enforce local-only for FAFB/FlyWire
-            if 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower():
+            if is_flywire and not self.use_cache:
+                return self._fetch_flywire_neurons_online(bodyIds, columns)
+
+            if is_flywire:
                  self._vprint(f"\n  ⚠️  Local neuron data not found for dataset '{self.dataset}'.", level='full')
                  self._vprint("  Please download the neuron table from: https://codex.flywire.ai/api/download?dataset=fafb", level='full')
                  self._vprint(f"  Save the file to: {dataset_path}", level='full') 
@@ -4243,6 +4727,8 @@ class FindNeuronConnection:
     def _fetch_neurons_by_types(self, types, columns=None):
         '''
         Fetch ALL neurons of given types from local dataset if available, otherwise use API.
+
+        With ``use_cache=False``, type resolution is always performed online.
         
         Parameters:
         -----------
@@ -4262,25 +4748,80 @@ class FindNeuronConnection:
                 if col not in columns:
                     columns.append(col)
 
+        is_flywire = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
+
+        # In online-only mode type resolution must also come from the API.
+        # CAVEDataFetcher searches the public annotation/tag table; a legacy
+        # adapter can provide its own type-aware query implementation.
+        if is_flywire and not self.use_cache:
+            if self.client_flywire is not None:
+                all_neurons = []
+                for neuron_type in types:
+                    criteria = SimpleNamespace(type=neuron_type)
+                    neuron_df, _ = self.client_flywire.fetch_neurons(criteria)
+                    if neuron_df is not None and not neuron_df.empty:
+                        all_neurons.append(neuron_df)
+                neuron_df = (
+                    pd.concat(all_neurons, ignore_index=True)
+                    if all_neurons else pd.DataFrame()
+                )
+            else:
+                neuron_df = self._get_cave_fetcher().fetch_neurons_by_types(
+                    types,
+                    show_progress=self.verbose_mode == 'full',
+                )
+
+            if neuron_df is None or neuron_df.empty:
+                return pd.DataFrame(columns=columns if columns else [])
+            neuron_df = neuron_df.copy()
+            id_column = next(
+                (column for column in ('bodyId', 'body_id', 'pt_root_id', 'root_id')
+                 if column in neuron_df.columns),
+                None,
+            )
+            if id_column is None:
+                return pd.DataFrame(columns=columns if columns else [])
+            if id_column != 'bodyId':
+                neuron_df = neuron_df.rename(columns={id_column: 'bodyId'})
+            normalize_flywire_id_columns(neuron_df, ['bodyId'])
+            if 'type' not in neuron_df.columns:
+                neuron_df['type'] = ''
+            if 'instance' not in neuron_df.columns:
+                neuron_df['instance'] = (
+                    neuron_df['tag'] if 'tag' in neuron_df.columns else ''
+                )
+            if 'post' not in neuron_df.columns:
+                neuron_df['post'] = 0
+            if columns:
+                for column in columns:
+                    if column not in neuron_df.columns:
+                        neuron_df[column] = 1000 if column == 'post' else ''
+                return neuron_df[columns].copy()
+            return neuron_df
+
         # Try local dataset first
-        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
-        dataset_path = os.path.join(
-            self.script_path,
-            'datasets',
-            dataset_safe,
-            f"{dataset_safe}_allneurons_neuron_df.csv"
+        dataset_safe = dataset_folder(self.dataset)
+        if is_flywire:
+            dataset_dir = resolve_flywire_dataset_dir(self.script_path, self.dataset)
+        else:
+            dataset_dir = Path(self.script_path) / 'datasets' / dataset_safe
+        dataset_dir = Path(dataset_dir) if dataset_dir is not None else (
+            Path(self.script_path) / 'datasets' / dataset_safe
         )
-        
-        # Check for FAFB specific path if generic path doesn't exist
-        if not os.path.exists(dataset_path) and ('fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()):
-            fafb_path = os.path.join(self.script_path, 'datasets', 'flywire_FAFB_v783', 'flywire_v783_allneurons_neuron_df.csv')
-            if os.path.exists(fafb_path):
-                dataset_path = fafb_path
-        
-        if os.path.exists(dataset_path):
-            # Fast: Load from local CSV (cached per file)
-            is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
-            ndf_complete = self._load_local_neuron_df(dataset_path, is_fafb)
+        neuron_candidates = [
+            dataset_dir / f"{dataset_dir.name}_allneurons_neuron_df.parquet",
+            dataset_dir / f"{dataset_dir.name}_allneurons_neuron_df.csv",
+            dataset_dir / f"{dataset_safe}_allneurons_neuron_df.parquet",
+            dataset_dir / f"{dataset_safe}_allneurons_neuron_df.csv",
+        ]
+        dataset_path = next(
+            (str(path) for path in neuron_candidates if path.exists()),
+            str(neuron_candidates[-1]),
+        )
+
+        if self.use_cache and os.path.exists(dataset_path):
+            # Fast: Load from local table (cached per file)
+            ndf_complete = self._load_local_neuron_df(dataset_path, is_flywire)
             
             neuron_df = ndf_complete[ndf_complete['type'].isin(types)].copy()
             if columns:
@@ -4295,7 +4836,7 @@ class FindNeuronConnection:
             return neuron_df
         else:
             # Check if we should enforce local-only for FAFB/FlyWire
-            if 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower():
+            if is_flywire:
                  self._vprint(f"\n  ⚠️  Local neuron data not found for dataset '{self.dataset}'.", level='full')
                  self._vprint("  Please download the neuron table from: https://codex.flywire.ai/api/download?dataset=fafb", level='full')
                  self._vprint(f"  Save the file to: {dataset_path}", level='full') 
@@ -4354,6 +4895,7 @@ class FindNeuronConnection:
             
             self._cave_fetcher = CAVEDataFetcher(
                 dataset=self.dataset,
+                materialization_version=self.version,
                 cache_enabled=False,  # We handle caching ourselves
                 verbose=self.verbose_mode == 'full'
             )
@@ -4363,7 +4905,8 @@ class FindNeuronConnection:
                                          min_weight=None, min_traversal_prob=None, min_conn_ratio=None):
         '''
         Fetch connections using CAVE API for FAFB/FlyWire datasets.
-        Results are cached in API_cache/ folder, separate from downloaded data cache.
+        Results are cached in API_cache/ only when ``use_cache=True``; with
+        ``use_cache=False`` they remain in memory for the current run.
         
         Parameters:
         -----------
@@ -4388,35 +4931,50 @@ class FindNeuronConnection:
             min_traversal_prob = self.min_traversal_probability  
         if min_conn_ratio is None:
             min_conn_ratio = self.min_ratio
+
+        if is_flywire_dataset(self.dataset):
+            upstream_bodyIds = normalize_flywire_body_ids(upstream_bodyIds)
+            if downstream_bodyIds is not None:
+                downstream_bodyIds = normalize_flywire_body_ids(downstream_bodyIds)
+
+        upstream_strs = normalize_flywire_body_ids(upstream_bodyIds)
+        downstream_strs = (
+            normalize_flywire_body_ids(downstream_bodyIds)
+            if downstream_bodyIds is not None else None
+        )
             
         # Setup API cache paths
         dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
         api_cache_dir = os.path.join(self.script_path, 'cache', dataset_safe, 'API_cache')
-        os.makedirs(api_cache_dir, exist_ok=True)
-        
         api_conn_cache = os.path.join(api_cache_dir, 'connections.parquet')
         api_neuron_cache = os.path.join(api_cache_dir, 'neuron_index.parquet')
-        
-        # Convert to strings
-        upstream_strs = [str(x) for x in upstream_bodyIds]
+        if self.use_cache:
+            os.makedirs(api_cache_dir, exist_ok=True)
         
         # Check API cache for already fetched neurons
         cached_upstream = set()
         cached_conn = pd.DataFrame()
         
-        if os.path.exists(api_neuron_cache):
+        if self.use_cache and os.path.exists(api_neuron_cache):
             try:
                 import polars as pl
                 neuron_index = pl.read_parquet(api_neuron_cache)
-                cached_upstream = set(neuron_index['bodyId'].unique().to_list())
+                cached_upstream = set(
+                    str(value) for value in neuron_index['bodyId'].unique().to_list()
+                )
                 self._vprint(f'  📂 API cache contains {len(cached_upstream)} neurons', level='full')
             except Exception as e:
                 self._vprint(f'  ⚠️ Error loading API neuron cache: {e}', level='full')
         
-        if os.path.exists(api_conn_cache) and cached_upstream:
+        if self.use_cache and os.path.exists(api_conn_cache) and cached_upstream:
             try:
                 import polars as pl
                 all_cached = pl.read_parquet(api_conn_cache)
+                for column in ('bodyId_pre', 'bodyId_post'):
+                    if column in all_cached.columns:
+                        all_cached = all_cached.with_columns(
+                            pl.col(column).cast(pl.Utf8)
+                        )
                 # Filter to upstream neurons
                 cached_conn = all_cached.filter(pl.col('bodyId_pre').is_in(upstream_strs))
                 if not cached_conn.is_empty():
@@ -4439,8 +4997,10 @@ class FindNeuronConnection:
                 # Reuse existing CAVE fetcher to avoid reconnecting
                 fetcher = self._get_cave_fetcher()
                 
-                # Convert to int for CAVE API
-                uncached_ints = [int(x) for x in uncached_upstream]
+                # Convert to integers only at the CAVE boundary.
+                uncached_ints = [
+                    body_id_to_api_int(value) for value in uncached_upstream
+                ]
                 
                 # Fetch connections (direction='pre' gets outgoing connections)
                 conn_df = fetcher.fetch_connections(uncached_ints, direction='pre')
@@ -4452,9 +5012,9 @@ class FindNeuronConnection:
                         'post_pt_root_id': 'bodyId_post'
                     })
                     
-                    # Ensure string types
-                    api_conn['bodyId_pre'] = api_conn['bodyId_pre'].astype(str)
-                    api_conn['bodyId_post'] = api_conn['bodyId_post'].astype(str)
+                    normalize_flywire_id_columns(
+                        api_conn, ['bodyId_pre', 'bodyId_post']
+                    )
                     
                     # Add roi column
                     if 'roi' not in api_conn.columns:
@@ -4462,8 +5022,11 @@ class FindNeuronConnection:
                     
                     self._vprint(f'  ✓ Fetched {len(api_conn)} connections via CAVE API', level='full')
                     
-                    # Save to API cache
-                    self._save_to_api_cache(api_conn, uncached_upstream, api_cache_dir)
+                    # Save to API cache only when the shared cache policy is
+                    # enabled. ``use_cache=False`` keeps CAVE results in
+                    # memory just like the NeuPrint path.
+                    if self.use_cache:
+                        self._save_to_api_cache(api_conn, uncached_upstream, api_cache_dir)
                 else:
                     self._vprint(f'  ℹ️ No connections found via CAVE API', level='full')
                     
@@ -4486,6 +5049,12 @@ class FindNeuronConnection:
         if combined.empty:
             return pd.DataFrame(columns=['bodyId_pre', 'bodyId_post', 'weight', 'roi', 'type_pre', 'type_post', 'instance_pre', 'instance_post'])
         
+        normalize_flywire_id_columns(combined, ['bodyId_pre', 'bodyId_post'])
+        if downstream_strs is not None and 'bodyId_post' in combined.columns:
+            combined = combined[
+                combined['bodyId_post'].isin(downstream_strs)
+            ].copy()
+
         # Enrich with neuron info
         combined = self._enrich_connections_with_neuron_info(combined)
         
@@ -4525,8 +5094,13 @@ class FindNeuronConnection:
     
     def _save_to_api_cache(self, conn_df, bodyIds, api_cache_dir):
         '''Save connection data to API cache.'''
+        if not self.use_cache:
+            return
         try:
             import polars as pl
+
+            bodyIds = normalize_flywire_body_ids(bodyIds)
+            normalize_flywire_id_columns(conn_df, ['bodyId_pre', 'bodyId_post'])
             
             api_conn_cache = os.path.join(api_cache_dir, 'connections.parquet')
             api_neuron_cache = os.path.join(api_cache_dir, 'neuron_index.parquet')
@@ -4534,10 +5108,21 @@ class FindNeuronConnection:
             # Load existing cache or create new
             if os.path.exists(api_conn_cache):
                 existing_conn = pl.read_parquet(api_conn_cache)
+                for column in ('bodyId_pre', 'bodyId_post'):
+                    if column in existing_conn.columns:
+                        existing_conn = existing_conn.with_columns(
+                            pl.col(column).cast(pl.Utf8)
+                        )
                 new_conn = pl.from_pandas(conn_df)
                 combined = pl.concat([existing_conn, new_conn], how='diagonal_relaxed').unique()
             else:
                 combined = pl.from_pandas(conn_df)
+
+            for column in ('bodyId_pre', 'bodyId_post'):
+                if column in combined.columns:
+                    combined = combined.with_columns(
+                        pl.col(column).cast(pl.Utf8)
+                    )
             
             # Save connections
             combined.write_parquet(api_conn_cache)
@@ -4545,6 +5130,10 @@ class FindNeuronConnection:
             # Update neuron index
             if os.path.exists(api_neuron_cache):
                 existing_index = pl.read_parquet(api_neuron_cache)
+                if 'bodyId' in existing_index.columns:
+                    existing_index = existing_index.with_columns(
+                        pl.col('bodyId').cast(pl.Utf8)
+                    )
                 new_index = pl.DataFrame({'bodyId': bodyIds, 'cached_date': [datetime.now().strftime('%Y-%m-%d %H:%M:%S')] * len(bodyIds)})
                 combined_index = pl.concat([existing_index, new_index], how='diagonal_relaxed').unique(subset=['bodyId'])
             else:
@@ -4583,9 +5172,10 @@ class FindNeuronConnection:
         Fetch connections with v4.0 pair-level caching.
         Queries unified database first, only fetches missing neurons from API.
         
-        When force_API_fetching=True for FAFB/FlyWire:
+        When force_API_fetching=True for FAFB/FlyWire, or when
+        use_cache=False:
         - Uses CAVE API instead of local files
-        - Caches API results in API_cache/ folder separately from downloaded data cache
+        - Caches API results in API_cache/ only when caching is enabled
         
         Parameters:
         -----------
@@ -4610,11 +5200,18 @@ class FindNeuronConnection:
             min_traversal_prob = self.min_traversal_probability
         if min_conn_ratio is None:
             min_conn_ratio = self.min_ratio
+
+        if is_flywire_dataset(self.dataset):
+            upstream_bodyIds = normalize_flywire_body_ids(upstream_bodyIds)
+            if downstream_bodyIds is not None:
+                downstream_bodyIds = normalize_flywire_body_ids(downstream_bodyIds)
         
         # Check if we should use CAVE API (force_API_fetching for FAFB/FlyWire)
-        use_cave_api = (self.force_API_fetching and 
-                       ('fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()) and
-                       'BANC' not in self.dataset.upper())
+        use_cave_api = (
+            (self.force_API_fetching or not self.use_cache)
+            and is_flywire_dataset(self.dataset)
+            and not is_banc_dataset(self.dataset)
+        )
         
         if use_cave_api:
             return self._fetch_connections_with_cave_api(upstream_bodyIds, downstream_bodyIds,
@@ -4650,21 +5247,23 @@ class FindNeuronConnection:
                 self._vprint(f'  🌐 Fetching {len(uncached_upstream)} uncached neurons from API (weight ≥ 1)...', level='full')
                 
                 fetched_locally = False
-                # Special handling for FAFB/FlyWire local data
-                if 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower():
+                # Special handling for FAFB/FlyWire local data.  This branch
+                # is intentionally cache-enabled only: no-cache FlyWire runs
+                # are routed through CAVE above and must not inspect local
+                # merged-connection tables.
+                if self.use_cache and is_flywire_dataset(self.dataset):
                     try:
                         import fafb_utils
                         project_root = os.path.dirname(os.path.dirname(__file__))
                         
                         # Try to find dataset directory by name
-                        data_dir = os.path.join(project_root, "datasets", self.dataset)
-                        if not os.path.exists(data_dir):
-                            # Fallback to default FAFB directory
-                            data_dir = os.path.join(project_root, "datasets", "flywire_FAFB_v783")
-                        
-                        if os.path.exists(data_dir):
+                        data_dir = resolve_flywire_dataset_dir(
+                            project_root, self.dataset
+                        )
+
+                        if data_dir is not None:
                             # Only try local if the directory exists
-                            _, conn_file = fafb_utils.prepare_fafb_data(data_dir)
+                            _, conn_file = fafb_utils.prepare_flywire_data(data_dir)
                             
                             # Load connections with an mtime-aware cache: the
                             # FlyWire synapse table has millions of rows and
@@ -4681,12 +5280,12 @@ class FindNeuronConnection:
                                 self._fafb_local_conn_cache = (conn_mtime, full_conn)
                             
                             # Filter by upstream (copy: cached frame is shared)
-                            upstream_strs = [str(x) for x in uncached_upstream]
+                            upstream_strs = normalize_flywire_body_ids(uncached_upstream)
                             api_conn = full_conn[full_conn['bodyId_pre'].isin(upstream_strs)].copy()
                             
                             # Filter by downstream if provided
                             if downstream_bodyIds is not None:
-                                downstream_strs = [str(x) for x in downstream_bodyIds]
+                                downstream_strs = normalize_flywire_body_ids(downstream_bodyIds)
                                 api_conn = api_conn[api_conn['bodyId_post'].isin(downstream_strs)].copy()
                                 
                             # Add dummy ROI column if missing
@@ -4857,8 +5456,11 @@ class FindNeuronConnection:
                         else:
                             api_conn = pd.DataFrame()
             
-            # Save connections to database (but don't mark neurons as cached yet)
-            self._save_connections_only(api_conn, uncached_upstream)
+            # Save connections to database (but don't mark neurons as cached
+            # yet). In no-cache mode the API result is deliberately kept
+            # only in memory for this run.
+            if self.use_cache:
+                self._save_connections_only(api_conn, uncached_upstream)
         
         # Step 3: Combine cached and API results
         if self._is_empty_df(cached_conn) and self._is_empty_df(api_conn):
@@ -4878,9 +5480,9 @@ class FindNeuronConnection:
         # Enrich with type and instance info (needed for both filtering modes)
         combined = self._enrich_connections_with_neuron_info(combined)
         
-        # NOW mark neurons as cached (after successful enrichment)
-        # Mark newly fetched neurons (partially_cached will be empty)
-        neurons_to_mark = list(set(uncached_upstream + partially_cached))
+        # NOW mark neurons as cached (after successful enrichment). In
+        # no-cache mode there is no persistent state to update.
+        neurons_to_mark = list(set(uncached_upstream + partially_cached)) if self.use_cache else []
         if len(neurons_to_mark) > 0:
             self._vprint(f'  ⏳ Preparing to mark {len(neurons_to_mark):,} neurons as cached...', level='full')
             # Get the connections for these neurons from the combined dataframe
@@ -5035,6 +5637,55 @@ class FindNeuronConnection:
         """
         return self._connection_map(min_weight).total_incoming_by_bodyid()
 
+    def _fetch_flywire_incoming_weights_online(
+        self, post_bodyIds, min_weight: int = 1
+    ) -> pd.DataFrame:
+        """Fetch FlyWire incoming weights directly from CAVE.
+
+        This helper intentionally has no local-table or API-cache fallback.
+        It is used only by online-only runs to keep ratio denominators on the
+        same fresh API snapshot as the path edges.
+        """
+        if not post_bodyIds:
+            return pd.DataFrame(
+                columns=['bodyId_post', 'total_incoming_weight']
+            )
+
+        post_bodyIds = normalize_flywire_body_ids(post_bodyIds)
+
+        fetcher = self._get_cave_fetcher()
+        incoming = fetcher.fetch_connections(
+            [body_id_to_api_int(body_id) for body_id in post_bodyIds],
+            direction='post',
+            show_progress=self.verbose_mode == 'full',
+        )
+        if incoming is None or incoming.empty:
+            return pd.DataFrame(
+                columns=['bodyId_post', 'total_incoming_weight']
+            )
+
+        incoming = incoming.rename(columns={
+            'post_pt_root_id': 'bodyId_post',
+            'post_root_id': 'bodyId_post',
+        }).copy()
+        if 'bodyId_post' not in incoming.columns or 'weight' not in incoming.columns:
+            return pd.DataFrame(
+                columns=['bodyId_post', 'total_incoming_weight']
+            )
+        post_strs = {str(value) for value in post_bodyIds}
+        normalize_flywire_id_columns(incoming, ['bodyId_post'])
+        incoming['weight'] = pd.to_numeric(incoming['weight'], errors='coerce')
+        incoming = incoming[
+            incoming['weight'].notna()
+            & incoming['weight'].ge(min_weight)
+            & incoming['bodyId_post'].isin(post_strs)
+        ]
+        return incoming.groupby(
+            'bodyId_post', as_index=False
+        )['weight'].sum().rename(
+            columns={'weight': 'total_incoming_weight'}
+        )
+
     def _fetch_total_incoming_weight(self, post_bodyIds: list, min_weight: int = 1, auto_build_cache: bool = True) -> pd.DataFrame:
         """
         Fetch ALL incoming connections to the given post-synaptic bodyIds.
@@ -5066,10 +5717,38 @@ class FindNeuronConnection:
 
         # The full-dataset aggregate is cached, so repeated per-layer calls
         # with different post-neuron lists only filter the cached table.
-        db_path = self._get_connection_db_path()
+        # A no-cache run must not accidentally read a relative
+        # ``connections.parquet`` left by an older run.
+        db_path = self._get_connection_db_path() if self.use_cache else ''
+
+        # Online-only FAFB/FlyWire runs fetch the denominator from CAVE.  They
+        # must not inspect the converted local connection table or a stale
+        # repository-relative connections.parquet.
+        if self.client_type == 'flywire' and not self.use_cache:
+            try:
+                total_incoming = self._fetch_flywire_incoming_weights_online(
+                    post_bodyIds, min_weight
+                )
+                self._vprint(
+                    f'     ✓ Found {len(total_incoming)} post-synaptic neurons '
+                    'with incoming connections from CAVE API',
+                    level='full',
+                )
+                return total_incoming
+            except Exception as exc:
+                self._vprint(
+                    f'     ⚠️ Error fetching FlyWire incoming weights from API: {exc}',
+                    level='full',
+                )
+                return pd.DataFrame(
+                    columns=['bodyId_post', 'total_incoming_weight']
+                ).astype({
+                    'bodyId_post': 'string',
+                    'total_incoming_weight': 'float64',
+                })
 
         # If cache doesn't exist and auto_build_cache is enabled, build it first
-        if not os.path.exists(db_path) and auto_build_cache:
+        if self.use_cache and not os.path.exists(db_path) and auto_build_cache:
             self._vprint(f'\n     ⚠️  Connection cache not found for {self.dataset}', level='simple')
             self._vprint(f'     ⏳ Building connection cache (this may take several minutes for large datasets)...', level='simple')
             self._vprint(f'     💡 This is a one-time operation. The cache will be reused for future analyses.', level='simple')
@@ -5100,6 +5779,18 @@ class FindNeuronConnection:
             except Exception as e:
                 self._vprint(f'     ⚠️ Error querying connection DB: {e}', level='full')
         
+        # FlyWire/FAFB has no NeuPrint default client. If local data was not
+        # available, return a correctly typed empty result rather than trying
+        # the NeuPrint fallback and producing a misleading client error.
+        if self.client_type == 'flywire':
+            self._vprint(
+                '     ⚠️ Local FlyWire data unavailable for incoming weights',
+                level='full',
+            )
+            return pd.DataFrame(
+                columns=['bodyId_post', 'total_incoming_weight']
+            ).astype({'bodyId_post': 'string', 'total_incoming_weight': 'float64'})
+
         # Last resort: use NeuPrint/CAVE API to fetch incoming connections
         # This is slow but accurate
         try:
@@ -5229,12 +5920,58 @@ class FindNeuronConnection:
         
         import polars as pl
         
-        # Check if we have a cached connection database
-        db_path = self._get_connection_db_path()
-        neuron_index_path = self._get_neuron_index_path()
+        # Check if we have a cached connection database. A no-cache run must
+        # not read a relative connections.parquet left by another dataset.
+        db_path = self._get_connection_db_path() if self.use_cache else ''
+        neuron_index_path = self._get_neuron_index_path() if self.use_cache else ''
+
+        # Online-only FAFB/FlyWire runs resolve type members and incoming
+        # weights through CAVE.  They must not read the local merged graph or
+        # neuron index as a denominator shortcut.
+        if self.client_type == 'flywire' and not self.use_cache:
+            try:
+                type_members = self._get_cave_fetcher().fetch_neurons_by_types(
+                    [str(value) for value in post_types],
+                    show_progress=self.verbose_mode == 'full',
+                )
+                if type_members is None or type_members.empty:
+                    return pd.DataFrame(
+                        columns=['type_post', 'total_incoming_weight']
+                    )
+                type_members = type_members.rename(
+                    columns={'type': 'type_post'}
+                )[['bodyId', 'type_post']].copy()
+                type_members['bodyId'] = type_members['bodyId'].astype(str)
+                incoming = self._fetch_flywire_incoming_weights_online(
+                    type_members['bodyId'].unique().tolist(), min_weight
+                )
+                total_incoming = incoming.rename(
+                    columns={'bodyId_post': 'bodyId'}
+                ).merge(type_members, on='bodyId', how='inner')
+                total_incoming = total_incoming.groupby(
+                    'type_post', as_index=False
+                )['total_incoming_weight'].sum()
+                self._vprint(
+                    f'     ✓ Found incoming connections to '
+                    f'{len(total_incoming)} types from CAVE API',
+                    level='full',
+                )
+                return total_incoming
+            except Exception as exc:
+                self._vprint(
+                    f'     ⚠️ Error fetching FlyWire type weights from API: {exc}',
+                    level='full',
+                )
+                return pd.DataFrame(
+                    columns=['type_post', 'total_incoming_weight']
+                )
         
         # If cache doesn't exist and auto_build_cache is enabled, build it first
-        if (not os.path.exists(db_path) or not os.path.exists(neuron_index_path)) and auto_build_cache:
+        if (
+            self.use_cache
+            and (not os.path.exists(db_path) or not os.path.exists(neuron_index_path))
+            and auto_build_cache
+        ):
             self._vprint(f'\n     ⚠️  Connection cache not found for {self.dataset}', level='simple')
             self._vprint(f'     ⏳ Building connection cache (this may take several minutes for large datasets)...', level='simple')
             self._vprint(f'     💡 This is a one-time operation. The cache will be reused for future analyses.', level='simple')
@@ -5588,15 +6325,23 @@ class FindNeuronConnection:
         """
         import os
         
-        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
-        
+        dataset_safe = dataset_folder(self.dataset)
+        dataset_dir = (
+            resolve_flywire_dataset_dir(self.script_path, self.dataset)
+            if is_flywire_dataset(self.dataset)
+            else Path(self.script_path) / 'datasets' / dataset_safe
+        )
+        dataset_dir = Path(dataset_dir) if dataset_dir is not None else (
+            Path(self.script_path) / 'datasets' / dataset_safe
+        )
+
         # Check Level 0: datasets/ neuron_df
         neuron_df_path_parquet = os.path.join(
-            self.script_path, 'datasets', dataset_safe,
+            str(dataset_dir),
             f"{dataset_safe}_allneurons_neuron_df.parquet"
         )
         neuron_df_path_csv = os.path.join(
-            self.script_path, 'datasets', dataset_safe,
+            str(dataset_dir),
             f"{dataset_safe}_allneurons_neuron_df.csv"
         )
         neuron_df_exists = os.path.exists(neuron_df_path_parquet) or os.path.exists(neuron_df_path_csv)
@@ -5732,7 +6477,7 @@ class FindNeuronConnection:
         _print("Building Connection Cache")
         _print("=" * 60)
         _print(f"Dataset: {self.dataset}")
-        
+
         if not self.use_cache:
             _print("Warning: Cache is disabled. Enable with use_cache=True")
             return {'total_neurons': 0, 'already_cached': 0, 'newly_cached': 0,
@@ -5806,20 +6551,35 @@ class FindNeuronConnection:
                         if metadata_index is not None:
                             ndf = metadata_index[['bodyId', 'type']].copy()
                         else:
-                            dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+                            dataset_safe = dataset_folder(self.dataset)
+                            dataset_dir = (
+                                resolve_flywire_dataset_dir(
+                                    self.script_path, self.dataset
+                                )
+                                if is_flywire_dataset(self.dataset)
+                                else Path(self.script_path) / 'datasets' / dataset_safe
+                            )
                             parquet_path = os.path.join(
-                                self.script_path, 'datasets', dataset_safe,
+                                str(dataset_dir) if dataset_dir is not None else "",
                                 f"{dataset_safe}_allneurons_neuron_df.parquet"
                             )
                             csv_path = os.path.join(
-                                self.script_path, 'datasets', dataset_safe,
+                                str(dataset_dir) if dataset_dir is not None else "",
                                 f"{dataset_safe}_allneurons_neuron_df.csv"
                             )
                             ndf = None
                             if os.path.exists(parquet_path):
                                 ndf = pd.read_parquet(parquet_path)
                             elif os.path.exists(csv_path):
-                                ndf = self._read_csv(csv_path, index_col=0, low_memory=False)
+                                ndf = self._read_csv(
+                                    csv_path,
+                                    index_col=None if is_flywire_dataset(self.dataset) else 0,
+                                    dtype={'bodyId': 'string'}
+                                    if is_flywire_dataset(self.dataset) else None,
+                                    low_memory=False,
+                                )
+                            if ndf is not None and is_flywire_dataset(self.dataset):
+                                normalize_flywire_id_columns(ndf, ['bodyId'])
                         
                         if ndf is not None and 'type' in ndf.columns:
                             type_neurons = ndf[ndf['type'] == ntype]
@@ -5841,22 +6601,32 @@ class FindNeuronConnection:
                 return {'total_neurons': 0, 'already_cached': 0, 'newly_cached': 0,
                         'failed_neurons': [], 'total_connections': 0, 'elapsed_time': 0}
         
-        # Check which neurons are already cached using neuron_index
-        # This uses O(1) dict lookup after warm-up.
+        # Check which neurons are already cached using both the persisted
+        # completion flags and the current connection table. A prior cache
+        # generation can leave downstream_complete=True after its connection
+        # rows were replaced or removed, so the flag alone is not disk truth.
         # NOTE: force_reload=True reads the PERSISTED index, never a stale
         # in-memory/module-level snapshot (the long-lived UI process shares
         # _FNC_CACHE across instances; a stale copy would make a completed
         # pull look uncached on the next run).
         neuron_index = self._load_neuron_index(force_reload=True)
+        cached_upstream_bodyids = self._get_cached_upstream_bodyids(force_reload=True)
         already_cached_set = set()
+        stale_complete = []
         
         if not neuron_index.empty:
             # Use O(1) dict lookup
             for bodyId in target_bodyIds:
                 bodyId_str = str(bodyId)
                 if bodyId_str in self._neuron_index_dict:
-                    if self._neuron_index_dict[bodyId_str].get('downstream_complete', False):
+                    neuron_data = self._neuron_index_dict[bodyId_str]
+                    is_complete = neuron_data.get('downstream_complete', False)
+                    connection_count = neuron_data.get('connection_count', -1)
+                    has_cached_rows = bodyId_str in cached_upstream_bodyids
+                    if is_complete and (has_cached_rows or connection_count == 0):
                         already_cached_set.add(bodyId_str)
+                    elif is_complete:
+                        stale_complete.append(bodyId_str)
         
         uncached = [x for x in target_bodyIds if str(x) not in already_cached_set]
         already_cached_count = len(already_cached_set)
@@ -5864,6 +6634,11 @@ class FindNeuronConnection:
         _print(f"\nCache Status:")
         _print(f"  Already cached: {already_cached_count:,}")
         _print(f"  Need to fetch: {len(uncached):,}")
+        if stale_complete:
+            _print(
+                f"  Detected {len(stale_complete):,} stale completion flags "
+                "without current connection rows; refetching them."
+            )
         
         if not uncached:
             # The metadata index is normally built during initialization.  A
@@ -6118,28 +6893,59 @@ class FindNeuronConnection:
         """
         if not upstream_bodyIds:
             return pd.DataFrame()
+
+        if is_flywire_dataset(self.dataset):
+            upstream_bodyIds = normalize_flywire_body_ids(upstream_bodyIds)
+            if downstream_bodyIds is not None:
+                downstream_bodyIds = normalize_flywire_body_ids(downstream_bodyIds)
         
         def _status(msg):
             if status_callback is not None:
                 status_callback(msg)
         
-        # For FlyWire/FAFB: use local CSV data
-        if 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower():
+        # For FlyWire/FAFB, cache-enabled pulls use the converted local table.
+        # An online-only call must use CAVE instead and must never enter this
+        # local-table branch.
+        if is_flywire_dataset(self.dataset):
+            if not self.use_cache:
+                fetcher = self._get_cave_fetcher()
+                result = fetcher.fetch_connections(
+                    [body_id_to_api_int(body_id) for body_id in upstream_bodyIds],
+                    direction='pre',
+                    show_progress=False,
+                )
+                if result is None or result.empty:
+                    return pd.DataFrame()
+                result = result.rename(columns={
+                    'pre_pt_root_id': 'bodyId_pre',
+                    'post_pt_root_id': 'bodyId_post',
+                })
+                normalize_flywire_id_columns(
+                    result, ['bodyId_pre', 'bodyId_post']
+                )
+                if downstream_bodyIds is not None:
+                    result = result[
+                        result['bodyId_post'].isin(
+                            str(value) for value in downstream_bodyIds
+                        )
+                    ]
+                if 'roi' not in result.columns:
+                    result['roi'] = 'WholeBrain'
+                return result
+
             try:
                 import fafb_utils
                 project_root = os.path.dirname(os.path.dirname(__file__))
-                data_dir = os.path.join(project_root, "datasets", self.dataset)
-                if not os.path.exists(data_dir):
-                    data_dir = os.path.join(project_root, "datasets", "flywire_FAFB_v783")
-                
-                if os.path.exists(data_dir):
+                data_dir = resolve_flywire_dataset_dir(project_root, self.dataset)
+
+                if data_dir is not None:
                     # Suppress fafb_utils print statements
                     import io
                     import sys
                     old_stdout = sys.stdout
                     sys.stdout = io.StringIO()
                     try:
-                        _, conn_file = fafb_utils.prepare_fafb_data(data_dir)
+                        _, conn_file = fafb_utils.prepare_flywire_data(data_dir)
                     finally:
                         sys.stdout = old_stdout
                     
@@ -6234,10 +7040,10 @@ class FindNeuronConnection:
         except Exception as e:
             # Re-raise to let caller handle/log the error properly
             raise RuntimeError(f"NeuPrint bulk fetch error: {type(e).__name__}: {e}") from e
-    
+
     def _get_all_dataset_bodyids(self) -> list:
         """Get all bodyIds from dataset's neuron_df file."""
-        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+        dataset_safe = dataset_folder(self.dataset)
 
         # A metadata-backed index contains the authoritative full neuron list
         # and is already columnar.  Reuse it instead of parsing the large CSV
@@ -6258,34 +7064,58 @@ class FindNeuronConnection:
             pass
         
         # Try parquet first, then CSV
-        parquet_path = os.path.join(
-            self.script_path, 'datasets', dataset_safe,
-            f"{dataset_safe}_allneurons_neuron_df.parquet"
+        dataset_dir = (
+            resolve_flywire_dataset_dir(self.script_path, self.dataset)
+            if is_flywire_dataset(self.dataset)
+            else Path(self.script_path) / 'datasets' / dataset_safe
         )
-        csv_path = os.path.join(
-            self.script_path, 'datasets', dataset_safe,
-            f"{dataset_safe}_allneurons_neuron_df.csv"
+        if dataset_dir is None:
+            return []
+        table_names = [dataset_dir.name, dataset_safe]
+        table_candidates = []
+        for table_name in table_names:
+            for suffix in ("parquet", "csv"):
+                path = Path(dataset_dir) / (
+                    f"{table_name}_allneurons_neuron_df.{suffix}"
+                )
+                if path not in table_candidates:
+                    table_candidates.append(path)
+        parquet_path = next(
+            (str(path) for path in table_candidates if path.suffix == '.parquet' and path.exists()),
+            None,
+        )
+        csv_path = next(
+            (str(path) for path in table_candidates if path.suffix == '.csv' and path.exists()),
+            None,
         )
         
         ndf = None
-        if os.path.exists(parquet_path):
+        if parquet_path is not None:
             try:
                 ndf = pd.read_parquet(parquet_path)
+                if is_flywire_dataset(self.dataset):
+                    normalize_flywire_id_columns(ndf, ['bodyId'])
             except Exception:
                 pass
-        
-        if ndf is None and os.path.exists(csv_path):
+
+        if ndf is None and csv_path is not None:
             try:
-                is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
-                if is_fafb:
-                    ndf = self._read_csv(csv_path, dtype={'bodyId': str}, low_memory=False)
+                if is_flywire_dataset(self.dataset):
+                    ndf = self._read_csv(
+                        csv_path, dtype={'bodyId': 'string'}, low_memory=False
+                    )
+                    normalize_flywire_id_columns(ndf, ['bodyId'])
                 else:
                     ndf = self._read_csv(csv_path, index_col=0, low_memory=False)
             except Exception:
                 pass
         
         if ndf is not None and 'bodyId' in ndf.columns:
-            return [str(x) for x in ndf['bodyId'].unique().tolist()]
+            return (
+                normalize_flywire_body_ids(ndf['bodyId'].tolist())
+                if is_flywire_dataset(self.dataset) else
+                [str(x) for x in ndf['bodyId'].unique().tolist()]
+            )
         
         return []
     
@@ -6318,34 +7148,59 @@ class FindNeuronConnection:
         _print("Validating and Repairing Connection Cache")
         _print("=" * 60)
         _print(f"Dataset: {self.dataset}")
+
+        if not self.use_cache:
+            _print("Cache is disabled; no cache validation or repair was performed.")
+            return {
+                'total_indexed': 0,
+                'total_with_connections': 0,
+                'falsely_complete': 0,
+                'repaired': 0,
+                'types_updated': 0,
+            }
         
         # Get paths
         index_path = self._get_neuron_index_path()
-        conn_path = self._get_connection_db_path()
-        
-        if not os.path.exists(index_path):
+
+        if not os.path.exists(index_path) and not os.path.exists(self._get_neuron_index_state_path()):
             _print("No neuron_index found. Nothing to repair.")
             return {'total_indexed': 0, 'total_with_connections': 0, 
                     'falsely_complete': 0, 'repaired': 0, 'types_updated': 0}
         
-        # Load neuron_index
-        ni = pl.read_parquet(index_path)
-        total_indexed = len(ni)
+        # Read the canonical index together with the progress sidecar. The
+        # sidecar is authoritative for completion flags while a pull is in
+        # progress; reading only neuron_index.parquet can repair values that
+        # are immediately overwritten by stale sidecar values on reload.
+        ni_pd = self._read_neuron_index_disk()
+        total_indexed = len(ni_pd)
         _print(f"Neurons in index: {total_indexed:,}")
         
         # Get neurons that actually have connections
         neurons_with_conns = set()
-        if os.path.exists(conn_path):
-            conns = pl.read_parquet(conn_path)
-            neurons_with_conns = set(conns['bodyId_pre'].unique().to_list())
-            _print(f"Neurons with downstream connections: {len(neurons_with_conns):,}")
-        
-        # Find neurons marked complete but no connections
-        complete_mask = ni['downstream_complete'] == True
-        complete_ids = set(ni.filter(complete_mask)['bodyId'].to_list())
-        falsely_complete = complete_ids - neurons_with_conns
-        
-        _print(f"Neurons marked complete: {len(complete_ids):,}")
+        if self.use_cache:
+            try:
+                conns = self._load_connection_db(force_reload=True)
+                if conns is not None and not conns.is_empty():
+                    neurons_with_conns = set(
+                        conns['bodyId_pre'].cast(pl.Utf8).unique().to_list()
+                    )
+            except Exception as exc:
+                _print(f"⚠️ Could not read connection cache: {exc}")
+        _print(f"Neurons with downstream connections: {len(neurons_with_conns):,}")
+
+        # Find neurons marked complete with a positive recorded connection
+        # count but no current rows. Complete zero-outdegree neurons are valid
+        # and must not be reset just because they have no bodyId_pre rows.
+        complete_mask = ni_pd['downstream_complete'].astype(bool)
+        connection_counts = pd.to_numeric(
+            ni_pd['connection_count'], errors='coerce'
+        ).fillna(-1)
+        positive_complete = ni_pd.loc[
+            complete_mask & connection_counts.gt(0), 'bodyId'
+        ].astype(str)
+        falsely_complete = set(positive_complete) - neurons_with_conns
+
+        _print(f"Neurons marked complete: {int(complete_mask.sum()):,}")
         _print(f"Falsely marked complete (no connections): {len(falsely_complete):,}")
         
         if len(falsely_complete) == 0:
@@ -6354,13 +7209,14 @@ class FindNeuronConnection:
             _print(f"\n⚠️ Found {len(falsely_complete):,} neurons incorrectly marked as complete")
             _print("   Resetting their downstream_complete flag to False...")
             
-            # Convert to pandas for update (polars is read-only)
-            ni_pd = ni.to_pandas()
             ni_pd.loc[ni_pd['bodyId'].isin(falsely_complete), 'downstream_complete'] = False
             ni_pd.loc[ni_pd['bodyId'].isin(falsely_complete), 'connection_count'] = -1  # Mark as needing fetch
             
-            # Save updated index
-            ni_pd.to_parquet(index_path, index=False)
+            # Persist through the state sidecar first, then fold the repair
+            # into the canonical index and remove the sidecar. Otherwise a
+            # stale sidecar would reassert the old completion flags.
+            self._save_neuron_index_state(ni_pd)
+            self._materialize_neuron_index(remove_state=True)
             _print(f"   ✓ Repaired {len(falsely_complete):,} entries")
         
         # Enrich with type/instance from neuron_df
@@ -6385,8 +7241,9 @@ class FindNeuronConnection:
             if 'bodyId' in ndf.columns:
                 ndf = ndf.with_columns(pl.col('bodyId').cast(pl.Utf8))
             
-            # Load current index again (might have been updated)
-            ni = pl.read_parquet(index_path)
+            # Load current index again (might have been updated), including
+            # any remaining progress sidecar values.
+            ni = pl.from_pandas(self._read_neuron_index_disk())
             
             # Find neurons with empty type
             empty_type_mask = (pl.col('type').is_null()) | (pl.col('type') == '')
@@ -8880,15 +9737,32 @@ class FindNeuronConnection:
         print('💾 Saving interlayer neuron info to Excel...')
         
         # Try to load complete neuron dataset for faster lookup
-        dataset_clean = self.dataset.replace(':', '_').replace('.', '_')
+        dataset_clean = dataset_folder(self.dataset)
         dataset_path = os.path.join(
             self.script_path,
             'datasets',
             f"{dataset_clean}_allneurons_neuron_df.csv"
         )
+
+        if is_flywire_dataset(self.dataset):
+            dataset_dir = resolve_flywire_dataset_dir(
+                self.script_path, self.dataset
+            )
+            candidates = (
+                [
+                    dataset_dir / f"{dataset_dir.name}_allneurons_neuron_df.parquet",
+                    dataset_dir / f"{dataset_dir.name}_allneurons_neuron_df.csv",
+                    dataset_dir / f"{dataset_clean}_allneurons_neuron_df.parquet",
+                    dataset_dir / f"{dataset_clean}_allneurons_neuron_df.csv",
+                ]
+                if dataset_dir is not None else []
+            )
+            dataset_path = next(
+                (str(path) for path in candidates if path.exists()), None
+            )
         
         # Check for subdirectory structure (common for FlyWire/FAFB)
-        if not os.path.exists(dataset_path):
+        if dataset_path is not None and not os.path.exists(dataset_path):
             # Try exact match in subdirectory
             dataset_path_subdir = os.path.join(
                 self.script_path,
@@ -8908,15 +9782,24 @@ class FindNeuronConnection:
                         dataset_path = candidates[0]
                         self._vprint(f"   Found dataset file via glob: {os.path.basename(dataset_path)}", level='full')
 
-        use_local_dataset = os.path.exists(dataset_path)
+        use_local_dataset = (
+            dataset_path is not None and os.path.exists(dataset_path)
+        )
         if use_local_dataset:
             self._vprint(f'   Using local dataset: {os.path.basename(dataset_path)}', level='full')
-            if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
-                ndf_complete = self._read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
+            if is_flywire_dataset(self.dataset):
+                if str(dataset_path).lower().endswith('.parquet'):
+                    ndf_complete = pd.read_parquet(dataset_path)
+                else:
+                    ndf_complete = self._read_csv(
+                        dataset_path, header=0, index_col=None,
+                        dtype={'bodyId': 'string'}, low_memory=False
+                    )
+                normalize_flywire_id_columns(ndf_complete, ['bodyId'])
             else:
                 ndf_complete = self._read_csv(dataset_path, header=0, index_col=0, low_memory=False)
         else:
-            if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
+            if is_flywire_dataset(self.dataset):
                 self._vprint(f'   ⚠️  Local dataset not found for FlyWire/FAFB. Skipping interlayer info fetch (NeuPrint API not supported for this dataset).', level='full')
                 ndf_complete = pd.DataFrame()
             else:
@@ -9425,9 +10308,19 @@ class FindNeuronConnection:
             f.write(f'path_mode:{" "*21}{path_mode}\n')
             f.write('\n')
         
-        # Ensure bodyIds are strings for consistent processing
-        self.source_df['bodyId'] = self.source_df['bodyId'].astype(str)
-        self.target_df['bodyId'] = self.target_df['bodyId'].astype(str)
+        # FlyWire identifiers are canonicalized losslessly before any graph
+        # membership or join operation.  The legacy NeuPrint path keeps its
+        # existing string conversion semantics.
+        if is_flywire_dataset(self.dataset):
+            normalize_flywire_id_columns(
+                self.source_df, ['bodyId']
+            )
+            normalize_flywire_id_columns(
+                self.target_df, ['bodyId']
+            )
+        else:
+            self.source_df['bodyId'] = self.source_df['bodyId'].astype(str)
+            self.target_df['bodyId'] = self.target_df['bodyId'].astype(str)
         
         source_ID = self.source_df['bodyId'].unique()
         target_ID = self.target_df['bodyId'].unique()
@@ -11469,15 +12362,32 @@ class FindNeuronConnection:
             interlayers = []
             
             # Try to load complete neuron dataset for faster lookup
-            dataset_clean = self.dataset.replace(':', '_').replace('.', '_')
+            dataset_clean = dataset_folder(self.dataset)
             dataset_path = os.path.join(
                 self.script_path,
                 'datasets',
                 f"{dataset_clean}_allneurons_neuron_df.csv"
             )
+
+            if is_flywire_dataset(self.dataset):
+                dataset_dir = resolve_flywire_dataset_dir(
+                    self.script_path, self.dataset
+                )
+                candidates = (
+                    [
+                        dataset_dir / f"{dataset_dir.name}_allneurons_neuron_df.parquet",
+                        dataset_dir / f"{dataset_dir.name}_allneurons_neuron_df.csv",
+                        dataset_dir / f"{dataset_clean}_allneurons_neuron_df.parquet",
+                        dataset_dir / f"{dataset_clean}_allneurons_neuron_df.csv",
+                    ]
+                    if dataset_dir is not None else []
+                )
+                dataset_path = next(
+                    (str(path) for path in candidates if path.exists()), None
+                )
             
             # Check for subdirectory structure (common for FlyWire/FAFB)
-            if not os.path.exists(dataset_path):
+            if dataset_path is not None and not os.path.exists(dataset_path):
                 # Try exact match in subdirectory
                 dataset_path_subdir = os.path.join(
                     self.script_path,
@@ -11497,17 +12407,26 @@ class FindNeuronConnection:
                             dataset_path = candidates[0]
                             print(f"   Found dataset file via glob: {os.path.basename(dataset_path)}")
             
-            use_local_dataset = os.path.exists(dataset_path)
+            use_local_dataset = (
+                dataset_path is not None and os.path.exists(dataset_path)
+            )
             ndf_complete = None
             
             if use_local_dataset:
                 self._vprint(f'   Using local dataset: {os.path.basename(dataset_path)}', level='full')
-                if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
-                    ndf_complete = self._read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
+                if is_flywire_dataset(self.dataset):
+                    if str(dataset_path).lower().endswith('.parquet'):
+                        ndf_complete = pd.read_parquet(dataset_path)
+                    else:
+                        ndf_complete = self._read_csv(
+                            dataset_path, header=0, index_col=None,
+                            dtype={'bodyId': 'string'}, low_memory=False
+                        )
+                    normalize_flywire_id_columns(ndf_complete, ['bodyId'])
                 else:
                     ndf_complete = self._read_csv(dataset_path, header=0, index_col=0, low_memory=False)
             else:
-                if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
+                if is_flywire_dataset(self.dataset):
                     self._vprint(f'   ⚠️  Local dataset not found for FlyWire/FAFB. Skipping interlayer info fetch.', level='full')
                     ndf_complete = pd.DataFrame()
                 else:
