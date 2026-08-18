@@ -2989,6 +2989,7 @@ class VisualizeSkeleton:
         kwargs.setdefault('include_plotlyjs', True)
         figure.write_html(html_path, **kwargs)
         self._inject_skeleton_simplification_warning(html_path)
+        self._record_large_html_warning(html_path)
 
     def _simplify_mesh_open3d(self, trimesh_obj, target_faces):
         """
@@ -5408,6 +5409,69 @@ class VisualizeSkeleton:
                 f"  Warning: could not write user_warning_notes.txt: {exc}",
                 level="full",
             )
+
+    def _record_large_html_warning(self, html_path):
+        """Append a render warning when a visualization HTML exceeds 50 MB.
+
+        The warning is recorded after the final HTML has been written, so its
+        size includes the embedded Plotly runtime and any in-page banners.
+        Keep this separate from ``_write_user_warning_notes`` because that
+        method runs during initialization, before the HTML exists.
+        """
+
+        threshold_mb = 50
+        try:
+            size_mb = os.path.getsize(html_path) / (1024 * 1024)
+        except OSError:
+            return False
+
+        if size_mb <= threshold_mb:
+            return False
+
+        save_folder = getattr(self, "save_folder", "") or os.path.dirname(
+            os.path.abspath(html_path)
+        )
+        note_path = os.path.join(save_folder, "user_warning_notes.txt")
+        html_name = os.path.basename(html_path)
+        marker = f"- [render warning] visualization HTML is too large: {html_name}"
+        warning = (
+            f"{marker} ({size_mb:.1f} MB > {threshold_mb} MB). "
+            "Browser rendering and exporting may fail. Try increasing the "
+            "simplification value in Advanced settings (for example, from "
+            "0.90 to 0.98 or 0.99), or change the skeleton mode to 'line'.\n"
+        )
+
+        try:
+            os.makedirs(save_folder, exist_ok=True)
+            if os.path.exists(note_path):
+                with open(note_path, "r", encoding="utf-8") as handle:
+                    existing = handle.read()
+            else:
+                existing = ""
+
+            # Avoid duplicate notes if the same HTML is rewritten by a retry
+            # or reused by another export path.
+            if marker in existing:
+                return True
+
+            with open(note_path, "a", encoding="utf-8") as handle:
+                if not existing:
+                    handle.write(
+                        "DROCAT user warning notes\n"
+                        + "=" * 60
+                        + "\n"
+                    )
+                elif not existing.endswith("\n"):
+                    handle.write("\n")
+                handle.write("\n" + warning)
+        except OSError as exc:
+            self._vprint(
+                f"  Warning: could not write large HTML render warning: {exc}",
+                level="full",
+            )
+            return False
+
+        return True
 
     def _get_cache_path(self, cache_type):
         """Get the cache directory for skeletons or synapses
@@ -12711,6 +12775,7 @@ class VisualizeSkeleton:
                     views=[self.fig_3d], 
                     title=self.saveas
                 )
+                self._record_large_html_warning(self.fig_path + '.html')
                 self._vprint('Done')
                 
                 if self.show_fig:

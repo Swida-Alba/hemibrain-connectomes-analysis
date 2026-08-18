@@ -307,6 +307,39 @@ def test_user_warning_notes_record_fine_threshold(tmp_path):
     assert "in-page warning threshold >0.95" in notes
 
 
+def test_large_html_render_warning_is_written_to_user_warning_notes(tmp_path):
+    visualizer = object.__new__(VisualizeSkeleton)
+    visualizer.save_folder = str(tmp_path)
+    visualizer._vprint = lambda *args, **kwargs: None
+
+    html_path = tmp_path / "large_skeleton.html"
+    html_path.write_text("<html></html>", encoding="utf-8")
+    with html_path.open("ab") as handle:
+        handle.truncate(50 * 1024 * 1024 + 1)
+
+    assert visualizer._record_large_html_warning(str(html_path)) is True
+
+    notes = (tmp_path / "user_warning_notes.txt").read_text(encoding="utf-8")
+    assert "[render warning] visualization HTML is too large" in notes
+    assert "Browser rendering and exporting may fail" in notes
+    assert "0.98 or 0.99" in notes
+    assert "skeleton mode to 'line'" in notes
+
+
+def test_large_html_render_warning_uses_strictly_greater_than_50_mb(tmp_path):
+    visualizer = object.__new__(VisualizeSkeleton)
+    visualizer.save_folder = str(tmp_path)
+    visualizer._vprint = lambda *args, **kwargs: None
+
+    html_path = tmp_path / "50mb_skeleton.html"
+    html_path.write_text("<html></html>", encoding="utf-8")
+    with html_path.open("ab") as handle:
+        handle.truncate(50 * 1024 * 1024)
+
+    assert visualizer._record_large_html_warning(str(html_path)) is False
+    assert not (tmp_path / "user_warning_notes.txt").exists()
+
+
 def test_real_skeleton_html_is_portable_without_plotly_sidecar(tmp_path):
     import plotly.graph_objects as go
 
