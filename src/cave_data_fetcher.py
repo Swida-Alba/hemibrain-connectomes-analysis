@@ -328,7 +328,15 @@ class CAVEDataFetcher:
         
         try:
             cv = self.cloudvolume
-            mesh = cv.mesh.get(body_id)[body_id]
+            # FAFB/CAVE Graphene meshes use variable-layered Draco. CloudVolume
+            # cannot boundary-deduplicate those layers and otherwise prints a
+            # warning for every mesh while returning the same undeduplicated
+            # data. Opt out explicitly so API repairs do not flood the render
+            # log with a misleading warning.
+            mesh = cv.mesh.get(
+                body_id,
+                deduplicate_chunk_boundaries=False,
+            )[body_id]
             
             # Convert to navis MeshNeuron
             mesh_neuron = navis.MeshNeuron(

@@ -47,6 +47,43 @@ def test_cache_disabled_does_not_create_api_cache_directories(tmp_path):
     assert fetcher.get_cache_path().endswith("cache/flywire_FAFB_v783/API_cache")
 
 
+def test_fafb_mesh_fetch_disables_unsupported_draco_deduplication(
+        tmp_path, capsys):
+    """FAFB Graphene fetches must not emit CloudVolume's no-op warning."""
+    calls = []
+    warning = (
+        "Warning: deduplication not currently supported for this layer's "
+        "variable layered draco meshes"
+    )
+
+    class FakeMeshSource:
+        def get(self, body_id, **kwargs):
+            calls.append((body_id, kwargs))
+            if kwargs.get("deduplicate_chunk_boundaries", True):
+                print(warning)
+            return {body_id: mesh_neuron().trimesh}
+
+    class FakeCloudVolume:
+        mesh = FakeMeshSource()
+
+    fetcher = cdf.CAVEDataFetcher(
+        dataset="flywire_FAFB_v783",
+        cave_token="test-token",
+        cache_enabled=False,
+        project_root=str(tmp_path),
+        verbose=False,
+        _cv=FakeCloudVolume(),
+    )
+
+    result = fetcher.fetch_mesh(42)
+
+    assert result is not None
+    assert calls == [(42, {"deduplicate_chunk_boundaries": False})]
+    output = capsys.readouterr()
+    assert warning not in output.out
+    assert warning not in output.err
+
+
 def test_banc_cache_namespace_keeps_requested_release(tmp_path):
     fetcher = cdf.CAVEDataFetcher(
         dataset="flywire_BANC_v888",
