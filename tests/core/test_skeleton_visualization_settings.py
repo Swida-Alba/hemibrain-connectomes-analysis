@@ -329,6 +329,20 @@ def test_large_html_render_warning_is_written_to_user_warning_notes(tmp_path):
     assert "skeleton mode to 'line'" in notes
 
 
+def test_large_html_render_warning_skips_temporary_export_copy(tmp_path):
+    visualizer = object.__new__(VisualizeSkeleton)
+    visualizer.save_folder = str(tmp_path)
+    visualizer._vprint = lambda *args, **kwargs: None
+
+    html_path = tmp_path / "_temp_export.html"
+    html_path.write_text("<html></html>", encoding="utf-8")
+    with html_path.open("ab") as handle:
+        handle.truncate(50 * 1024 * 1024 + 1)
+
+    assert visualizer._record_large_html_warning(str(html_path)) is False
+    assert not (tmp_path / "user_warning_notes.txt").exists()
+
+
 def test_large_html_render_warning_uses_strictly_greater_than_50_mb(tmp_path):
     visualizer = object.__new__(VisualizeSkeleton)
     visualizer.save_folder = str(tmp_path)

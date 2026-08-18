@@ -5440,9 +5440,14 @@ class VisualizeSkeleton:
 
         The warning is recorded after the final HTML has been written, so its
         size includes the embedded Plotly runtime and any in-page banners.
+        Temporary HTML used only by the WebDriver export session is excluded;
+        the main visualization HTML remains the user-facing artifact.
         Keep this separate from ``_write_user_warning_notes`` because that
         method runs during initialization, before the HTML exists.
         """
+
+        if os.path.basename(html_path) == "_temp_export.html":
+            return False
 
         threshold_mb = 50
         try:
