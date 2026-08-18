@@ -144,7 +144,7 @@ class NeuronBridgeFinder:
 | Parameter                 | Type            | Default                          | Description                                                                                                                                                                                                                                                                                                                                                                                             |
 | ------------------------- | --------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `datasets_path`           | `str` or `None` | Auto-detect                      | Path to the datasets folder containing neuron_df CSV files. Used for enriching results with local neuron metadata.                                                                                                                                                                                                                                                                                      |
-| `use_cache`               | `bool`          | `True`                           | Whether to cache API results locally. New records are stored as compressed Parquet; older CSV cache files remain readable during migration.                                                                                                                                                                                                                                                            |
+| `use_cache`               | `bool`          | `True`                           | Whether to cache API results locally. Records are stored as compressed, NeuronBridge-versioned Parquet; legacy CSV records are ignored.                                                                                                                                                                                                                                                            |
 | `cache_folder`            | `str` or `None` | Auto-detect                      | Folder for cached results. Default: `cache/neuronbridge/` in the project directory.                                                                                                                                                                                                                                                                                                                     |
 | `verbose`                 | `bool`          | `True`                           | Print progress messages during operations.                                                                                                                                                                                                                                                                                                                                                              |
 | `separate_splitgal4`      | `bool`          | `False`                          | **NEW**: If True, separate results into GAL4/LexA and Split-GAL4 categories. When enabled, `download_top_n_img` applies separately to each category (see [Line Type Separation](#line-type-separation)).                                                                                                                                                                                                |
@@ -538,7 +538,7 @@ results = nbf.find_lines_batch(
 | `image_formats`                | `str` or `list`          | `['png', 'jpg']`             | File formats to download.                                                                     |
 | `image_types`                  | `str` or `list`          | `'all'`                      | Image types: `'mip'`, `'cdm'`, `'aligned'`, `'all'`, etc.                                     |
 | `max_download_images_per_line` | `int` or `None`          | `20`                         | Maximum images to download per line.                                                          |
-| `flylight_category`            | `str` or `list`          | `['GAL4/LEXA', 'SplitGAL4']` | FlyLight collection category. MCFO automatically used as fallback.                            |
+| `flylight_category`            | `str` or `list`          | `['GAL4/LEXA', 'SplitGAL4']` | FlyLight collection category. Missing lines fall back to MCFO, then RawImages, then NeuronBridge. |
 | `organize_by_region`           | `bool`                   | `False`                      | Organize images into Brain/VNC subfolders.                                                    |
 | `simple_mode`                  | `bool`                   | `False`                      | Apply filename filtering to reduce download volume (see [Simple Mode](#simple-mode)).         |
 | `pdf_images_per_page`          | `tuple`                  | `(5, 3)`                     | (columns, rows) - images per page in PDF summary.                                             |
@@ -1098,13 +1098,13 @@ The current cache lives under `cache/neuronbridge/parquet/<neuronbridge-version>
 
 - `id_to_lines/` contains one table per canonical body/dataset/match key. Region and `max_api_images_per_line` are not part of this key because they do not affect EM-to-LM lookups.
 - `image_cache/` contains one compact table per LM image and algorithm (`cds` or `pppm`). The unused duplicate `both` tables are no longer created.
+- `line_image_mapping.json` stores image metadata beside those tables in the same versioned directory.
 - `manifest.json` records the cache format and schema version.
 
-`line_to_neuron()` derives its result from the per-image tables, so `top_n` is applied at query time and cannot make a smaller request poison a later full request. Existing CSV files are read-only fallbacks. To convert them explicitly:
+`line_to_neuron()` derives its result from the per-image tables, so `top_n` is applied at query time and cannot make a smaller request poison a later full request. The cache is Parquet-only and isolated by the NeuronBridge API version. After changing cache formats or versions, clear the cache and let it rebuild:
 
 ```python
-nbf.migrate_cache_to_parquet(dry_run=True)       # inspect first
-nbf.migrate_cache_to_parquet(remove_legacy=True) # remove only converted CSVs
+nbf.clear_cache()
 ```
 
 ---

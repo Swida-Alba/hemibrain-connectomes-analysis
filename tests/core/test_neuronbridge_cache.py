@@ -186,7 +186,9 @@ def test_line_results_use_image_cache_without_line_snapshot(tmp_path, monkeypatc
     assert not list(Path(tmp_path).glob("line_to_neuron_*.csv"))
 
 
-def test_legacy_migration_writes_parquet_and_can_remove_sources(tmp_path, monkeypatch):
+def test_legacy_csv_is_not_loaded_and_clear_cache_removes_known_legacy_files(
+    tmp_path, monkeypatch
+):
     finder = _finder(tmp_path, monkeypatch)
     image_dir = Path(tmp_path) / "image_cache"
     image_dir.mkdir(parents=True, exist_ok=True)
@@ -222,11 +224,65 @@ def test_legacy_migration_writes_parquet_and_can_remove_sources(tmp_path, monkey
         ]
     ).to_csv(id_csv, index=False)
 
-    stats = finder.migrate_cache_to_parquet(remove_legacy=True)
+    image_csv = image_dir / "cds_lm-1.csv"
+    pd.DataFrame([{"bodyId": 123, "score": 0.8}]).to_csv(image_csv, index=False)
 
-    assert stats["errors"] == 0
+    # Legacy files do not participate in cache hits.
+    assert finder._load_from_cache(
+        "id_to_lines", "123_cds_ds:v1_Brain_all"
+    ) is None
+    assert finder._load_image_cache("lm-1", "cds") is None
+
+    finder.clear_cache()
     assert not line_csv.exists()
     assert not id_csv.exists()
-    parquet_root = Path(tmp_path) / "parquet" / "v_test-version"
-    assert (parquet_root / "image_cache" / "cds_lm-1.parquet").exists()
-    assert (parquet_root / "id_to_lines" / "id_to_lines_123_cds_ds_v1.parquet").exists()
+    assert not image_csv.exists()
+
+
+class _EMImage:
+    type = "EMImage"
+    files = object()
+
+    def __init__(self, published_name):
+        self.publishedName = published_name
+
+
+class _MetadataClient:
+    version = "test-version"
+
+    def __init__(self):
+        self.calls = 0
+        self.images = [
+            _EMImage("male-cns:v0.9:12211"),
+            _EMImage("male-cns:v1.0:12211"),
+        ]
+
+    def get_em_images(self, body_id):
+        self.calls += 1
+        return list(self.images)
+
+
+def test_dataset_version_selection_does_not_fall_back_to_wrong_image(tmp_path, monkeypatch):
+    finder = _finder(tmp_path, monkeypatch)
+    client = _MetadataClient()
+    finder._client = client
+
+    selected = finder._get_em_image_for_dataset(12211, "male-cns:v1.0")
+
+    assert selected is client.images[1]
+    assert finder._get_em_image_for_dataset(12211, "male-cns:v2.0") is None
+
+
+def test_batched_metadata_validation_carries_selected_image(tmp_path, monkeypatch):
+    finder = _finder(tmp_path, monkeypatch)
+    client = _MetadataClient()
+    finder._client = client
+
+    result = finder._validate_body_ids_parallel(
+        [{"bodyId": 12211, "dataset": "male-cns:v1.0"}],
+        max_workers=1,
+    )
+
+    assert client.calls == 1
+    assert result[12211]["dataset"] == "male-cns:v1.0"
+    assert result[12211]["em_image"] is client.images[1]

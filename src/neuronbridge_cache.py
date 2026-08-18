@@ -6,11 +6,12 @@ schema explicit:
 
 * id-to-line records are stored once per canonical body/dataset/match key;
 * image records are stored once per LM image and algorithm;
-* derived ``both`` and line-level result tables are not written by the new
-  cache path.
+* derived ``both`` and line-level result tables are not written by the cache
+  path.
 
-CSV files from older DROCAT releases are intentionally handled by the Finder
-as a read-only fallback.  The migration command can convert them explicitly.
+The cache is intentionally Parquet-only.  Older CSV files are not read or
+migrated, because they do not carry enough NeuronBridge-version information to
+be safely reused after a cache reset.
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ ID_COLUMNS = ["line", "library", "score", "image_id", "match_type"]
 def _safe_component(value: Any) -> str:
     """Return a filesystem-safe cache-key component."""
 
-    return str(value).replace("/", "_").replace(":", "_")
+    return str(value).replace("/", "_").replace("\\", "_").replace(":", "_")
 
 
 def _empty_string_columns(frame: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:

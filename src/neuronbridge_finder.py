@@ -60,6 +60,20 @@ import bokeh.palettes
 import numpy as np
 import pandas as pd
 try:
+    from .flywire_ids import (
+        is_flywire_dataset,
+        normalize_flywire_body_id,
+        normalize_flywire_id_columns,
+        resolve_flywire_dataset_dir,
+    )
+except ImportError:
+    from flywire_ids import (
+        is_flywire_dataset,
+        normalize_flywire_body_id,
+        normalize_flywire_id_columns,
+        resolve_flywire_dataset_dir,
+    )
+try:
     from .utils.naming_utils import dataset_abbrev
 except ImportError:
     try:
@@ -241,31 +255,12 @@ def _to_int_bodyid(val):
     
     Returns the original value if conversion fails.
     """
-    import numpy as np
-    
-    # Already an int
-    if isinstance(val, (int, np.integer)):
-        return int(val)
-    
-    # Float (including numpy float)
-    if isinstance(val, (float, np.floating)):
-        return int(val)
-    
-    # String
-    if isinstance(val, str):
-        # Try direct int conversion first (handles '5813128953')
-        try:
-            return int(val)
-        except ValueError:
-            pass
-        # Try float then int (handles '5813128953.0')
-        try:
-            return int(float(val))
-        except ValueError:
-            pass
-    
-    # Return original if conversion fails
-    return val
+    try:
+        # The normalizer rejects unsafe FlyWire floats instead of silently
+        # rounding them through ``int(float(value))``.
+        return int(normalize_flywire_body_id(val, field='bodyId'))
+    except (TypeError, ValueError):
+        return val
 
 
 # Line name prefixes for classification
@@ -278,6 +273,7 @@ SPLIT_GAL4_PREFIXES = ('SS', 'LH', 'MB', 'IS', 'OL', 'LC', 'LLPC', 'LPC', 'JRC_S
 VALID_MATCH_TYPES = {'cds', 'pppm', 'both'}
 VALID_REGIONS = {'brain', 'vnc', 'all'}
 VALID_SIMILARITY_METHODS = {'jaccard', 'weighted_jaccard', 'rank_correlation'}
+_EM_IMAGE_NOT_PROVIDED = object()
 VALID_SORT_BY = {'completeness', 'max'}
 
 
@@ -483,8 +479,7 @@ class NeuronBridgeFinder:
             self._get_parquet_cache().ensure_manifest(
                 getattr(self._client, 'version', None)
             )
-            # Build cache index for fast lookups after both legacy CSV and new
-            # Parquet locations are known.
+            # Build cache index for fast lookups in the current Parquet store.
             self._build_cache_index()
     
     def _vprint(self, msg: str, end: str = '\n', force: bool = False):
@@ -617,14 +612,14 @@ class NeuronBridgeFinder:
         if not self._cache_index:
             return False
         
-        safe_id = str(identifier).replace('/', '_').replace(':', '_')
+        safe_id = str(identifier).replace('/', '_').replace('\\', '_').replace(':', '_')
         cache_key = f"{cache_type}_{safe_id}"
         
         return cache_key in self._cache_index.get(cache_type, set())
     
     def _add_to_cache_index(self, cache_type: str, identifier: str):
         """Add a new entry to the cache index after saving to disk."""
-        safe_id = str(identifier).replace('/', '_').replace(':', '_')
+        safe_id = str(identifier).replace('/', '_').replace('\\', '_').replace(':', '_')
         cache_key = f"{cache_type}_{safe_id}"
         
         if cache_type not in self._cache_index:
@@ -753,7 +748,7 @@ class NeuronBridgeFinder:
         if no_files_at_all:
             lines = [w.split("for ")[-1].split(" in")[0].strip() for w in no_files_at_all]
             if lines:
-                self._vprint(f"\n❌ {len(lines)} line(s) had no images in any collection:", force=True)
+                self._vprint(f"\n❌ {len(lines)} line(s) had no FlyLight images after all collection fallbacks:", force=True)
                 self._vprint(f"   {', '.join(lines[:10])}{'...' if len(lines) > 10 else ''}", force=True)
         
         # Clear warnings after printing
@@ -3796,6 +3791,19 @@ class NeuronBridgeFinder:
             if dataset_folder in self._neuron_dfs:
                 loaded.append(dataset_folder)
                 continue
+
+            # FlyWire-family tables are local prepared artifacts, not
+            # NeuPrint datasets. Prefer the exact Parquet/CSV resolver and
+            # never attempt a NeuPrint/FAFB fallback for a missing BANC table.
+            if is_flywire_dataset(dataset_folder):
+                local_df = self._load_neuron_df_for_dataset(dataset_folder)
+                if local_df is not None and not local_df.empty:
+                    loaded.append(dataset_folder)
+                else:
+                    self._vprint(
+                        f"   ⚠️ Could not load FlyWire dataset: {dataset_folder}"
+                    )
+                continue
             
             # Try to load from local file
             if self.datasets_path:
@@ -3854,15 +3862,44 @@ class NeuronBridgeFinder:
         if dataset in self._neuron_dfs:
             return self._neuron_dfs[dataset]
         
-        # Try to load from datasets folder
+        # Try to load from datasets folder. FlyWire-family datasets must use
+        # their own exact table; in particular BANC must never fall back to
+        # the FAFB table or a NeuPrint pull.
         if self.datasets_path:
-            neuron_df_path = os.path.join(
-                self.datasets_path, dataset, f"{dataset}_allneurons_neuron_df.csv"
+            if is_flywire_dataset(dataset):
+                dataset_root = resolve_flywire_dataset_dir(
+                    Path(self.datasets_path).parent, dataset
+                )
+            else:
+                dataset_root = Path(self.datasets_path) / dataset
+            dataset_root = Path(dataset_root) if dataset_root is not None else None
+            dataset_names = []
+            if dataset_root is not None:
+                dataset_names.append(dataset_root.name)
+            if dataset not in dataset_names:
+                dataset_names.append(dataset)
+            neuron_candidates = [
+                dataset_root / f"{name}_allneurons_neuron_df.{suffix}"
+                for name in dataset_names
+                for suffix in ("parquet", "csv")
+            ] if dataset_root is not None else []
+            neuron_df_path = next(
+                (path for path in neuron_candidates if path.exists()),
+                None,
             )
             
-            if os.path.exists(neuron_df_path):
+            if neuron_df_path is not None:
                 try:
-                    df = pd.read_csv(neuron_df_path, dtype={'bodyId': str}, low_memory=False)
+                    if str(neuron_df_path).lower().endswith('.parquet'):
+                        df = pd.read_parquet(neuron_df_path)
+                    else:
+                        df = pd.read_csv(
+                            neuron_df_path,
+                            dtype={'bodyId': 'string'},
+                            low_memory=False,
+                        )
+                    if is_flywire_dataset(dataset):
+                        normalize_flywire_id_columns(df, ['bodyId', 'root_id'])
                     self._neuron_dfs[dataset] = df
                     # Only print loading message if not suppressing
                     if not self._suppress_loading_msgs:
@@ -3870,6 +3907,12 @@ class NeuronBridgeFinder:
                     return df
                 except Exception as e:
                     self._vprint(f"  ⚠️ Could not load neuron data for {dataset}: {e}")
+            elif is_flywire_dataset(dataset):
+                self._vprint(
+                    f"  ⚠️ No local FlyWire neuron table found for {dataset}; "
+                    "skipping this dataset."
+                )
+                return None
             else:
                 # Try to pull dataset using statvis.pull_dataset
                 return self._pull_and_load_dataset(dataset)
@@ -4275,12 +4318,7 @@ class NeuronBridgeFinder:
         cache_path = self._get_cache_path(cache_type, identifier)
         with self._cache_lock:
             try:
-                if cache_type == 'id_to_lines':
-                    saved_path = self._get_parquet_cache().save_id(identifier, df)
-                else:
-                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                    df.to_parquet(cache_path, index=False, compression='zstd')
-                    saved_path = cache_path
+                saved_path = self._get_parquet_cache().save_id(identifier, df)
                 # Update in-memory index
                 if saved_path:
                     self._add_to_cache_index(cache_type, identifier)
@@ -4302,20 +4340,13 @@ class NeuronBridgeFinder:
     # - Does NOT mark lines as "complete" since server images can update
     # - Always checks online for new images, uses cache for existing ones
     
-    def _get_image_cache_dir(self) -> str:
-        """Get the directory for image-based cache."""
-        cache_dir = os.path.join(self.cache_folder, 'image_cache')
-        os.makedirs(cache_dir, exist_ok=True)
-        return cache_dir
-    
     def _get_image_cache_path(self, image_id: str, match_type: str) -> str:
         """Get the new Parquet path for a specific LM image and match type."""
         return str(self._get_parquet_cache().image_path(str(image_id), match_type))
     
     def _get_line_mapping_path(self) -> str:
-        """Get the path to the line-image mapping file."""
-        cache_dir = self._get_image_cache_dir()
-        return os.path.join(cache_dir, 'line_image_mapping.json')
+        """Get the mapping path inside the current versioned cache."""
+        return str(self._get_parquet_cache().root / 'line_image_mapping.json')
     
     def _load_line_mapping(self) -> Dict[str, Any]:
         """
@@ -4369,6 +4400,7 @@ class NeuronBridgeFinder:
         mapping_path = self._get_line_mapping_path()
         temporary = f"{mapping_path}.{os.getpid()}.tmp"
         try:
+            os.makedirs(os.path.dirname(mapping_path), exist_ok=True)
             with open(temporary, 'w') as f:
                 json.dump(mapping, f, indent=2)
             os.replace(temporary, mapping_path)
@@ -4462,36 +4494,34 @@ class NeuronBridgeFinder:
         cache_paths = list(self._get_parquet_cache().image_dir.glob('*.parquet'))
         with self._cache_lock:
             mapping = self._read_line_mapping_unlocked()
+            for cache_path in cache_paths:
+                if not cache_path.is_file():
+                    continue
 
-        for cache_path in cache_paths:
-            if not cache_path.is_file():
-                continue
+                # Parse filename: {match_type}_{image_id}.parquet
+                parts = cache_path.stem.split('_', 1)
+                if len(parts) != 2:
+                    continue
 
-            # Parse filename: {match_type}_{image_id}.parquet
-            parts = cache_path.stem.split('_', 1)
-            if len(parts) != 2:
-                continue
-            
-            match_type, image_id = parts
-            if match_type not in ['cds', 'pppm', 'both']:
-                continue
-            
-            stats['images_scanned'] += 1
-            
-            # Update mapping
-            if image_id not in mapping.get("images", {}):
-                mapping["images"][image_id] = {
-                    "line": "",  # Unknown line
-                    "cached_types": []
-                }
-            
-            if match_type not in mapping["images"][image_id].get("cached_types", []):
-                if "cached_types" not in mapping["images"][image_id]:
-                    mapping["images"][image_id]["cached_types"] = []
-                mapping["images"][image_id]["cached_types"].append(match_type)
-                stats['types_updated'] += 1
-        
-        with self._cache_lock:
+                match_type, image_id = parts
+                if match_type not in ['cds', 'pppm']:
+                    continue
+
+                stats['images_scanned'] += 1
+
+                # Update mapping
+                if image_id not in mapping.get("images", {}):
+                    mapping["images"][image_id] = {
+                        "line": "",  # Unknown line
+                        "cached_types": []
+                    }
+
+                if match_type not in mapping["images"][image_id].get("cached_types", []):
+                    if "cached_types" not in mapping["images"][image_id]:
+                        mapping["images"][image_id]["cached_types"] = []
+                    mapping["images"][image_id]["cached_types"].append(match_type)
+                    stats['types_updated'] += 1
+
             self._write_line_mapping_unlocked(mapping)
         self._vprint(f"✓ Synced mapping: {stats['images_scanned']} files, {stats['types_updated']} types updated")
         return stats
@@ -4713,186 +4743,6 @@ class NeuronBridgeFinder:
         
         return all_matches, all_from_cache, partial_cache
     
-    def migrate_cache_to_image_format(self, dry_run: bool = False) -> Dict[str, int]:
-        """Backward-compatible name for :meth:`migrate_cache_to_parquet`."""
-        return self.migrate_cache_to_parquet(dry_run=dry_run)
-
-    def migrate_cache_to_parquet(
-        self,
-        dry_run: bool = False,
-        remove_legacy: bool = False,
-    ) -> Dict[str, int]:
-        """Convert legacy CSV cache records to the compact Parquet layout.
-
-        The migration is explicit so simply upgrading DROCAT never rewrites or
-        deletes a user's cache.  ``remove_legacy=True`` removes only files that
-        were successfully converted; the default leaves CSVs in place as a
-        rollback/read-only fallback.
-
-        ``both`` is expanded into raw CDS and PPPM records when the source has
-        the component scores.  Legacy per-image ``both`` files that are exact
-        CDS copies are treated as CDS records, which matches the historical
-        cache contents and avoids creating another duplicate table.
-        """
-        stats = {
-            'files_processed': 0,
-            'images_extracted': 0,
-            'id_files_converted': 0,
-            'legacy_removed': 0,
-            'errors': 0,
-        }
-        cache_root = Path(self.cache_folder)
-        parquet_cache = self._get_parquet_cache()
-        if self.use_cache and not dry_run:
-            parquet_cache.ensure_manifest(getattr(self._client, 'version', None))
-
-        def as_image_id(value: Any) -> Optional[str]:
-            if pd.isna(value):
-                return None
-            if isinstance(value, float) and value.is_integer():
-                return str(int(value))
-            return str(value)
-
-        def algorithm_frames(frame: pd.DataFrame, default: str) -> List[Tuple[str, pd.DataFrame]]:
-            """Return raw algorithm frames, expanding derived ``both`` rows."""
-            frame = frame.copy()
-            if 'match_type' not in frame.columns:
-                frame['match_type'] = default
-            frame['match_type'] = frame['match_type'].fillna(default).astype(str).str.lower()
-            output: List[Tuple[str, pd.DataFrame]] = []
-            for algorithm in ('cds', 'pppm'):
-                rows = frame[frame['match_type'] == algorithm].copy()
-                if not rows.empty:
-                    rows['match_type'] = algorithm
-                    output.append((algorithm, rows))
-
-            both = frame[frame['match_type'] == 'both'].copy()
-            if not both.empty:
-                for algorithm, score_column in (
-                    ('cds', 'cds_score'),
-                    ('pppm', 'pppm_score'),
-                ):
-                    if score_column not in both.columns:
-                        continue
-                    rows = both.copy()
-                    rows['score'] = pd.to_numeric(rows[score_column], errors='coerce')
-                    rows = rows[rows['score'].notna()]
-                    if not rows.empty:
-                        rows['match_type'] = algorithm
-                        output.append((algorithm, rows))
-            return output
-
-        def save_image_frame(image_id: str, algorithm: str, frame: pd.DataFrame) -> None:
-            if dry_run:
-                stats['images_extracted'] += 1
-                return
-            path = parquet_cache.save_image(image_id, algorithm, frame)
-            if path is not None:
-                stats['images_extracted'] += 1
-
-        # Convert old per-image CSVs first.  These are already close to the
-        # canonical shape and can be merged into an existing Parquet file.
-        image_csvs = [
-            path for path in (cache_root / 'image_cache').glob('*.csv')
-            if path.name != 'line_image_mapping.json'
-        ] if (cache_root / 'image_cache').exists() else []
-        for path in image_csvs:
-            try:
-                frame = pd.read_csv(path)
-                stem_parts = path.stem.split('_', 1)
-                default = stem_parts[0] if stem_parts and stem_parts[0] in ('cds', 'pppm') else 'cds'
-                file_image_id = stem_parts[1] if len(stem_parts) == 2 else ''
-                converted = False
-                for algorithm, algorithm_df in algorithm_frames(frame, default):
-                    if 'lm_sample' not in algorithm_df.columns:
-                        algorithm_df['lm_sample'] = file_image_id
-                    for lm_sample, group in algorithm_df.groupby('lm_sample', dropna=True):
-                        image_id = as_image_id(lm_sample) or file_image_id
-                        if not image_id:
-                            continue
-                        save_image_frame(image_id, algorithm, group)
-                        converted = True
-                stats['files_processed'] += 1
-                if converted and remove_legacy and not dry_run:
-                    path.unlink()
-                    stats['legacy_removed'] += 1
-            except Exception as exc:
-                stats['errors'] += 1
-                self._vprint(f"  ⚠️ Error converting {path.name}: {exc}")
-
-        # Convert old line snapshots.  They are intentionally not recreated;
-        # their per-image rows become the source of future line queries.
-        line_csvs = list(cache_root.glob('line_to_neuron_*.csv')) if cache_root.exists() else []
-        for path in line_csvs:
-            try:
-                frame = pd.read_csv(path)
-                if 'lm_sample' not in frame.columns:
-                    continue
-                converted = False
-                for algorithm, algorithm_df in algorithm_frames(frame, 'cds'):
-                    for lm_sample, group in algorithm_df.groupby('lm_sample', dropna=True):
-                        image_id = as_image_id(lm_sample)
-                        if not image_id:
-                            continue
-                        save_image_frame(image_id, algorithm, group)
-                        converted = True
-                stats['files_processed'] += 1
-                if converted and remove_legacy and not dry_run:
-                    path.unlink()
-                    stats['legacy_removed'] += 1
-            except Exception as exc:
-                stats['errors'] += 1
-                self._vprint(f"  ⚠️ Error converting {path.name}: {exc}")
-
-        # Convert directional EM->LM snapshots.  The old filename encodes
-        # dataset + region + max-image settings; only the dataset survives in
-        # the canonical key because the other settings do not affect EM data.
-        id_csvs = list(cache_root.glob('id_to_lines_*.csv')) if cache_root.exists() else []
-        id_pattern = re.compile(r'^id_to_lines_(\d+)_(cds|pppm|both)(?:_(.*))?$')
-        for path in id_csvs:
-            try:
-                match = id_pattern.match(path.stem)
-                if not match:
-                    continue
-                body_id, file_algorithm, suffix = match.groups()
-                dataset_key = 'any'
-                if suffix:
-                    parts = suffix.split('_')
-                    # Current legacy keys end in <region>_<max_images>.
-                    if len(parts) >= 3 and parts[-2] in ('Brain', 'VNC', 'All'):
-                        dataset_key = '_'.join(parts[:-2]) or 'any'
-                    else:
-                        dataset_key = '_'.join(parts) or 'any'
-                frame = pd.read_csv(path)
-                converted = False
-                for algorithm, algorithm_df in algorithm_frames(frame, file_algorithm):
-                    identifier = f"{body_id}_{algorithm}_{dataset_key}"
-                    if not dry_run and parquet_cache.save_id(identifier, algorithm_df) is not None:
-                        converted = True
-                    elif dry_run and not algorithm_df.empty:
-                        converted = True
-                stats['files_processed'] += 1
-                if converted:
-                    stats['id_files_converted'] += 1
-                if converted and remove_legacy and not dry_run:
-                    path.unlink()
-                    stats['legacy_removed'] += 1
-            except Exception as exc:
-                stats['errors'] += 1
-                self._vprint(f"  ⚠️ Error converting {path.name}: {exc}")
-
-        if not dry_run:
-            self.sync_mapping_from_cache_files()
-        action = "Would migrate" if dry_run else "Migrated"
-        self._vprint(
-            f"✓ {action} {stats['files_processed']} CSV files "
-            f"({stats['id_files_converted']} id tables, "
-            f"{stats['images_extracted']} image tables)"
-        )
-        if stats['errors']:
-            self._vprint(f"  ⚠️ {stats['errors']} files had errors")
-        return stats
-    
     def _get_em_images(self, body_id: int) -> List[Any]:
         """Fetch all NeuronBridge EM image records for one body ID."""
         if not self._client:
@@ -5055,8 +4905,8 @@ class NeuronBridgeFinder:
             futures = {executor.submit(validate_single, bi): bi for bi in body_info_list}
             for future in as_completed(futures):
                 try:
-                    body_id, actual_ds = future.result()
-                    results[body_id] = actual_ds
+                    body_id, metadata = future.result()
+                    results[body_id] = metadata
                 except Exception:
                     body_info = futures[future]
                     results[body_info['bodyId']] = {
@@ -5173,6 +5023,7 @@ class NeuronBridgeFinder:
         body_id: int, 
         match_type: Optional[str] = None,
         expected_dataset: Optional[str] = None,
+        em_image: Any = _EM_IMAGE_NOT_PROVIDED,
         raw: bool = False
     ) -> List[Dict[str, Any]]:
         """
@@ -5188,6 +5039,10 @@ class NeuronBridgeFinder:
         expected_dataset : str, optional
             Expected dataset name (e.g., 'male-cns:v0.9').
             If provided, will filter EM images to match this dataset.
+        em_image : object, optional
+            A preselected EM image from batched metadata validation.  Passing
+            ``None`` explicitly means validation found no matching image and
+            avoids a second metadata request.
         raw : bool
             If True, return the CDS/PPPM rows before derived combined-rank
             reduction.  This is used so ``both`` can be reconstructed from
@@ -5205,8 +5060,10 @@ class NeuronBridgeFinder:
             match_type = self.match_type
             
         try:
-            # Use helper to get EM image for the expected dataset
-            em_image = self._get_em_image_for_dataset(body_id, expected_dataset)
+            # Reuse a selected image from batched metadata validation when
+            # available; otherwise resolve it here for direct callers.
+            if em_image is _EM_IMAGE_NOT_PROVIDED:
+                em_image = self._get_em_image_for_dataset(body_id, expected_dataset)
             if em_image is None:
                 self._vprint(f"  ⚠️ No EM image found for body ID {body_id}")
                 return []
@@ -5672,23 +5529,12 @@ class NeuronBridgeFinder:
         ds_key = expected_dataset if expected_dataset else 'any'
         return f"{body_id}_{match_type}_{ds_key}"
 
-    def _get_legacy_id_to_lines_cache_key(
-        self,
-        body_id: int,
-        match_type: str,
-        expected_dataset: Optional[str] = None,
-    ) -> str:
-        """Build the former key used only for CSV read compatibility."""
-        ds_key = expected_dataset.replace(':', '_') if expected_dataset else 'any'
-        region_key = self.region if self.region else 'all'
-        max_imgs_key = self.max_api_images_per_line if self.max_api_images_per_line > 0 else 'all'
-        return f"{body_id}_{match_type}_{ds_key}_{region_key}_{max_imgs_key}"
-    
     def id_to_lines(
         self, 
         body_id: int, 
         match_type: str = 'cds',
-        expected_dataset: Optional[str] = None
+        expected_dataset: Optional[str] = None,
+        _em_image: Any = _EM_IMAGE_NOT_PROVIDED,
     ) -> pd.DataFrame:
         """
         Find driver lines matching a given EM body ID.
@@ -5720,17 +5566,9 @@ class NeuronBridgeFinder:
         
         self._vprint(f"🔍 Searching for lines matching body ID: {body_id}")
         
-        # Check the canonical Parquet key first.  If it is not present, try
-        # the exact legacy key so existing CSV caches remain usable without
-        # silently copying them into the new location.
+        # Only the current NeuronBridge-versioned Parquet key is authoritative.
         cache_key = self._get_id_to_lines_cache_key(body_id, match_type, expected_dataset)
         cached = self._load_from_cache('id_to_lines', cache_key)
-        if cached is None:
-            legacy_key = self._get_legacy_id_to_lines_cache_key(
-                body_id, match_type, expected_dataset
-            )
-            if legacy_key != cache_key:
-                cached = self._load_from_cache('id_to_lines', legacy_key)
         if cached is not None:
             return cached
 
@@ -5744,14 +5582,6 @@ class NeuronBridgeFinder:
                     body_id, algorithm, expected_dataset
                 )
                 algorithm_cached = self._load_from_cache('id_to_lines', algorithm_key)
-                if algorithm_cached is None:
-                    legacy_algorithm_key = self._get_legacy_id_to_lines_cache_key(
-                        body_id, algorithm, expected_dataset
-                    )
-                    if legacy_algorithm_key != algorithm_key:
-                        algorithm_cached = self._load_from_cache(
-                            'id_to_lines', legacy_algorithm_key
-                        )
                 if algorithm_cached is not None:
                     raw_matches.extend(algorithm_cached.to_dict('records'))
                 else:
@@ -5762,6 +5592,7 @@ class NeuronBridgeFinder:
                     body_id,
                     match_type=algorithm,
                     expected_dataset=expected_dataset,
+                    em_image=_em_image,
                 )
                 if algorithm_matches:
                     algorithm_df = pd.DataFrame(algorithm_matches)
@@ -5779,6 +5610,7 @@ class NeuronBridgeFinder:
                 body_id,
                 match_type=match_type,
                 expected_dataset=expected_dataset,
+                em_image=_em_image,
             )
         
         if not matches:
@@ -5875,7 +5707,7 @@ class NeuronBridgeFinder:
         # =====================================================================
         # Pre-validate ALL uncached neurons in parallel (single batch of API calls)
         # =====================================================================
-        validation_results = {}  # body_id -> actual_dataset
+        validation_results = {}  # body_id -> {'dataset', 'em_image'}
         if uncached_neurons:
             self._vprint(f"  🔄 Pre-validating {len(uncached_neurons)} neurons against NeuronBridge API...")
             validation_results = self._validate_body_ids_parallel(
@@ -5911,21 +5743,27 @@ class NeuronBridgeFinder:
             expected_ds = body_info.get('dataset', 'unknown')
             
             # Use pre-validated result (no API call needed here!)
-            actual_ds = validation_results.get(body_id, expected_ds)
-            
-            # Check for dataset mismatch
-            if actual_ds and expected_ds != 'unknown':
-                expected_base = self._normalize_dataset_name(expected_ds)
-                actual_base = self._normalize_dataset_name(actual_ds)
-                
-                if expected_base != actual_base:
-                    return body_id, None, True  # skipped=True
+            metadata = validation_results.get(
+                body_id,
+                {'dataset': expected_ds, 'em_image': None},
+            )
+            actual_ds = metadata.get('dataset') or expected_ds
+            em_image = metadata.get('em_image')
+
+            # Check for dataset and version mismatch.
+            if (
+                actual_ds
+                and expected_ds != 'unknown'
+                and not self._datasets_match(expected_ds, actual_ds)
+            ):
+                return body_id, None, True  # skipped=True
             
             try:
                 lines_df = self.id_to_lines(
                     int(body_id), 
                     match_type=match_type,
-                    expected_dataset=expected_ds
+                    expected_dataset=expected_ds,
+                    _em_image=em_image,
                 )
                 if not lines_df.empty:
                     lines_df = lines_df.copy()
@@ -5949,7 +5787,7 @@ class NeuronBridgeFinder:
                 if HAS_POLARS and len(cached_neurons) > 1:
                     # Use bulk Polars loader for maximum speed
                     self._vprint(
-                        f"  ⏩ Loading {len(cached_neurons)} from cache with online API validation...",
+                        f"  ⏩ Loading {len(cached_neurons)} from cache...",
                         force=True
                     )
                     import time
@@ -5959,7 +5797,7 @@ class NeuronBridgeFinder:
                         cached_neurons,
                         match_type,
                         max_workers=16,
-                        progress_desc=f"  ⏩ Loading {len(cached_neurons)} from cache with online API validation"
+                        progress_desc=f"  ⏩ Loading {len(cached_neurons)} from cache"
                     )
                     
                     # Convert to per-neuron results dict (still in Polars until final output)
@@ -5981,7 +5819,7 @@ class NeuronBridgeFinder:
                         pbar_cache = tqdm_progress(
                             as_completed(futures),
                             total=len(cached_neurons),
-                            desc=f"  ⏩ Loading {len(cached_neurons)} from cache with online API validation",
+                            desc=f"  ⏩ Loading {len(cached_neurons)} from cache",
                             unit="neuron",
                             bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
                             ncols=110,
@@ -6106,24 +5944,30 @@ class NeuronBridgeFinder:
                         results[body_id] = pd.DataFrame()
                 else:
                     # Uncached - use pre-validated result (no API call here)
-                    actual_ds = seq_validation_results.get(body_id, expected_ds)
-                    
-                    # Check for dataset mismatch
-                    if actual_ds and expected_ds != 'unknown':
-                        expected_base = self._normalize_dataset_name(expected_ds)
-                        actual_base = self._normalize_dataset_name(actual_ds)
-                        
-                        if expected_base != actual_base:
-                            self._vprint(f"  ⏭️  Skipping {body_id}: belongs to {actual_ds}, not {expected_ds} (dataset mismatch)")
-                            skipped_count += 1
-                            continue
+                    metadata = seq_validation_results.get(
+                        body_id,
+                        {'dataset': expected_ds, 'em_image': None},
+                    )
+                    actual_ds = metadata.get('dataset') or expected_ds
+                    em_image = metadata.get('em_image')
+
+                    # Check for dataset and version mismatch.
+                    if (
+                        actual_ds
+                        and expected_ds != 'unknown'
+                        and not self._datasets_match(expected_ds, actual_ds)
+                    ):
+                        self._vprint(f"  ⏭️  Skipping {body_id}: belongs to {actual_ds}, not {expected_ds} (dataset mismatch)")
+                        skipped_count += 1
+                        continue
                     
                     self._vprint(f"  Processing {i+1}/{len(body_info_list)}: {body_id} ({actual_ds or expected_ds})")
                     try:
                         lines_df = self.id_to_lines(
                             int(body_id), 
                             match_type=match_type,
-                            expected_dataset=expected_ds
+                            expected_dataset=expected_ds,
+                            _em_image=em_image,
                         )
                         if not lines_df.empty:
                             lines_df = lines_df.copy()
@@ -7112,8 +6956,14 @@ class NeuronBridgeFinder:
                 for original_rank, type_name in top_ranked_types:
                     # Case-sensitive type matching
                     type_neurons = ds_df[ds_df['type_label'] == type_name]['bodyId'].tolist()
-                    # Convert to int (handles strings, floats, and string floats like '123.0')
-                    type_neurons = [_to_int_bodyid(n) for n in type_neurons]
+                    # FlyWire IDs remain exact strings. NeuPrint retains its
+                    # historical integer body-ID representation.
+                    type_neurons = [
+                        normalize_flywire_body_id(n)
+                        if is_flywire_dataset(dataset)
+                        else _to_int_bodyid(n)
+                        for n in type_neurons
+                    ]
                     
                     if len(type_neurons) > 0:
                         neuron_layers.append(type_neurons)
@@ -7164,8 +7014,11 @@ class NeuronBridgeFinder:
                 type_min_rank = {}  # Track minimum rank (best) for each type
                 for rank_idx, (_, row) in enumerate(ds_df_sorted.iterrows(), start=1):
                     bodyid = row['bodyId']
-                    # Convert to int (handles strings, floats, and string floats like '123.0')
-                    bodyid_val = _to_int_bodyid(bodyid)
+                    bodyid_val = (
+                        normalize_flywire_body_id(bodyid)
+                        if is_flywire_dataset(dataset)
+                        else _to_int_bodyid(bodyid)
+                    )
                     type_label = row['type_label']
                     
                     if type_label not in type_to_bodyids:
@@ -7227,9 +7080,14 @@ class NeuronBridgeFinder:
             # Local dataset is loaded with dtype={'bodyId': str}, so convert to strings for comparison
             sample_ids = [bid for layer in neuron_layers for bid in layer[:3]]  # Sample bodyIds
             
-            # Convert sample_ids to strings for comparison (local df uses strings)
-            # Use _to_int_bodyid first to normalize, then convert to string
-            test_ids = [str(_to_int_bodyid(bid)) for bid in sample_ids]
+            # Local FlyWire tables use canonical exact strings. Keep the
+            # NeuPrint comparison behavior unchanged.
+            test_ids = [
+                normalize_flywire_body_id(bid)
+                if is_flywire_dataset(dataset)
+                else str(_to_int_bodyid(bid))
+                for bid in sample_ids
+            ]
             
             found_count = local_neuron_df[local_neuron_df['bodyId'].isin(test_ids)].shape[0]
             
@@ -9296,9 +9154,10 @@ class NeuronBridgeFinder:
                         images_dir = os.path.join(output_path, 'images')
                         
                         # Download from NeuronBridge
+                        nb_files = []
                         if download_source in ('neuronbridge', 'both'):
                             nb_dir = os.path.join(images_dir, 'neuronbridge') if download_source == 'both' else images_dir
-                            self._download_neuronbridge_images(
+                            nb_files = self._download_neuronbridge_images(
                                 lines=download_lines,
                                 output_dir=nb_dir,
                                 formats=image_formats,
@@ -9326,17 +9185,35 @@ class NeuronBridgeFinder:
                             if lines_without_flylight:
                                 self._vprint(f"\n⚠️  Note: No FlyLight images found for {len(lines_without_flylight)} line(s):")
                                 self._vprint(f"   {', '.join(lines_without_flylight)}")
-                                self._vprint("   (tried all categories including MCFO/flweb/RawImages fallbacks)")
+                                self._vprint("   (tried GAL4/LexA → Split-GAL4 → MCFO → RawImages fallbacks)")
                                 
                                 # Last-resort fallback: NeuronBridge images for
-                                # the lines the FlyLight sources missed
-                                # (flylight-only runs; 'both' already covered
-                                # them in the neuronbridge step above).
+                                # lines the FlyLight sources missed. In 'both'
+                                # mode NeuronBridge was already attempted for
+                                # every line; retry only lines for which that
+                                # first pass produced no image.
+                                fallback_lines = []
+                                resolved_by_neuronbridge = set()
                                 if download_source == 'flylight':
-                                    self._vprint(f"\n🔄 NeuronBridge fallback for {len(lines_without_flylight)} line(s) without FlyLight images...")
+                                    fallback_lines = list(lines_without_flylight)
+                                elif download_source == 'both':
+                                    nb_lines_with_files = {
+                                        os.path.basename(os.path.dirname(path))
+                                        for path in nb_files
+                                    }
+                                    resolved_by_neuronbridge.update(
+                                        nb_lines_with_files.intersection(lines_without_flylight)
+                                    )
+                                    fallback_lines = [
+                                        line for line in lines_without_flylight
+                                        if line not in nb_lines_with_files
+                                    ]
+
+                                if fallback_lines:
+                                    self._vprint(f"\n🔄 NeuronBridge fallback for {len(fallback_lines)} line(s) without FlyLight images...")
                                     nb_fb_dir = os.path.join(fl_dir, 'neuronbridge_fallback')
                                     fb_files = self._download_neuronbridge_images(
-                                        lines=lines_without_flylight,
+                                        lines=fallback_lines,
                                         output_dir=nb_fb_dir,
                                         formats=image_formats,
                                         image_types=image_types,
@@ -9344,8 +9221,31 @@ class NeuronBridgeFinder:
                                         verbose=self.verbose,
                                     )
                                     if fb_files:
+                                        resolved_by_neuronbridge.update(
+                                            os.path.basename(os.path.dirname(path))
+                                            for path in fb_files
+                                        )
                                         self._vprint(f"   ✅ NeuronBridge fallback: {len(fb_files)} files for "
                                                      f"{len(set(os.path.basename(os.path.dirname(p)) for p in fb_files))} line(s)")
+
+                                # A line resolved by NeuronBridge is not a
+                                # final "no images" failure; retain the
+                                # informational FlyLight fallback messages,
+                                # but remove the terminal error for that line.
+                                if resolved_by_neuronbridge:
+                                    self._warning_collector[:] = [
+                                        warning for warning in self._warning_collector
+                                        if not any(
+                                            f"No images found for {line} in" in warning
+                                            for line in resolved_by_neuronbridge
+                                        )
+                                    ]
+
+                        # Print FlyLight warnings only after the NeuronBridge
+                        # last-resort has had a chance to run, so the summary
+                        # reflects the complete fallback chain.
+                        if self._warning_collector:
+                            self._print_warning_summary()
                         
                         # Generate PDF/PPTX summary if images were downloaded
                         # from EITHER source. (Previously nested in the FlyLight
@@ -9430,36 +9330,37 @@ class NeuronBridgeFinder:
         Parameters
         ----------
         cache_type : str, optional
-            Type of cache to clear: 'id_to_lines', 'line_to_neuron',
-            'image_cache', or None (all).
+            Type of cache to clear: 'id_to_lines', 'image_cache', or None
+            (all current-version Parquet data and mapping metadata).
         """
         if not os.path.exists(self.cache_folder):
             return
 
         root = Path(self.cache_folder)
         files: List[Path] = []
+        parquet_root = root / 'parquet'
         if cache_type is None:
-            # Only cache-owned files are selected; unrelated files in a
-            # caller-provided cache folder are left untouched.
-            files.extend(path for path in root.glob('*.csv') if path.is_file())
-            files.extend(path for path in (root / 'image_cache').glob('*.csv') if path.is_file())
-            parquet_root = root / 'parquet'
+            # Only current Parquet cache files and its mapping/manifest are
+            # selected, plus known NeuronBridge legacy artifacts so a full
+            # reset really leaves no old cache records behind.
             files.extend(path for path in parquet_root.rglob('*.parquet') if path.is_file())
             files.extend(path for path in parquet_root.rglob('manifest.json') if path.is_file())
-            mapping = Path(self._get_line_mapping_path())
-            if mapping.exists():
-                files.append(mapping)
-        elif cache_type == 'image_cache':
+            files.extend(path for path in parquet_root.rglob('line_image_mapping.json') if path.is_file())
+            files.extend(path for path in root.glob('*.csv') if path.is_file())
+            files.extend(path for path in root.glob('*.parquet') if path.is_file())
             files.extend(path for path in (root / 'image_cache').glob('*.csv') if path.is_file())
-            files.extend(path for path in (root / 'parquet').glob('*/image_cache/*.parquet') if path.is_file())
-            mapping = Path(self._get_line_mapping_path())
-            if mapping.exists():
-                files.append(mapping)
+            files.extend(path for path in (root / 'image_cache').glob('line_image_mapping.json') if path.is_file())
+        elif cache_type == 'image_cache':
+            files.extend(path for path in parquet_root.glob('*/image_cache/*.parquet') if path.is_file())
+            files.extend(path for path in parquet_root.glob('*/line_image_mapping.json') if path.is_file())
+            files.extend(path for path in (root / 'image_cache').glob('*.csv') if path.is_file())
+            files.extend(path for path in (root / 'image_cache').glob('line_image_mapping.json') if path.is_file())
+        elif cache_type == 'id_to_lines':
+            files.extend(path for path in parquet_root.glob('*/id_to_lines/*.parquet') if path.is_file())
+            files.extend(path for path in root.glob('id_to_lines_*.csv') if path.is_file())
+            files.extend(path for path in root.glob('id_to_lines_*.parquet') if path.is_file())
         else:
-            files.extend(path for path in root.glob(f'{cache_type}_*.csv') if path.is_file())
-            files.extend(path for path in root.glob(f'{cache_type}_*.parquet') if path.is_file())
-            if cache_type == 'id_to_lines':
-                files.extend(path for path in (root / 'parquet').glob('*/id_to_lines/*.parquet') if path.is_file())
+            raise ValueError("cache_type must be 'id_to_lines', 'image_cache', or None")
 
         for path in files:
             try:
@@ -9752,7 +9653,7 @@ class NeuronBridgeFinder:
         verbose: bool
     ) -> List[str]:
         """Download images from FlyLight using flylight_downloader module."""
-        return self._download_flylight_images_with_category(
+        downloaded, _missing = self._download_flylight_images_with_category(
             lines=lines,
             output_dir=output_dir,
             formats=formats,
@@ -9762,6 +9663,9 @@ class NeuronBridgeFinder:
             organize_by_region=False,
             verbose=verbose
         )
+        if verbose:
+            self._print_warning_summary()
+        return downloaded
     
     def _parse_region_from_filename(self, filename: str, full_key: str = None) -> str:
         """
@@ -9957,7 +9861,8 @@ class NeuronBridgeFinder:
         This method searches FlyLight collections in priority order, collecting
         images from each category sequentially until ``max_files`` is reached
         for each line. If a line has no images in the specified categories,
-        it automatically falls back to searching 'MCFO' collection.
+        it automatically falls back to MCFO, then RawImages, before the
+        caller's final NeuronBridge fallback.
         
         **Category Search Order:**
         
@@ -9967,11 +9872,14 @@ class NeuronBridgeFinder:
         1. First, search 'GAL4/LEXA' collection
         2. If not enough files, search 'SplitGAL4' collection
         3. If still no files found, fallback to 'MCFO' collection
+        4. If still no files found, fallback to 'RawImages' collection
+        5. If still no files found, the caller tries NeuronBridge images
         
         This sequential approach ensures:
         - Preferred collections are prioritized
         - ``max_files`` limit is respected across all categories
-        - Lines without images in primary categories get MCFO fallback
+        - Lines without images in primary categories get MCFO and RawImages
+          fallbacks in that order
         
         Parameters
         ----------
@@ -9993,8 +9901,9 @@ class NeuronBridgeFinder:
             If None, searches all collections.
             
             **Fallback behavior:** If no images are found for a line in the
-            specified categories, 'MCFO' is automatically added as a fallback
-            (unless already included or category is 'All'/None).
+            specified categories, MCFO and then RawImages are searched
+            automatically. If FlyLight still has no image,
+            ``find_lines_batch`` tries NeuronBridge.
         organize_by_region : bool
             If True, organize images into Brain/VNC subfolders.
         simple_mode : bool
@@ -10008,7 +9917,7 @@ class NeuronBridgeFinder:
         tuple of (list, list)
             - downloaded_files: List of downloaded file paths
             - lines_without_files: List of line names that had no FlyLight
-              files available even after MCFO fallback
+              files available even after MCFO and RawImages fallbacks
               
         Examples
         --------
@@ -10119,6 +10028,7 @@ class NeuronBridgeFinder:
                         collection_category=cat,
                         formats=downloader_kwargs.get('formats', formats),
                         image_types=downloader_kwargs.get('image_types', image_types),
+                        automatic_fallback=False,
                         verbose=False
                     )
                     
@@ -10200,7 +10110,7 @@ class NeuronBridgeFinder:
         if verbose:
             cat_str = ' → '.join(categories)
             if needs_mcfo_fallback:
-                cat_str += ' → MCFO (fallback)'
+                cat_str += ' → MCFO → RawImages (fallback)'
             if simple_mode:
                 print(f"📊 Scanning {len(lines)} lines (simple mode, categories: {cat_str})...")
             else:
@@ -10253,19 +10163,10 @@ class NeuronBridgeFinder:
                         max_files_limit
                     )
                 
-                # flweb CGI fallback: expression-pattern imagery on
-                # flweb.janelia.org for lines the collections missed
-                # (e.g. R-lines like R85D07).
-                if not files:
-                    with warning_lock:
-                        warning_msg = f"ℹ️  No files from collections for {line_name}, trying flweb.janelia.org..."
-                        self._warning_collector.append(warning_msg)
-                    files = get_flweb_fallback_files(line_name, max_files_limit)
-                
                 # RawImages collection fallback: raw confocal data on S3.
                 if not files:
                     with warning_lock:
-                        warning_msg = f"ℹ️  No flweb files for {line_name}, trying RawImages collection..."
+                        warning_msg = f"ℹ️  No MCFO files for {line_name}, trying RawImages collection..."
                         self._warning_collector.append(warning_msg)
                     files = get_files_for_line_sequential(
                         line_name,
@@ -10273,10 +10174,22 @@ class NeuronBridgeFinder:
                         {'formats': line_formats, 'image_types': line_image_types},
                         max_files_limit
                     )
+
+                # Legacy flweb CGI fallback: expression-pattern imagery on
+                # flweb.janelia.org for lines the selected collections missed
+                # (e.g. R-lines like R85D07). The primary GAL4/LexA lookup
+                # already checks this endpoint for R-lines; keep this final
+                # FlyLight probe for older/atypical CGI pages, after MCFO and
+                # RawImages as requested.
+                if not files:
+                    with warning_lock:
+                        warning_msg = f"ℹ️  No RawImages files for {line_name}, trying flweb.janelia.org..."
+                        self._warning_collector.append(warning_msg)
+                    files = get_flweb_fallback_files(line_name, max_files_limit)
                 
                 if not files:
                     with warning_lock:
-                        warning_msg = f"⚠️  No images found for {line_name} in any collection (including MCFO/flweb/RawImages)"
+                        warning_msg = f"⚠️  No images found for {line_name} in any FlyLight collection (MCFO/RawImages included)"
                         self._warning_collector.append(warning_msg)
                 
                 return (line_name, files)
@@ -10431,10 +10344,6 @@ class NeuronBridgeFinder:
         
         if verbose:
             print(f"  ✅ Downloaded {len(downloaded)}/{total_file_count} files")
-        
-        # Print warning summary
-        if verbose:
-            self._print_warning_summary()
         
         # Reorganize files by anatomical region if requested
         if organize_by_region and downloaded:
