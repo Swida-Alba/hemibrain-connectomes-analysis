@@ -18,6 +18,236 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 import cave_data_fetcher as cdf  # noqa: E402
 
 
+def mesh_neuron():
+    """A small surface mesh suitable for cache and type-contract tests."""
+    import navis
+
+    vertices = np.array([
+        (0.0, 0.0, 0.0),
+        (100.0, 0.0, 0.0),
+        (0.0, 100.0, 0.0),
+        (0.0, 0.0, 100.0),
+    ])
+    faces = np.array([
+        (0, 2, 1), (0, 1, 3), (1, 2, 3), (2, 0, 3),
+    ], dtype=np.int64)
+    return navis.MeshNeuron({"vertices": vertices, "faces": faces})
+
+
+def test_cache_disabled_does_not_create_api_cache_directories(tmp_path):
+    fetcher = cdf.CAVEDataFetcher(
+        dataset="flywire_FAFB_v783",
+        cave_token="test-token",
+        cache_enabled=False,
+        project_root=str(tmp_path),
+        verbose=False,
+    )
+
+    assert not (tmp_path / "cache").exists()
+    assert fetcher.get_cache_path().endswith("cache/flywire_FAFB_v783/API_cache")
+
+
+def test_banc_cache_namespace_keeps_requested_release(tmp_path):
+    fetcher = cdf.CAVEDataFetcher(
+        dataset="flywire_BANC_v888",
+        cave_token="test-token",
+        project_root=str(tmp_path),
+        verbose=False,
+    )
+
+    assert fetcher.get_cache_path().endswith(
+        "cache/flywire_BANC_v888/API_cache"
+    )
+    assert fetcher._get_skeleton_cache_path("72057594037927937").endswith(
+        "cache/flywire_BANC_v888/skeletons/raw_skeletons/"
+        "72057594037927937.swc.gz"
+    )
+
+
+def test_use_cache_false_is_online_only_even_when_cache_enabled(
+        tmp_path, monkeypatch):
+    """Per-call ``use_cache=False`` must not read or write API skeletons."""
+    fetcher = cdf.CAVEDataFetcher(
+        dataset="flywire_FAFB_v783",
+        cave_token="test-token",
+        cache_enabled=True,
+        project_root=str(tmp_path),
+        verbose=False,
+    )
+    monkeypatch.setattr(
+        fetcher, "_load_from_cache",
+        lambda _path: pytest.fail("online-only fetch inspected the cache"),
+    )
+    monkeypatch.setattr(
+        fetcher, "fetch_mesh",
+        lambda _body_id, use_cache=False: object(),
+    )
+    monkeypatch.setattr(
+        cdf.navis, "skeletonize",
+        lambda *_args, **_kwargs: twiggy_neuron(),
+    )
+
+    skeleton = fetcher.fetch_skeleton(
+        42, use_cache=False, simplify_mesh=0.0, denoise_twigs=None
+    )
+
+    assert skeleton is not None
+    assert not (tmp_path / "cache").exists()
+
+
+def test_skeleton_cache_roundtrip_is_written_only_for_cache_enabled_call(
+        tmp_path, monkeypatch):
+    """An opted-in fetch writes raw compressed SWC for reuse."""
+    fetcher = cdf.CAVEDataFetcher(
+        dataset="flywire_FAFB_v783",
+        cave_token="test-token",
+        cache_enabled=True,
+        project_root=str(tmp_path),
+        verbose=False,
+    )
+    monkeypatch.setattr(
+        fetcher, "fetch_mesh",
+        lambda _body_id, use_cache=False: object(),
+    )
+    monkeypatch.setattr(
+        cdf.navis, "skeletonize",
+        lambda *_args, **_kwargs: twiggy_neuron(),
+    )
+
+    first = fetcher.fetch_skeleton(
+        42, use_cache=True, simplify_mesh=0.0, denoise_twigs=None
+    )
+    cache_path = tmp_path / "cache" / "flywire_FAFB_v783" \
+        / "skeletons" / "raw_skeletons" / "42.swc.gz"
+    assert first is not None and cache_path.exists()
+
+    monkeypatch.setattr(
+        fetcher, "fetch_mesh",
+        lambda *_args, **_kwargs: pytest.fail("cache hit fetched the mesh"),
+    )
+    second = fetcher.fetch_skeleton(
+        42, use_cache=True, simplify_mesh=0.0, denoise_twigs=None
+    )
+    assert second is not None
+    assert len(second.nodes) == len(first.nodes)
+
+
+def test_fafb_mesh_cache_roundtrip_is_mesh_native_and_never_skeletonizes(
+        tmp_path, monkeypatch):
+    """CAVE FAFB preparation writes/reads a dedicated MeshNeuron cache."""
+    fetcher = cdf.CAVEDataFetcher(
+        dataset="flywire_FAFB_v783",
+        cave_token="test-token",
+        cache_enabled=True,
+        project_root=str(tmp_path),
+        verbose=False,
+    )
+    raw_mesh = mesh_neuron()
+    monkeypatch.setattr(
+        fetcher, "fetch_mesh",
+        lambda _body_id, use_cache=False: raw_mesh,
+    )
+    monkeypatch.setattr(
+        cdf.navis,
+        "skeletonize",
+        lambda *_args, **_kwargs: pytest.fail(
+            "FAFB mesh preparation must not skeletonize"),
+    )
+
+    first = fetcher.fetch_fafb_mesh(
+        42, use_cache=True, soma_pos=[0.0, 0.0, 0.0])
+    import navis
+    assert isinstance(first, navis.MeshNeuron)
+    cache_path = (tmp_path / "cache" / "flywire_FAFB_v783" / "meshes"
+                  / "FLYWIRE_simp95_soma80_r20" / "42.pkl.zst")
+    assert cache_path.exists()
+    assert not cache_path.with_suffix("").with_suffix(".pkl").exists()
+    assert not (tmp_path / "cache" / "flywire_FAFB_v783" / "skeletons"
+                / "raw_skeletons" / "42.swc.gz").exists()
+
+    monkeypatch.setattr(
+        fetcher, "fetch_mesh",
+        lambda *_args, **_kwargs: pytest.fail("cache hit fetched the mesh"),
+    )
+    second = fetcher.fetch_fafb_mesh(
+        42, use_cache=True, soma_pos=[0.0, 0.0, 0.0])
+    assert isinstance(second, navis.MeshNeuron)
+    assert str(second.id) == "42"
+
+
+def test_fafb_mesh_use_cache_false_is_online_only(tmp_path, monkeypatch):
+    """An online-only FAFB mesh fetch does not touch the local mesh cache."""
+    fetcher = cdf.CAVEDataFetcher(
+        dataset="flywire_FAFB_v783",
+        cave_token="test-token",
+        cache_enabled=True,
+        project_root=str(tmp_path),
+        verbose=False,
+    )
+    monkeypatch.setattr(
+        fetcher, "fetch_mesh",
+        lambda _body_id, use_cache=False: mesh_neuron(),
+    )
+
+    result = fetcher.fetch_fafb_mesh(42, use_cache=False)
+
+    import navis
+    assert isinstance(result, navis.MeshNeuron)
+    assert not (tmp_path / "cache").exists()
+
+
+def test_fafb_mesh_force_refresh_bypasses_cache_and_rewrites_prepared_mesh(
+        tmp_path, monkeypatch):
+    """Extrusion repair must replace, not reuse, a prepared cache entry."""
+    fetcher = cdf.CAVEDataFetcher(
+        dataset="flywire_FAFB_v783",
+        cave_token="test-token",
+        cache_enabled=True,
+        project_root=str(tmp_path),
+        verbose=False,
+    )
+    calls = []
+
+    def fetch_raw(body_id, use_cache=False):
+        calls.append((body_id, use_cache))
+        refreshed = mesh_neuron()
+        refreshed.id = body_id
+        return refreshed
+
+    monkeypatch.setattr(fetcher, "fetch_mesh", fetch_raw)
+
+    first = fetcher.fetch_fafb_mesh(
+        42, use_cache=True, soma_pos=[0.0, 0.0, 0.0])
+    assert first is not None
+    calls.clear()
+
+    saved = []
+    original_save = cdf.FlyWireMeshCache.save
+
+    def record_save(cache, meshes):
+        saved.append(meshes)
+        return original_save(cache, meshes)
+
+    monkeypatch.setattr(cdf.FlyWireMeshCache, "save", record_save)
+    monkeypatch.setattr(
+        cdf.FlyWireMeshCache,
+        "load",
+        lambda *_args, **_kwargs: pytest.fail(
+            "force_refresh must bypass the prepared mesh cache read"),
+    )
+
+    refreshed = fetcher.fetch_fafb_mesh(
+        42,
+        use_cache=True,
+        force_refresh=True,
+        soma_pos=[0.0, 0.0, 0.0],
+    )
+
+    assert refreshed is not None
+    assert calls == [(42, False)]
+    assert saved and 42 in saved[0]
+
+
 def twiggy_neuron():
     """A long neurite (200 µm) with a short 2 µm terminal twig."""
     import navis
@@ -58,8 +288,7 @@ class TestDenoiseSkeleton:
         assert len(nrn.nodes) == 203
 
     def test_fetch_skeleton_denoises_cache_hits(self, monkeypatch):
-        """A cached skeleton is returned DENOISED (consistent with fresh
-        fetches that cache the denoised skeleton)."""
+        """Denoising is transient and does not alter the raw cache source."""
         fetcher = object.__new__(cdf.CAVEDataFetcher)
         fetcher.verbose = False
         monkeypatch.setattr(fetcher, "_get_skeleton_cache_path",
@@ -69,12 +298,13 @@ class TestDenoiseSkeleton:
         # denoise_twigs=None keeps the cached skeleton as-is
         raw = fetcher.fetch_skeleton(42, use_cache=True, denoise_twigs=None)
         assert len(raw.nodes) == 203
-        # default 10 µm prunes the twig even on a cache hit
-        den = fetcher.fetch_skeleton(42, use_cache=True)
+        # An explicit 10 µm request prunes the twig on a cache hit.
+        den = fetcher.fetch_skeleton(
+            42, use_cache=True, denoise_twigs=10000.0)
         assert len(den.nodes) < len(raw.nodes)
 
     def test_fetch_skeleton_caches_denoised(self, monkeypatch):
-        """A fresh fetch caches the DENOISED skeleton."""
+        """A fresh fetch caches raw data before transient denoising."""
         import pickle
         import navis
         fetcher = object.__new__(cdf.CAVEDataFetcher)
@@ -104,4 +334,4 @@ class TestDenoiseSkeleton:
         skel = fetcher.fetch_skeleton(42, use_cache=True, denoise_twigs=10000.0)
         assert skel is not None
         assert "/tmp/42.pkl" in saved
-        assert saved["/tmp/42.pkl"] == len(skel.nodes)  # cache == returned
+        assert saved["/tmp/42.pkl"] >= len(skel.nodes)

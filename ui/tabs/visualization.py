@@ -5,7 +5,6 @@ this module's pathway-graph tab is named Net-Viz (net_viz) to avoid any
 name collision with it.
 """
 
-import json
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -13,7 +12,6 @@ from pathlib import Path
 from nicegui import ui
 
 from ..config import (
-    PROJECT_ROOT,
     DEFAULTS,
     SKELETON_MODES,
     BRAIN_MESH_OPTIONS,
@@ -37,6 +35,11 @@ from ..components.palette_picker import (
 )
 from ..components.edge_list_editor import edge_list_editor
 from ..dataset_service import is_banc_dataset, is_flywire_dataset
+from visualization_options import default_skeleton_tab_simplification
+from ..roi_options import (
+    load_roi_catalog,
+    roi_options_from_catalog,
+)
 
 
 def _flatten_neuron_layers(neuron_layers) -> list:
@@ -258,14 +261,38 @@ def create_skeleton_tab():
             # ------------------------------------------------------------------
             with ui.card().classes("w-full drocat-card").props('id="card-skeleton-roi-colors"'):
                 section_header("Brain Region ROIs (independent)", "view_in_ar")
-                with param_grid(2):
-                    roi_mode = select_input(
-                        "ROI Selection Mode", ["primary", "detailed"], "primary",
-                        hint="'primary': common top-level brain regions. 'detailed': "
-                             "the full dataset ROI list including non-primary "
-                             "sub-regions (e.g. AL-DA1(L), EBr3d) for detailed "
-                             "ROI selection.",
+                roi_select = multi_select_input(
+                    "Mesh ROIs",
+                    COMMON_ROIS,
+                    default=[],
+                    hint=(
+                        "Select brain regions to show as meshes. No ROI meshes are "
+                        "selected by default. Type any ROI name or regex (e.g. "
+                        "ME.*, all, primary) and press Enter to add it."
+                    ),
+                ).props("outlined").props('new-value-mode="add-unique"')
+                roi_detail_hint = ui.label(
+                    "Primary ROI suggestions load the selected dataset's metadata."
+                ).classes("text-caption drocat-muted")
+                with ui.row().classes("w-full items-center gap-6"):
+                    include_lr = checkbox_input(
+                        "Include L/R variants",
+                        False,
+                        hint=(
+                            "Keep explicit (L)/(R) entries in the primary list. "
+                            "When off, bilateral pairs are shown once without "
+                            "the suffix."
+                        ),
                     )
+                    include_subprimary = checkbox_input(
+                        "Include sub-primary ROIs",
+                        False,
+                        hint=(
+                            "Append non-primary ROI names from the local "
+                            "available-ROI inventory to the primary list."
+                        ),
+                    )
+                with param_grid(1):
                     mesh_alpha = number_input(
                         "ROI Mesh Opacity", 0.1, 0, 1, 0.05,
                         hint=(
@@ -274,20 +301,6 @@ def create_skeleton_tab():
                             "opacity inherit it."
                         ),
                     )
-                roi_select = multi_select_input(
-                    "Mesh ROIs",
-                    COMMON_ROIS,
-                    default=["EB", "LH", "AL"],
-                    hint="Select brain regions to show as meshes. Type any ROI name or regex "
-                         "(e.g. ME.*, all, primary) and press Enter to add it. "
-                         "Switch ROI Selection Mode to 'detailed' to list the "
-                         "non-primary sub-regions of the selected dataset.",
-                )
-                roi_select.props('new-value-mode="add-unique"')
-                roi_detail_hint = ui.label(
-                    "Detailed mode lists every ROI cached for the selected dataset."
-                ).classes("text-caption drocat-muted")
-                roi_detail_hint.set_visibility(False)
                 roi_palette = palette_editor(
                     "ROI Colors",
                     value="Cool",
@@ -346,12 +359,14 @@ def create_skeleton_tab():
                     default_simplification = checkbox_input(
                         "Use Default Mesh Simplification", True,
                         hint="Use the method default: fast removes 0.90 of faces; "
-                             "fine/artistic remove 0.95. Uncheck to set the "
-                             "value below.",
+                             "fine/artistic remove 0.95. FAFB uses 0.95 in this "
+                             "tab. Uncheck to set the value below.",
                     )
                     mesh_simplification = number_input(
                         "Mesh Simplification (faces removed)",
-                        0.9 if simplification_method.value == "fast" else 0.95,
+                        default_skeleton_tab_simplification(
+                            dataset.value, simplification_method.value,
+                        ),
                         0.0, 0.99, 0.05,
                         hint="Fraction of tube-mesh faces REMOVED for rendering: "
                              "0.95 = keep 5%. Higher = faster/coarser, lower = "
@@ -431,7 +446,9 @@ def create_skeleton_tab():
             pipeline = str(simplification_method.value or "fine").strip().lower()
             if default_simplification.value:
                 mesh_simplification.set_value(
-                    0.9 if pipeline in {"fast", "direct"} else 0.95
+                    default_skeleton_tab_simplification(
+                        dataset.value, pipeline,
+                    )
                 )
             mesh_simplification.set_enabled(
                 not is_line and not default_simplification.value
@@ -441,7 +458,13 @@ def create_skeleton_tab():
                 not is_line and not is_flywire_dataset(str(dataset.value or ""))
             )
             if not cache_default_state["user_changed"]:
-                default_cache = pipeline not in {"fast", "artistic"}
+                # FAFB's disabled method selector historically starts at
+                # ``fast``. Its dedicated 95% target should still use the
+                # prepared mesh cache by default.
+                default_cache = (
+                    True if is_flywire_dataset(str(dataset.value or ""))
+                    else pipeline not in {"fast", "artistic"}
+                )
                 if cache_neurons.value != default_cache:
                     cache_default_state["updating"] = True
                     try:
@@ -459,52 +482,28 @@ def create_skeleton_tab():
         dataset.on_value_change(lambda _e: _sync_simplification_controls())
         _sync_simplification_controls()
 
-        # ------------------------------------------------------------------
-        # ROI Selection Mode: 'detailed' swaps the pulldown option list for
-        # the full dataset ROI list (primary + non-primary sub-regions) from
-        # cache/<dataset>/available_rois.json, following the dataset selector.
-        # ------------------------------------------------------------------
-        def _load_dataset_rois(dataset_value: str) -> list:
-            """Load the full ROI list cached for *dataset_value*.
-
-            Mirrors the backend: FlyWire/FAFB ROI meshes come from male-cns,
-            so the male-cns available-ROI list is used for those datasets.
-            """
-            from ..dataset_service import dataset_to_folder, is_flywire_dataset
-
-            if is_flywire_dataset(dataset_value):
-                folders = ["male-cns_v0_9", "male-cns_v1_0"]
-            else:
-                folders = [dataset_to_folder(dataset_value)]
-            for folder in folders:
-                roi_file = PROJECT_ROOT / "cache" / folder / "available_rois.json"
-                if roi_file.exists():
-                    try:
-                        rois = json.loads(roi_file.read_text(encoding="utf-8"))
-                    except (OSError, ValueError):
-                        continue
-                    if isinstance(rois, list):
-                        return [r for r in rois if isinstance(r, str)]
-            return []
-
         def _sync_roi_options():
-            if roi_mode.value == "detailed":
-                detailed = _load_dataset_rois(dataset.value)
-                if detailed:
-                    roi_detail_hint.set_text(
-                        f"Detailed mode: {len(detailed)} ROIs (incl. non-primary "
-                        f"sub-regions) listed for {dataset.value}."
-                    )
-                else:
-                    roi_detail_hint.set_text(
-                        "No cached ROI list for this dataset yet — type ROI "
-                        "names manually, or run once to build the cache."
-                    )
-                roi_detail_hint.set_visibility(True)
-                options = list(detailed) if detailed else list(COMMON_ROIS)
+            catalog = load_roi_catalog(dataset.value)
+            options = roi_options_from_catalog(
+                catalog,
+                include_lr=bool(include_lr.value),
+                include_subprimary=bool(include_subprimary.value),
+                fallback=COMMON_ROIS,
+            )
+            primary_count = len(catalog["primary"])
+            if catalog["primary"]:
+                suffix = ""
+                if include_subprimary.value:
+                    suffix = " plus sub-primary entries"
+                roi_detail_hint.set_text(
+                    f"Primary list: {primary_count} metadata ROIs{suffix} "
+                    f"for {dataset.value}."
+                )
             else:
-                roi_detail_hint.set_visibility(False)
-                options = list(COMMON_ROIS)
+                roi_detail_hint.set_text(
+                    "No local metadata primary list was found; using the "
+                    "common fallback list."
+                )
             # QSelect only renders chips whose values exist in its options,
             # so keep the currently selected ROIs in the new option list.
             for value in roi_select.value or []:
@@ -517,9 +516,11 @@ def create_skeleton_tab():
                 is_banc_dataset(dataset.value)
             )
 
-        roi_mode.on_value_change(lambda _e: _sync_roi_options())
+        include_lr.on_value_change(lambda _e: _sync_roi_options())
+        include_subprimary.on_value_change(lambda _e: _sync_roi_options())
         dataset.on_value_change(lambda _e: _sync_roi_options())
         dataset.on_value_change(lambda _e: _sync_skeleton_dataset_warning())
+        _sync_roi_options()
         _sync_skeleton_dataset_warning()
 
     with results_col:
@@ -655,8 +656,9 @@ def create_skeleton_tab():
             "brain_mesh_color": brain_mesh_picker.get_value(),
             "neuprint_skeleton_pipeline": simplification_method.value,
             "skeleton_mesh_simplification": (
-                (0.9 if simplification_method.value in {"fast", "direct"}
-                 else 0.95) if default_simplification.value
+                default_skeleton_tab_simplification(
+                    dataset.value, simplification_method.value,
+                ) if default_simplification.value
                 else float(mesh_simplification.value)
             ),
         }

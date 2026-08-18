@@ -81,7 +81,8 @@ def _first_existing(paths: list[Path]) -> Optional[Path]:
             return path
         if path.is_dir():
             try:
-                if next(path.rglob("*.pkl"), None) is not None:
+                if (next(path.rglob("*.pkl"), None) is not None
+                        or next(path.rglob("*.pkl.zst"), None) is not None):
                     return path
             except OSError:
                 continue
@@ -111,6 +112,7 @@ def local_fafb_skeleton_source(
         dataset_dir / f"{folder}_skeletons.parquet",
         cache_dir / "API_cache" / "skeletons",
         cache_dir / "skeletons",
+        cache_dir / "meshes",
     ])
     if source is not None:
         return source

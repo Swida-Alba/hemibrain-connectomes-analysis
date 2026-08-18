@@ -52,6 +52,7 @@ dependencies = [
     "neuprint-python==0.4.26",
     "navis==1.5.0",
     "flybrains==0.6.3",
+    "zstandard==0.23.0",
     "boto3>=1.26.0,<2",
     "reportlab>=4.0.0,<6",
     "python-pptx>=0.6.21,<2",

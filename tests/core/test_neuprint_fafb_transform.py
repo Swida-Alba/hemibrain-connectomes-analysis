@@ -20,6 +20,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 import navis  # noqa: E402
 import visualize_skeleton as visualize_skeleton_module  # noqa: E402
+import morphology as morph_mod  # noqa: E402
 from visualize_skeleton import VisualizeSkeleton  # noqa: E402
 
 
@@ -188,7 +189,7 @@ class TestNeuprintPipeline:
         assert progress.descriptions[-1] == "Vector cache complete"
         assert progress.closed is True
 
-    def test_fast_first_render_uses_the_simp90_cache_representation(
+    def test_fast_first_render_simplifies_raw_swc_in_memory(
             self, tmp_path, monkeypatch):
         vs = build_vs(tmp_path, pipeline="fast")
         vs.skeleton_mode = "tube"
@@ -215,15 +216,15 @@ class TestNeuprintPipeline:
 
         cache_file = (
             Path(tmp_path) / "cache" / "hemibrain_v1_2_1" / "skeletons"
-            / "12211.pkl"
+            / "raw_skeletons" / "12211.swc.gz"
         )
-        with open(cache_file, "rb") as handle:
-            cached = pickle.load(handle)
-        assert len(cached.nodes) < len(raw.nodes)
+        assert cache_file.exists()
+        cached = morph_mod._load_cached_skeleton_file(cache_file)
+        assert len(cached.nodes) == len(raw.nodes)
         assert 12211 in prepared
-        # At exactly simp90, the fast path converts the cached skeleton to a
-        # mesh without applying a second render-time reduction.
-        assert decimation_calls == []
+        # Fast is a render-time simplification mode: the raw SWC remains
+        # untouched while direct mesh decimation runs in memory.
+        assert decimation_calls == [True]
 
     def test_render_preprocessing_aggregates_layers_before_fetch(
             self, tmp_path, monkeypatch):
@@ -354,8 +355,8 @@ class TestNeuprintPipeline:
             self, tmp_path):
         body_df = pd.DataFrame({"bodyId": [101, 202]})
 
-        # Fast tube mode skips a warm simp90 skeleton cache, but correctly
-        # returns to raw online fetching when the requested level is finer.
+        # Fast tube mode and a finer render target both reuse the same raw
+        # SWC source; simplification level never changes online fetch IDs.
         fast = build_vs(tmp_path / "fast", pipeline="fast")
         fast.neuron_dfs = [body_df]
         fast.skeleton_mesh_simplification = 0.9
@@ -367,12 +368,11 @@ class TestNeuprintPipeline:
             use_neuprint_mesh_cache=False,
             neuprint_mesh_cache={},
         ) == [202]
-        fast.skeleton_mesh_simplification = 0.5
         assert fast._get_neuprint_online_fetch_ids(
             use_neuprint_fine_pipeline=False,
             use_neuprint_mesh_cache=False,
             neuprint_mesh_cache={},
-        ) == [101, 202]
+        ) == [202]
 
         # Both fine method names use the shared path and therefore request
         # every body not already represented by the transformed mesh cache.
@@ -385,8 +385,7 @@ class TestNeuprintPipeline:
                 neuprint_mesh_cache={},
             ) == [101, 202]
 
-        # Line mode follows the direct cache-aware path and shares the same
-        # online prefetch when one of its simp90 entries is missing.
+        # Line mode follows the same raw cache-aware path.
         line = build_vs(tmp_path / "line", pipeline="fast")
         line.skeleton_mode = "line"
         line.neuron_dfs = [body_df]

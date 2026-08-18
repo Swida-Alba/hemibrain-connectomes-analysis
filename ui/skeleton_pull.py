@@ -51,11 +51,12 @@ class SkeletonPuller:
         """Start a background skeleton download. Returns False when one is
         already running.
 
-        ``raw`` is retained for callers from the earlier Find Similar UI;
-        raw SWC is now the default shared cache representation. Settings
-        passes the explicit ``mode="raw"``.
+        ``raw`` and ``mode`` are retained for callers from the earlier Find
+        Similar UI. Pulls always use the shared raw compressed-SWC
+        representation; visualization ``fast`` is a render-time
+        simplification mode, not a pull mode.
         """
-        selected_mode = str(mode or ("raw" if raw else "fast")).lower()
+        selected_mode = "raw"
         with self._lock:
             if self._state["running"]:
                 return False

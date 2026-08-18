@@ -260,6 +260,8 @@ class CAVEDataFetcher:
                 if str(cache_path).endswith('.swc.gz'):
                     with gzip.open(cache_path, 'rt', encoding='utf-8') as handle:
                         obj = navis.read_swc(handle)
+                    if not isinstance(obj, navis.TreeNeuron):
+                        return None
                     try:
                         obj.id = int(Path(cache_path).name[:-len('.swc.gz')])
                         obj.units = 'nm'
@@ -278,6 +280,9 @@ class CAVEDataFetcher:
             try:
                 os.makedirs(os.path.dirname(cache_path), exist_ok=True)
                 if str(cache_path).endswith('.swc.gz'):
+                    if not isinstance(obj, navis.TreeNeuron):
+                        raise TypeError(
+                            "compressed SWC cache accepts TreeNeuron only")
                     cache_path_obj = Path(cache_path)
                     with tempfile.NamedTemporaryFile(
                             suffix='.swc', dir=str(cache_path_obj.parent),
@@ -352,17 +357,23 @@ class CAVEDataFetcher:
             soma_simplification: float = FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION,
             soma_radius: float = FLYWIRE_MESH_CACHE_SOMA_RADIUS,
             soma_pos=None,
+            force_refresh: bool = False,
             ) -> Optional['navis.MeshNeuron']:
         """Fetch, prepare, and cache one FlyWire/FAFB ``MeshNeuron``.
 
         The prepared cache is intentionally mesh-native.  The default
         settings match the visualization cache: remove 95% of branch-region
         faces, remove 80% in the 20 µm soma region, and persist the resulting
-        ``MeshNeuron`` as a pickle.  A missing soma coordinate falls back to
-        the same uniform 95% simplification used by the visualizer.
+        ``MeshNeuron`` as a level-1 Zstandard-compressed pickle
+        (``{bodyId}.pkl.zst``).  A missing soma coordinate falls back to the
+        same uniform 95% simplification used by the visualizer.
 
         ``use_cache=False`` is an online-only operation: it neither reads nor
-        writes the local mesh cache.
+        writes the local mesh cache.  ``force_refresh=True`` is the repair
+        operation: it bypasses an existing prepared-mesh cache entry, fetches
+        a new raw mesh from CAVE, and writes the newly prepared mesh when
+        caching is enabled.  This is used for ZIP meshes with extrusion
+        artifacts so a stale prepared cache entry cannot silently win.
         """
         api_body_id = body_id_to_api_int(body_id)
         mesh_cache = FlyWireMeshCache(
@@ -374,7 +385,11 @@ class CAVEDataFetcher:
         )
         cache_allowed = bool(use_cache and self.cache_enabled)
 
-        if cache_allowed:
+        # A repair must not reuse the prepared entry that may have been made
+        # from the same extrusion-affected source.  ``force_refresh`` only
+        # changes cache reads; ``use_cache`` still controls whether the fresh
+        # prepared result is persisted below.
+        if cache_allowed and not force_refresh:
             cached = mesh_cache.load(body_id)
             if cached is not None:
                 if self.verbose:
@@ -388,6 +403,7 @@ class CAVEDataFetcher:
         if soma_pos is None:
             soma_pos = getattr(mesh, 'soma_pos', None)
 
+        prepared_ok = False
         try:
             prepared = prepare_flywire_mesh(
                 mesh,
@@ -397,13 +413,17 @@ class CAVEDataFetcher:
                 soma_simplification=soma_simplification,
                 soma_radius=soma_radius,
             )
+            prepared_ok = True
         except Exception as exc:
             logger.warning(
                 "Failed to prepare FlyWire mesh %s; using the fetched mesh: %s",
                 body_id, exc)
             prepared = mesh
 
-        if cache_allowed and isinstance(prepared, navis.MeshNeuron):
+        # Never promote an unprepared fallback into the prepared cache. The
+        # online caller can still render the raw MeshNeuron, but the next
+        # cache-enabled call must retry the requested 95%/80% preparation.
+        if cache_allowed and prepared_ok and isinstance(prepared, navis.MeshNeuron):
             mesh_cache.save({body_id: prepared})
         if self.verbose:
             try:
@@ -423,8 +443,15 @@ class CAVEDataFetcher:
             soma_simplification: float = FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION,
             soma_radius: float = FLYWIRE_MESH_CACHE_SOMA_RADIUS,
             soma_positions: Optional[Dict[object, object]] = None,
+            force_refresh: bool = False,
             ) -> 'navis.NeuronList':
-        """Fetch prepared FlyWire meshes without skeletonization."""
+        """Fetch prepared FlyWire meshes without skeletonization.
+
+        ``force_refresh`` bypasses prepared-mesh cache reads for repair
+        requests while preserving normal cache writes when ``use_cache`` is
+        true.  With ``use_cache=False``, both reads and writes remain
+        disabled regardless of ``force_refresh``.
+        """
         from tqdm import tqdm
 
         positions = soma_positions or {}
@@ -439,6 +466,7 @@ class CAVEDataFetcher:
             mesh = self.fetch_fafb_mesh(
                 body_id,
                 use_cache=use_cache,
+                force_refresh=force_refresh,
                 simplify_mesh=simplify_mesh,
                 soma_simplification=soma_simplification,
                 soma_radius=soma_radius,
@@ -971,8 +999,17 @@ class CAVEDataFetcher:
                 print(f"✓ Cleared skeleton cache: {skel_dir}")
         
         if cache_type in ['meshes', 'all']:
-            mesh_dir = self.get_cache_path('meshes')
-            if os.path.exists(mesh_dir):
+            mesh_dirs = [
+                Path(self.get_cache_path('meshes')),
+                Path(self.project_root) / 'cache' / self._cache_dataset_name()
+                / 'meshes',
+            ]
+            seen = set()
+            for mesh_dir_path in mesh_dirs:
+                mesh_dir = str(mesh_dir_path)
+                if mesh_dir in seen or not os.path.exists(mesh_dir):
+                    continue
+                seen.add(mesh_dir)
                 shutil.rmtree(mesh_dir)
                 os.makedirs(mesh_dir)
                 print(f"✓ Cleared mesh cache: {mesh_dir}")
@@ -985,24 +1022,38 @@ class CAVEDataFetcher:
         dict
             Dictionary with cache statistics
         """
-        skel_dir = self.get_cache_path('skeletons')
-        mesh_dir = self.get_cache_path('meshes')
+        skel_dir = Path(self.get_cache_path('skeletons'))
+        api_mesh_dir = Path(self.get_cache_path('meshes'))
+        canonical_mesh_dir = (
+            Path(self.project_root) / 'cache' / self._cache_dataset_name()
+            / 'meshes'
+        )
+
+        skel_files = (
+            [path for path in skel_dir.rglob('*')
+             if path.is_file()
+             and (path.name.endswith('.pkl')
+                  or path.name.endswith('.pkl.zst')
+                  or path.name.endswith('.swc.gz'))]
+            if skel_dir.exists() else []
+        )
+        mesh_files = []
+        for mesh_dir in (api_mesh_dir, canonical_mesh_dir):
+            if not mesh_dir.exists():
+                continue
+            mesh_files.extend(
+                path for path in mesh_dir.rglob('*')
+                if path.is_file()
+                and (path.name.endswith('.pkl')
+                     or path.name.endswith('.pkl.zst'))
+            )
+        mesh_files = list({path.resolve() for path in mesh_files})
+
+        skel_count = len(skel_files)
+        mesh_count = len(mesh_files)
         
-        skel_count = len([f for f in os.listdir(skel_dir) if f.endswith('.pkl')]) if os.path.exists(skel_dir) else 0
-        mesh_count = len([f for f in os.listdir(mesh_dir) if f.endswith('.pkl')]) if os.path.exists(mesh_dir) else 0
-        
-        # Calculate total size
-        def get_dir_size(path):
-            total = 0
-            if os.path.exists(path):
-                for f in os.listdir(path):
-                    fp = os.path.join(path, f)
-                    if os.path.isfile(fp):
-                        total += os.path.getsize(fp)
-            return total
-        
-        skel_size = get_dir_size(skel_dir)
-        mesh_size = get_dir_size(mesh_dir)
+        skel_size = sum(path.stat().st_size for path in skel_files)
+        mesh_size = sum(path.stat().st_size for path in mesh_files)
         
         return {
             'skeleton_count': skel_count,

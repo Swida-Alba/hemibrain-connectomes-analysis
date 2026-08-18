@@ -39,6 +39,21 @@ def make_neuron(name):
     return neuron
 
 
+def make_mesh(body_id=42):
+    vertices = np.array([
+        (0.0, 0.0, 0.0),
+        (100.0, 0.0, 0.0),
+        (0.0, 100.0, 0.0),
+        (0.0, 0.0, 100.0),
+    ])
+    faces = np.array([
+        (0, 2, 1), (0, 1, 3), (1, 2, 3), (2, 0, 3),
+    ], dtype=np.int64)
+    mesh = navis.MeshNeuron({"vertices": vertices, "faces": faces})
+    mesh.id = body_id
+    return mesh
+
+
 def test_transform_progress_reuses_outer_bar(monkeypatch, capsys):
     """Successful transforms refresh one bar instead of printing status lines."""
     monkeypatch.setitem(sys.modules, "flybrains", types.ModuleType("flybrains"))
@@ -71,3 +86,71 @@ def test_transform_progress_reuses_outer_bar(monkeypatch, capsys):
     output = capsys.readouterr()
     assert output.out == ""
     assert output.err == ""
+
+
+def test_fafb_visualizer_api_bypass_fetches_mesh_without_skeletonizing(
+        tmp_path, monkeypatch):
+    """The uncached FAFB render path must stay mesh-native."""
+    import cave_data_fetcher as cave
+
+    calls = []
+
+    class FakeCaveFetcher:
+        def __init__(self, *args, **kwargs):
+            assert kwargs["project_root"] == str(tmp_path)
+
+        def fetch_mesh(self, body_id, use_cache=False):
+            calls.append((body_id, use_cache))
+            return make_mesh(body_id)
+
+    monkeypatch.setattr(cave, "CAVEDataFetcher", FakeCaveFetcher)
+
+    visualizer = object.__new__(VisualizeSkeleton)
+    visualizer.dataset = "flywire_FAFB_v783"
+    visualizer.script_path = str(tmp_path)
+    visualizer.verbose = False
+    visualizer.cache_neurons = False
+    visualizer._flywire_skeleton_access = {"cave_token": "test-token"}
+
+    result = visualizer._fetch_fafb_skeletons_via_api(
+        [42], cache_prepared=False, soma_positions={"42": [0, 0, 0]})
+
+    assert calls == [(42, False)]
+    assert isinstance(result["42"], navis.MeshNeuron)
+
+
+def test_fafb_visualizer_extrusion_repair_forces_mesh_refresh(
+        tmp_path, monkeypatch):
+    """Extrusion replacement must refresh even when prepared caching is on."""
+    import cave_data_fetcher as cave
+
+    calls = []
+
+    class FakeCaveFetcher:
+        def __init__(self, *args, **kwargs):
+            assert kwargs["project_root"] == str(tmp_path)
+
+        def fetch_fafb_meshes(self, body_ids, **kwargs):
+            calls.append((list(body_ids), kwargs))
+            return navis.NeuronList([make_mesh(body_ids[0])])
+
+    monkeypatch.setattr(cave, "CAVEDataFetcher", FakeCaveFetcher)
+
+    visualizer = object.__new__(VisualizeSkeleton)
+    visualizer.dataset = "flywire_FAFB_v783"
+    visualizer.script_path = str(tmp_path)
+    visualizer.verbose = False
+    visualizer.cache_neurons = True
+    visualizer._flywire_skeleton_access = {"cave_token": "test-token"}
+
+    result = visualizer._fetch_fafb_skeletons_via_api(
+        [42],
+        cache_prepared=True,
+        force_refresh=True,
+        soma_positions={"42": [0, 0, 0]},
+    )
+
+    assert isinstance(result["42"], navis.MeshNeuron)
+    assert calls[0][0] == [42]
+    assert calls[0][1]["use_cache"] is True
+    assert calls[0][1]["force_refresh"] is True

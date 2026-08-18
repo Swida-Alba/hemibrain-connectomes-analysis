@@ -40,6 +40,11 @@ import pandas as pd
 import navis
 from tqdm import tqdm
 
+try:
+    import zstandard as zstd
+except ImportError:  # pragma: no cover - installation is covered by requirements
+    zstd = None
+
 from statvis import getNeurons
 
 try:
@@ -180,6 +185,59 @@ def _api_dataset_body_id(dataset: str, body_id) -> int:
     return int(body_id)
 
 
+def _load_flywire_soma_positions(
+        dataset: str, root: Path,
+        body_ids: Optional[List[Union[int, str]]] = None,
+        ) -> Dict[str, np.ndarray]:
+    """Load optional FAFB soma coordinates from the local neuron table."""
+    folder = _dataset_folder(dataset)
+    candidates = [
+        root / "datasets" / folder / f"{folder}_allneurons_neuron_df.parquet",
+        root / "datasets" / folder / f"{folder}_allneurons_neuron_df.csv",
+    ]
+    table = next((path for path in candidates if path.exists()), None)
+    if table is None:
+        return {}
+    try:
+        if table.suffix.lower() == ".parquet":
+            columns = pd.read_parquet(table).columns.tolist()
+            pos_col = next(
+                (name for name in (
+                    "position", "soma_position", "soma_pos", "somaLocation")
+                 if name in columns),
+                None,
+            )
+            if pos_col is None:
+                return {}
+            frame = pd.read_parquet(table, columns=["bodyId", pos_col])
+        else:
+            header = pd.read_csv(table, nrows=0).columns.tolist()
+            pos_col = next(
+                (name for name in (
+                    "position", "soma_position", "soma_pos", "somaLocation")
+                 if name in header),
+                None,
+            )
+            if pos_col is None:
+                return {}
+            frame = pd.read_csv(table, usecols=["bodyId", pos_col])
+        requested = (
+            set(normalize_flywire_body_ids(body_ids))
+            if body_ids is not None else None
+        )
+        out = {}
+        for body_id, value in zip(frame["bodyId"], frame[pos_col]):
+            key = normalize_flywire_body_id(body_id)
+            if requested is not None and key not in requested:
+                continue
+            position = parse_soma_position(value)
+            if position is not None:
+                out[key] = position
+        return out
+    except Exception:
+        return {}
+
+
 def _has_local_dataset_presence(dataset: str, root: Path) -> bool:
     """Whether the dataset has real local data beyond a shipped index seed.
 
@@ -199,17 +257,22 @@ def _has_local_dataset_presence(dataset: str, root: Path) -> bool:
         return True
     skeletons = cache_dir / "skeletons"
     if skeletons.is_dir() and any(
-            p.suffix == ".pkl" or str(p).endswith(".swc.gz")
+            p.suffix == ".pkl" or str(p).endswith((".pkl.zst", ".swc.gz"))
             for p in skeletons.rglob("*")):
         return True
     raw_skeletons = cache_dir / "skeletons" / "raw_skeletons"
     if raw_skeletons.is_dir() and any(
-            p.suffix == ".pkl" or str(p).endswith(".swc.gz")
+            p.suffix == ".pkl" or str(p).endswith((".pkl.zst", ".swc.gz"))
             for p in raw_skeletons.rglob("*")):
+        return True
+    meshes = cache_dir / "meshes"
+    if meshes.is_dir() and any(
+            p.suffix == ".pkl" or str(p).endswith(".pkl.zst")
+            for p in meshes.rglob("*")):
         return True
     legacy_raw_skeletons = cache_dir / "find_similar" / "raw_skeletons"
     if legacy_raw_skeletons.is_dir() and any(
-            p.suffix == ".pkl" or str(p).endswith(".swc.gz")
+            p.suffix == ".pkl" or str(p).endswith((".pkl.zst", ".swc.gz"))
             for p in legacy_raw_skeletons.rglob("*")):
         return True
     return False
@@ -489,21 +552,24 @@ def _neuron_rep(neuron) -> str:
 def _skeleton_body_id(path) -> int:
     """Extract a bodyId from a cached skeleton filename.
 
-    The raw Find Similar cache accepts both the historical ``.pkl`` files and
-    the portable compressed-SWC form (``{bodyId}.swc.gz``). Keeping this
-    parser in one place prevents ``Path.stem`` from turning ``123.swc.gz``
-    into the invalid bodyId ``123.swc`` during parallel cache builds.
+    The cache accepts historical ``.pkl`` files, compressed mesh pickles
+    (``{bodyId}.pkl.zst``), and the portable compressed-SWC form
+    (``{bodyId}.swc.gz``). Keeping this parser in one place prevents
+    ``Path.stem`` from turning ``123.swc.gz`` or ``123.pkl.zst`` into an
+    invalid bodyId during parallel cache builds.
     """
     name = Path(path).name
     if name.endswith(".swc.gz"):
         name = name[:-len(".swc.gz")]
+    elif name.endswith(".pkl.zst"):
+        name = name[:-len(".pkl.zst")]
     elif name.endswith(".pkl"):
         name = name[:-len(".pkl")]
     return int(name)
 
 
 def _load_cached_skeleton_file(path):
-    """Load a legacy pickle or a compressed, portable SWC skeleton."""
+    """Load a legacy pickle, compressed mesh pickle, or compressed SWC."""
     path = Path(path)
     if str(path).endswith(".swc.gz"):
         with gzip.open(path, "rt", encoding="utf-8") as handle:
@@ -519,6 +585,13 @@ def _load_cached_skeleton_file(path):
         except Exception:
             pass
         return neuron
+    if str(path).endswith(".pkl.zst"):
+        if zstd is None:
+            raise ImportError(
+                "zstandard is required to read FlyWire .pkl.zst caches")
+        with path.open("rb") as handle:
+            with zstd.ZstdDecompressor().stream_reader(handle) as reader:
+                return pickle.load(reader)
     with open(path, "rb") as handle:
         return pickle.load(handle)
 
@@ -680,10 +753,16 @@ def _find_skeleton_file(dataset: str, body_id: int,
     cache_dir = root / "cache" / _dataset_folder(dataset) / "skeletons"
     if not cache_dir.exists():
         return None
-    for name in (f"{body_id}.pkl", f"{body_id}.swc.gz"):
+    for name in (f"{body_id}.pkl.zst", f"{body_id}.pkl", f"{body_id}.swc.gz"):
         direct = cache_dir / name
         if direct.exists():
             return direct
+    nested = sorted(
+        path for path in cache_dir.rglob(f"{body_id}.pkl.zst")
+        if "raw_skeletons" not in path.parts
+    )
+    if nested:
+        return nested[0]
     nested = sorted(
         path for path in cache_dir.rglob(f"{body_id}.pkl")
         if "raw_skeletons" not in path.parts
@@ -983,6 +1062,7 @@ class SkeletonVectorCache:
             return []
         files = []
         for directory in directories:
+            files.extend(directory.rglob("*.pkl.zst"))
             files.extend(directory.rglob("*.pkl"))
             files.extend(directory.rglob("*.swc.gz"))
         if not self.raw_only:
@@ -996,15 +1076,29 @@ class SkeletonVectorCache:
                 continue
             current = preferred.get(body_id)
             # Prefer the new shared path over the legacy Find Similar path,
-            # then prefer compressed SWC over a legacy pickle in that path.
+            # then prefer the canonical compressed representation for the
+            # cache type (SWC for raw skeletons, Zstandard for meshes).
+            if str(path).endswith(".swc.gz"):
+                format_rank = 0
+            elif str(path).endswith(".pkl.zst"):
+                format_rank = 1
+            else:
+                format_rank = 2
             path_rank = (
                 0 if self.skeleton_dir in path.parents else 1,
-                0 if str(path).endswith(".swc.gz") else 1,
+                format_rank,
             )
+            current_path = Path(current) if current is not None else None
+            if current_path is not None and str(current_path).endswith(".swc.gz"):
+                current_format_rank = 0
+            elif current_path is not None and str(current_path).endswith(".pkl.zst"):
+                current_format_rank = 1
+            else:
+                current_format_rank = 2
             current_rank = (
-                0 if self.skeleton_dir in Path(current).parents else 1,
-                0 if str(current).endswith(".swc.gz") else 1,
-            ) if current is not None else None
+                0 if self.skeleton_dir in current_path.parents else 1,
+                current_format_rank,
+            ) if current_path is not None else None
             if current is None or path_rank < current_rank:
                 preferred[body_id] = path
         return sorted(str(path) for path in preferred.values())
@@ -1022,11 +1116,23 @@ class SkeletonVectorCache:
             directories = [self.skeleton_dir]
             if self.legacy_skeleton_dir is not None:
                 directories.append(self.legacy_skeleton_dir)
-            # Prefer the new shared path, and within each path prefer SWC.
+            # Prefer the new shared path. Within a mesh cache prefer the
+            # canonical compressed pickle; within a raw cache prefer SWC.
+            if self.mesh_only:
+                names = (
+                    f"{body_id}.pkl.zst",
+                    f"{body_id}.pkl",
+                )
+            else:
+                names = (
+                    f"{body_id}.swc.gz",
+                    f"{body_id}.pkl",
+                    f"{body_id}.pkl.zst",
+                )
             for directory in directories:
                 if not directory.exists():
                     continue
-                for name in (f"{body_id}.swc.gz", f"{body_id}.pkl"):
+                for name in names:
                     direct = directory / name
                     if direct.exists():
                         return direct
@@ -1053,7 +1159,9 @@ class SkeletonVectorCache:
                 allowed = ("TreeNeuron", "MeshNeuron")
             if type(neuron).__name__ not in allowed:
                 return None
-            if self.mesh_only and self.skeleton_dir not in path.parents:
+            if (self.mesh_only
+                    and (self.skeleton_dir not in path.parents
+                         or str(path).endswith(".pkl"))):
                 self.persist_skeletons({self._canonical_body_id(body_id): neuron})
             if (self.raw_only and self.raw_format == "swc.gz"
                     and (self.skeleton_dir not in path.parents
@@ -1080,6 +1188,15 @@ class SkeletonVectorCache:
             return 0
         self.skeleton_dir.mkdir(parents=True, exist_ok=True)
         written = 0
+        mesh_cache = None
+        if self.mesh_only:
+            mesh_cache = FlyWireMeshCache(
+                self.dataset,
+                project_root=self.project_root,
+                simplification=FLYWIRE_MESH_CACHE_SIMPLIFICATION,
+                soma_simplification=FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION,
+                soma_radius=FLYWIRE_MESH_CACHE_SOMA_RADIUS,
+            )
         for body_id, neuron in neurons.items():
             try:
                 body_id = self._canonical_body_id(body_id)
@@ -1088,15 +1205,15 @@ class SkeletonVectorCache:
                 if self.raw_only and _neuron_rep(neuron) != "skeleton":
                     continue
                 if self.mesh_only:
-                    with open(self.skeleton_dir / f"{body_id}.pkl", "wb") as handle:
-                        pickle.dump(neuron, handle)
+                    written += mesh_cache.save({body_id: neuron})
                 elif self.raw_only and self.raw_format == "swc.gz":
                     _write_compressed_swc(
                         self.skeleton_dir / f"{body_id}.swc.gz", neuron)
+                    written += 1
                 else:
                     with open(self.skeleton_dir / f"{body_id}.pkl", "wb") as handle:
                         pickle.dump(neuron, handle)
-                written += 1
+                    written += 1
             except Exception:
                 continue
         return written
@@ -1745,6 +1862,27 @@ def find_similar_flywire_mesh_cache(
     )
 
 
+def find_similar_dataset_cache(
+        dataset: str,
+        project_root: Optional[str] = None,
+        n_workers: int = 8,
+        verbose: bool = True,
+        ) -> SkeletonVectorCache:
+    """Return the dataset-native vector/cache manager.
+
+    NeuPrint owns the raw SWC manager; FlyWire owns the prepared mesh
+    manager. This boundary prevents a CAVE MeshNeuron from being serialized
+    through the NeuPrint SWC writer.
+    """
+    if is_flywire_dataset(dataset):
+        return find_similar_flywire_mesh_cache(
+            dataset, project_root=project_root, n_workers=n_workers,
+            verbose=verbose)
+    return find_similar_raw_cache(
+        dataset, project_root=project_root, n_workers=n_workers,
+        verbose=verbose)
+
+
 def cache_fetched_skeleton_vectors(
         dataset: str, neurons, project_root: Optional[str] = None,
         vector_cache: Optional[SkeletonVectorCache] = None,
@@ -1982,6 +2120,8 @@ def population_stats(dataset: str, project_root: Optional[str] = None,
             sf = sorted(
                 [str(p) for p in skel_dir.rglob("*.pkl")
                  if "raw_skeletons" not in p.parts]
+                + [str(p) for p in skel_dir.rglob("*.pkl.zst")
+                   if "raw_skeletons" not in p.parts]
                 + [str(p) for p in skel_dir.rglob("*.swc.gz")
                    if "raw_skeletons" not in p.parts]
             )
@@ -2071,7 +2211,7 @@ def _fetch_neuprint_skeleton(dataset: str, body_id: int):
 def _fetch_cave_skeleton(dataset: str, body_id: int,
                          project_root: Optional[str] = None,
                          use_cache: bool = True):
-    """Fetch one skeleton from a FlyWire/CAVE dataset."""
+    """Legacy compatibility fetch; production FlyWire uses ``_fetch_cave_mesh``."""
     from cave_data_fetcher import CAVEDataFetcher
     fetcher = CAVEDataFetcher(
         dataset=_dataset_folder(dataset), project_root=project_root,
@@ -2083,41 +2223,71 @@ def _fetch_cave_skeleton(dataset: str, body_id: int,
     )
 
 
+def _fetch_cave_mesh(dataset: str, body_id: int,
+                     project_root: Optional[str] = None,
+                     use_cache: bool = True,
+                     soma_pos=None):
+    """Fetch one prepared MeshNeuron from a FlyWire/CAVE dataset."""
+    from cave_data_fetcher import CAVEDataFetcher
+    fetcher = CAVEDataFetcher(
+        dataset=_dataset_folder(dataset), project_root=project_root,
+        verbose=False,
+    )
+    return fetcher.fetch_fafb_mesh(
+        body_id_to_api_int(body_id),
+        use_cache=use_cache,
+        simplify_mesh=FLYWIRE_MESH_CACHE_SIMPLIFICATION,
+        soma_simplification=FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION,
+        soma_radius=FLYWIRE_MESH_CACHE_SOMA_RADIUS,
+        soma_pos=soma_pos,
+    )
+
+
 def fetch_skeleton_on_demand(dataset: str, body_id: int,
                              project_root: Optional[str] = None,
                              persist: bool = True,
                              level: str = VECTOR_BASIS_RAW,
                              raw_cache: Optional[SkeletonVectorCache] = None,
-                             vector_cache: Optional[SkeletonVectorCache] = None
-                             ) -> Optional["navis.TreeNeuron"]:
-    """Fetch a neuron skeleton if missing (reusing any cached file).
+                             vector_cache: Optional[SkeletonVectorCache] = None,
+                             soma_pos=None
+                             ) -> Optional[object]:
+    """Fetch one dataset-native neuron if missing.
 
-    NeuPrint datasets use ``neuprint.fetch_skeleton``; FlyWire/CAVE datasets
-    use ``CAVEDataFetcher.fetch_skeleton`` (which caches itself). Every fetch
-    returns the RAW skeleton and uses the shared raw-skeleton namespace.
-    Persisted files are portable compressed SWC at
-    ``cache/{dataset}/skeletons/raw_skeletons/{body_id}.swc.gz``. The
-    visualization's ``fast``/``fine`` choice is applied later to an in-memory
-    copy and never changes this fetch/cache contract.
+    NeuPrint datasets use ``neuprint.fetch_skeleton`` and persist raw
+    ``TreeNeuron`` objects as compressed SWC. FlyWire/FAFB datasets use the
+    CAVE mesh path and persist prepared ``MeshNeuron`` objects in the
+    representation-specific mesh cache. The two paths never share a file.
 
-    ``persist=False`` remains a low-level compatibility escape hatch for
-    callers that explicitly request a transient skeleton; vectors may still
-    be appended because they are independent of raw-file persistence.
+    ``persist=False`` is an online-only compatibility escape hatch for the
+    selected representation; it does not read or write local morphology data.
 
     ``level`` is retained for compatibility with older callers, but is
-    deliberately ignored after validation: even ``level="simp90"`` returns
-    and caches the raw skeleton. There is no fetch-level simplified cache.
-
-    Every online fetch vectorizes the RAW skeleton immediately and persists
-    the vector (basis ``VECTOR_BASIS_RAW``), so later comparisons reuse it.
-    Raw TreeNeuron persistence is written to the shared cache when
-    ``persist=True``.
+    deliberately ignored after validation for NeuPrint. FlyWire's prepared
+    mesh cache has its fixed 95%/80% visualization preparation level.
     """
     body_id = _canonical_dataset_body_id(dataset, body_id)
     level = str(level).lower()
     if level not in (VECTOR_BASIS_RAW, VECTOR_BASIS_SIMP90):
         raise ValueError(f"Invalid level: {level} (raw|simp90)")
     root = Path(project_root) if project_root else Path(__file__).parent.parent
+
+    if is_flywire_dataset(dataset):
+        mesh = _fetch_cave_mesh(
+            dataset,
+            body_id,
+            project_root=str(root),
+            use_cache=bool(persist),
+            soma_pos=soma_pos,
+        )
+        if mesh is not None and persist:
+            cache_fetched_skeleton_vectors(
+                dataset,
+                {body_id: mesh},
+                project_root=str(root),
+                vector_cache=vector_cache,
+                verbose=False,
+            )
+        return mesh
 
     # Every fetch-level caller uses the same raw cache, regardless of the
     # legacy level value supplied by an older visualization caller.
@@ -2189,12 +2359,10 @@ def fetch_skeletons_on_demand_batch(
         vector_cache: Optional[SkeletonVectorCache] = None) -> Dict[int, object]:
     """Fetch a set of skeletons through one cache-aware online phase.
 
-    The NeuPrint path is deliberately shared by Find Similar, full-dataset
-    pulls, visualization, and other non-visual callers. It deduplicates the
-    request, loads raw files from the shared namespace first, fetches the
-    remaining raw skeletons in bounded batches, vectorizes them, and writes
-    raw ``.swc.gz`` files in one persistence phase. No fetch-level simplified
-    pickle or level marker is read or written.
+    NeuPrint and FlyWire use separate cache transactions. NeuPrint loads and
+    writes raw ``TreeNeuron`` SWC; FlyWire loads and writes prepared
+    ``MeshNeuron`` pickles at the fixed visualization mesh level. Neither
+    path converts the other representation.
 
     ``progress_callback(done, total, message)`` is optional and is called at
     batch boundaries.  The returned mapping is keyed by integer body ID and
@@ -2219,13 +2387,32 @@ def fetch_skeletons_on_demand_batch(
         return {}
 
     root = Path(project_root) if project_root else Path(__file__).parent.parent
+    flywire = is_flywire_dataset(dataset)
+    flywire_soma_positions = (
+        _load_flywire_soma_positions(dataset, root, requested)
+        if flywire else {}
+    )
     loaded: Dict[int, object] = {}
     missing = []
     raw_lookup_cache = raw_cache
-    if raw_lookup_cache is None:
-        # Every caller gets the same first lookup into the shared raw cache.
-        # The same cache is also the raw-file write target, so every workflow
-        # converges on one namespace regardless of its render mode.
+    if flywire:
+        # A FlyWire caller must never inherit a NeuPrint raw-SWC cache object
+        # supplied by an older integration.
+        if not getattr(raw_lookup_cache, "mesh_only", False):
+            raw_lookup_cache = None
+        if persist and raw_lookup_cache is None:
+            try:
+                raw_lookup_cache = find_similar_flywire_mesh_cache(
+                    dataset, project_root=str(root), verbose=False)
+            except Exception:
+                raw_lookup_cache = None
+        if not persist:
+            raw_lookup_cache = None
+        if raw_cache is None or not getattr(raw_cache, "mesh_only", False):
+            raw_cache = raw_lookup_cache
+    elif raw_lookup_cache is None:
+        # Every NeuPrint caller gets the same first lookup into the shared
+        # raw SWC cache. The same cache is also the raw-file write target.
         try:
             raw_lookup_cache = find_similar_raw_cache(
                 dataset, project_root=str(root), verbose=False)
@@ -2248,7 +2435,7 @@ def fetch_skeletons_on_demand_batch(
 
     if progress_callback:
         progress_callback(len(loaded), len(requested),
-                          f"Skeleton cache ({len(loaded)}/{len(requested)})")
+                          f"Neuron cache ({len(loaded)}/{len(requested)})")
 
     if missing:
         dataset_l = dataset.lower()
@@ -2263,24 +2450,42 @@ def fetch_skeletons_on_demand_batch(
                     neuron = fetch_skeleton_on_demand(
                         dataset, bid, project_root=str(root), persist=persist,
                         level=level, raw_cache=raw_cache,
-                        vector_cache=vector_cache)
+                        vector_cache=vector_cache,
+                        soma_pos=flywire_soma_positions.get(str(bid)))
                 except TypeError as exc:
                     # A few older integrations exposed the original helper
                     # without the newer cache/level keywords.  The batch
                     # phase below owns persistence, so old overrides remain
                     # compatible without changing the new raw-cache path.
                     if not any(k in str(exc) for k in
-                               ("persist", "level", "raw_cache", "vector_cache")):
+                               ("persist", "level", "raw_cache", "vector_cache",
+                                "soma_pos")):
                         raise
                     try:
                         neuron = fetch_skeleton_on_demand(
                             dataset, bid, project_root=str(root),
-                            persist=persist)
+                            persist=persist,
+                            soma_pos=flywire_soma_positions.get(str(bid)))
                     except TypeError as older_exc:
-                        if "persist" not in str(older_exc):
+                        if not any(k in str(older_exc)
+                                   for k in ("persist", "soma_pos")):
                             raise
-                        neuron = fetch_skeleton_on_demand(
-                            dataset, bid, project_root=str(root))
+                        try:
+                            neuron = fetch_skeleton_on_demand(
+                                dataset, bid, project_root=str(root),
+                                persist=persist)
+                        except TypeError as legacy_exc:
+                            if "persist" not in str(legacy_exc):
+                                raise
+                            try:
+                                neuron = fetch_skeleton_on_demand(
+                                    dataset, bid,
+                                    project_root=str(root))
+                            except TypeError as root_exc:
+                                if "project_root" not in str(root_exc):
+                                    raise
+                                neuron = fetch_skeleton_on_demand(
+                                    dataset, bid)
                 if neuron is not None:
                     fetched_by_id[
                         _canonical_dataset_body_id(dataset, bid)
@@ -2290,15 +2495,22 @@ def fetch_skeletons_on_demand_batch(
                     len(loaded) + len(fetched_by_id), len(requested),
                     f"Fetching skeletons ({len(loaded) + len(fetched_by_id)}/"
                     f"{len(requested)})")
-        elif any(k in dataset_l for k in ("flywire", "fafb", "banc")):
-            # CAVE already exposes a batch API and manages its own local API
-            # cache.  Keep this branch separate from NeuPrint's SWC batching.
+        elif flywire:
+            # CAVE returns meshes. Keep this branch separate from NeuPrint's
+            # TreeNeuron/SWC batching and never call fetch_skeletons().
             from cave_data_fetcher import CAVEDataFetcher
             fetcher = CAVEDataFetcher(
-                dataset=_dataset_folder(dataset), verbose=False)
-            neurons = fetcher.fetch_skeletons(
+                dataset=_dataset_folder(dataset),
+                project_root=str(root),
+                verbose=False,
+            )
+            neurons = fetcher.fetch_fafb_meshes(
                 [body_id_to_api_int(bid) for bid in missing],
-                use_cache=True, simplify_mesh=0.0, denoise_twigs=None,
+                use_cache=bool(persist),
+                simplify_mesh=FLYWIRE_MESH_CACHE_SIMPLIFICATION,
+                soma_simplification=FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION,
+                soma_radius=FLYWIRE_MESH_CACHE_SOMA_RADIUS,
+                soma_positions=flywire_soma_positions,
             )
             for neuron in neurons or []:
                 neuron_id = getattr(neuron, "id", None)
@@ -2359,17 +2571,22 @@ def fetch_skeletons_on_demand_batch(
                         done, len(requested),
                         f"Fetching skeletons ({done}/{len(requested)})")
 
-        # Normalize IDs and NeuPrint soma metadata once, before vectorization
-        # and persistence.  The visualization fetcher returns TreeNeurons,
-        # while a few test/client versions return a skeleton DataFrame.
+        # Normalize the object at the dataset boundary.  FlyWire remains a
+        # MeshNeuron; only NeuPrint accepts DataFrame -> TreeNeuron coercion.
         for fallback_id, neuron in fetched_by_id.items():
             try:
-                if not isinstance(neuron, navis.TreeNeuron):
-                    neuron = navis.TreeNeuron(neuron)
-                neuron.id = _api_dataset_body_id(dataset, fallback_id)
-                soma = getattr(neuron, "soma", None)
-                if soma is not None and hasattr(soma, "__len__") and len(soma) > 1:
-                    neuron.soma = None
+                if flywire:
+                    if not isinstance(neuron, navis.MeshNeuron):
+                        continue
+                    neuron.id = _canonical_dataset_body_id(
+                        dataset, fallback_id)
+                else:
+                    if not isinstance(neuron, navis.TreeNeuron):
+                        neuron = navis.TreeNeuron(neuron)
+                    neuron.id = _api_dataset_body_id(dataset, fallback_id)
+                    soma = getattr(neuron, "soma", None)
+                    if soma is not None and hasattr(soma, "__len__") and len(soma) > 1:
+                        neuron.soma = None
                 fetched_by_id[
                     _canonical_dataset_body_id(dataset, fallback_id)
                 ] = neuron
@@ -2379,21 +2596,23 @@ def fetch_skeletons_on_demand_batch(
         # Vectorize and persist the raw vectors before the batch returns. A
         # single append keeps the vector cache consistent with the fetched
         # skeleton set and exposes the previously invisible post-fetch wait.
-        vector_stats = cache_fetched_skeleton_vectors(
-            dataset,
-            fetched_by_id,
-            project_root=str(root),
-            vector_cache=vector_cache or raw_cache,
-            progress_callback=progress_callback,
-            progress_offset=len(loaded),
-            progress_total=len(requested),
-            verbose=True,
-        )
-        if vector_stats.get("cache_error"):
-            print(
-                f"[morphology] vector cache incomplete for {dataset}: "
-                f"{vector_stats['cache_error']}"
+        vector_stats = {"cache_error": None}
+        if persist or not flywire:
+            vector_stats = cache_fetched_skeleton_vectors(
+                dataset,
+                fetched_by_id,
+                project_root=str(root),
+                vector_cache=vector_cache or raw_cache,
+                progress_callback=progress_callback,
+                progress_offset=len(loaded),
+                progress_total=len(requested),
+                verbose=True,
             )
+            if vector_stats.get("cache_error"):
+                print(
+                    f"[morphology] vector cache incomplete for {dataset}: "
+                    f"{vector_stats['cache_error']}"
+                )
 
         if persist and fetched_by_id and raw_cache is not None:
             raw_cache.persist_skeletons(fetched_by_id)
@@ -2415,16 +2634,17 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
                            raw_format: str = "swc.gz") -> Dict[str, object]:
     """Download every missing skeleton of a dataset to the local cache.
 
-    Mirrors the Settings-panel full dataset pull. Every pull fetches and
-    persists RAW skeletons in the shared
-    ``skeletons/raw_skeletons/{bodyId}.swc.gz`` namespace. Visualization
-    simplification modes (including ``fast``) are not pull modes.
+    Mirrors the Settings-panel full dataset pull. NeuPrint pulls persist raw
+    ``TreeNeuron`` objects in ``skeletons/raw_skeletons/{bodyId}.swc.gz``.
+    FlyWire/FAFB pulls persist prepared ``MeshNeuron`` objects in the
+    dedicated ``meshes/FLYWIRE_simp95_soma80_r20/{bodyId}.pkl.zst`` namespace.
+    Visualization ``fast`` is not a pull mode for either representation.
 
     ``mode`` and ``raw`` remain compatibility parameters for older callers;
     any accepted mode is normalized to ``"raw"``. NeuPrint requests use
-    bounded online batches; the FlyWire/CAVE fallback retains its local-bundle
-    behavior. ``raw_format`` is likewise retained but new pulls always use
-    compressed SWC.
+    bounded online batches; the FlyWire/CAVE branch remains mesh-native.
+    ``raw_format`` is retained for NeuPrint compatibility and does not alter
+    the FlyWire mesh cache.
     ``progress_callback(current, total, info)`` and
     ``cancel_event`` (threading.Event) drive the UI; ``limit`` bounds the
     download (tests / smoke runs). Returns a summary dict.
@@ -2450,10 +2670,17 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
     # Pulling is representation-only. ``fast`` and ``fine`` are visualization
     # simplification choices and must never select a different disk format.
     mode = "raw"
-    raw_cache = (find_similar_raw_cache(
-        dataset, project_root=str(root), n_workers=max_workers,
-        verbose=verbose, raw_format="swc.gz"
-    ))
+    flywire = is_flywire_dataset(dataset)
+    if flywire:
+        raw_cache = find_similar_flywire_mesh_cache(
+            dataset, project_root=str(root), n_workers=max_workers,
+            verbose=verbose,
+        )
+    else:
+        raw_cache = find_similar_raw_cache(
+            dataset, project_root=str(root), n_workers=max_workers,
+            verbose=verbose, raw_format="swc.gz"
+        )
     skeleton_dir = raw_cache.skeleton_dir
     skeleton_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2498,9 +2725,12 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
             except Exception:
                 index = []
 
-    # Only canonical raw files and migration-aware legacy raw files count as
-    # available. Visualization pickles in ``skeletons/`` are intentionally
-    # excluded because their simplification level is not trustworthy.
+    flywire_soma_positions = (
+        _load_flywire_soma_positions(dataset, root, index)
+        if flywire else {}
+    )
+
+    # Only files from the representation-specific cache count as available.
     existing_paths = [Path(path) for path in raw_cache._discover_skeleton_files()]
     existing = set()
     for path in existing_paths:
@@ -2545,7 +2775,8 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
                   f"({len(existing)} cached, {len(local_bundle_ids)} from the "
                   f"healed bundle); nothing to fetch.")
         return {"total": 0, "fetched": 0, "skipped_existing": skipped_existing,
-                "cancelled": False, "errors": 0, "mode": mode}
+                "cancelled": False, "errors": 0, "mode": mode,
+                "representation": "mesh" if flywire else "skeleton"}
 
     if verbose:
         print(f"[morphology] download_all_skeletons: fetching {total} "
@@ -2604,6 +2835,7 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
             "cancelled": cancelled,
             "errors": errors,
             "mode": mode,
+            "representation": "skeleton",
         }
         if verbose:
             print(f"[morphology] download_all_skeletons: {fetched}/{total} "
@@ -2622,13 +2854,15 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
             if raw_cache is not None:
                 fetch_kwargs.update({"raw_cache": raw_cache,
                                      "vector_cache": raw_cache})
+            if flywire:
+                fetch_kwargs["soma_pos"] = flywire_soma_positions.get(str(bid))
             try:
                 nrn = fetch_skeleton_on_demand(dataset, bid, **fetch_kwargs)
             except TypeError as exc:
                 # Keep Download All compatible with older integrations that
                 # still expose the pre-namespace singular fetcher.
                 if not any(k in str(exc) for k in (
-                        "level", "raw_cache", "vector_cache")):
+                        "level", "raw_cache", "vector_cache", "soma_pos")):
                     raise
                 nrn = fetch_skeleton_on_demand(
                     dataset, bid, project_root=str(root),
@@ -2641,7 +2875,8 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
                     })
                 except Exception:
                     pass
-            ok = nrn is not None and _neuron_rep(nrn) == "skeleton"
+            expected_rep = "mesh" if flywire else "skeleton"
+            ok = nrn is not None and _neuron_rep(nrn) == expected_rep
         except Exception:
             ok = False
         with lock:
@@ -2677,6 +2912,7 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
         "cancelled": cancelled,
         "errors": errors,
         "mode": mode,
+        "representation": "mesh" if flywire else "skeleton",
     }
     if verbose:
         print(f"[morphology] download_all_skeletons: {fetched}/{total} fetched, "
@@ -2931,7 +3167,7 @@ class MorphologyComparer:
             self.level = self._resolve_level(query_df)
             self._log(f"Level auto-resolved to: {self.level} "
                       f"({'type-to-type' if self.level == 'type' else 'bodyId-to-bodyId'})")
-        cache = find_similar_raw_cache(
+        cache = find_similar_dataset_cache(
             self.dataset, project_root=str(self.project_root),
             n_workers=self.n_workers, verbose=self.verbose,
         )
@@ -4413,15 +4649,17 @@ class MorphologyComparer:
         return bodyid_df, type_df
 
     def _load_fafb_skeletons(self, body_ids: List[int]
-                             ) -> Dict[int, "navis.TreeNeuron"]:
-        """Load FAFB skeletons following the visualization pipeline:
+                             ) -> Dict[int, object]:
+        """Load FAFB sources following the visualization pipeline:
 
         1. local first: extrusion-fixed skeletons cached under
            ``cache/{dataset}/API_cache/skeletons/``,
         2. the healed skeleton bundle (``{bodyId}.swc``),
         3. extrusion test on the bundle skeletons (results cached),
         4. online fallback via the CAVE API (token-gated) for ids missing
-           locally or flagged by the extrusion test.
+           locally or flagged by the extrusion test. CAVE replacements are
+           prepared ``MeshNeuron`` objects cached as ``.pkl.zst`` files; they are
+           never written to the raw SWC cache.
         """
         from fafb_utils import flag_extrusions
 
@@ -4430,7 +4668,7 @@ class MorphologyComparer:
             return {}
         root = self.project_root
         folder = _dataset_folder(self.dataset)
-        loaded: Dict[int, navis.TreeNeuron] = {}
+        loaded: Dict[int, object] = {}
 
         # 1. Local first: the API skeleton cache holds previously fetched
         #    (extrusion-fixed) skeletons and takes priority over the bundle,
@@ -4472,21 +4710,34 @@ class MorphologyComparer:
         )
 
         missing = [b for b in ids if b not in loaded]
-        to_fetch = sorted(set(missing) | set(extrusion_ids))
+        extrusion_ids = sorted(set(extrusion_ids))
         # 4. Online fallback (token-gated; matches the visualization
-        #    pipeline's CAVE_TOKEN check).
-        if to_fetch:
-            self._log(f"FAFB: {len(to_fetch)} skeleton(s) missing locally or "
-                      "extrusion-affected; trying the CAVE API fallback.")
-            loaded.update(self._fafb_cave_fallback(to_fetch))
+        #    pipeline's CAVE_TOKEN check). Missing neurons may reuse a
+        #    prepared mesh cache. Extrusion replacements must bypass that
+        #    cache so an old prepared copy cannot mask the repair.
+        if missing:
+            self._log(f"FAFB: {len(missing)} skeleton(s) missing locally; "
+                      "trying the CAVE API fallback.")
+            loaded.update(self._fafb_cave_fallback(missing))
+        if extrusion_ids:
+            self._log(
+                f"FAFB: refreshing {len(extrusion_ids)} extrusion-affected "
+                "mesh(es) from the CAVE API.")
+            loaded.update(
+                self._fafb_cave_fallback(
+                    extrusion_ids, force_refresh=True))
         return loaded
 
-    def _fafb_cave_fallback(self, body_ids: List[int]
-                            ) -> Dict[int, "navis.TreeNeuron"]:
-        """Fetch FAFB skeletons through the CAVE API (token-gated).
+    def _fafb_cave_fallback(
+            self, body_ids: List[int], force_refresh: bool = False
+            ) -> Dict[int, object]:
+        """Fetch FAFB meshes through CAVE (token-gated).
 
-        Returns an empty dict when CAVE_TOKEN is not configured so the run
-        continues with local skeleton data only.
+        CAVE fallback remains mesh-native. NBLAST callers can still use local
+        healed SWC skeletons; a CAVE mesh is not silently skeletonized just
+        to satisfy that separate backend. ``force_refresh=True`` is reserved
+        for replacing extrusion-affected local data and bypasses the
+        prepared-mesh cache read while still writing the repaired mesh cache.
         """
         from utils.flywire_readiness import flywire_skeleton_readiness
 
@@ -4497,17 +4748,25 @@ class MorphologyComparer:
             return {}
         from cave_data_fetcher import CAVEDataFetcher
 
-        pbar = tqdm(total=len(body_ids), desc="Fetching skeletons (CAVE)",
+        pbar = tqdm(total=len(body_ids), desc="Fetching meshes (CAVE)",
                     unit="neuron", disable=not self.verbose, leave=False,
                     file=sys.stdout)
-        out: Dict[int, navis.TreeNeuron] = {}
+        out: Dict[int, navis.MeshNeuron] = {}
         try:
             fetcher = CAVEDataFetcher(
-                dataset=_dataset_folder(self.dataset), verbose=False
+                dataset=_dataset_folder(self.dataset),
+                project_root=str(self.project_root),
+                verbose=False,
             )
-            neurons = fetcher.fetch_skeletons(
+            soma_positions = _load_flywire_soma_positions(
+                self.dataset, self.project_root, body_ids)
+            neurons = fetcher.fetch_fafb_meshes(
                 [int(b) for b in body_ids], use_cache=True,
-                simplify_mesh=0.0, denoise_twigs=None,
+                simplify_mesh=FLYWIRE_MESH_CACHE_SIMPLIFICATION,
+                soma_simplification=FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION,
+                soma_radius=FLYWIRE_MESH_CACHE_SOMA_RADIUS,
+                soma_positions=soma_positions,
+                force_refresh=force_refresh,
             )
             for n in neurons:
                 bid = getattr(n, "id", None)
@@ -4674,13 +4933,13 @@ class MorphologyComparer:
             "visualize_by": self.visualize_by,
             "cache_raw_skeletons": self.cache_fetched_skeletons,
             "raw_skeleton_cache": str(
-                find_similar_raw_cache(
+                find_similar_dataset_cache(
                     self.dataset, project_root=str(self.project_root),
                     verbose=False,
                 ).skeleton_dir
             ),
             "raw_vector_cache": str(
-                find_similar_raw_cache(
+                find_similar_dataset_cache(
                     self.dataset, project_root=str(self.project_root),
                     verbose=False,
                 ).parquet_path
@@ -4876,9 +5135,12 @@ class MorphologyComparer:
                 "brain_mesh": "template",
                 "export_views": False,
                 "show_fig": False,
-                "cache_neurons": pipeline not in {
-                    "fast", "direct", "artistic", "fine_opt1"
-                },
+                "cache_neurons": (
+                    True if is_flywire_dataset(self.dataset)
+                    else pipeline not in {
+                        "fast", "direct", "artistic", "fine_opt1"
+                    }
+                ),
                 "verbose": "simple",
             }
             # The panel contains the same keyword names as VisualizeSkeleton.
@@ -4914,7 +5176,7 @@ class MorphologyComparer:
         per-type sample size so type-level renders stay bounded); falls back
         to the neuron table / index when the dataset has no vector cache."""
         try:
-            data = find_similar_raw_cache(
+            data = find_similar_dataset_cache(
                 self.dataset, project_root=str(self.project_root),
                 n_workers=self.n_workers, verbose=False,
             ).load()
@@ -4961,7 +5223,7 @@ def enrich_homolog_results(
     def _vectors(
         dataset: str, bids: List[Union[int, str]]
     ) -> Tuple[np.ndarray, np.ndarray]:
-        cache = find_similar_raw_cache(
+        cache = find_similar_dataset_cache(
             dataset, project_root=project_root, verbose=verbose
         )
         X, ok, _ = cache.vectors_for(bids, compute_missing=True)

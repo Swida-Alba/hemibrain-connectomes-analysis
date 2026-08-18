@@ -21,15 +21,15 @@ from .common import (
 )
 from .palette_picker import color_swatch_picker, palette_editor
 from ..dataset_service import is_flywire_dataset
+from visualization_options import default_analysis_skeleton_mesh_simplification
 
 
 def _default_analysis_simplification(
         dataset_value: Any, pipeline: str = "fine") -> float:
     """Return the visible default for analysis-generated visualizations."""
-
-    if str(pipeline or "fine").strip().lower() in {"fast", "direct"}:
-        return 0.90
-    return 0.98
+    return default_analysis_skeleton_mesh_simplification(
+        str(dataset_value or ""), pipeline,
+    )
 
 
 def _contains_flywire_dataset(dataset_value: Any) -> bool:
@@ -350,8 +350,9 @@ def skeleton_visualization_settings(
                 True,
                 hint=(
                     "Use the method default: fast removes 0.90 of faces; "
-                    "fine/artistic remove 0.98. The dedicated Skeleton tab "
-                    "uses 0.95 for fine/artistic."
+                    "fine/artistic remove 0.98 in analysis renders. FAFB "
+                    "analysis renders use 0.98; the dedicated Skeleton tab "
+                    "uses 0.95."
                 ),
             )
             fields["neuprint_skeleton_pipeline"] = select_input(
@@ -378,7 +379,8 @@ def skeleton_visualization_settings(
                 0.05,
                 hint=(
                     "Fraction of skeleton-mesh faces removed (higher is coarser). "
-                    "Analysis defaults are 0.90 for fast and 0.98 for fine/artistic."
+                    "Analysis defaults are 0.90 for NeuPrint fast and 0.98 "
+                    "for analysis fine/FAFB renders."
                 ),
             )
             fields["export_method"] = select_input(

@@ -1,15 +1,12 @@
-"""Simplified NeuPrint skeleton cache (Mission 1.2).
+"""Raw NeuPrint skeleton cache and render-time simplification.
 
 Covers `VisualizeSkeleton._save_cached_neurons` / `_load_cached_neurons` /
 `_skeleton_cache_is_simplified`:
-- NeuPrint caches hold ONLY the fixed 90%-simplified skeleton
-  (downsample factor 10) plus the `.level` marker; raw is never persisted
-- a less-simplified render ignores the cache (`ignore_cache=True`) so the
-  RAW skeletons are re-fetched transiently
-- the FlyWire path is untouched (no downsample, no marker)
+- NeuPrint caches hold the raw skeleton in the shared compressed-SWC namespace
+- every visualization simplification level reuses that raw source
+- no visualization fetch writes a `.pkl` skeleton or `.level` marker
 """
 
-import pickle
 import sys
 from pathlib import Path
 
@@ -70,23 +67,27 @@ def build_vs(tmp_path, dataset="hemibrain:v1.2.1", cache_neurons=True):
 
 
 class TestNeuPrintSimplifiedCache:
-    def test_save_writes_simplified_and_marker(self, tmp_path):
+    def test_save_writes_raw_swc_without_marker(self, tmp_path):
         vs = build_vs(tmp_path)
         neuron = make_neuron(120)
         neuron.id = 101
         df = pd.DataFrame({"bodyId": [101]})
         vs._save_cached_neurons(df, [neuron])
 
-        cache_dir = Path(tmp_path) / "cache" / "hemibrain_v1_2_1" / "skeletons"
-        pkl = cache_dir / "101.pkl"
-        assert pkl.exists()
-        assert (cache_dir / ".level").read_text().strip() == "simp90"
-        with open(pkl, "rb") as f:
-            cached = pickle.load(f)
-        # simplified: strictly fewer nodes than the raw 120-node neuron
-        assert len(cached.nodes) < len(neuron.nodes)
+        cache_dir = (Path(tmp_path) / "cache" / "hemibrain_v1_2_1"
+                     / "skeletons")
+        raw_path = cache_dir / "raw_skeletons" / "101.swc.gz"
+        assert raw_path.exists()
+        assert not (cache_dir / "101.pkl").exists()
+        assert not (cache_dir / ".level").exists()
 
-    def test_save_warms_simp90_cache_for_below90_render(self, tmp_path):
+        cached, missing = vs._load_cached_neurons(
+            pd.DataFrame({"bodyId": [101]}))
+        assert missing == []
+        assert cached is not None and len(cached) == 1
+        assert len(cached[0].nodes) == len(neuron.nodes)
+
+    def test_save_is_independent_of_render_simplification(self, tmp_path):
         vs = build_vs(tmp_path)
         vs.skeleton_mesh_simplification = 0.5
         neuron = make_neuron(120)
@@ -94,13 +95,12 @@ class TestNeuPrintSimplifiedCache:
 
         vs._save_cached_neurons(pd.DataFrame({"bodyId": [101]}), [neuron])
 
-        cache_dir = Path(tmp_path) / "cache" / "hemibrain_v1_2_1" / "skeletons"
-        with open(cache_dir / "101.pkl", "rb") as f:
-            cached = pickle.load(f)
-        assert len(cached.nodes) < len(neuron.nodes)
-        assert (cache_dir / ".level").read_text().strip() == "simp90"
+        raw_path = (Path(tmp_path) / "cache" / "hemibrain_v1_2_1"
+                    / "skeletons" / "raw_skeletons" / "101.swc.gz")
+        assert raw_path.exists()
+        assert not raw_path.with_name("101.pkl").exists()
 
-    def test_load_reads_simplified_cache(self, tmp_path):
+    def test_load_reads_raw_cache(self, tmp_path):
         vs = build_vs(tmp_path)
         neuron = make_neuron(120)
         neuron.id = 101
@@ -108,26 +108,27 @@ class TestNeuPrintSimplifiedCache:
         neurons, missing = vs._load_cached_neurons(pd.DataFrame({"bodyId": [101, 202]}))
         assert missing == [202]
         assert neurons is not None and len(neurons) == 1
-        assert vs._skeleton_cache_is_simplified() is True
+        assert len(neurons[0].nodes) == len(neuron.nodes)
+        assert vs._skeleton_cache_is_simplified() is False
 
     def test_ignore_cache_reports_all_missing(self, tmp_path):
         vs = build_vs(tmp_path)
         neuron = make_neuron(120)
         neuron.id = 101
         vs._save_cached_neurons(pd.DataFrame({"bodyId": [101]}), [neuron])
-        # less-simplified render: the simp90 cache is too coarse -> refetch
+        # Explicitly bypassing the raw cache still reports the IDs as missing.
         neurons, missing = vs._load_cached_neurons(
             pd.DataFrame({"bodyId": [101]}), ignore_cache=True)
         assert neurons is None
         assert missing == [101]
 
-    def test_skeleton_cache_is_simplified_reads_marker(self, tmp_path):
+    def test_skeleton_cache_is_never_marked_simplified(self, tmp_path):
         vs = build_vs(tmp_path)
-        assert vs._skeleton_cache_is_simplified() is False  # no marker yet
+        assert vs._skeleton_cache_is_simplified() is False
         cache_dir = Path(tmp_path) / "cache" / "hemibrain_v1_2_1" / "skeletons"
         cache_dir.mkdir(parents=True, exist_ok=True)
         (cache_dir / ".level").write_text("simp90\n")
-        assert vs._skeleton_cache_is_simplified() is True
+        assert vs._skeleton_cache_is_simplified() is False
 
     def test_effective_render_level_uses_current_render_source(self, tmp_path):
         vs = build_vs(tmp_path)
@@ -136,22 +137,19 @@ class TestNeuPrintSimplifiedCache:
         neuron.id = 101
         vs._save_cached_neurons(pd.DataFrame({"bodyId": [101]}), [neuron])
 
-        # A raw first-run render must use the requested level directly even
-        # though the simp90 marker has already been written for future runs.
+        # Render simplification is always applied directly to the raw source.
         assert vs._effective_render_simplification(
             is_fafb=False, using_simplified_cache=False
         ) == pytest.approx(0.95)
-        # A cache-hit render uses the remaining relative reduction:
-        # (1 - .95) / (1 - .90) = 50% of cached faces kept.
         assert vs._effective_render_simplification(
             is_fafb=False, using_simplified_cache=True
-        ) == pytest.approx(0.5)
+        ) == pytest.approx(0.95)
 
 
 class TestFlywireCacheUntouched:
-    def test_save_does_not_downsample_fafb(self, tmp_path, monkeypatch):
-        """The FlyWire path keeps its own (mesh) cache: no downsample, no
-        level marker, raw neurons stored as-is."""
+    def test_visualizer_raw_cache_hook_does_not_write_flywire_api_cache(
+            self, tmp_path, monkeypatch):
+        """FlyWire uses its CAVE/mesh path, not the NeuPrint SWC hook."""
         # the constructor checks the real FlyWire data files; skip that
         # check (the cache logic itself is what is under test)
         import FAFB_file_converter
@@ -163,13 +161,9 @@ class TestFlywireCacheUntouched:
         neuron.id = 101
         vs._save_cached_neurons(pd.DataFrame({"bodyId": [101]}), [neuron])
 
-        cache_dir = Path(tmp_path) / "cache" / "flywire_FAFB_v783" / "skeletons"
-        pkl = cache_dir / "101.pkl"
-        assert pkl.exists()
-        assert not (cache_dir / ".level").exists()
-        with open(pkl, "rb") as f:
-            cached = pickle.load(f)
-        assert len(cached.nodes) == len(neuron.nodes)  # unchanged
+        cache_dir = Path(tmp_path) / "cache" / "flywire_FAFB_v783"
+        assert not (cache_dir / "skeletons" / "raw_skeletons").exists()
+        assert not (cache_dir / "API_cache").exists()
 
 
 class TestCustomLayerGrouping:

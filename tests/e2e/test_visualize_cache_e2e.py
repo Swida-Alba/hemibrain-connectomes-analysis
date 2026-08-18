@@ -1,23 +1,19 @@
-"""3D-skeleton visualization e2e — simplified NeuPrint cache pipeline (M1.5).
+"""3D-skeleton visualization e2e — raw NeuPrint cache pipeline.
 
 Runs against the REAL hemibrain v1.2.1 NeuPrint server (skipped when the
 network is unavailable) and verifies the Mission-1 contract:
 
-  * A fresh fetch writes ONLY the 90%-simplified skeleton to the cache
-    (``navis.downsample_neuron`` factor 10) plus the ``skeletons/.level``
-    marker; raw is never persisted.
+  * A fresh fetch writes the raw skeleton as compressed SWC in the shared
+    ``skeletons/raw_skeletons`` namespace; no simplification marker is used.
   * A second load is a cache hit (no network): ``_load_cached_neurons``
     returns every neuron.
-  * A less-simplified render (``skeleton_mesh_simplification < 0.9``)
-    ignores the simplified cache and reports all neurons as missing, so
-    the render re-fetches RAW skeletons transiently.
-  * ``morphology.fetch_skeleton_on_demand``: a raw request never serves the
-    disk cache (raw is not persisted) and appends the raw vector; a simp90
-    request reuses the cached simplified file.
+  * Every render simplification level reuses the raw cache; ``fast`` only
+    controls in-memory mesh decimation.
+  * ``morphology.fetch_skeleton_on_demand`` always returns raw data, even
+    when the compatibility ``level="simp90"`` argument is supplied.
   * The FlyWire path keeps its own cache (no marker written).
 """
 
-import pickle
 import sys
 import time
 from pathlib import Path
@@ -99,19 +95,21 @@ def _vs(tmp_path, simplification=0.9):
 
 
 class TestSimplifiedCacheE2E:
-    def test_fetch_writes_simplified_cache_only(self, tmp_path, probe_neurons):
+    def test_fetch_writes_raw_swc_cache_only(self, tmp_path, probe_neurons):
         vs = _vs(tmp_path)
         cache_dir = Path(tmp_path) / "cache" / FOLDER / "skeletons"
         neuron_df = pd.DataFrame({"bodyId": PROBE_IDS})
 
         vs._save_cached_neurons(neuron_df, probe_neurons)
 
-        assert (cache_dir / ".level").read_text().strip() == "simp90"
+        raw_dir = cache_dir / "raw_skeletons"
         for i, bid in enumerate(PROBE_IDS):
-            with open(cache_dir / f"{bid}.pkl", "rb") as f:
-                cached = pickle.load(f)
-            # strictly fewer nodes: the raw skeleton is not persisted
-            assert len(cached.nodes) < len(probe_neurons[i].nodes)
+            assert (raw_dir / f"{bid}.swc.gz").exists()
+            cached = morph._load_cached_skeleton_file(
+                raw_dir / f"{bid}.swc.gz")
+            assert len(cached.nodes) == len(probe_neurons[i].nodes)
+        assert not (cache_dir / ".level").exists()
+        assert not list(cache_dir.glob("*.pkl"))
 
     def test_second_load_is_cache_hit(self, tmp_path, probe_neurons):
         vs = _vs(tmp_path)
@@ -124,34 +122,29 @@ class TestSimplifiedCacheE2E:
         assert neurons is not None and len(neurons) == 2
         assert elapsed < 5.0  # local cache read: no network round-trips
 
-    def test_less_simplified_render_ignores_cache(self, tmp_path, probe_neurons):
+    def test_less_simplified_render_reuses_raw_cache(self, tmp_path, probe_neurons):
         vs = _vs(tmp_path, simplification=0.5)
         vs._save_cached_neurons(pd.DataFrame({"bodyId": PROBE_IDS}), probe_neurons)
-        # < 0.9 render: the simp90 cache is too coarse -> refetch RAW
+        # < 0.9 render still consumes the same raw source.
         neurons, missing = vs._load_cached_neurons(
-            pd.DataFrame({"bodyId": PROBE_IDS}), ignore_cache=True)
-        assert neurons is None
-        assert sorted(missing) == sorted(PROBE_IDS)
+            pd.DataFrame({"bodyId": PROBE_IDS}))
+        assert neurons is not None and len(neurons) == len(PROBE_IDS)
+        assert missing == []
 
-    def test_render_decimation_skipped_at_cache_level(self, tmp_path, probe_neurons):
+    def test_render_decimation_is_direct_from_raw_source(self, tmp_path, probe_neurons):
         vs = _vs(tmp_path, simplification=0.9)
         vs._save_cached_neurons(pd.DataFrame({"bodyId": PROBE_IDS}), probe_neurons)
-        assert vs._skeleton_cache_is_simplified() is True
-        # at exactly the cache level the render-time decimation is skipped
-        # (the tube mesh is already at the cache level; double-decimation guard)
-        assert vs._effective_render_simplification(is_fafb=False) == 0.0
+        assert vs._skeleton_cache_is_simplified() is False
+        assert vs._effective_render_simplification(is_fafb=False) == pytest.approx(0.9)
 
-    def test_render_decimation_above_cache_level_applies_remainder(self, tmp_path, probe_neurons):
+    def test_render_decimation_above_legacy_level_is_still_direct(self, tmp_path, probe_neurons):
         vs = _vs(tmp_path, simplification=0.95)
         vs._save_cached_neurons(pd.DataFrame({"bodyId": PROBE_IDS}), probe_neurons)
-        assert vs._skeleton_cache_is_simplified() is True
-        # above the cache level only the *remaining* relative reduction is
-        # applied: (1 - 0.95) / (1 - 0.9) = 0.5 kept -> remove 50% of faces
-        assert vs._effective_render_simplification(is_fafb=False) == pytest.approx(0.5)
+        assert vs._skeleton_cache_is_simplified() is False
+        assert vs._effective_render_simplification(is_fafb=False) == pytest.approx(0.95)
 
     def test_render_decimation_below_cache_level_is_direct(self, tmp_path, probe_neurons):
-        # below the cache level the RAW skeletons are re-fetched and the
-        # user's fraction applies directly (no relative adjustment)
+        # The requested fraction applies directly to the raw render source.
         vs = _vs(tmp_path, simplification=0.5)
         assert vs._effective_render_simplification(is_fafb=False) == pytest.approx(0.5)
 
@@ -159,15 +152,16 @@ class TestSimplifiedCacheE2E:
         vs = _vs(tmp_path)
         vs._save_cached_neurons(pd.DataFrame({"bodyId": PROBE_IDS}), probe_neurons)
 
-        # simp90 request: served from the disk cache (no network)
+        # The compatibility level still serves the shared raw SWC (no network).
         nrn = morph.fetch_skeleton_on_demand(
             DATASET, PROBE_IDS[0], project_root=str(tmp_path), level="simp90")
         assert nrn is not None
-        assert len(nrn.nodes) < len(probe_neurons[0].nodes)
+        assert len(nrn.nodes) == len(probe_neurons[0].nodes)
 
-        # raw request never serves the disk cache: it fetches (network)
+        # Raw requests use the same source and therefore also hit the raw
+        # cache, even when persistence is disabled for this call.
         nrn_raw = morph.fetch_skeleton_on_demand(
             DATASET, PROBE_IDS[0], project_root=str(tmp_path), level="raw",
             persist=False)
         assert nrn_raw is not None
-        assert len(nrn_raw.nodes) >= len(nrn.nodes)
+        assert len(nrn_raw.nodes) == len(nrn.nodes)

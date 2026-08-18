@@ -68,6 +68,9 @@ def _wait_until(predicate, timeout=5.0):
 
 class TestSkeletonPuller:
     def test_lifecycle_and_progress(self, fake_download):
+        # Keep the worker alive long enough to assert the one-at-a-time guard;
+        # the zero-delay fake can otherwise finish before start() returns.
+        fake_download["impl"].delay = 0.01
         puller = SkeletonPuller()
         assert puller.start("np:v1")
         assert puller.running

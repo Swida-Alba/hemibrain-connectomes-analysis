@@ -49,6 +49,7 @@ PyQt5==5.15.10             # Recommended - Fastest, most responsive dialogs
 neuprint-python==0.4.26    # NeuPrint database access
 navis==1.5.0               # Neuron visualization and analysis toolkit
 flybrains==0.6.3           # Adds VNC mesh support; also constrains h5py<=3.12.1
+zstandard==0.23.0         # Compressed FlyWire MeshNeuron cache (.pkl.zst)
 
 # NeuronBridge & FlyLight Integration (v4.3.0)
 # -----------------------------------------------------------------------------

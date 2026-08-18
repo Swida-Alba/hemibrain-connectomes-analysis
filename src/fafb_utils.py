@@ -278,22 +278,15 @@ def detect_extrusion(neuron, simplification=0.95, tube_points=6):
         n_faces = len(mesh_neuron.trimesh.faces)
         target_faces = max(100, int(n_faces * (1 - simplification)))
         if n_faces > target_faces:
+            # Use the same accelerated fine-quality decimator as FAFB
+            # visualization/cache preparation.  It prefilters very large
+            # tube meshes with one cheap clustering pass, then uses QEM for
+            # the final target.  Small meshes fall back to direct QEM.
             try:
-                import open3d as o3d
-
-                o3d_mesh = o3d.geometry.TriangleMesh()
-                o3d_mesh.vertices = o3d.utility.Vector3dVector(mesh_neuron.trimesh.vertices)
-                o3d_mesh.triangles = o3d.utility.Vector3iVector(mesh_neuron.trimesh.faces)
-                simplified = o3d_mesh.simplify_quadric_decimation(
-                    target_number_of_triangles=target_faces)
-                import trimesh
-
-                mesh = trimesh.Trimesh(
-                    vertices=np.asarray(simplified.vertices),
-                    faces=np.asarray(simplified.triangles),
-                )
+                from flywire_mesh_cache import simplify_mesh_fine
             except ImportError:
-                mesh = mesh_neuron.trimesh.simplify_quadric_decimation(target_faces)
+                from .flywire_mesh_cache import simplify_mesh_fine
+            mesh = simplify_mesh_fine(mesh_neuron.trimesh, target_faces)
         else:
             # Already small enough: analyzing the tube mesh directly avoids
             # the (dominant) decimation cost without changing the result.

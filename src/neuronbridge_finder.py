@@ -7164,7 +7164,8 @@ class NeuronBridgeFinder:
                 # Set skeleton_mesh_simplification based on dataset when the
                 # user leaves the shared control at its default. Analysis
                 # renders use more simplification than the dedicated Skeleton
-                # tab, except fast which follows the fixed simp90 convention.
+                # tab for FAFB (98% vs 95%); NeuPrint fast keeps its fixed
+                # simp90 convention.
                 skeleton_simplification = (
                     default_analysis_skeleton_mesh_simplification(
                         dataset, pipeline
@@ -7217,9 +7218,12 @@ class NeuronBridgeFinder:
                 effective_background = viz_settings.get(
                     'background_color', background_color
                 )
-                default_cache_neurons = pipeline not in {
-                    'fast', 'direct', 'artistic', 'fine_opt1'
-                }
+                default_cache_neurons = (
+                    True if is_flywire_dataset(dataset)
+                    else pipeline not in {
+                        'fast', 'direct', 'artistic', 'fine_opt1'
+                    }
+                )
                 viz_kwargs = {
                     'dataset': dataset,
                     'output_dir': output_path,

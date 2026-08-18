@@ -7048,10 +7048,15 @@ class HomologFinder:
         pipeline = str(
             options.get('neuprint_skeleton_pipeline', 'fine') or 'fine'
         ).strip().lower()
+        dataset_name = str(options.get('dataset', '') or '').strip().lower()
         options.setdefault(
-            'cache_neurons', pipeline not in {
-                'fast', 'direct', 'artistic', 'fine_opt1'
-            }
+            'cache_neurons', (
+                True if dataset_name.startswith('flywire_')
+                or 'fafb' in dataset_name
+                else pipeline not in {
+                    'fast', 'direct', 'artistic', 'fine_opt1'
+                }
+            )
         )
         options.update(required)
         if options.get('skeleton_mesh_simplification') is None:

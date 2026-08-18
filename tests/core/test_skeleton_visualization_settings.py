@@ -13,6 +13,7 @@ from neuronbridge_finder import NeuronBridgeFinder  # noqa: E402
 from visualize_skeleton import VisualizeSkeleton  # noqa: E402
 from visualization_options import (  # noqa: E402
     default_analysis_skeleton_mesh_simplification,
+    default_skeleton_tab_simplification,
 )
 
 
@@ -49,6 +50,55 @@ def test_analysis_skeleton_simplification_defaults_use_the_analysis_level():
     assert default_analysis_skeleton_mesh_simplification(
         "male-cns:v1.0", "fast"
     ) == 0.90
+    assert default_analysis_skeleton_mesh_simplification(
+        "flywire_FAFB_v783", "fast"
+    ) == 0.98
+
+
+def test_dedicated_skeleton_tab_uses_95_percent_for_fafb():
+    assert default_skeleton_tab_simplification(
+        "flywire_FAFB_v783", "fast"
+    ) == 0.95
+    assert default_skeleton_tab_simplification(
+        "FAFB:v783", "fine"
+    ) == 0.95
+    assert default_skeleton_tab_simplification(
+        "male-cns:v1.0", "fast"
+    ) == 0.90
+    assert default_skeleton_tab_simplification(
+        "male-cns:v1.0", "fine"
+    ) == 0.95
+
+
+def test_primary_roi_keyword_reads_dataset_metadata(tmp_path):
+    """The programmatic primary keyword uses the local NeuPrint sidecar."""
+    import json
+
+    dataset = "test:v1.0"
+    folder = dataset.replace(":", "_").replace(".", "_")
+    dataset_dir = tmp_path / "datasets" / folder
+    dataset_dir.mkdir(parents=True)
+    (dataset_dir / f"{folder}_metadata.json").write_text(
+        json.dumps({
+            "roi_coverage": {
+                "roi_list": ["A(L)", "A(R)", "M", "NotPrimary"],
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    visualizer = object.__new__(VisualizeSkeleton)
+    visualizer.dataset = dataset
+    visualizer.script_path = str(tmp_path)
+    visualizer._vprint = lambda *args, **kwargs: None
+    visualizer._get_available_rois = lambda **kwargs: [
+        "A(L)", "A(R)", "M", "A-sub(L)",
+    ]
+
+    assert visualizer._get_metadata_primary_rois() == ["A(L)", "A(R)", "M"]
+    assert visualizer._expand_mesh_roi_patterns(["primary"]) == [
+        "A(L)", "A(R)", "M",
+    ]
 
 
 def test_visualization_warning_notes_record_effective_simplification(tmp_path):

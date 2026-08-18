@@ -369,6 +369,39 @@ class TestSkeletonVectorCache:
         assert cached_path is not None
         assert type(raw_cache.load_skeleton(102)).__name__ == "TreeNeuron"
 
+    def test_flywire_batch_uses_mesh_fetcher_and_caller_cache_root(
+            self, tmp_path, monkeypatch):
+        """FlyWire batches stay mesh-native and honor the caller's root."""
+        import cave_data_fetcher as cave
+
+        calls = {}
+
+        class FakeCaveFetcher:
+            def __init__(self, *args, **kwargs):
+                calls["project_root"] = kwargs.get("project_root")
+
+            def fetch_fafb_meshes(self, body_ids, **kwargs):
+                calls["body_ids"] = body_ids
+                calls["use_cache"] = kwargs["use_cache"]
+                mesh = cube_mesh()
+                mesh.id = body_ids[0]
+                return [mesh]
+
+        monkeypatch.setattr(cave, "CAVEDataFetcher", FakeCaveFetcher)
+        result = morph.fetch_skeletons_on_demand_batch(
+            "flywire_FAFB_v783", [42], project_root=str(tmp_path),
+            persist=False,
+        )
+
+        import navis
+        assert isinstance(result["42"], navis.MeshNeuron)
+        assert calls == {
+            "project_root": str(tmp_path),
+            "body_ids": [42],
+            "use_cache": False,
+        }
+        assert not (tmp_path / "cache").exists()
+
 
 # ---------------------------------------------------------------------------
 # On-demand fetch
@@ -404,6 +437,52 @@ class TestFetchOnDemand:
         assert all(kwargs["parallel"] is True for _, kwargs in calls)
         assert not list((tmp_path / "cache" / "test_v1" / "skeletons")
                         .glob("*.pkl"))
+
+    def test_legacy_simp90_request_writes_and_reads_raw_swc(
+            self, tmp_path, monkeypatch):
+        """The compatibility level does not change the raw cache contract."""
+        import navis.interfaces.neuprint as neu
+
+        calls = []
+
+        def fake_fetch(batch, **kwargs):
+            calls.append(batch["bodyId"].tolist())
+            out = []
+            for body_id in batch["bodyId"].tolist():
+                neuron = line_neuron(length=12)
+                neuron.id = int(body_id)
+                out.append(neuron)
+            return out
+
+        monkeypatch.setattr(neu, "fetch_skeletons", fake_fetch)
+        raw_cache = morph.find_similar_raw_cache(
+            "np:v1", project_root=str(tmp_path), verbose=False
+        )
+        first = morph.fetch_skeletons_on_demand_batch(
+            "np:v1", [101], project_root=str(tmp_path), persist=True,
+            level=morph.VECTOR_BASIS_SIMP90, raw_cache=raw_cache,
+            vector_cache=raw_cache, client=object(),
+        )
+        assert 101 in first
+        skeleton_dir = (tmp_path / "cache" / morph._dataset_folder("np:v1")
+                        / "skeletons")
+        assert (skeleton_dir / "raw_skeletons" / "101.swc.gz").exists()
+        assert not (skeleton_dir / "101.pkl").exists()
+        assert not (skeleton_dir / ".level").exists()
+
+        monkeypatch.setattr(
+            neu, "fetch_skeletons",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("raw SWC cache was not reused")
+            ),
+        )
+        second = morph.fetch_skeletons_on_demand_batch(
+            "np:v1", [101], project_root=str(tmp_path), persist=True,
+            level=morph.VECTOR_BASIS_SIMP90, raw_cache=raw_cache,
+            vector_cache=raw_cache, client=object(),
+        )
+        assert 101 in second
+        assert calls == [[101]]
 
     def test_neuprint_fetch_persists_raw_swc_and_reuses_it(self, tmp_path, monkeypatch):
         """Raw requests persist portable SWC and reuse that shared cache."""
@@ -456,18 +535,21 @@ class TestFetchOnDemand:
     def test_cave_fetch_used_for_flywire(self, monkeypatch, tmp_path):
         used = {}
 
-        def fake_cave(dataset, bid):
+        def fake_cave(dataset, bid, **kwargs):
             used["dataset"] = dataset
-            return y_neuron()
+            used["kwargs"] = kwargs
+            return cube_mesh()
 
-        monkeypatch.setattr(morph, "_fetch_cave_skeleton", fake_cave)
+        monkeypatch.setattr(morph, "_fetch_cave_mesh", fake_cave)
         monkeypatch.setattr(morph, "_fetch_neuprint_skeleton",
                             lambda d, b: (_ for _ in ()).throw(AssertionError("neuprint used")))
         nrn = morph.fetch_skeleton_on_demand(
             "flywire_FAFB_v783", 42, project_root=str(tmp_path)
         )
         assert used["dataset"] == "flywire_FAFB_v783"
-        assert nrn is not None
+        assert used["kwargs"]["use_cache"] is True
+        import navis
+        assert isinstance(nrn, navis.MeshNeuron)
 
 
 # ---------------------------------------------------------------------------
@@ -949,14 +1031,13 @@ class TestNestedDiscovery:
         X, mask, _ = cache.vectors_for([301, 999])
         assert mask.tolist() == [True, False]
 
-    def test_fetch_reuses_nested_file(self, tmp_path, monkeypatch):
-        """A simp90 request reuses a nested (bulk-folder) cache file."""
+    def test_fetch_reuses_nested_raw_swc_file(self, tmp_path, monkeypatch):
+        """A compatibility-level request reuses nested raw SWC."""
         dataset = "fw:v1"
         folder = (tmp_path / "cache" / morph._dataset_folder(dataset)
-                  / "skeletons" / "bulk_v1")
+                  / "skeletons" / "raw_skeletons" / "bulk_v1")
         folder.mkdir(parents=True)
-        with open(folder / "301.pkl", "wb") as f:
-            pickle.dump(line_neuron(), f)
+        morph._write_compressed_swc(folder / "301.swc.gz", line_neuron())
         monkeypatch.setattr(morph, "_fetch_neuprint_skeleton",
                             lambda d, b: (_ for _ in ()).throw(AssertionError("fetcher used")))
         nrn = morph.fetch_skeleton_on_demand(dataset, 301, project_root=str(tmp_path),
@@ -1472,11 +1553,12 @@ class TestFlyWireNblast:
                                      verbose=False)
         fetched = []
         monkeypatch.setattr(c, "_fafb_cave_fallback",
-                            lambda ids: (fetched.extend(ids), {})[1])
+                            lambda ids, **kwargs: (
+                                fetched.append((list(ids), kwargs)), {})[1])
         loaded = c._load_fafb_skeletons([42, 43])
         assert 42 in loaded and 43 in loaded
         # 42 flagged by the extrusion check -> CAVE fallback requested
-        assert fetched == [42]
+        assert fetched == [([42], {"force_refresh": True})]
 
 
 class TestExtrusionCheck:
@@ -1589,19 +1671,22 @@ class TestFafbBundleLocalSources:
         (cache_dir / "connections.parquet").touch()
         fetched = []
 
-        def fake_fetch(dataset, bid, project_root=None, persist=True):
+        def fake_fetch(dataset, bid, project_root=None, persist=True, **kwargs):
             assert persist is True
             fetched.append(bid)
-            return line_neuron(length=25)
+            return cube_mesh()
 
         monkeypatch.setattr(morph, "fetch_skeleton_on_demand", fake_fetch)
         summary = morph.download_all_skeletons(
             "flywire_FAFB_v783", project_root=str(tmp_path),
             max_workers=2, verbose=False,
         )
-        assert summary["fetched"] == 1 and fetched == [1]
+        assert summary["fetched"] == 1 and fetched == ["1"]
         assert summary["skipped_existing"] == 2  # healed-bundle entries
         assert summary["errors"] == 0
+        assert summary["representation"] == "mesh"
+        assert (cache_dir / "meshes" / "FLYWIRE_simp95_soma80_r20"
+                / "1.pkl.zst").exists()
 
     def test_build_uses_healed_bundle_for_fafb(self, tmp_path):
         """Full vector-cache build on FAFB vectorizes the healed bundle
@@ -1614,7 +1699,7 @@ class TestFafbBundleLocalSources:
         stats = cache.build()
         assert stats["new"] == 3 and stats["rows"] == 3
         data = cache.load()
-        assert set(data["bodyIds"].tolist()) == {1, 2, 3}
+        assert set(data["bodyIds"].tolist()) == {"1", "2", "3"}
         assert data["dataset_rep"] == "skeleton"
         assert (cache._load_meta() or {}).get("rep") == "skeleton"
         assert cache.coverage() == {"skeletons": 3, "vectors": 3}
@@ -1633,7 +1718,7 @@ class TestFafbBundleLocalSources:
         stats = cache.build()
         assert stats["rows"] == 2
         data = cache.load()
-        assert set(data["bodyIds"].tolist()) == {1, 2}
+        assert set(data["bodyIds"].tolist()) == {"1", "2"}
         assert data["dataset_rep"] == "skeleton"
 
 
@@ -2028,22 +2113,22 @@ class TestProfileFirst:
         write_neuron_index(tmp_path, "np:v1", [
             (101, "T", "T_1"), (201, "T", "T_2"), (202, "Y", "Y_1"),
         ])
-        # The pull marker that makes the index authoritative for skeleton
-        # workflows (a shipped seed alone must not authorize bulk fetches).
+        # The connection cache marker makes the index authoritative for
+        # skeleton workflows (a shipped seed alone must not authorize bulk
+        # fetches).
         cache_dir = tmp_path / "cache" / "np_v1"
         cache_dir.mkdir(parents=True)
         (cache_dir / "connections.parquet").touch()
         fetched = []
+        fetch_levels = []
 
-        def fake_fetch(dataset, bid, project_root=None, persist=True):
+        def fake_fetch(dataset, bid, project_root=None, persist=True, **kwargs):
             assert persist is True
             fetched.append(bid)
-            folder = (Path(project_root) / "cache"
-                      / morph._dataset_folder(dataset) / "skeletons")
-            folder.mkdir(parents=True, exist_ok=True)
-            with open(folder / f"{bid}.pkl", "wb") as f:
-                pickle.dump(line_neuron(length=25), f)
-            return line_neuron(length=25)
+            fetch_levels.append(kwargs.get("level"))
+            neuron = line_neuron(length=25)
+            neuron.id = int(bid)
+            return neuron
 
         monkeypatch.setattr(morph, "fetch_skeleton_on_demand", fake_fetch)
         progress = []
@@ -2055,6 +2140,13 @@ class TestProfileFirst:
         )
         assert summary["fetched"] == 2 and summary["errors"] == 0
         assert set(fetched) == {101, 201}  # deterministic first two of the index
+        assert fetch_levels == [morph.VECTOR_BASIS_RAW] * 2
+        raw_dir = cache_dir / "skeletons" / "raw_skeletons"
+        assert sorted(path.name for path in raw_dir.glob("*.swc.gz")) == [
+            "101.swc.gz", "201.swc.gz",
+        ]
+        assert not list((cache_dir / "skeletons").glob("*.pkl"))
+        assert not (cache_dir / "skeletons" / ".level").exists()
         assert progress and progress[-1][0] == progress[-1][1] == 2
         # resume: the two fetched are now cached; limit=2 fetches the rest
         summary2 = morph.download_all_skeletons(
@@ -2063,6 +2155,40 @@ class TestProfileFirst:
         )
         assert summary2["fetched"] == 1 and 202 in fetched
         assert summary2["skipped_existing"] == 2
+
+    def test_fast_pull_uses_raw_swc_cache_not_legacy_pickle(
+            self, tmp_path, monkeypatch):
+        """The legacy fast label cannot select a pull-time pickle cache."""
+        write_neuron_index(tmp_path, "np:v1", [(101, "T", "T_1")])
+        cache_dir = tmp_path / "cache" / "np_v1"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "connections.parquet").touch()
+        skeleton_dir = cache_dir / "skeletons"
+        skeleton_dir.mkdir()
+        with open(skeleton_dir / "101.pkl", "wb") as f:
+            pickle.dump(line_neuron(length=10), f)
+
+        fetched = []
+
+        def fake_fetch(dataset, bid, project_root=None, persist=True, **kwargs):
+            fetched.append(bid)
+            neuron = line_neuron(length=25)
+            neuron.id = int(bid)
+            return neuron
+
+        monkeypatch.setattr(morph, "fetch_skeleton_on_demand", fake_fetch)
+        summary = morph.download_all_skeletons(
+            "np:v1", project_root=str(tmp_path), mode="fast", verbose=False
+        )
+
+        assert summary["fetched"] == 1
+        assert fetched == [101]
+        assert summary["mode"] == "raw"
+        assert (skeleton_dir / "raw_skeletons" / "101.swc.gz").exists()
+        assert not (skeleton_dir / ".level").exists()
+        # The ambiguous legacy file is left recoverable but is never used as
+        # the new raw pull artifact.
+        assert (skeleton_dir / "101.pkl").exists()
 
     def test_download_all_skeletons_cancel(self, tmp_path, monkeypatch):
         import threading

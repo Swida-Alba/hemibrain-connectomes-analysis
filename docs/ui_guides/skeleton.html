@@ -26,8 +26,8 @@
     <li>In the <b>Layer Structure</b> tree, three layer rows are ready by
       default — add neurons to them, or click <b>Add Layer</b> for more
       rows.</li>
-    <li>Pick the dataset; keep <b>Brain Mesh = template</b> and
-      <b>ROIs = EB, LH, AL</b>.</li>
+    <li>Pick the dataset; keep <b>Brain Mesh = template</b>. ROI meshes are
+      optional and start unselected.</li>
     <li>Click <b>Generate 3D Skeleton</b>.</li>
   </ol>
 
@@ -132,11 +132,14 @@
     <div class="card">
       <h3>Brain region ROIs</h3>
       <ul>
-        <li><b>ROI Selection Mode</b>: <code>primary</code> lists the common
-          top-level brain regions; <code>detailed</code> lists the full dataset
-          ROI list including non-primary sub-regions (e.g.
-          <code>AL-DA1(L)</code>, <code>EBr3d</code>) for detailed ROI
-          selection, following the selected dataset.</li>
+        <li>The Mesh ROIs suggestions start with the complete dataset primary-ROI
+          list from <code>datasets/&lt;dataset&gt;/*metadata*</code>. Type
+          <code>all</code> to request every locally available ROI.</li>
+        <li><b>Include L/R variants</b> keeps explicit <code>(L)</code>/<code>(R)</code>
+          entries in the primary list; otherwise bilateral pairs are shown once.</li>
+        <li><b>Include sub-primary ROIs</b> appends non-primary entries to the
+          primary list.</li>
+        <li>No ROI mesh is selected by default.</li>
         <li><b>Mesh ROIs</b>: presets or regex (<code>ME.*</code>,
           <code>all</code>, <code>primary</code>).</li>
         <li><b>ROI Colors</b>: Auto gray, or any palette assigned in its exact
@@ -161,7 +164,8 @@
       use batched parallel online skeleton fetching across layers. The selector and simplification
       controls are disabled for FlyWire/FAFB datasets and for line mode.</li>
     <li><b>Mesh Simplification</b>: defaults to 90% faces removed for fast and
-      95% for fine/artistic in this tab;
+      95% for fine/artistic in this tab. FAFB/FlyWire uses 95% regardless of
+      the disabled NeuPrint method selector;
       line mode does not apply mesh simplification.</li>
     <li><b>Export Method</b>: webdriver (fast, needs Chrome 109+) or kaleido
       (stable fallback). <b>Export Scale</b> and <b>Export Views</b>.</li>
