@@ -1,7 +1,7 @@
 """NeuronBridge Colabel Tab - Co-labeling analysis for driver lines."""
 
 from nicegui import ui
-from ..config import DATASETS
+from ..config import DATASETS, DEFAULTS
 from ..components.common import (
     dataset_selector, neuron_list_input, number_input, select_input, checkbox_input,
     dir_input, section_header, param_grid, tool_page,
@@ -54,6 +54,16 @@ def create_nb_colabel_tab():
             ui.label(
                 "Line-specificity and sparsity metrics are included automatically."
             ).classes("text-caption drocat-muted")
+            top_n = number_input(
+                "Top N Matches Per Line",
+                DEFAULTS["nb_top_n"],
+                1,
+                2000,
+                hint=(
+                    "Always retrieve this many highest-scoring matches per line; "
+                    "the score cutoff does not reduce the top-N result list."
+                ),
+            )
 
             with ui.row().classes("w-full items-center gap-4"):
                 visualize_3d = checkbox_input(
@@ -77,18 +87,21 @@ def create_nb_colabel_tab():
                 with ui.row().classes("gap-4"):
                     gen_heatmap = checkbox_input("Heatmaps", True, hint="Generate interactive heatmap visualizations.")
                     gen_report = checkbox_input("HTML Report", True, hint="Generate comprehensive HTML analysis report.")
-                with param_grid(3):
-                    top_n_neurons = number_input(
-                        "Top N Neurons Per Line", 200, 5, 2000,
-                        hint="Maximum neurons considered per driver line for the analysis.",
-                    )
+                with param_grid(2):
                     min_score = number_input(
-                        "Min Match Score", 20000, 0, 200000, 1000,
-                        hint="Minimum NeuronBridge score for a neuron to be included.",
+                        "Score Cutoff",
+                        DEFAULTS["nb_min_score"],
+                        0,
+                        200000,
+                        1000,
+                        hint=(
+                            "Filters expression-matrix and similarity calculations "
+                            "after the top-N matches have been retrieved."
+                        ),
                     )
                     min_type_avg_score = number_input(
-                        "Min Type Avg Score", 10000, 0, 200000, 1000,
-                        hint="Minimum average score for a type to be included.",
+                        "Min Type Avg Score", DEFAULTS["nb_min_type_avg_score"], 0, 200000, 1000,
+                        hint="Additional filter for co-labeling similarity matrices; does not filter the expression matrix.",
                     )
                 with param_grid(3):
                     sort_by = select_input(
@@ -139,7 +152,7 @@ def create_nb_colabel_tab():
                 visualization_values["visualize_top_n"]
                 if visualize_3d.value else 0
             ),
-            "top_n_neurons": int(top_n_neurons.value),
+            "top_n_neurons": int(top_n.value),
             "min_score": float(min_score.value),
             "min_type_avg_score": float(min_type_avg_score.value),
             "sort_by": sort_by.value,

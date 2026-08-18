@@ -40,7 +40,16 @@ def create_nb_find_neuron_tab():
             section_header("Search Parameters", "tune")
             with param_grid(2):
                 match_algo = select_input("Algorithm", MATCH_ALGORITHMS, DEFAULTS["match_algorithm"])
-                top_n = number_input("Top N Results", 20, 5, 100)
+                top_n = number_input(
+                    "Top N Matches Per Line",
+                    DEFAULTS["nb_top_n"],
+                    1,
+                    2000,
+                    hint=(
+                        "Always retrieve this many highest-scoring matches per line; "
+                        "the score cutoff does not reduce the top-N result list."
+                    ),
+                )
 
             with ui.row().classes("w-full items-center gap-4"):
                 visualize = checkbox_input(
@@ -72,6 +81,17 @@ def create_nb_find_neuron_tab():
                         "Profile Background", ["white", "black"], "white",
                         hint="Background color for individual profile PDFs.",
                     )
+                    min_score = number_input(
+                        "Score Cutoff",
+                        DEFAULTS["nb_min_score"],
+                        0,
+                        200000,
+                        1000,
+                        hint=(
+                            "Threshold for score-based views. Top-N result files "
+                            "still retain all ranked matches, including lower scores."
+                        ),
+                    )
                 generate_pdf = checkbox_input("PDF Summary", True, hint="Generate PDF/PPTX with individual neuron profiles.")
 
     with results_col:
@@ -96,6 +116,7 @@ def create_nb_find_neuron_tab():
             "output_dir": output_dir.value,
             "match_type": match_algo.value,
             "top_n": int(top_n.value),
+            "min_score": float(min_score.value),
             "visualize_top_n": (
                 visualization_values["visualize_top_n"]
                 if visualize.value else 0

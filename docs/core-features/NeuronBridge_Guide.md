@@ -322,9 +322,9 @@ results = nbf.analyze_colabeling(
 | -------------------- | --------------- | --------------------------------- | ---------------------------------------------------------------------------------------- |
 | `lines`              | `str` or `list` | Required                          | Driver lines to analyze (at least 2 required)                                            |
 | `match_type`         | `str`           | `'cds'`                           | Match algorithm for neuron lookup                                                        |
-| `top_n_neurons`      | `int`           | `-1`                              | Top N neurons to consider per line (-1 = all)                                            |
-| `min_score`          | `float`         | `0.0`                             | Visualization threshold only (does NOT filter expression matrix)                         |
-| `min_type_avg_score` | `float`         | `0.0`                             | Type filtering for similarity matrix/clustering ONLY (does NOT filter expression matrix) |
+| `top_n_neurons`      | `int`           | `50`                              | Top N ranked neurons retrieved per line                                                   |
+| `min_score`          | `float`         | `30000.0`                         | Filters expression/labeling matrices after top-N retrieval; raw top-N files are retained |
+| `min_type_avg_score` | `float`         | `10000.0`                         | Additional type filtering for similarity matrices only                                  |
 | `similarity_methods` | `list`          | `['jaccard', 'weighted_jaccard']` | Similarity methods for co-labeling                                                       |
 | `output_dir`         | `str`           | `None`                            | Output directory for results                                                             |
 | `generate_report`    | `bool`          | `True`                            | Generate HTML analysis report                                                            |
@@ -635,7 +635,7 @@ This sorted format ensures that `top_n` type visualizations and selections use t
 
 ---
 
-#### `find_neurons_batch(line_names, top_n=-1, match_type=None, output_dir=None)`
+#### `find_neurons_batch(line_names, top_n=50, match_type=None, output_dir=None, min_score=30000)`
 
 Find EM neurons for multiple driver lines.
 
@@ -651,7 +651,8 @@ results = nbf.find_neurons_batch(
 | Parameter    | Type            | Default  | Description                                                   |
 | ------------ | --------------- | -------- | ------------------------------------------------------------- |
 | `line_names` | `str` or `list` | Required | Driver line name(s). Can be comma-separated.                  |
-| `top_n`      | `int`           | `-1`     | Maximum matches per line. `-1` for all.                       |
+| `top_n`      | `int`           | `50`     | Maximum ranked matches per line. The score cutoff does not reduce this list. |
+| `min_score`  | `float`         | `30000`  | Score cutoff used for score-based annotations; raw top-N matches are retained. |
 | `match_type` | `str` or `None` | `None`   | Match algorithm. If `None`, uses instance-level `match_type`. |
 | `output_dir` | `str` or `None` | `None`   | Directory to save results.                                    |
 

@@ -365,6 +365,7 @@ LM→EM mapping (EM neurons matching a driver line). Example: `NB-find-neurons_S
 *   **`{line}_type_mapped.csv`**: Cross-dataset type mapping summary
 *   **`labeling_distribution.html`**: Score distribution visualization
 *   **`parameters.json`**: Analysis parameters
+*   **`user_warning_notes.txt`**: Notes when score-cutoff behavior affects interpretation
 *   **`plot-3d_{dataset}/`**: Per-dataset 3D skeleton visualizations (only when `visualize_top_n > 0`)
 
 ### 9c. Co-Labeling Mode (`NB-colabeling_{lines}_{ts}/`)
@@ -376,6 +377,11 @@ Multi-line co-labeling analysis. Example: `NB-colabeling_SS01015_VT037867_SS4611
 *   **`expression_matrix_merged.csv`**: Same data with types merged across datasets (max score aggregation)
 *   **`expression_matrix.html`** / **`expression_matrix_merged.html`**: Interactive heatmaps
 *   **`expression_matrix_viz.csv`** / **`expression_matrix_merged_viz.csv`**: Reduced matrices for visualization
+
+The expression and labeling matrices honor the run's `min_score` after the
+ranked top-N matches have been retrieved. The raw per-line files retain the
+full requested top-N, including matches below the cutoff; see
+`user_warning_notes.txt` in affected runs.
 
 #### Co-Labeling Matrices
 *   **`colabeling_matrix_jaccard.csv`** / **`colabeling_matrix_jaccard.html`**: Binary Jaccard similarity between lines
@@ -390,6 +396,7 @@ Multi-line co-labeling analysis. Example: `NB-colabeling_SS01015_VT037867_SS4611
 *   **`line_summary.csv`**: Summary statistics per line
 *   **`line_labeled_neurons/`**: Per-line neuron details (`{line}_neurons.csv`, `{line}_{dataset_folder}_neurons.csv`, `{line}_{dataset_folder}_types.csv`, `{line}_type_mapped.csv`)
 *   **`parameters.json`**: Analysis parameters
+*   **`user_warning_notes.txt`**: Notes describing score-cutoff filtering and retained top-N records
 *   **`colabeling_report.html`**: Comprehensive HTML report
 *   **`plot-3d_{dataset}/`**: Per-dataset 3D visualizations (only when `visualize_top_n > 0`)
 

@@ -69,8 +69,10 @@ if __name__ == "__main__":
     # Images are pre-filtered by match_type availability before limiting
     max_api_images_per_line = -1
     
-    # Maximum number of matches to return per line (-1 for all matches)
-    top_n = -1
+    # Maximum number of ranked matches to return per line.
+    # The score cutoff is applied only to score-based annotations; raw output
+    # retains this many matches, including rows below the cutoff.
+    top_n = 50
     
     # Output directory (set to None for stdout only)
     output_dir = '../local_data/neuronbridge_finding'

@@ -82,10 +82,9 @@ if __name__ == "__main__":
     # Match algorithm: 'cds' (Color Depth Search), 'pppm', or 'both'
     match_type = 'cds'
     
-    # Number of top neuron matches to consider per line
-    # -1 (default) includes all labeled neurons for comprehensive analysis
-    # Higher values give more comprehensive analysis but take longer
-    top_n_neurons = -1
+    # Number of top ranked neuron matches to consider per line. The score
+    # cutoff is applied after this top-N selection.
+    top_n_neurons = 50
     
     # Similarity methods for co-labeling matrix
     # Options: 'jaccard', 'weighted_jaccard', 'rank_correlation'
@@ -156,17 +155,16 @@ if __name__ == "__main__":
     # SCORE FILTERING - Filter low-confidence neurons and types
     # ==========================================================================
     
-    # Minimum score threshold for VISUALIZATION only
-    # This does NOT filter data from expression matrix - all neurons are included
-    # Only affects labeling distribution plots (highlighting high-confidence matches)
-    # Default: 20000. Set to 0 to disable visualization threshold
-    min_score = 20000
+    # Minimum score threshold for expression/labeling matrices and similarity
+    # calculations. Raw top-N per-line tables retain lower-scoring matches.
+    # Default: 30000. Set to 0 to disable the score cutoff.
+    min_score = 30000
     
     # Minimum average score threshold for types in SIMILARITY matrix (clustering)
     # Types with average score < threshold may be excluded from clustering
-    # Note: Expression matrix includes ALL types regardless of this threshold
+    # Note: Expression matrix is filtered by min_score, not by this threshold
     # Default: 10000. Set to 0 to include all types in clustering
-    min_type_avg_score = 20000
+    min_type_avg_score = 10000
     
     # ==========================================================================
     # ADVANCED OPTIONS

@@ -225,6 +225,10 @@ DEFAULTS = {
     "similarity_metric": "cosine",  # Sort By (homolog candidates): sorting only — all metrics are always computed
     "top_n": 30,
     "match_algorithm": "cds",
+    # NeuronBridge Find Neurons / Co-Labeling shared controls
+    "nb_top_n": 50,
+    "nb_min_score": 30000,
+    "nb_min_type_avg_score": 10000,
     # Find Similar Neurons (morphological mode)
     "morph_level": "auto",
     "morph_method": "vector",

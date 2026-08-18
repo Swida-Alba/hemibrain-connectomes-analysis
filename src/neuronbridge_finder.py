@@ -936,6 +936,30 @@ class NeuronBridgeFinder:
             json.dump(params, f, indent=2, ensure_ascii=False)
         
         return params_path
+
+    def _save_user_warning_notes(
+        self,
+        output_path: str,
+        notes: List[str],
+        filename: str = 'user_warning_notes.txt',
+    ) -> Optional[str]:
+        """Save output-affecting caveats for a completed NeuronBridge run.
+
+        The notes are intentionally kept separate from ``parameters.json`` so
+        they are visible alongside the generated result files and can explain
+        when a user-facing cutoff changes an aggregate view without changing
+        the retained top-N match records.
+        """
+        if not notes:
+            return None
+
+        notes_path = os.path.join(output_path, filename)
+        with open(notes_path, 'w', encoding='utf-8') as f:
+            f.write('User warning notes\n')
+            f.write('==================\n\n')
+            for note in notes:
+                f.write(f'- {note}\n')
+        return notes_path
     
     def _filter_images_by_region(self, images: List[Any]) -> List[Any]:
         """
@@ -1662,9 +1686,16 @@ class NeuronBridgeFinder:
             if HAS_TQDM and self.verbose:
                 iterator.set_description(f"   🔍 [{idx+1}/{len(lines)}] Fetching neurons for {line_name}")
             try:
-                neurons_df = self.line_to_neuron(line_name, match_type=match_type)
+                neurons_df = self.line_to_neuron(
+                    line_name,
+                    match_type=match_type,
+                    top_n=top_n,
+                )
                 if not neurons_df.empty:
-                    neurons_top = neurons_df.head(top_n)
+                    # Always select the ranked top-N records first.  A
+                    # positive score cutoff is a downstream filter and must
+                    # never reduce the number of retained top-N records.
+                    neurons_top = neurons_df.head(top_n) if top_n > 0 else neurons_df
                     # Apply minimum score filter if specified
                     if min_score > 0:
                         neurons_top = neurons_top[neurons_top['score'] >= min_score]
@@ -2047,12 +2078,14 @@ class NeuronBridgeFinder:
         output_path : str, optional
             If provided, save per-line neuron details CSVs to this directory.
         min_score : float
-            Score threshold for visualization marker only. Does NOT filter data.
-            Expression matrix includes ALL neurons. Default: 0.0.
+            Minimum score used to filter the expression matrix and labeling
+            information after the ranked top-N records have been retrieved.
+            The per-line neuron tables retain all top-N records and mark rows
+            below this cutoff. Default: 0.0.
         min_type_avg_score : float
             NOT USED in this function. Kept for API compatibility.
             Type filtering is done in _build_colabeling_matrix for similarity calculations.
-            Expression matrix includes ALL types regardless of this parameter.
+            Expression matrix filtering is controlled independently by min_score.
             
         Returns
         -------
@@ -2066,7 +2099,7 @@ class NeuronBridgeFinder:
         """
         self._vprint(f"\n📊 Calculating mutual information for {len(lines)} lines...")
         if min_score > 0:
-            self._vprint(f"   📊 Min neuron score (visualization threshold): {min_score:,.0f}")
+            self._vprint(f"   📊 Min neuron score (expression threshold): {min_score:,.0f}")
         # Note: min_type_avg_score is NOT used here - filtering happens in _build_colabeling_matrix
         self._vprint(f"   ⏱️  Note: Fetching neuron types for each line (may take time)")
         
@@ -2104,21 +2137,37 @@ class NeuronBridgeFinder:
             if HAS_TQDM and self.verbose:
                 iterator.set_description(f"   🧬 [{idx+1}/{len(lines)}] Processing {line_name}")
             try:
+                # ``line_to_neuron`` applies top-N to the ranked records before
+                # this method applies the score cutoff.  This preserves the
+                # requested top-N result list, including rows below the cutoff.
                 neurons_df = self.line_to_neuron(line_name, match_type=match_type, top_n=top_n)
                 if not neurons_df.empty:
-                    # NO min_score filtering for expression matrix - include ALL data
-                    # min_score is only used for visualization (labeling distribution plots)
-                    
-                    # Get lowercase types for MI calculation (from ALL neurons)
-                    types = neurons_df['type'].fillna('Unknown').unique()
+                    neurons_to_store = neurons_df.copy()
+                    neurons_to_store['_passes_min_score'] = neurons_to_store['score'] >= (
+                        min_score if min_score > 0 else 0
+                    )
+                    line_neurons_dict[line_name] = neurons_to_store
+
+                    # The cutoff affects aggregate expression outputs, but not
+                    # the raw top-N per-line tables retained above.
+                    expression_neurons = neurons_df
+                    if min_score > 0:
+                        expression_neurons = neurons_df[neurons_df['score'] >= min_score]
+
+                    # Get lowercase types for MI calculation from the same
+                    # score-filtered data used by the expression matrix.
+                    types = expression_neurons['type'].fillna('Unknown').unique()
                     types_lower = set(t.lower() for t in types)
                     line_type_sets[line_name] = types_lower
+
+                    if expression_neurons.empty:
+                        line_prefixed_type_scores[line_name] = {}
+                        continue
                     
                     # Build prefixed type scores: {ABBREV}_{type} with original case
-                    # Use ALL data for expression matrix (no min_score filter)
                     line_prefixed_scores = {}
-                    for dataset in neurons_df['dataset'].dropna().unique():
-                        ds_df = neurons_df[neurons_df['dataset'] == dataset]
+                    for dataset in expression_neurons['dataset'].dropna().unique():
+                        ds_df = expression_neurons[expression_neurons['dataset'] == dataset]
                         # Get dataset abbreviation
                         ds_abbrev = DATASET_ABBREVIATIONS.get(dataset, dataset[:4].upper())
                         
@@ -2134,9 +2183,9 @@ class NeuronBridgeFinder:
                                 max_score
                             )
                     
-                    # Build labeling_info from ALL data (same as expression matrix)
-                    for dataset in neurons_df['dataset'].dropna().unique():
-                        ds_df = neurons_df[neurons_df['dataset'] == dataset]
+                    # Build labeling_info from the same filtered data.
+                    for dataset in expression_neurons['dataset'].dropna().unique():
+                        ds_df = expression_neurons[expression_neurons['dataset'] == dataset]
                         ds_abbrev = DATASET_ABBREVIATIONS.get(dataset, dataset[:4].upper())
                         
                         for type_name, type_df in ds_df.groupby(ds_df['type'].fillna('Unknown')):
@@ -2153,11 +2202,6 @@ class NeuronBridgeFinder:
                     
                     line_prefixed_type_scores[line_name] = line_prefixed_scores
                     
-                    # Store neurons DataFrame with visualization marker column
-                    # _passes_min_score is used by visualization functions only
-                    neurons_to_store = neurons_df.copy()
-                    neurons_to_store['_passes_min_score'] = neurons_to_store['score'] >= (min_score if min_score > 0 else 0)
-                    line_neurons_dict[line_name] = neurons_to_store
                 else:
                     line_type_sets[line_name] = set()
                     line_prefixed_type_scores[line_name] = {}
@@ -2174,9 +2218,10 @@ class NeuronBridgeFinder:
             self._vprint("   ⚠️ No types found for any line")
             return pd.DataFrame(), pd.DataFrame(), line_neurons_dict, pd.DataFrame()
         
-        # NOTE: min_type_avg_score filtering is NOT applied here
-        # Expression matrix includes ALL types regardless of score
-        # Type filtering for similarity/clustering is done in _build_colabeling_matrix
+        # NOTE: min_type_avg_score filtering is NOT applied here. The
+        # expression matrix includes all types that remain after min_score;
+        # type filtering for similarity/clustering is done in
+        # _build_colabeling_matrix.
         
         # Create score-based expression matrix with prefixed types (case-sensitive)
         # Value = max match score if line labels that type, 0 otherwise
@@ -7247,7 +7292,7 @@ class NeuronBridgeFinder:
     def find_neurons_batch(
         self,
         line_names: Union[str, List[str]],
-        top_n: int = -1,
+        top_n: int = 50,
         match_type: Optional[str] = None,
         output_dir: Optional[str] = None,
         visualize_top_n: int = 0,
@@ -7260,6 +7305,7 @@ class NeuronBridgeFinder:
         datasets_to_visualize: Union[str, List[str]] = 'all',
         sort_by: str = 'max_score',
         visualization_settings: Optional[Dict[str, Any]] = None,
+        min_score: float = 30000.0,
     ) -> pd.DataFrame:
         """
         Find EM neurons for multiple driver lines with automatic saving.
@@ -7272,7 +7318,7 @@ class NeuronBridgeFinder:
         line_names : str or list
             Driver line name(s). Can be comma-separated string or list.
         top_n : int
-            Maximum matches per line. Default: -1 (all matches)
+            Maximum matches per line. Default: 50.
         match_type : str, optional
             Match algorithm: 'cds', 'pppm', or 'both'. 
             If None, uses self.match_type. Default: None
@@ -7317,6 +7363,10 @@ class NeuronBridgeFinder:
             - 'Q3_score': 75th percentile (Q3) score among neurons of this type
             - 'Q1_score': 25th percentile (Q1) score among neurons of this type
             - 'avg_score': Average score among neurons of this type
+        min_score : float, default 30000.0
+            Score cutoff used for score-based visualization annotations. The
+            raw per-line result files always retain the ranked top-N matches,
+            including matches below this cutoff.
             
         Returns
         -------
@@ -7331,6 +7381,7 @@ class NeuronBridgeFinder:
         - {line}_{dataset}_types.csv: Type summary with labeled_N, max_score, median_score, 
           Q3_score, Q1_score, avg_score, and typed_N_in_dataset
         - all_neurons.csv: Combined results from all searches
+        - user_warning_notes.txt: Score-cutoff interpretation notes (when applicable)
             
         Example
         -------
@@ -7396,10 +7447,23 @@ class NeuronBridgeFinder:
                     'generate_individual_profiles': generate_individual_profiles,
                     'pdf_images_per_page': pdf_images_per_page,
                     'type_filter': type_filter,
-                    'datasets_to_visualize': datasets_to_visualize
+                    'datasets_to_visualize': datasets_to_visualize,
+                    'min_score': min_score,
                 }
             )
             self._vprint(f"   💾 Parameters: parameters.json")
+
+            self._save_user_warning_notes(
+                output_path,
+                [
+                    (
+                        f"Score cutoff ({min_score:,.0f}) is applied only to score-based "
+                        "visualization annotations in Find EM Neurons. Each raw per-line "
+                        f"CSV still retains the requested top-N ({top_n}) ranked matches, "
+                        "including matches below the cutoff."
+                    )
+                ] if min_score > 0 else [],
+            )
         
         # Process each line
         all_results = []
@@ -7661,6 +7725,7 @@ class NeuronBridgeFinder:
                     score_column='score',
                     label_column='type',
                     title=f"Labeling Score Distribution ({len(lines)} line(s))",
+                    show_threshold=min_score if min_score > 0 else None,
                     group_by='source_line' if 'source_line' in combined_df.columns and len(lines) > 1 else None
                 )
             
@@ -7735,7 +7800,7 @@ class NeuronBridgeFinder:
         self,
         lines: Union[str, List[str]],
         match_type: Optional[str] = None,
-        top_n_neurons: int = -1,
+        top_n_neurons: int = 50,
         similarity_methods: Union[str, List[str]] = None,
         output_dir: Optional[str] = None,
         generate_report: bool = True,
@@ -7743,7 +7808,7 @@ class NeuronBridgeFinder:
         visualize_top_n: int = 0,
         generate_individual_profiles: Union[bool, List[str]] = None,
         pdf_images_per_page: Tuple[int, int] = (3, 2),
-        min_score: float = 20000.0,
+        min_score: float = 30000.0,
         min_type_avg_score: float = 10000.0,
         background_color: str = 'white',
         type_filter: Optional[Dict[str, Union[str, List[str]]]] = None,
@@ -7769,7 +7834,7 @@ class NeuronBridgeFinder:
             Match algorithm: 'cds', 'pppm', or 'both'.
             If None, uses self.match_type. Default: None
         top_n_neurons : int
-            Number of top neuron matches to consider per line. Default: -1 (all)
+            Number of top neuron matches to consider per line. Default: 50.
         similarity_methods : str or list of str
             Similarity method(s) for co-labeling matrix:
             - 'jaccard': Binary Jaccard similarity (presence/absence of types)
@@ -7790,13 +7855,15 @@ class NeuronBridgeFinder:
         pdf_images_per_page : tuple
             (columns, rows) for PDF layout. Default: (3, 2)
         min_score : float
-            Score threshold for visualization marker only (labeling distribution plots).
-            Does NOT filter data in expression matrix - all neurons are included.
-            Default: 30000.0
+            Minimum score for expression-matrix and similarity calculations,
+            applied after the ranked top-N matches are retrieved. The raw
+            per-line neuron files retain all top-N matches, including rows
+            below this cutoff. Default: 30000.0.
         min_type_avg_score : float
-            Minimum average score threshold for types in similarity matrix. Default: 20000.0
-            Types with average score < threshold may be excluded from clustering.
-            Note: Expression matrix includes ALL types regardless of this threshold.
+            Minimum average score threshold for types in the similarity matrix.
+            Types with average score < threshold may be excluded from
+            similarity calculations. This does not further filter the
+            expression matrix. Default: 10000.0.
         background_color : str, default 'white'
             Background color for 3D visualization. Can be 'white', 'black',
             or any CSS color (e.g., '#f0f0f0', 'lightgray').
@@ -7870,6 +7937,7 @@ class NeuronBridgeFinder:
         - colabeling_matrix_{method}.html: Interactive heatmap
         - line_labeled_neurons/{line}_neurons.csv: Per-line neuron details
         - line_summary.csv: Summary statistics per line
+        - user_warning_notes.txt: Score-cutoff and top-N interpretation notes
         - colabeling_report.html: Comprehensive analysis report
         
         Example
@@ -7964,6 +8032,29 @@ class NeuronBridgeFinder:
                 }
             )
             self._vprint(f"   💾 Parameters: parameters.json")
+
+            warning_notes = []
+            if min_score > 0:
+                warning_notes.extend([
+                    (
+                        f"Score cutoff ({min_score:,.0f}) is applied after the ranked "
+                        f"top-N ({top_n_neurons}) matches per line are retrieved. "
+                        "The raw line_labeled_neurons/*_neurons.csv files retain all "
+                        "top-N matches, including rows below the cutoff."
+                    ),
+                    (
+                        "The score cutoff filters expression_matrix.csv, "
+                        "expression_matrix_merged.csv, and labeling_info.csv; "
+                        "their aggregate scores and type coverage therefore reflect "
+                        "only matches at or above the cutoff."
+                    ),
+                ])
+            if min_type_avg_score > 0:
+                warning_notes.append(
+                    f"Min Type Avg Score ({min_type_avg_score:,.0f}) is an additional "
+                    "filter used for the co-labeling similarity matrices only."
+                )
+            self._save_user_warning_notes(output_path, warning_notes)
         
         results = {
             'expression_matrix': None,

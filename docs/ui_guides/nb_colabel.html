@@ -31,8 +31,8 @@
   <table>
     <tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr>
     <tr><td>Similarity methods</td><td>jaccard, weighted_jaccard</td><td>Binary vs score-weighted overlap</td></tr>
-    <tr><td>Top N Neurons Per Line</td><td>200</td><td>Neurons considered per line</td></tr>
-    <tr><td>Min Match Score</td><td>20000</td><td>Minimum NeuronBridge score to include a neuron</td></tr>
+    <tr><td>Top N Matches Per Line</td><td>50</td><td>Ranked matches retrieved per line before score filtering</td></tr>
+    <tr><td>Score Cutoff</td><td>30000</td><td>Filters expression/labeling matrices and similarity inputs after top-N retrieval</td></tr>
     <tr><td>Min Type Avg Score</td><td>10000</td><td>Minimum average score to include a type</td></tr>
     <tr><td>Heatmaps / HTML Report</td><td>on</td><td>Interactive outputs</td></tr>
     <tr><td>3D Skeleton</td><td>off</td><td>Render top co-labeled types</td></tr>
@@ -51,6 +51,7 @@
   line_summary.csv            (specificity statistics)
   line_labeled_neurons/...    # per-line neuron details
   colabeling_report.html
+  user_warning_notes.txt      # cutoff interpretation notes
   parameters.json</code></pre>
 
   <div class="callout tip">

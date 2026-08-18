@@ -236,7 +236,7 @@ visualize_by = 'type'   # 'type' or 'bodyId'
 | `lines` | Driver line name(s) | Single line or comma-separated |
 | `match_type` | 'cds', 'pppm', or 'both' | 'cds' for speed |
 | `region` | 'Brain', 'VNC', or 'All' | Filter by region |
-| `top_n` | Max matches per line | -1 for all |
+| `top_n` | Max ranked matches per line; applied before score cutoff | 50 |
 | `visualize_top_n` | 3D viz for top N types | 20-50 |
 | `visualize_by` | 'type' or 'bodyId' | 'type' for grouping |
 
@@ -333,13 +333,11 @@ lines = [
 | Parameter | Description | Recommended |
 |-----------|-------------|-------------|
 | `lines` | List of driver lines to analyze | Use top 10-20 from FindLines |
-| `min_score` | Visualization threshold (does NOT filter expression matrix data) | 30000-40000 |
-| `min_type_avg_score` | Type filtering for similarity matrix/clustering ONLY | 30000 |
+| `min_score` | Expression/labeling matrix and similarity cutoff, applied after top-N retrieval | 30000 |
+| `min_type_avg_score` | Additional type filtering for similarity matrices only | 10000 |
 | `visualize_top_n` | 3D visualization of top N types | 10-20 |
 
-> **Note**: Both `min_score` and `min_type_avg_score` do NOT filter the expression matrix. The expression matrix includes ALL neurons and types regardless of scores. These thresholds only affect:
-> - `min_score`: Labeling distribution plot highlighting
-> - `min_type_avg_score`: Similarity matrix calculations (for clustering)
+> **Note**: Top-N retrieval is performed before score filtering, so the raw per-line tables always contain the requested number of ranked matches, including rows below the cutoff. `min_score` filters the expression/labeling matrices and the similarity inputs; `min_type_avg_score` applies only to similarity-matrix type filtering. Runs that use these cutoffs record the distinction in `user_warning_notes.txt`.
 
 ---
 

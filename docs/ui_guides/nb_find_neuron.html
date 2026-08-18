@@ -38,7 +38,8 @@
   <table>
     <tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr>
     <tr><td>Algorithm</td><td>cds</td><td>cds, pppm, or both</td></tr>
-    <tr><td>Top N Results</td><td>20</td><td>Matched neurons returned per line</td></tr>
+    <tr><td>Top N Matches Per Line</td><td>50</td><td>Ranked matches retained per line; this count is applied before the score cutoff</td></tr>
+    <tr><td>Score Cutoff</td><td>30000</td><td>Threshold for score-based annotations; top-N result files retain lower-scoring matches</td></tr>
     <tr><td>Visualize Top Neurons</td><td>on</td><td>Render top matches in 3D</td></tr>
     <tr><td>Visualize By</td><td>type</td><td>Group visualizations by type or bodyId</td></tr>
     <tr><td>Sort By</td><td>max_score</td><td>max_score or type_avg_score</td></tr>
@@ -58,6 +59,7 @@
   {line}_{dataset_folder}_types.csv     # per-dataset type aggregates
   {line}_type_mapped.csv                # cross-dataset type mapping
   labeling_distribution.html            # score distribution
+  user_warning_notes.txt                 # cutoff interpretation notes (when applicable)
   parameters.json
   plot-3d_{dataset}/...                 # 3D views (when Visualize Top N > 0)
   individual_profiles/...               # PDF/PPTX (when enabled)</code></pre>
