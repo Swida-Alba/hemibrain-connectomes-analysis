@@ -10,6 +10,7 @@ import json
 import pytest
 
 import ui.history_store as history_store
+import ui.line_history_store as line_history_store
 
 
 @pytest.fixture
@@ -184,3 +185,25 @@ class TestResilience:
         )
         history_store.record(["aMe12"])  # parent dir does not exist -> OSError
         assert history_store.recent() == []
+
+
+class TestSeparateLineHistory:
+    def test_line_values_use_a_separate_history_namespace(
+        self, store, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            line_history_store, "_HISTORY_PATH", tmp_path / "line_history.json"
+        )
+
+        store.record(["aMe12"], now="2026-08-11T10:00:00")
+        line_history_store.record(["R10A06"], now="2026-08-11T10:01:00")
+        line_history_store.record(
+            ["SS01015"], now="2026-08-11T10:02:00", datasets=["dataset-a"]
+        )
+
+        assert store.recent() == ["aMe12"]
+        assert line_history_store.recent(datasets=["dataset-b"]) == [
+            "SS01015", "R10A06"
+        ]
+        assert "aMe12" not in line_history_store.recent()
+        assert line_history_store.datasets_of("SS01015") == []

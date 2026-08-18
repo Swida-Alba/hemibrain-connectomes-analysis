@@ -1,10 +1,8 @@
 """Tab-level query-history recording tests.
 
-Every UI tab records its query inputs into the shared history store after a
-successful run: dataset-scoped tabs record the selected dataset(s), while
-NeuronBridge / FlyLight queries are recorded without dataset provenance so
-they appear in every dataset's history list. Failed or cancelled runs never
-record.
+Every UI tab records its query inputs after a successful run. Neuron queries
+use the neuron history store, while NeuronBridge / FlyLight driver lines use a
+separate line history store. Failed or cancelled runs never record.
 """
 
 import asyncio
@@ -20,17 +18,21 @@ from nicegui import Client  # noqa: E402
 from nicegui.page import page  # noqa: E402
 
 import ui.history_store as hs  # noqa: E402
+import ui.line_history_store as lhs  # noqa: E402
 from ui.components.output_panel import OutputPanel  # noqa: E402
 from ui.tabs.connectivity_profiling import (  # noqa: E402
     create_connectivity_profiling_tab,
 )
 from ui.tabs.find_homologs import create_find_homologs_tab  # noqa: E402
+from ui.tabs.flylight import create_flylight_tab  # noqa: E402
 from ui.tabs.nb_colabel import create_nb_colabel_tab  # noqa: E402
+from ui.tabs.nb_find_neuron import create_nb_find_neuron_tab  # noqa: E402
 
 
 @pytest.fixture
 def isolated_history(tmp_path, monkeypatch):
     monkeypatch.setattr(hs, "_HISTORY_PATH", tmp_path / "neuron_history.json")
+    monkeypatch.setattr(lhs, "_HISTORY_PATH", tmp_path / "line_history.json")
     return hs
 
 
@@ -158,7 +160,71 @@ class TestColabelHistory:
         _click_run(client, "Run Co-Labeling")
 
         assert captured and captured[0][0] == "nb_colabel"
-        assert isolated_history.recent() == ["R10A06", "R10A07"]
-        # NeuronBridge searches every dataset: no provenance, visible in all
-        # dataset scopes.
-        assert isolated_history.datasets_of("R10A06") == []
+        assert isolated_history.recent() == []
+        assert lhs.recent() == ["R10A06", "R10A07"]
+        assert lhs.datasets_of("R10A06") == []
+
+
+class TestFindNeuronHistory:
+    def test_find_neurons_records_driver_lines_in_line_history(
+        self, isolated_history, monkeypatch
+    ):
+        captured = _mock_output_panel_run(monkeypatch)
+        client = Client(page("/history-find-neuron"))
+        with client:
+            create_nb_find_neuron_tab()
+        _chip_input(client, "Driver Line Names").add_values(
+            ["VT037867", "SS01015"]
+        )
+        _click_run(client, "Find EM Neurons")
+
+        assert captured and captured[0][0] == "nb_find_neuron"
+        assert isolated_history.recent() == []
+        assert lhs.recent() == ["VT037867", "SS01015"]
+
+
+class TestFlylightHistory:
+    def test_flylight_shares_global_line_history(
+        self, isolated_history, monkeypatch
+    ):
+        captured = _mock_output_panel_run(monkeypatch)
+        client = Client(page("/history-flylight"))
+        with client:
+            create_flylight_tab()
+        _chip_input(client, "Driver line name(s)").add_values(["R10A06"])
+        _click_run(client, "Download Images")
+
+        assert captured and captured[0][0] == "flylight_download"
+        assert isolated_history.recent() == []
+        assert lhs.recent() == ["R10A06"]
+
+
+class TestLineHistoryMenu:
+    def test_driver_line_input_shows_line_history_only(
+        self, isolated_history
+    ):
+        lhs.record(["R10A06"], now="2026-08-11T10:00:00")
+        isolated_history.record(["aMe12"], now="2026-08-11T10:01:00")
+
+        client = Client(page("/history-line-menu"))
+        with client:
+            from ui.components.common import neuron_list_input
+
+            box = neuron_list_input(
+                label="Driver Line Names",
+                show_filter=False,
+                show_upload=False,
+                history_kind="line",
+            )
+
+        focus = next(
+            listener for listener in box.chip_input._event_listeners.values()
+            if listener.type == "focus"
+        )
+        box.chip_input._handle_event({"listener_id": focus.id, "args": None})
+        texts = [
+            element.text for element in client.elements.values()
+            if getattr(element, "text", "")
+        ]
+        assert "R10A06" in texts
+        assert "aMe12" not in texts

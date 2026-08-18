@@ -127,10 +127,16 @@ def _matches_dataset_scope(value: str, entry: dict,
     return True
 
 
-def _load() -> Dict[str, dict]:
+def _path_or_default(history_path: Optional[Path] = None) -> Path:
+    """Return an explicitly selected history path or the neuron store path."""
+    return Path(history_path) if history_path is not None else _HISTORY_PATH
+
+
+def _load(history_path: Optional[Path] = None) -> Dict[str, dict]:
+    path = _path_or_default(history_path)
     try:
-        if _HISTORY_PATH.exists():
-            data = json.loads(_HISTORY_PATH.read_text(encoding="utf-8"))
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(data, dict) and isinstance(data.get("values"), dict):
                 return data["values"]
     except (OSError, ValueError):
@@ -138,19 +144,20 @@ def _load() -> Dict[str, dict]:
     return {}
 
 
-def _save(values: Dict[str, dict]) -> None:
+def _save(values: Dict[str, dict], history_path: Optional[Path] = None) -> None:
+    path = _path_or_default(history_path)
     try:
-        tmp = _HISTORY_PATH.with_suffix(".json.tmp")
+        tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps({"values": values}, indent=2),
                        encoding="utf-8")
-        tmp.replace(_HISTORY_PATH)
+        tmp.replace(path)
     except OSError:
         pass
 
 
 def record(values: List[str], now: Optional[str] = None,
            custom_values: Optional[Iterable[str]] = None,
-           datasets=None) -> None:
+           datasets=None, *, _history_path: Optional[Path] = None) -> None:
     """Record searched values (raw chips, pre-pattern): bump the count and
     refresh the last-used timestamp of each value.
 
@@ -163,6 +170,7 @@ def record(values: List[str], now: Optional[str] = None,
     """
     if not values:
         return
+    history_path = _path_or_default(_history_path)
     stamp = now or datetime.now(timezone.utc).isoformat(timespec="seconds")
     custom_keys = {
         str(value).strip() for value in (
@@ -171,7 +179,7 @@ def record(values: List[str], now: Optional[str] = None,
         ) if str(value).strip()
     }
     with _LOCK:
-        data = _load()
+        data = _load(history_path)
         for value in values:
             value = str(value).strip()
             if not value or value.lower() in ("nan", "none", "null"):
@@ -195,10 +203,10 @@ def record(values: List[str], now: Optional[str] = None,
                 }
                 entry["datasets"] = sorted(prior_datasets | dataset_values)
             data[value] = entry
-        _save(data)
+        _save(data, history_path)
 
 
-def datasets_of(value: str) -> List[str]:
+def datasets_of(value: str, *, _history_path: Optional[Path] = None) -> List[str]:
     """Recorded dataset names for one history value, sorted and deduplicated.
 
     Entries recorded before dataset provenance was introduced return ``[]``;
@@ -208,7 +216,7 @@ def datasets_of(value: str) -> List[str]:
     if not value:
         return []
     with _LOCK:
-        data = _load()
+        data = _load(_history_path)
         entry = data.get(value)
         if not isinstance(entry, dict):
             return []
@@ -219,13 +227,13 @@ def datasets_of(value: str) -> List[str]:
         })
 
 
-def mark_custom(values: Iterable[str]) -> None:
+def mark_custom(values: Iterable[str], *, _history_path: Optional[Path] = None) -> None:
     """Mark already-recorded query values as custom-group entries."""
     keys = {str(value).strip() for value in values if str(value).strip()}
     if not keys:
         return
     with _LOCK:
-        data = _load()
+        data = _load(_history_path)
         changed = False
         for value in keys:
             entry = data.get(value)
@@ -233,10 +241,12 @@ def mark_custom(values: Iterable[str]) -> None:
                 entry["kind"] = "custom"
                 changed = True
         if changed:
-            _save(data)
+            _save(data, _history_path)
 
 
-def prune_orphaned_custom(valid_values: Iterable[str]) -> List[str]:
+def prune_orphaned_custom(
+    valid_values: Iterable[str], *, _history_path: Optional[Path] = None
+) -> List[str]:
     """Delete custom-marked query history whose group no longer exists.
 
     Unknown legacy entries are intentionally preserved because they may be
@@ -246,7 +256,7 @@ def prune_orphaned_custom(valid_values: Iterable[str]) -> List[str]:
     valid = {str(value).strip() for value in valid_values
              if str(value).strip()}
     with _LOCK:
-        data = _load()
+        data = _load(_history_path)
         stale = [
             value for value, entry in data.items()
             if isinstance(entry, dict)
@@ -256,15 +266,20 @@ def prune_orphaned_custom(valid_values: Iterable[str]) -> List[str]:
         if stale:
             for value in stale:
                 del data[value]
-            _save(data)
+            _save(data, _history_path)
         return stale
 
 
-def recent(limit: int = _LIMIT_RECENT, datasets=None) -> List[str]:
+def recent(
+    limit: int = _LIMIT_RECENT,
+    datasets=None,
+    *,
+    _history_path: Optional[Path] = None,
+) -> List[str]:
     """Most recently searched values, optionally scoped to datasets."""
     scope = _normalize_datasets(datasets)
     with _LOCK:
-        data = _load()
+        data = _load(_history_path)
         ordered = sorted(data.items(),
                          key=lambda kv: str(kv[1].get("last_used", "")),
                          reverse=True)
@@ -274,11 +289,16 @@ def recent(limit: int = _LIMIT_RECENT, datasets=None) -> List[str]:
         ][:limit]
 
 
-def frequent(limit: int = _LIMIT_FREQUENT, datasets=None) -> List[str]:
+def frequent(
+    limit: int = _LIMIT_FREQUENT,
+    datasets=None,
+    *,
+    _history_path: Optional[Path] = None,
+) -> List[str]:
     """Most frequently searched values, optionally scoped to datasets."""
     scope = _normalize_datasets(datasets)
     with _LOCK:
-        data = _load()
+        data = _load(_history_path)
         ordered = sorted(
             data.items(),
             key=lambda kv: (int(kv[1].get("count", 0)),
@@ -291,21 +311,21 @@ def frequent(limit: int = _LIMIT_FREQUENT, datasets=None) -> List[str]:
         ][:limit]
 
 
-def remove(value: str) -> bool:
+def remove(value: str, *, _history_path: Optional[Path] = None) -> bool:
     """Remove one value from query history and return whether it existed."""
     value = str(value or "").strip()
     if not value:
         return False
     with _LOCK:
-        data = _load()
+        data = _load(_history_path)
         if value not in data:
             return False
         del data[value]
-        _save(data)
+        _save(data, _history_path)
         return True
 
 
-def clear() -> None:
+def clear(*, _history_path: Optional[Path] = None) -> None:
     """Wipe the history file (used by tests and the UI clear action)."""
     with _LOCK:
-        _save({})
+        _save({}, _history_path)

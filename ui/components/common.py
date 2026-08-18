@@ -580,12 +580,13 @@ def neuron_list_input(
     suggestions: Optional[Callable[[str], List[Tuple[str, str]]]] = None,
     available_neurons: Optional[Callable[[], object]] = None,
     history_datasets: Optional[Callable[[], object]] = None,
+    history_kind: Optional[str] = None,
     show_history_datasets: bool = False,
     suggestion_min_chars: int = 1,
     suggestion_limit: int = 50,
 ) -> ui.element:
     """
-    Create a chip-based list input for neurons.
+    Create a chip-based list input for neurons or driver lines.
 
     - Type a name (type, bodyId or pattern) and press Enter or leave the field
       to add it as a chip. The whole typed text becomes ONE chip — commas and
@@ -607,7 +608,10 @@ def neuron_list_input(
       to the dataset(s) selected in the current tab (via ``history_datasets``
       or ``available_neurons``); history is not mixed into a nonblank dataset
       search. History rows carry the same gray category hint as suggestion
-      rows (the searched column, or the cached instance for bodyIds). With
+      rows (the searched column, or the cached instance for bodyIds). Set
+      ``history_kind="line"`` for a driver-line input; line history is stored
+      separately from neuron history and works even without a suggestion
+      provider. With
       ``show_history_datasets=True`` (the cross-dataset tab), history rows
       additionally show a gray tag per dataset the value was recorded for —
       restricted to the datasets currently selected in the tab's dataset
@@ -630,6 +634,10 @@ def neuron_list_input(
 
     Returns container with .get_value() -> (filter_mode, neuron_list).
     """
+    if history_kind not in (None, "neuron", "line"):
+        raise ValueError("history_kind must be 'neuron', 'line', or None")
+    history_enabled = suggestions is not None or history_kind is not None
+
     def _unit(count: int) -> str:
         """Pluralized unit label for count displays."""
         return f"{unit_label}{'s' if count != 1 else ''}"
@@ -883,7 +891,7 @@ def neuron_list_input(
         # suggestion/history menu is open because the editor still owns focus,
         # close it before the button takes focus so the Recent list cannot
         # flash back over the expanded editor.
-        if suggestions is not None and suggest_menu is not None:
+        if history_enabled and suggest_menu is not None:
             _suppress_history_popup["value"] = True
             _close_suggest()
         chip_list_expanded["value"] = not chip_list_expanded["value"]
@@ -976,7 +984,7 @@ def neuron_list_input(
         """
         # While the suggestion menu is open the blur comes from clicking a
         # suggestion — the click commits the picked value, not the typed text.
-        if suggestions is not None and suggest_menu.value:
+        if history_enabled and suggest_menu.value:
             return
         args = getattr(event, "args", None) if event is not None else None
         text = str(args or "") or pending_input["value"]
@@ -1013,14 +1021,14 @@ def neuron_list_input(
         update_status()
 
     # ------------------------------------------------------------------
-    # Auto-suggest + query history. Only active when a provider is wired
-    # (the pathfinding tabs pass ``suggestions``): a custom menu replaces
-    # the native QSelect popup (suppressed via popup-content-class) so
-    # entries can render a solid name with a gray column hint and history
-    # sections. History is read from ui/history_store (persisted per user).
+    # Auto-suggest + query history. A provider enables both features for
+    # neuron inputs; an explicit ``history_kind`` also enables the history
+    # menu for inputs such as driver-line fields that do not have a dataset
+    # suggestion provider. The selected store keeps line and neuron values
+    # in separate namespaces.
     # ------------------------------------------------------------------
     suggest_menu = None
-    if suggestions is not None:
+    if history_enabled:
         # The native QSelect popup would open empty on focus/typing; hide it
         # (CSS rule in ui/app.py) and drive the custom menu instead.
         chip_input.props('hide-dropdown-icon '
@@ -1122,7 +1130,7 @@ def neuron_list_input(
                     _candidate_state["entries"] = narrowed
                     return narrowed
 
-            entries = list(suggestions(query) or [])
+            entries = list(suggestions(query) or []) if suggestions else []
             _candidate_state["text"] = query
             _candidate_state["entries"] = entries
             return entries
@@ -1189,13 +1197,22 @@ def neuron_list_input(
             _refresh_menu()
 
         def _show_history(query: str = ""):
-            from ..history_store import (
-                datasets_of as _datasets_of,
-                frequent as _frequent,
-                prune_orphaned_custom as _prune_orphaned_custom,
-                recent as _recent,
-                remove as _remove,
-            )
+            if history_kind == "line":
+                from ..line_history_store import (
+                    datasets_of as _datasets_of,
+                    frequent as _frequent,
+                    prune_orphaned_custom as _prune_orphaned_custom,
+                    recent as _recent,
+                    remove as _remove,
+                )
+            else:
+                from ..history_store import (
+                    datasets_of as _datasets_of,
+                    frequent as _frequent,
+                    prune_orphaned_custom as _prune_orphaned_custom,
+                    recent as _recent,
+                    remove as _remove,
+                )
 
             valid_custom_labels = group_history.valid_labels()
             _prune_orphaned_custom(valid_custom_labels)
@@ -1222,7 +1239,12 @@ def neuron_list_input(
                 ]
                 return values or None
 
-            dataset_scope = _history_dataset_scope()
+            # Driver-line history is shared by NeuronBridge and FlyLight and
+            # has no dataset dimension, even if a caller supplies a dataset
+            # getter for another purpose.
+            dataset_scope = (
+                None if history_kind == "line" else _history_dataset_scope()
+            )
 
             def matches_query(value: str) -> bool:
                 # History filtering follows the same strict prefix behavior
@@ -1288,7 +1310,11 @@ def neuron_list_input(
             def _history_datasets(value: str) -> List[str]:
                 """Dataset tags for one row, restricted to the datasets
                 currently selected in the tab's dataset input."""
-                if not show_history_datasets or dataset_scope is None:
+                if (
+                    history_kind == "line"
+                    or not show_history_datasets
+                    or dataset_scope is None
+                ):
                     return []
                 scope = set(dataset_scope)
                 return [
@@ -1585,7 +1611,7 @@ def neuron_list_input(
     chip_input.on_value_change(handle_value_change)
     # Registered AFTER handle_value_change so the pending text is already
     # cleared when the "finished input" decision runs.
-    if suggestions is not None:
+    if history_enabled:
         chip_input.on_value_change(_finished_input)
     # Commit the remembered editor text when the field loses focus, so a value
     # is added as a chip without requiring Enter. ``blur`` is a Quasar field

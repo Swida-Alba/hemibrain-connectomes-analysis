@@ -90,8 +90,10 @@ def create_flylight_tab():
             section_header("Driver Lines", "route")
             lines_input = neuron_list_input(
                 label="Driver line name(s)",
+                unit_label="line",
                 show_filter=False,
                 show_upload=False,
+                history_kind="line",
                 hint=(
                     "Type a driver line name and press Enter or leave the field "
                     "to add it as a chip. R-lines (Gen1 GAL4) and SS-lines "
@@ -307,10 +309,10 @@ def create_flylight_tab():
         )
 
         # A completed download means the driver lines existed on FlyLight;
-        # keep them in the query history (no dataset scope: imagery is not
-        # tied to a connectome dataset).
+        # Keep them in the separate driver-line history (imagery is not tied
+        # to a connectome dataset).
         if result["returncode"] == 0:
-            from ..history_store import record as _record_history
+            from ..line_history_store import record as _record_history
             _record_history([str(v) for v in line_names])
 
         output_panel.set_running(False)

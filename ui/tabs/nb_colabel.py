@@ -28,8 +28,10 @@ def create_nb_colabel_tab():
             section_header("Driver Lines", "search")
             line_input = neuron_list_input(
                 label="Driver Line Names",
+                unit_label="line",
                 show_filter=False,
                 show_upload=False,
+                history_kind="line",
                 hint="Type a driver line name and press Enter (or leave the field) to add it as a chip.",
             )
             with param_grid(2):
@@ -153,10 +155,10 @@ def create_nb_colabel_tab():
                                         output_dir=output_dir.value)
 
         # Co-labeling always searches every NeuronBridge dataset, so the
-        # driver lines enter the query history without dataset provenance
-        # (visible in every tab's history list).
+        # Driver lines use their own history list; co-labeling is not a neuron
+        # query and must not pollute the neuron history.
         if result["returncode"] == 0:
-            from ..history_store import record as _record_history
+            from ..line_history_store import record as _record_history
             _record_history([str(v) for v in lines])
 
         output_panel.set_running(False)

@@ -28,8 +28,10 @@ def create_nb_find_neuron_tab():
             section_header("Driver Line Query", "search")
             line_input = neuron_list_input(
                 label="Driver Line Names",
+                unit_label="line",
                 show_filter=False,
                 show_upload=False,
+                history_kind="line",
                 hint="Type a driver line name and press Enter (or leave the field) to add it as a chip.",
             )
             output_dir = dir_input(scope="nb_find_neuron")
@@ -112,9 +114,10 @@ def create_nb_find_neuron_tab():
 
         # A completed search means the driver lines matched EM neurons; keep
         # them in the query history without dataset provenance (NeuronBridge
-        # searches every dataset).
+        # searches every dataset). Driver-line history is intentionally kept
+        # separate from the neuron-query history.
         if result["returncode"] == 0:
-            from ..history_store import record as _record_history
+            from ..line_history_store import record as _record_history
             _record_history([str(v) for v in lines])
 
         output_panel.set_running(False)
