@@ -6707,7 +6707,10 @@ class VisualizeSkeleton:
             total=len(body_ids),
             desc="Preprocessing NeuPrint skeletons",
             unit="neuron",
-            disable=True,
+            # This aggregate phase owns one transient tqdm row.  It closes
+            # before the layered-render progress bar starts, so preprocessing
+            # reports a compact n/N count without nesting progress displays.
+            disable=not self.verbose,
             leave=False,
             file=sys.stdout,
         )
