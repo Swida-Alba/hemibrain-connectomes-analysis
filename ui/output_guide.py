@@ -646,6 +646,12 @@ TOOL_GUIDE_SPECS = {
              "description": "Degree analysis by type (in/out/statistics)."},
             {"pattern": "comparison_results/neuron_counts_*.csv",
              "description": "Neuron counts per type and overall."},
+            {"pattern": "comparison_results/dataset_metadata_comparison.csv",
+             "description": "Per-dataset metadata overview: one row per "
+                            "dataset with total/typed/untyped neuron counts, "
+                            "type coverage percentage, pre/post-synaptic and "
+                            "total synapse counts, ROI count and coverage "
+                            "notes."},
             {"pattern": "comparison_results/motif_analysis.csv",
              "description": "Network motif analysis."},
             {"pattern": "comparison_results/threshold_sensitivity.csv",
