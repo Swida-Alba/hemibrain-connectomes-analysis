@@ -6,6 +6,7 @@ Datasets, defaults, and path settings.
 from pathlib import Path
 import json
 import os
+import re
 import subprocess
 
 # Project root (parent of ui/)
@@ -217,6 +218,19 @@ def _coerce_user_default(key: str, value):
         if high is not None and number > high:
             return None
         return number
+    if kind == "combo":
+        # Dropdown options plus free text matching the backend's fold
+        # notation ('real', any number, 'Nx real'); anything else is
+        # rejected so an invalid saved override falls back to DEFAULTS.
+        if not isinstance(value, str) or not value.strip():
+            return None
+        options = spec.get("options") or []
+        text = value.strip().lower()
+        if text in [str(o).lower() for o in options]:
+            return value.strip()
+        if key == "synapse_size" and is_valid_synapse_size(value):
+            return value.strip()
+        return None
     options = spec.get("options") or []
     return value if value in options else None
 
@@ -327,6 +341,8 @@ DEFAULTS = {
     "auto_type_mapping": True,
     "skip_bodyId": True,
     "showfig_analysis": False,
+    # Exported per-run user guide (_UserGuide_please_read_me.<ext>)
+    "run_guide_format": "html",
     # Default dataset selections
     "default_dataset": "male-cns:v1.0",
     "default_target_dataset": "male-cns:v0.9",
@@ -342,6 +358,8 @@ DEFAULTS = {
     "legend_mode": "type",
     "background": "white",
     "brain_mesh": "template",
+    "synapse_size": "3x real",
+    "uniform_synapse_size": False,
     # Similarity / homolog search toggles
     "fast_search": True,
     "vector_prefilter": True,
@@ -379,11 +397,14 @@ FILTER_OPTIONS = ["bodyId", "type"]
 # Output formats
 OUTPUT_FORMATS = ["csv", "xlsx"]
 
+# Exported per-run user guide formats (_UserGuide_please_read_me.<ext>)
+RUN_GUIDE_FORMATS = ["html", "txt", "markdown", "disabled"]
+
 # Network layouts
 NETWORK_LAYOUTS = ["distributed", "circular", "shell", "spring"]
 
 # Similarity metrics
-SIMILARITY_METRICS = ["rank_union", "jaccard", "cosine", "rank_corr"]
+SIMILARITY_METRICS = ["rank_union", "jaccard", "cosine", "rank_corr", "combined"]
 
 # Match algorithms for NeuronBridge
 MATCH_ALGORITHMS = ["cds", "pppm", "both"]
@@ -397,6 +418,25 @@ SKELETON_MODES = ["tube", "line"]
 
 # Brain mesh options
 BRAIN_MESH_OPTIONS = ["template", "whole", "none"]
+
+# Synapse size presets (folds of the real pre->post distance); the UI
+# combo box additionally accepts any typed number or 'Nx real' value.
+SYNAPSE_SIZE_OPTIONS = ["real", "2x real", "3x real"]
+
+# Mirrors VisualizeSkeleton._parse_synapse_size: 'real' or any fold
+# notation ("2", "2.5x", "2 x real"). Used to validate free-typed combo
+# values before they reach the backend.
+_SYNAPSE_SIZE_RE = re.compile(
+    r'real|[0-9]*\.?[0-9]+\s*(?:x|\u00d7)?(?:\s*real)?',
+    re.IGNORECASE,
+)
+
+
+def is_valid_synapse_size(value) -> bool:
+    """Return True when *value* is an accepted synapse size string."""
+    if not isinstance(value, str):
+        return False
+    return bool(_SYNAPSE_SIZE_RE.fullmatch(value.strip()))
 
 # Morphology similarity options (Find Similar tab)
 MORPH_LEVEL_OPTIONS = ["auto", "bodyid", "type"]
@@ -534,6 +574,15 @@ DEFAULT_SETTING_SPECS = {
         "options": OUTPUT_FORMATS,
         "hint": "'csv': faster, smaller. 'xlsx': Excel format.",
     },
+    "run_guide_format": {
+        "label": "Run Guide Format",
+        "group": "pathfinding_output",
+        "kind": "select",
+        "options": RUN_GUIDE_FORMATS,
+        "hint": "Exported _UserGuide_please_read_me file in every run "
+                "folder: 'html' (default), 'txt', 'markdown', or "
+                "'disabled' to skip writing it.",
+    },
     "network_layout": {
         "label": "Network Layout",
         "group": "pathfinding_output",
@@ -636,6 +685,21 @@ DEFAULT_SETTING_SPECS = {
         "kind": "select",
         "options": BRAIN_MESH_OPTIONS,
         "hint": "'template': brain outline. 'whole': full surface. 'none'.",
+    },
+    "synapse_size": {
+        "label": "Synapse Size",
+        "group": "skeleton_render",
+        "kind": "combo",
+        "options": SYNAPSE_SIZE_OPTIONS,
+        "hint": "Marker size as a fold of the real pre→post distance "
+                "('real' = 1x). Any number or 'Nx real' can be typed.",
+    },
+    "uniform_synapse_size": {
+        "label": "Uniform Synapse Size",
+        "group": "skeleton_render",
+        "kind": "bool",
+        "hint": "Use the median pre→post distance for every synapse marker "
+                "so all markers share one size.",
     },
     # --- Similarity & Homolog Search ----------------------------------------
     "top_n": {

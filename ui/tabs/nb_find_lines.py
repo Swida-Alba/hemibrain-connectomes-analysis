@@ -124,11 +124,12 @@ def create_nb_find_lines_tab():
                     hint="Maximum number of images downloaded per driver line.",
                 )
                 flylight_category = multi_select_input(
-                    "FlyLight Collections", ["GAL4/LEXA", "SplitGAL4", "MCFO", "RawImages"],
+                    "FlyLight Collections", ["GAL4/LEXA", "SplitGAL4", "MCFO", "RawImages", "All"],
                     ["GAL4/LEXA", "SplitGAL4"],
                     hint=(
                         "FlyLight collections searched in priority order; MCFO and "
-                        "RawImages are automatic fallbacks."
+                        "RawImages are automatic fallbacks. 'All' searches every "
+                        "collection."
                     ),
                 )
                 simple_mode = checkbox_input(

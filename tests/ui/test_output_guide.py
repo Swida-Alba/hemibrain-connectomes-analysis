@@ -1,0 +1,227 @@
+"""Tests for the exported per-run user guide (ui/output_guide.py)."""
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+import ui.config as cfg
+import ui.output_guide as guide
+from ui.runner import TOOL_REGISTRY
+
+
+PARAMS = {
+    "dataset": "male-cns:v1.0",
+    "sourceNeurons": {"type": ["aMe12"]},
+    "targetNeurons": {"type": ["PPL1*"]},
+    "max_interlayer": 5,
+    "skip_bodyId": True,
+}
+
+
+def _make_pathfinding_folder(root: Path, with_warnings: bool = True) -> Path:
+    """Synthetic Complete Paths run folder with representative outputs."""
+    run = root / "find_path_20240101_120000"
+    (run / "data_details").mkdir(parents=True)
+    (run / "visualization" / "visualization_data").mkdir(parents=True)
+    (run / "aMe12_to_PPL101_allpaths_type.csv").write_text(
+        "path,weights,probabilities,ratios,min_weight,path_prob,min_ratio,"
+        "length,nt_types\n", encoding="utf-8")
+    (run / "data_details" / "connection_type.csv").write_text(
+        "type_pre,type_post,weight,connection_ratio,traversal_probability,"
+        "block_probability,nt_type\n", encoding="utf-8")
+    (run / "visualization" / "Network_20240101.html").write_text(
+        "<html></html>", encoding="utf-8")
+    if with_warnings:
+        (run / guide.WARNING_FILENAME).write_text(
+            "Note: 3 source neurons had no downstream partners.\n",
+            encoding="utf-8")
+    return run
+
+
+class TestSpecIntegrity:
+    """Content model consistency across glossary, specs, and registry."""
+
+    def test_all_spec_columns_exist_in_glossary(self):
+        for tool_name, spec in guide.TOOL_GUIDE_SPECS.items():
+            for file_spec in spec["files"]:
+                for column in file_spec.get("columns", []):
+                    assert column in guide.COLUMN_GLOSSARY, (
+                        f"{tool_name}: column '{column}' "
+                        f"(pattern {file_spec['pattern']}) missing from "
+                        f"COLUMN_GLOSSARY")
+
+    def test_every_registered_tool_has_guide_spec(self):
+        missing = set(TOOL_REGISTRY) - set(guide.TOOL_GUIDE_SPECS)
+        assert not missing
+
+    def test_glossary_entries_are_description_range_pairs(self):
+        for column, entry in guide.COLUMN_GLOSSARY.items():
+            assert isinstance(entry, tuple) and len(entry) == 2, column
+            assert entry[0], f"empty description for {column}"
+
+
+class TestAssemble:
+    def test_files_matched_to_spec_entries(self, tmp_path):
+        run = _make_pathfinding_folder(tmp_path)
+        content = guide.assemble_run_content(run, "find_path", PARAMS)
+        assert content["title"] == "Complete Paths"
+        matched = {m for e in content["entries"] for m in e["matched"]}
+        assert "aMe12_to_PPL101_allpaths_type.csv" in matched
+        assert "data_details/connection_type.csv" in matched
+        assert "visualization/Network_20240101.html" in matched
+        assert content["warnings"] is not None
+
+    def test_no_file_listed_twice(self, tmp_path):
+        run = _make_pathfinding_folder(tmp_path)
+        content = guide.assemble_run_content(run, "find_path", PARAMS)
+        listed = [m for e in content["entries"] for m in e["matched"]]
+        assert len(listed) == len(set(listed))
+
+    def test_guide_file_excluded_from_listings(self, tmp_path):
+        run = _make_pathfinding_folder(tmp_path)
+        guide.write_run_guide(run, "find_path", PARAMS, fmt="html")
+        content = guide.assemble_run_content(run, "find_path", PARAMS)
+        listed = [m for e in content["entries"] for m in e["matched"]]
+        leftover_paths = [item["path"] for item in content["leftovers"]]
+        assert not any(p.startswith(guide.GUIDE_BASENAME) for p in listed)
+        assert not any(p.startswith(guide.GUIDE_BASENAME)
+                       for p in leftover_paths)
+
+    def test_unmatched_files_get_generic_descriptions(self, tmp_path):
+        run = _make_pathfinding_folder(tmp_path)
+        (run / "mystery_output.xyz").write_text("x", encoding="utf-8")
+        content = guide.assemble_run_content(run, "find_path", PARAMS)
+        leftovers = {i["path"]: i["description"] for i in content["leftovers"]}
+        assert "mystery_output.xyz" in leftovers
+        # Not listed under any spec entry either.
+        listed = [m for e in content["entries"] for m in e["matched"]]
+        assert "mystery_output.xyz" not in listed
+
+    def test_unknown_tool_still_lists_files(self, tmp_path):
+        run = _make_pathfinding_folder(tmp_path)
+        content = guide.assemble_run_content(run, "no_such_tool", PARAMS)
+        leftover_paths = [i["path"] for i in content["leftovers"]]
+        assert "aMe12_to_PPL101_allpaths_type.csv" in leftover_paths
+
+    def test_warnings_absent_returns_none(self, tmp_path):
+        run = _make_pathfinding_folder(tmp_path, with_warnings=False)
+        content = guide.assemble_run_content(run, "find_path", PARAMS)
+        assert content["warnings"] is None
+
+    def test_empty_warnings_file_treated_as_absent(self, tmp_path):
+        run = _make_pathfinding_folder(tmp_path, with_warnings=False)
+        (run / guide.WARNING_FILENAME).write_text("   \n", encoding="utf-8")
+        content = guide.assemble_run_content(run, "find_path", PARAMS)
+        assert content["warnings"] is None
+
+
+class TestWriteRunGuide:
+    def test_html_default(self, tmp_path):
+        run = _make_pathfinding_folder(tmp_path)
+        path = guide.write_run_guide(run, "find_path", PARAMS, fmt="html")
+        assert path is not None
+        assert path.name == guide.GUIDE_BASENAME + ".html"
+        text = path.read_text(encoding="utf-8")
+        assert text.lstrip().lower().startswith("<!doctype html>")
+        assert "DROCAT Run Guide" in text
+        # Glossary-driven column descriptions rendered.
+        assert "connection_ratio" in text
+        # Warning note rendered.
+        assert "no downstream partners" in text
+        # Top-level HTML visualizations become relative links.
+        assert '<a href="visualization/Network_20240101.html"' not in text
+        # (nested viz files are intentionally not linked)
+
+    def test_txt_format(self, tmp_path):
+        run = _make_pathfinding_folder(tmp_path)
+        path = guide.write_run_guide(run, "find_path", PARAMS, fmt="txt")
+        assert path is not None and path.suffix == ".txt"
+        text = path.read_text(encoding="utf-8")
+        assert "DROCAT RUN GUIDE" in text
+        assert "RUN PARAMETERS" in text
+        assert "WARNINGS & NOTES" in text
+        assert "OUTPUT FILES" in text
+
+    def test_markdown_format(self, tmp_path):
+        run = _make_pathfinding_folder(tmp_path)
+        path = guide.write_run_guide(run, "find_path", PARAMS, fmt="markdown")
+        assert path is not None and path.suffix == ".md"
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith("# DROCAT Run Guide")
+        assert "| Column | Description | Range |" in text
+
+    def test_disabled_writes_nothing(self, tmp_path):
+        run = _make_pathfinding_folder(tmp_path)
+        before = sorted(p.name for p in run.iterdir())
+        path = guide.write_run_guide(run, "find_path", PARAMS, fmt="disabled")
+        assert path is None
+        assert sorted(p.name for p in run.iterdir()) == before
+
+    def test_missing_folder_returns_none(self, tmp_path):
+        assert guide.write_run_guide(
+            tmp_path / "nope", "find_path", fmt="html") is None
+
+    def test_warnings_absent_fallback_text(self, tmp_path):
+        run = _make_pathfinding_folder(tmp_path, with_warnings=False)
+        path = guide.write_run_guide(run, "find_path", PARAMS, fmt="txt")
+        text = path.read_text(encoding="utf-8")
+        assert guide.NO_WARNINGS_TEXT in text
+
+    def test_guide_never_lists_itself(self, tmp_path):
+        run = _make_pathfinding_folder(tmp_path)
+        for fmt, ext in guide.GUIDE_EXTENSIONS.items():
+            path = guide.write_run_guide(run, "find_path", PARAMS, fmt=fmt)
+            text = path.read_text(encoding="utf-8")
+            assert guide.GUIDE_BASENAME + ext not in text
+            assert guide.GUIDE_BASENAME not in text
+
+
+class TestFormatResolution:
+    def test_env_overrides_saved_default(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE",
+                            tmp_path / "local_config.json")
+        cfg.save_local_config({"user_defaults": {"run_guide_format": "html"}})
+        monkeypatch.setenv(guide.GUIDE_FORMAT_ENV, "markdown")
+        assert guide.resolve_guide_format() == "markdown"
+
+    def test_explicit_arg_beats_env(self, monkeypatch):
+        monkeypatch.setenv(guide.GUIDE_FORMAT_ENV, "txt")
+        assert guide.resolve_guide_format("disabled") == "disabled"
+
+    def test_invalid_env_falls_back_to_saved(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE",
+                            tmp_path / "local_config.json")
+        cfg.save_local_config({"user_defaults": {"run_guide_format": "txt"}})
+        monkeypatch.setenv(guide.GUIDE_FORMAT_ENV, "bogus")
+        assert guide.resolve_guide_format() == "txt"
+
+    def test_no_env_uses_saved_default(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE",
+                            tmp_path / "local_config.json")
+        cfg.save_local_config(
+            {"user_defaults": {"run_guide_format": "markdown"}})
+        monkeypatch.delenv(guide.GUIDE_FORMAT_ENV, raising=False)
+        assert guide.resolve_guide_format() == "markdown"
+
+    def test_no_env_no_saved_defaults_to_html(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "nope.json")
+        monkeypatch.delenv(guide.GUIDE_FORMAT_ENV, raising=False)
+        assert guide.resolve_guide_format() == "html"
+
+    def test_env_disabled_skips_write(self, monkeypatch, tmp_path):
+        run = _make_pathfinding_folder(tmp_path)
+        monkeypatch.setenv(guide.GUIDE_FORMAT_ENV, "disabled")
+        assert guide.write_run_guide(run, "find_path", PARAMS) is None
+
+
+class TestConfigIntegration:
+    def test_default_value_registered(self):
+        assert cfg.DEFAULTS["run_guide_format"] == "html"
+
+    def test_setting_spec_registered(self):
+        spec = cfg.DEFAULT_SETTING_SPECS["run_guide_format"]
+        assert spec["options"] == cfg.RUN_GUIDE_FORMATS
+        assert spec["group"] == "pathfinding_output"
+        assert spec["kind"] == "select"

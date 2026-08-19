@@ -60,14 +60,16 @@
     (works offline with Cache Only).
   </div>
 
-  <h2>Depth cap (default: 2 intermediate layers)</h2>
+  <h2>Depth cap (default: 5 intermediate layers)</h2>
   <ul>
     <li><b>Max Intermediate Layers (optional) = 0</b> means direct connections
       only. For a positive value <code>M</code>, paths are capped at
       <code>M + 1</code> hops.</li>
-    <li>The default is 2, matching the Find All Paths tab. Increase it when a
-      query needs deeper intermediate layers. Backward discovery continues
-      until the enrolled source bodyIds are reached or this bound is hit.</li>
+    <li>The tab default is 5 (deeper than the Complete Paths default of 2),
+      because shortest-path searches typically target deeper routes. Increase
+      it further when a query needs deeper intermediate layers. Backward
+      discovery continues until the enrolled source bodyIds are reached or
+      this bound is hit.</li>
     <li>If the bound truncates an active frontier, results are shortest only
       within the explored, threshold-filtered graph. A path at that boundary
       is a constrained solution, not proof of a globally shortest route.</li>
@@ -76,7 +78,7 @@
   <h2>Parameters</h2>
   <table>
     <tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr>
-    <tr><td>Max Intermediate Layers (optional)</td><td>2</td><td>0 = direct only; &gt;0 caps path length at <i>layers + 1</i> edges</td></tr>
+    <tr><td>Max Intermediate Layers (optional)</td><td>5</td><td>0 = direct only; &gt;0 caps path length at <i>layers + 1</i> edges</td></tr>
     <tr><td>Min Synapse Count</td><td>3</td><td>Minimum edge weight</td></tr>
     <tr><td>Min Connection Ratio</td><td>0.0</td><td>Minimum weight/post ratio</td></tr>
     <tr><td>Min Traversal Prob.</td><td>0.0</td><td>Traversal probability threshold</td></tr>
@@ -137,8 +139,16 @@
   find_reciprocal/...      # when Find Reciprocal Connections is on</code></pre>
   <p><code>Lmax</code> records the exact bound used for the run; <code>L99</code>
     is simply a practical high bound. With <b>Skip BodyId</b> off, bodyId-level tables
-    (<code>..._allpaths_bodyId.csv</code>) are written next to the type-level
-    ones. The full reference is in <code>docs/OUTPUT_FILES.md</code>.</p>
+    (<code>data_details/connection_info_bodyId.csv</code> and
+    <code>..._allpaths_bodyId_paths.csv</code>) are written alongside the
+    type-level ones. The full reference is in <code>docs/OUTPUT_FILES.md</code>.</p>
+  <div class="callout info">
+    <b>Exported run guide:</b> every successful run also writes
+    <code>_UserGuide_please_read_me.html</code> into the run folder — a
+    self-contained explanation of every output file, every table column, and
+    any warnings recorded for the run. Format (html / txt / markdown /
+    disabled) is set in Settings → Default Settings → Run Guide Format.
+  </div>
 </main>
 </body>
 </html>

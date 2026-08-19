@@ -87,6 +87,7 @@ See Also
 
 import json
 import os
+import re
 import sys
 import shutil
 import time
@@ -2046,12 +2047,21 @@ class VisualizeSkeleton:
     (for connections between adjacent layers)
     '''
 
-    synapse_size: int | str = 1
+    synapse_size: int | float | str = 1
     '''
     size of synapse\n
     when synapse_mode='scatter': size in pixels (1–3 recommended)\n
-    when synapse_mode='sphere'/'cone'/'tetrahedron': multiplier of the real distance between pre- and post-synaptic sites.\n
-    e.g., 1 or 'real' = exact distance size. 2 = 2x distance size.\n
+    when synapse_mode='sphere'/'cone'/'tetrahedron': fold of the real distance between pre- and post-synaptic sites.\n
+    Any number (int or float) or numeric string ('2', '2.5x', '2x real') is
+    interpreted as that fold of the real distance; 'real' (or 1) = exact
+    distance size, 2 = 2x distance size.\n
+    '''
+
+    uniform_synapse_size: bool = False
+    '''
+    when True, every synapse marker in sphere/cone/tetrahedron modes uses the
+    median pre->post distance of the plotted connections instead of its own
+    distance, so all markers share one uniform size\n
     '''
 
     synapse_criteria: SynapseCriteria = None
@@ -4328,10 +4338,20 @@ class VisualizeSkeleton:
                 errors.append(f"webdriver_render_wait must be non-negative, got {self.webdriver_render_wait}")
         
         # === Synapse size validation ===
+        # Accepts 'real', a number, or a fold-notation string ("2",
+        # "2.5x", "2x real"); numeric values are folds of the real
+        # pre->post distance. Unparseable strings are rejected.
+        if isinstance(self.synapse_size, str):
+            parsed = self._parse_synapse_size(self.synapse_size)
+            if parsed is None:
+                errors.append(
+                    "synapse_size must be 'real', a number, or a fold of real "
+                    f"(e.g. '2x real'), got '{self.synapse_size}'"
+                )
+            else:
+                self.synapse_size = parsed
         if not isinstance(self.synapse_size, (int, float, str)):
             errors.append(f"synapse_size must be a number or 'real', got {type(self.synapse_size).__name__}")
-        elif isinstance(self.synapse_size, str) and self.synapse_size != 'real':
-            errors.append(f"synapse_size string must be 'real', got '{self.synapse_size}'")
         elif isinstance(self.synapse_size, (int, float)) and self.synapse_size < 0:
             errors.append(f"synapse_size must be non-negative, got {self.synapse_size}")
             
@@ -4442,6 +4462,7 @@ class VisualizeSkeleton:
             ('show_fig', self.show_fig),
             ('show_connectors', self.show_connectors),
             ('FAFB_template_correction', self.FAFB_template_correction),
+            ('uniform_synapse_size', self.uniform_synapse_size),
         ]
         for name, value in additional_bools:
             if not isinstance(value, bool):
@@ -4511,6 +4532,23 @@ class VisualizeSkeleton:
         if errors:
             error_msg = "VisualizeSkeleton input validation failed:\n  - " + "\n  - ".join(errors)
             raise ValueError(error_msg)
+
+    @staticmethod
+    def _parse_synapse_size(value: str):
+        """Parse a synapse_size string into 'real' or a float fold.
+
+        Accepts 'real' (any capitalization), plain numbers, and fold
+        notations such as "2", "2.5x", or "2 x real" — any numeric value
+        is interpreted as that fold of the real pre->post distance.
+        Returns None for anything unparseable.
+        """
+        text = value.strip().lower()
+        if text == 'real':
+            return 'real'
+        match = re.fullmatch(r'([0-9]*\.?[0-9]+)\s*(?:x|\u00d7)?(?:\s*real)?', text)
+        if match:
+            return float(match.group(1))
+        return None
 
     def _is_valid_color(self, color) -> bool:
         """Return True if `color` parses to a usable color (any supported format)."""
@@ -4896,6 +4934,11 @@ class VisualizeSkeleton:
         
         if self.synapse_mode == 'scatter' and self.synapse_size == 0:
             self.synapse_size = 2
+        if self.synapse_mode == 'scatter' and self.synapse_size == 'real':
+            # Scatter markers use a fixed pixel size; 'real' only has a
+            # distance to scale in sphere/cone/tetrahedron modes.
+            self._vprint("\033[33m⚠️  Warning: synapse_size='real' is not supported in scatter mode; using pixel size 1.\033[0m", level='simple')
+            self.synapse_size = 1
         # elif self.synapse_mode in ['sphere', 'cone', 'tetrahedron']:
         #     # Only check size limit if synapse_size is a number (not 'real')
         #     # For these modes, synapse_size is a multiplier, so small values (e.g. 1.0) are valid
@@ -5277,6 +5320,7 @@ class VisualizeSkeleton:
             f.write("[Synapse Settings]\n")
             f.write(f"  Synapse Mode:     {self.synapse_mode}\n")
             f.write(f"  Synapse Size:     {self.synapse_size}\n")
+            f.write(f"  Uniform Size:     {self.uniform_synapse_size}\n")
             f.write(f"  Min Synapse Num:  {self.min_synapse_num}\n")
             f.write(f"  Synapse Alpha:    {self.synapse_alpha}\n")
             f.write("\n")
@@ -5356,6 +5400,12 @@ class VisualizeSkeleton:
             return None
 
         merged_synapses = pd.concat(synapse_frames, ignore_index=True, sort=False)
+        # Keep the layer identifier as the first column so the merged table
+        # is immediately grouped by its source layer.
+        if 'viz_layer' in merged_synapses.columns:
+            merged_synapses.insert(
+                0, 'viz_layer', merged_synapses.pop('viz_layer')
+            )
         output_format = str(getattr(self, 'output_format', 'csv')).lower()
         if output_format not in ('xlsx', 'csv'):
             raise ValueError(f"output_format must be 'xlsx' or 'csv', got '{output_format}'")
@@ -9998,6 +10048,11 @@ class VisualizeSkeleton:
                 # Calculate Euclidean distance
                 diff = pre_coords[['x', 'y', 'z']].values - post_coords[['x', 'y', 'z']].values
                 dists = np.linalg.norm(diff, axis=1)
+                
+                if self.uniform_synapse_size and dists.size:
+                    # One shared marker size: the median distance of this
+                    # layer's connections replaces each individual distance.
+                    dists = np.full_like(dists, float(np.median(dists)))
                 
                 if self.synapse_size == 'real':
                     multiplier = 1.0

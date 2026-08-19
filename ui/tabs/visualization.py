@@ -16,11 +16,13 @@ from ..config import (
     BRAIN_MESH_OPTIONS,
     NETWORK_LAYOUTS,
     SEARCH_COLUMNS,
+    SYNAPSE_SIZE_OPTIONS,
     get_user_default,
     has_user_default,
+    is_valid_synapse_size,
 )
 from ..components.common import (
-    dataset_selector, multi_select_input, number_input, select_input,
+    combo_input, dataset_selector, multi_select_input, number_input, select_input,
     checkbox_input, dir_input, read_upload_event, section_header, param_grid, tool_page,
     apply_filter_mode,
 )
@@ -240,9 +242,23 @@ def create_skeleton_tab():
                         "Min Synapse Count", get_user_default("min_synapse_num"), 1, 100,
                         hint="Minimum synapses for a connection marker to be shown.",
                     )
-                    synapse_size = select_input(
-                        "Synapse Size", ["real", "1", "2", "3"], "real",
-                        hint="'real': scale by synapse count. 1-3: fixed marker size.",
+                    synapse_size = combo_input(
+                        "Synapse Size", SYNAPSE_SIZE_OPTIONS,
+                        get_user_default("synapse_size"),
+                        hint=(
+                            "Marker size as a fold of the real pre→post "
+                            "distance: 'real' = 1x. Any number (e.g. 2, 2.5) "
+                            "or 'Nx real' works — type your own value. "
+                            "(Scatter mode: pixel size.)"
+                        ),
+                    )
+                    uniform_synapse_size = checkbox_input(
+                        "Uniform Synapse Size",
+                        get_user_default("uniform_synapse_size"),
+                        hint=(
+                            "Use the median pre→post distance for every "
+                            "synapse marker so all markers share one size."
+                        ),
                     )
                     synapse_alpha = number_input(
                         "Synapse Opacity", 0.6, 0, 1, 0.1,
@@ -627,6 +643,19 @@ def create_skeleton_tab():
 
         custom_names = layer_tree.get_custom_layer_names()
 
+        # Combo box free text; an emptied or unparseable value falls back
+        # to 'real' so the backend never receives an invalid string.
+        synapse_size_value = str(synapse_size.value or "").strip()
+        if not synapse_size_value:
+            synapse_size_value = "real"
+        elif not is_valid_synapse_size(synapse_size_value):
+            ui.notify(
+                f"Invalid Synapse Size '{synapse_size_value}' — using "
+                "'real' instead.",
+                type="warning",
+            )
+            synapse_size_value = "real"
+
         constructor_params = {
             "dataset": dataset.value,
             "neuron_layers": neuron_layers,
@@ -645,7 +674,8 @@ def create_skeleton_tab():
             "background_color": bg_color.value,
             "skip_synapse": skip_synapse.value,
             "min_synapse_num": int(min_synapse_num.value),
-            "synapse_size": synapse_size.value,
+            "synapse_size": synapse_size_value,
+            "uniform_synapse_size": uniform_synapse_size.value,
             "synapse_alpha": float(synapse_alpha.value),
             "synapse_mode": synapse_mode.value,
             "mesh_roi": rois,

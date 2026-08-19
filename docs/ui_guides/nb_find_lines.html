@@ -39,7 +39,7 @@
   <table>
     <tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr>
     <tr><td>Algorithm</td><td>cds</td><td>cds (fast), pppm (precise), both</td></tr>
-    <tr><td>Top N Lines</td><td>20</td><td>Driver lines returned per query (per GAL4/Split category when separated)</td></tr>
+    <tr><td>Top Lines for Images</td><td>30</td><td>When image download is enabled, download images only for the top N ranked lines (per category in separate mode); the search CSVs still contain all matches</td></tr>
     <tr><td>Separate Split-GAL4</td><td>on</td><td>GAL4/LexA and Split-GAL4 summarized separately</td></tr>
     <tr><td>Region</td><td>Brain</td><td>Brain, VNC, or All (image downloads)</td></tr>
     <tr><td>Max Workers</td><td>8</td><td>Parallel API workers; lower if rate-limited</td></tr>
@@ -77,6 +77,14 @@
   <div class="callout warn">
     <b>Weighted score</b> = avg match score × coverage. A line labeling all
     queried neurons ranks higher than one with a single high score.
+  </div>
+
+  <div class="callout info">
+    <b>Exported run guide:</b> every successful run also writes
+    <code>_UserGuide_please_read_me.html</code> into the run folder — a
+    self-contained explanation of every output file, every table column, and
+    any warnings recorded for the run. Format (html / txt / markdown /
+    disabled) is set in Settings → Default Settings → Run Guide Format.
   </div>
 </main>
 </body>

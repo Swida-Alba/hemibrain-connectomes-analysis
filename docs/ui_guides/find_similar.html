@@ -67,7 +67,7 @@
       screen below can never find neurons without shared partners (~8% of
       same-type members on male-cns). A one-time per-dataset matrix is
       cached (<code>cache/{dataset}/morphology/roi_profiles.npz</code>);
-      the top <b>N × Candidate Expansion</b> screen-ranked <b>types</b>
+      the top screen-ranked <b>types</b> (bounded by <b>Candidate Cap</b>)
       are kept and expanded to <b>all their member neurons</b>; raw
       skeletons are then fetched for the pool and shared for reuse. FlyWire/FAFB sources use healed raw skeletons
       or the CAVE fallback. Mesh and simp90 visualization files are never
@@ -133,7 +133,8 @@
 
   <h2>Connection profile similarity</h2>
   <p>The relocated "find similar" search from Homolog Finding: query-vs-all
-    within one dataset (default) or across datasets, ranked by connectivity
+    <b>within one dataset</b> (source and target dataset are the same),
+    ranked by connectivity
     profile similarity. Same backend (<code>HomologFinder</code>) and the same
     loose-search knobs:</p>
   <ul>
@@ -178,7 +179,7 @@
     settings, so morphological results and connectivity results are never
     mixed.</p>
   <ul>
-    <li><b>Morphological — Visualize Top N Types / Neurons</b> (default 6;
+    <li><b>Morphological — Visualize Top N Types / Neurons</b> (default 10;
       0 = disabled): number of top morphology result types/rows to render.</li>
     <li><b>Connectivity — Visualize Top N Candidates</b> (default 5;
       0 = disabled): number of top connectivity-similar candidates to render.
@@ -200,7 +201,7 @@
   <p>When multiple queries are entered, the tab runs them sequentially and
     saves each query in its own run folder. Morphological output is saved next
     to its results in
-    <code>{run_folder}/plot-3d_{dataset}/</code>. Connectivity output is saved
+    <code>{run_folder}/plot-3d_{ABBREV}_{dataset_folder}/</code>. Connectivity output is saved
     in separate <code>visualization/bodyId_level/</code>,
     <code>visualization/type_level/</code>, and
     <code>visualization/source_neurons/</code> folders. Each scene starts with
@@ -236,6 +237,13 @@ profile:       {output_dir}/similar-connectivity_FAFB_to_FAFB_aMe12_20260815_143
       skeleton population (connection candidates + cached skeletons), so the
       result is not capped at the candidate types.</li>
   </ul>
+  <div class="callout info">
+    <b>Exported run guide:</b> every successful run also writes
+    <code>_UserGuide_please_read_me.html</code> into the run folder — a
+    self-contained explanation of every output file, every table column, and
+    any warnings recorded for the run. Format (html / txt / markdown /
+    disabled) is set in Settings → Default Settings → Run Guide Format.
+  </div>
 </main>
 </body>
 </html>

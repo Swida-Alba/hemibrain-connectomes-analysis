@@ -29,15 +29,25 @@
     <li>Click <b>Generate Network</b>.</li>
   </ol>
 
+  <h2>Quick start - edge list editor</h2>
+  <ol>
+    <li>In the <b>Edge List Editor</b> card (always visible below the source
+      card), enter a <b>Draft Name</b>, click <b>Add Edge</b>, fill
+      source / target / weight in the edit row and click
+      <b>Apply to Selected</b>.</li>
+    <li>Set <b>Canvas Source</b> to <b>Edge list editor</b> (opening the
+      editor also selects it) and click <b>Generate Network</b> - the draft
+      is auto-saved and used directly as the network input.</li>
+  </ol>
+
   <h2>Quick start - empty drawing canvas</h2>
   <ol>
-    <li>Set <b>Canvas Source</b> to <b>Empty drawing canvas</b>; no path file
-      is required.</li>
-    <li>Click <b>Generate Network</b> and open the generated HTML.</li>
+    <li>Click the standalone <b>Create Empty Canvas</b> button in the
+      <b>Net-Viz Source</b> card; no path file and no Canvas Source change
+      is required. It generates the HTML and opens it in a new browser tab
+      automatically.</li>
     <li>Enable <b>Edit Mode</b>, add nodes, and connect them directly on the
       canvas.</li>
-    <li>For a one-click workflow, use <b>Create Empty Canvas</b>; it generates
-      the HTML and opens it in a new browser tab automatically.</li>
   </ol>
 
   <h2 id="input-files">Network input files - full specification</h2>
@@ -137,12 +147,45 @@ aMe12-&gt;PPL101-&gt;MBON01,"[63, 22]"</code></pre>
     <code>color</code> / <code>edge_color</code> / <code>link_color</code>
     column assigns a per-edge color (hex or rgba).</p>
 
+  <p><b>Expanded edge list (Edge List CSV export).</b> The file written by the
+    in-HTML <b>📋 Edge List CSV</b> button (see
+    <a href="#edge-list-csv-export">Export edge list as CSV</a>) can be
+    re-uploaded as-is - it round-trips back into the same network. The extra
+    columns are handled as follows:</p>
+  <table>
+    <tr><th>Column</th><th>On re-import</th></tr>
+    <tr><td><code>source</code> / <code>target</code> / <code>weight</code></td>
+      <td>Required; the edges of the network (signed weights allowed).</td></tr>
+    <tr><td><code>color</code></td>
+      <td>Per-edge color (hex or rgba).</td></tr>
+    <tr><td><code>nt_type</code></td>
+      <td>Neurotransmitter type; drives NT-based edge coloring (empty =
+        unknown).</td></tr>
+    <tr><td><code>source_group</code> / <code>target_group</code></td>
+      <td>Restores the source / intermediate / target classification of each
+        endpoint node. Without them a plain edge list would classify every
+        node as <i>source</i>.</td></tr>
+    <tr><td><code>ratio</code> / <code>probability</code></td>
+      <td>Mapped back to the standard connection-ratio and
+        traversal-probability metric columns.</td></tr>
+    <tr><td><code>nt_group</code> / <code>custom_groups</code></td>
+      <td>Informational; accepted and ignored (NT grouping is re-derived from
+        <code>nt_type</code>).</td></tr>
+  </table>
+
   <div class="example">
     <div class="example-title">Edge-list CSV</div>
     <pre><code>source,target,weight
 aMe12,aMe10,128
 aMe10,MBON01,47
 aMe12,PPL101,63</code></pre>
+  </div>
+
+  <div class="example">
+    <div class="example-title">Expanded edge-list CSV (export round-trip)</div>
+    <pre><code>source,target,weight,color,nt_type,nt_group,source_group,target_group,custom_groups,ratio,probability
+aMe12,aMe10,128,#F39C12,acetylcholine,excitatory,source,intermediate,,0.42,0.91
+aMe10,MBON01,47,#27AE60,gaba,inhibitory,intermediate,target,,0.18,0.35</code></pre>
   </div>
 
   <h3>Format 3 - Connection matrix</h3>
@@ -178,17 +221,6 @@ PPL101,0,0,22</code></pre>
     to work without a <code>weight</code> column.
   </div>
 
-  <h2>Quick start - edge list editor</h2>
-  <ol>
-    <li>The <b>Edge List Editor</b> card is always visible in the Net-Viz tab,
-      below the source card.</li>
-    <li>Enter a <b>Draft Name</b>, click <b>Add Edge</b>, fill source / target /
-      weight in the edit row and click <b>Apply to Selected</b>.</li>
-    <li>Set <b>Canvas Source</b> to <b>Edge list editor</b> and click
-      <b>Generate Network</b> - the draft is auto-saved and used directly as
-      the network input.</li>
-  </ol>
-
   <h2 id="edge-list-editor">Edge list editor - auto-save &amp; recovery</h2>
   <p>The editor builds a Format-2 edge list interactively and persists every
     change automatically:</p>
@@ -209,16 +241,19 @@ PPL101,0,0,22</code></pre>
       <b>Generate Network</b> flushes the draft and feeds its CSV straight to
       PlotPath, so the draft must contain at least one complete edge
       (source, target, weight).</li>
-    <li><b>Export CSV</b> copies the draft into the Path Output Directory as
-      <code>{name}_edge_list.csv</code> and clears the pending-export
-      marker.</li>
+    <li><b>Export CSV</b> downloads the draft as
+      <code>{name}_edge_list_{timestamp}.csv</code> through the browser;
+      when a Path Output Directory is set, a local copy with the same
+      timestamped name is saved there too. The pending-export marker is
+      cleared.</li>
   </ul>
 
   <h2>Rendering options</h2>
   <ul>
     <li><b>Canvas Source</b>: <b>Path file</b> (load Find All Paths output or
-      any format above), <b>Edge list editor</b> (build/edit an auto-saved
-      edge list), or <b>Empty drawing canvas</b>.</li>
+      any format above) or <b>Edge list editor</b> (build/edit an auto-saved
+      edge list). The empty drawing canvas is created with the standalone
+      <b>Create Empty Canvas</b> button next to the selector.</li>
     <li><b>Path Output Directory</b>: every run creates its own
       <code>plot-network_{name}_{timestamp}/</code> subfolder inside it.</li>
     <li><b>Network Layout</b>: hierarchical (default), spring, circular,
@@ -244,9 +279,40 @@ PPL101,0,0,22</code></pre>
       another to connect them, double-click to edit properties, right-click
       to delete. Every action is recorded - use Undo/Redo or the history
       list to jump between states.</li>
-    <li><b>Save your work</b>: Save/Load layout, Export/Import graph (JSON)
-      and export the figure as PNG or SVG.</li>
+    <li><b>Save your work</b>: Save/Load layout, Export/Import graph (JSON),
+      export the edge list as CSV, and export the figure as PNG or SVG.</li>
   </ul>
+
+  <h2 id="edge-list-csv-export">Export edge list as CSV</h2>
+  <p>The <b>📋 Edge List CSV</b> button in the Export panel downloads every
+    edge of the <i>current</i> graph - including everything changed in Edit
+    Mode (edited weights, recolored edges, added/deleted edges, relabeled
+    nodes). The file always contains the complete edge table, even when the
+    view is filtered or elements are hidden. The file is a valid
+    <a href="#input-files">Format-2 edge list</a>: upload it again in the
+    Net-Viz tab to rebuild the same network (edges, colors, NT types, metric
+    columns and the source/intermediate/target node grouping).</p>
+  <table>
+    <tr><th>Column</th><th>Content</th></tr>
+    <tr><td><code>source</code> / <code>target</code> / <code>weight</code></td>
+      <td>Edge endpoints (current node labels) and the signed weight -
+        directly re-importable as a Format-2 edge list.</td></tr>
+    <tr><td><code>color</code></td>
+      <td>The edge's current color (hex); recognized on re-import.</td></tr>
+    <tr><td><code>nt_type</code> / <code>nt_group</code></td>
+      <td>Neurotransmitter type and its group (excitatory / inhibitory /
+        modulatory / unknown). <code>nt_type</code> is recognized on
+        re-import.</td></tr>
+    <tr><td><code>source_group</code> / <code>target_group</code></td>
+      <td>Node group of each endpoint (source / intermediate / target).</td></tr>
+    <tr><td><code>custom_groups</code></td>
+      <td>Semicolon-separated names of custom groups containing the
+        edge.</td></tr>
+    <tr><td><code>ratio</code> / <code>probability</code></td>
+      <td>Connection ratio and traversal probability when present; empty
+        otherwise. Mapped back to the standard metric columns on
+        re-import.</td></tr>
+  </table>
 
   <h2>Output</h2>
   <pre><code>{path_output_dir}/plot-network_{name}_{timestamp}/
@@ -257,6 +323,14 @@ PPL101,0,0,22</code></pre>
 
 Empty canvas mode:
     {name}_network.html  - editable canvas only</code></pre>
+
+  <div class="callout info">
+    <b>Exported run guide:</b> every successful run also writes
+    <code>_UserGuide_please_read_me.html</code> into the run folder — a
+    self-contained explanation of every output file, every table column, and
+    any warnings recorded for the run. Format (html / txt / markdown /
+    disabled) is set in Settings → Default Settings → Run Guide Format.
+  </div>
 </main>
 </body>
 </html>

@@ -14,11 +14,14 @@ from nicegui import ui
 from ..config import (
     BRAIN_MESH_OPTIONS,
     SKELETON_MODES,
+    SYNAPSE_SIZE_OPTIONS,
     get_user_default,
     has_user_default,
+    is_valid_synapse_size,
 )
 from .common import (
     checkbox_input,
+    combo_input,
     multi_select_input,
     number_input,
     param_grid,
@@ -82,6 +85,19 @@ class SkeletonVisualizationSettings:
             values["export_scale"] = int(values["export_scale"] or 1)
         if "min_synapse_num" in values:
             values["min_synapse_num"] = int(values["min_synapse_num"] or 1)
+        if "synapse_size" in values:
+            # The combo box accepts free text; an emptied field falls back
+            # to 'real' instead of sending an invalid empty string.
+            size = str(values["synapse_size"] or "").strip()
+            if not size:
+                size = "real"
+            elif not is_valid_synapse_size(size):
+                ui.notify(
+                    f"Invalid Synapse Size '{size}' — using 'real' instead.",
+                    type="warning",
+                )
+                size = "real"
+            values["synapse_size"] = size
         if "neuron_alpha" in values:
             values["neuron_alpha"] = float(values["neuron_alpha"] or 0)
         if "synapse_alpha" in values:
@@ -289,11 +305,23 @@ def skeleton_visualization_settings(
                 "cone",
                 hint="Directional cones or simple point markers.",
             )
-            fields["synapse_size"] = select_input(
+            fields["synapse_size"] = combo_input(
                 "Synapse Size",
-                ["real", "1", "2", "3"],
-                "real",
-                hint="Use real count scaling or a fixed marker size.",
+                SYNAPSE_SIZE_OPTIONS,
+                get_user_default("synapse_size"),
+                hint=(
+                    "Marker size as a fold of the real pre→post distance: "
+                    "'real' = 1x. Any number (e.g. 2, 2.5) or 'Nx real' "
+                    "works — type your own value. (Scatter mode: pixel size.)"
+                ),
+            )
+            fields["uniform_synapse_size"] = checkbox_input(
+                "Uniform Synapse Size",
+                get_user_default("uniform_synapse_size"),
+                hint=(
+                    "Use the median pre→post distance for every synapse "
+                    "marker so all markers share one size."
+                ),
             )
             fields["synapse_alpha"] = number_input(
                 "Synapse Opacity",

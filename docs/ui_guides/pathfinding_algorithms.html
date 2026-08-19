@@ -24,7 +24,7 @@
     Given a set of <b>source neurons</b> and a set of <b>target neurons</b>,
     DROCAT enumerates every acyclic connection chain (path) from any source
     to any target with at most <code>Max Intermediate Layers + 1</code> edges
-    (the <b>cutoff</b>). All four algorithms return <b>exactly the same
+    (the <b>cutoff</b>). All five algorithms return <b>exactly the same
     paths</b> — they only differ in how fast they run and how much memory
     they use.
   </p>
@@ -43,9 +43,9 @@
         (backward DP layers), then runs a forward search that only follows
         edges that provably lead to a target.</p>
       <p class="small">Strongest dead-end pruning; stores only node sets.
-        <b>Default and recommended</b>: fastest at 2–3 intermediate layers
-        (the common case) with low, flat memory. Degrades on very deep
-        (5+) queries.</p>
+        <b>Fastest measured at 3 intermediate layers</b> (0.02 s) with low,
+        flat memory. Degrades on very deep (5+) queries. Not the default —
+        <b>MemoizedDFS</b> is.</p>
     </div>
     <div class="card">
       <h3>DFS (Backward Memoized)</h3>
@@ -145,7 +145,7 @@
     The algorithm names now match the implementations (a routing bug made
     "MemoizedDFS" run meet-in-the-middle; the forward memoized DFS was
     never wired up — and it turns out to be the fastest of all: it makes
-    no reversed-graph copy and prunes to the source-side cone). All four
+    no reversed-graph copy and prunes to the source-side cone). All five
     implementations were verified correct against a naive reference on
     150 random graphs (750 runs, zero mismatches). The default changed
     from DP to <b>MemoizedDFS</b>.

@@ -65,6 +65,13 @@
     here and click <b>Save Default Directory</b>. Each run creates its own
     timestamped subfolder.</p>
 
+  <h2>App settings</h2>
+  <p>The <b>Input Auto-Suggestion</b> toggle controls the type-ahead
+    suggestions in the pathfinding neuron inputs: dataset type / instance /
+    bodyId names while typing, plus a Recent/Frequent query history when the
+    field is empty. Disabling it restores plain chip inputs. The change is
+    saved immediately and applies to every input.</p>
+
   <h2>Default Settings</h2>
   <p>Tool-tab selections remain one-time: changing a control inside a tab
     applies only to that run. The <b>Default Settings</b> card defines the
@@ -79,7 +86,7 @@
     <tr><td>Dataset &amp; Search</td><td>Default Dataset, Homolog Target Dataset, Search Columns, Filter By</td><td>Dataset selectors in every tool tab, pathfinding and search tabs</td></tr>
     <tr><td>Connection Thresholds</td><td>Min Synapse Count, Min Connection Ratio, Min Traversal Probability, Visualization Edge Limit</td><td>Find Path, Find Shortest, Network, Cross-Dataset, Profiling, Find Homologs, Find Similar</td></tr>
     <tr><td>Cache &amp; Data</td><td>Connection Cache (Use Cache), Cache Only, Skeleton Cache (Cache Neurons), Cache Synapses, Auto Type Mapping</td><td>Pathfinding tabs, similarity/homolog searches, skeleton rendering</td></tr>
-    <tr><td>Pathfinding &amp; Output</td><td>Skip BodyId-Level Export, Output Format, Network Layout, Algorithm, Show Figure, Max Intermediate Layers</td><td>Pathfinding, Cross-Dataset and export surfaces</td></tr>
+    <tr><td>Pathfinding &amp; Output</td><td>Skip BodyId-Level Export, Output Format, Run Guide Format, Network Layout, Algorithm, Show Figure, Max Intermediate Layers</td><td>Pathfinding, Cross-Dataset and export surfaces</td></tr>
     <tr><td>3D Skeleton Rendering</td><td>Skeleton Mode, Simplification Method, Show Soma, Legend Mode, Background, Brain Mesh, Export Views</td><td>Visualization → Skeleton tab and the Advanced Visualization editor in analysis tabs</td></tr>
     <tr><td>Similarity &amp; Homolog Search</td><td>Top N/K/M, Similarity Metric, Fast Search, Vector Pre-filtering, Candidate Cap/Source, NeuronBridge controls</td><td>Find Similar, Find Homologs, NeuronBridge tabs</td></tr>
   </table>
@@ -89,6 +96,15 @@
     dataset-aware behavior: Cache Neurons flips automatically (for example on
     for FlyWire, off for NeuPrint fast/artistic tube renders). Saving a value
     in Default Settings pins the checkbox and disables that auto-flip.
+  </div>
+  <div class="callout info">
+    <b>Run Guide Format</b> (Pathfinding &amp; Output group) controls the
+    exported per-run user guide: every successful run writes
+    <code>_UserGuide_please_read_me</code> into its run folder, explaining
+    each output file, each table column and any recorded warnings. Choose
+    <b>html</b> (default), <b>txt</b> or <b>markdown</b> — or
+    <b>disabled</b> to skip writing it. The environment variable
+    <code>DROCAT_RUN_GUIDE_FORMAT</code> overrides this setting.
   </div>
 
   <h2>Dataset preparation</h2>

@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Callable, Optional, List, Dict, Any
 
 from .config import PROJECT_ROOT, SRC_DIR
+from .output_guide import write_run_guide
 
 
 # The PlotPath tool lives in the vispath subproject, imported as `vispath_pkg`.
@@ -474,6 +475,20 @@ class ScriptRunner:
             # runs (e.g. an earlier BANC run while running male-cns).
             _progress("collect", "Collecting output files")
             scan_dir = self._resolve_scan_dir(output_dir)
+
+            # Export the per-run user guide into the run folder (Settings →
+            # Run Guide Format; never fails the run itself). Written before
+            # the file scan so it appears in the Output Files panel.
+            if returncode == 0 and not self._cancelled and scan_dir:
+                guide_path = write_run_guide(
+                    scan_dir,
+                    tool_name,
+                    params={**(constructor_params or {}),
+                            **(method_params or {})},
+                )
+                if guide_path:
+                    _log(f"Run guide written: {guide_path.name}", "system")
+
             files = self._scan_output_files(scan_dir) if scan_dir else []
 
             return {

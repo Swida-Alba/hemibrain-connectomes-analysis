@@ -23,6 +23,7 @@ from ..config import (
 )
 from ..components.common import (
     checkbox_input,
+    combo_input,
     dataset_multi_selector,
     dataset_status_card,
     dir_input,
@@ -499,6 +500,11 @@ def create_settings_tab():
                         spec["label"], spec["options"], value,
                         hint=spec.get("hint", ""),
                     )
+                if spec["kind"] == "combo":
+                    return combo_input(
+                        spec["label"], spec["options"], value,
+                        hint=spec.get("hint", ""),
+                    )
                 return number_input(
                     spec["label"], value,
                     spec.get("min", 0), spec.get("max"),
@@ -545,6 +551,10 @@ def create_settings_tab():
                         try:
                             value = float(value)
                         except (TypeError, ValueError):
+                            return None, spec["label"]
+                    elif spec["kind"] == "combo":
+                        value = str(value or "").strip()
+                        if not value:
                             return None, spec["label"]
                     values[key] = value
                 return values, None

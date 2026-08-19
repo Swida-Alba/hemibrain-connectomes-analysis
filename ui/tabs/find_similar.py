@@ -4,7 +4,17 @@ import re
 
 from nicegui import ui
 
-from ..config import DEFAULTS, PROJECT_ROOT, SRC_DIR, SIMILARITY_METRICS, get_user_default
+from ..config import (
+    CANDIDATE_SOURCE_OPTIONS,
+    DEFAULTS,
+    MORPH_LEVEL_OPTIONS,
+    MORPH_METHOD_OPTIONS,
+    MORPH_METRIC_OPTIONS,
+    PROJECT_ROOT,
+    SIMILARITY_METRICS,
+    SRC_DIR,
+    get_user_default,
+)
 from ..components.common import (
     dataset_selector, neuron_list_input, number_input, select_input,
     checkbox_input, dir_input, section_header, param_grid, tool_page,
@@ -16,9 +26,13 @@ from ..runner import ScriptRunner
 from ..type_suggestions import dataset_suggestions
 from ..dataset_service import is_banc_dataset
 
-MORPH_METHODS = {"vector": "Vector", "nblast": "NBLAST"}
-MORPH_METRICS = ["cosine", "pearson"]
-MORPH_LEVELS = ["auto", "bodyid", "type"]
+# Option lists live centrally in ui/config; labels for the method select
+# stay local because the backend only knows the raw keys.
+_MORPH_METHOD_LABELS = {"vector": "Vector", "nblast": "NBLAST"}
+MORPH_METHODS = {
+    method: _MORPH_METHOD_LABELS.get(method, method)
+    for method in MORPH_METHOD_OPTIONS
+}
 
 
 def create_find_similar_tab():
@@ -89,7 +103,7 @@ def create_find_similar_tab():
                 section_header("Similarity Parameters", "tune")
                 with param_grid(3):
                     level = select_input(
-                        "Level", MORPH_LEVELS, get_user_default("morph_level"),
+                        "Level", MORPH_LEVEL_OPTIONS, get_user_default("morph_level"),
                         hint="'auto' (recommended): a type query returns "
                              "type-to-type results, a bodyId query returns "
                              "bodyId-to-bodyId results. 'bodyid': rank "
@@ -103,7 +117,7 @@ def create_find_similar_tab():
                              "runs on vector-prefiltered candidates).",
                     )
                     metric = select_input(
-                        "Metric", MORPH_METRICS, get_user_default("morph_metric"),
+                        "Metric", MORPH_METRIC_OPTIONS, get_user_default("morph_metric"),
                         hint="Similarity on standardized vectors: cosine or "
                              "Pearson. Applies to the 'Vector' method only.",
                     )
@@ -117,8 +131,7 @@ def create_find_similar_tab():
                     sync_metric_state()
                 with param_grid(2):
                     candidate_source = select_input(
-                        "Candidate Source", ["auto", "roi", "combined",
-                                             "profile", "cache"],
+                        "Candidate Source", CANDIDATE_SOURCE_OPTIONS,
                         get_user_default("candidate_source"),
                         hint="'auto' (recommended): NeuPrint datasets screen "
                              "candidates by primary-ROI distribution "

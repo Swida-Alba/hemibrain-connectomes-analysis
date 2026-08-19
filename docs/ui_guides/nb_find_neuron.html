@@ -61,8 +61,16 @@
   labeling_distribution.html            # score distribution
   user_warning_notes.txt                 # cutoff interpretation notes (when applicable)
   parameters.json
-  plot-3d_{dataset}/...                 # 3D views (when Visualize Top N > 0)
+  plot-3d_{ABBREV}_{dataset_folder}/...  # 3D views (when Visualize Top N > 0)
   individual_profiles/...               # PDF/PPTX (when enabled)</code></pre>
+
+  <div class="callout info">
+    <b>Exported run guide:</b> every successful run also writes
+    <code>_UserGuide_please_read_me.html</code> into the run folder — a
+    self-contained explanation of every output file, every table column, and
+    any warnings recorded for the run. Format (html / txt / markdown /
+    disabled) is set in Settings → Default Settings → Run Guide Format.
+  </div>
 </main>
 </body>
 </html>

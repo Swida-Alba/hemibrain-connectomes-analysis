@@ -88,29 +88,42 @@ Example: `find-paths-complete_MCNS_aMe12_to_PPL101_L1w3r0p0_20260815_142520/`
     *   `length`: Number of hops
     *   `nt_types`: Neurotransmitter types along the path
 *   **`all_attributes.json`**: Serialized run attributes.
+*   **`{source}_to_{target}_allpaths_group.csv`**: Group-level path table
+    (only for custom-group queries).
 
 #### Enrollment Files (run root)
 
-*   **`source_neurons.csv`**: Resolved source neurons, including `isInPath`.
-*   **`target_neurons.csv`**: Resolved target neurons, including `Checked` and
-    `Layer`.
+*   **`source_neurons.csv`**: Resolved source neurons. Key columns: `isInPath`
+    (neuron participates in ≥1 found path), `bodyId`, `instance`, `type`,
+    `pre`, `post`, `downstream`, `upstream`, `synweight` — plus the full
+    NeuPrint neuron table (`status`, `somaSide`, `predictedNt`, `group`,
+    cross-dataset type names `hemibrainType`/`flywireType`/`mancType`, ...).
+*   **`target_neurons.csv`**: Resolved target neurons. Same layout, prefixed
+    with `Checked` (target was reached) and `Layer` (traversal layer at which
+    it was reached).
 
 Synapse-count fields (`weight`, `weights`, `min_weight`, and total-weight
 fields) are exported as integers (`5`, not `5.0`). Ratio and probability
 fields remain decimal-valued.
 
 #### Supporting Data (`data_details/`)
-*   **`conn_mat_type_weight.csv` / `conn_mat_type_ratio.csv` / `conn_mat_type_prob.csv` / `conn_mat_type_nt.csv`**: Type-level weight / ratio / traversal-probability / neurotransmitter matrices
+*   **`conn_mat_type_weight.csv` / `conn_mat_type_ratio.csv` / `conn_mat_type_prob.csv` / `conn_mat_type_nt.csv`**: Type-level matrices (rows/columns = neuron types; values = synapse count / connection_ratio / traversal_probability / nt_type)
 *   **`connection_type.csv`**: Edges aggregated by type pair — columns `type_pre`, `type_post`, `weight`, `connection_ratio`, `traversal_probability`, `block_probability`, `nt_type`
-*   **`neurons_included.csv`**: All neurons participating in the found connections
-*   **`total_weight_layer.csv`**: Total weight per intermediate layer
-*   **`parameters.csv`**: Parameters of the run
+*   **`neurons_included.csv`**: All neurons participating in the found connections — columns `group`, `bodyId`, `type`, `instance`, `nt_type`
+*   **`total_weight_layer.csv`**: Total weight per intermediate layer — columns `conn_layer` (layer transition label, e.g. `0->1`), `weight`
+*   **`parameters.csv`**: Parameters of the run (`parameter`, `value` rows)
+*   **`connection_info_bodyId.csv`**: BodyId-level edge table (only when `skip_bodyId=False`)
+*   **`hemisphere_unconserved_edges.csv`**: Edges removed by hemisphere-unconserved-edge filtering (only when that filter is active)
+*   **`connection_custom_groups.csv`**: Custom query-group definitions (only when custom groups are used)
+*   **`{source}_to_{target}_allpaths_type_excluded.csv`**: Paths excluded by the active filters
+*   **`{source}_to_{target}_allpaths_group_excluded.csv`**: Group-level paths excluded by the filters (group queries only)
 
 #### Visualizations (`visualization/`)
 *   **`Network_{folder}.html`**: Interactive network graph of the found paths
 *   **`Heatmap_{folder}.html`**: Connection weight heatmap
 *   **`Sankey_{folder}.html`**: Sankey flow diagram of the pathways
-*   **`visualization_data/{folder}_data_connections.csv` / `{folder}_data_original_paths.csv`**: Data backing the HTML files
+*   **`visualization_data/{folder}_data_connections.csv` / `{folder}_data_original_paths.csv`**: Data backing the HTML files (connections columns: `source`, `target`, `weight`, `ratio`, `probability`, `nt_type`)
+*   **`visualization_data/{folder}_data_connMatrix_weight.csv` / `_connMatrix_ratio.csv` / `_connMatrix_prob.csv` / `_connMatrix_nt_type.csv`**: Long-form connection matrices backing the HTML views
 
 #### Run Metadata
 *   **`parameters.txt`**: Human-readable record of all parameters
@@ -119,11 +132,11 @@ fields remain decimal-valued.
 #### Hemisphere Symmetry (`hemisphere_symmetry/`)
 Written when `symmetry_analysis=True` (enabled together with the Hemisphere-aware checkbox):
 *   **`symmetry_summary.json`**: Ipsilateral/contralateral Jaccard and conserved/union counts
-*   **`symmetry_ipsi.csv`**: L-L vs R-R edge comparisons
-*   **`symmetry_contra.csv`**: L-R vs R-L edge comparisons
-*   **`conserved_edges.csv`** / **`unconserved_edges.csv`**: Hemisphere-conserved vs unconserved edge lists
-*   **`pairwise_strength.csv`**: Weight comparisons for matched hemisphere edge pairs
-*   **`type_counts_by_role.csv`**: Per-type source/intermediate/target counts
+*   **`symmetry_ipsi.csv`**: L-L vs R-R edge comparisons — columns `base_pre`, `base_post`, `weight_L`, `weight_R`, `present_L`, `present_R`, `conserved`, `ratio`
+*   **`symmetry_contra.csv`**: L-R vs R-L edge comparisons — columns `base_pre`, `base_post`, `weight_LR`, `weight_RL`, `present_LR`, `present_RL`, `conserved`, `ratio`
+*   **`conserved_edges.csv`** / **`unconserved_edges.csv`**: Hemisphere-conserved vs unconserved edge lists — columns `base_pre`, `base_post`, `type`, `note`
+*   **`pairwise_strength.csv`**: Weight comparisons for matched hemisphere edge pairs — columns `base_pre`, `base_post`, `type`, `weight_L`, `weight_R`, `diff`, `ratio`, `weight_LR`, `weight_RL`
+*   **`type_counts_by_role.csv`**: Per-type source/intermediate/target counts — columns `base_type` plus `source_`/`target_`/`intermediate_` counts per hemisphere side (`_L`, `_R`, `_U`)
 
 #### Reciprocal Connections (`find_reciprocal/`)
 Written when `find_reciprocal=True`:
@@ -133,7 +146,7 @@ Written when `find_reciprocal=True`:
 
 > ℹ️ **Parameter Calculations**: See [ScoreCalculation_Guide](core-features/ScoreCalculation_Guide.md) for formulas explaining `connection_ratio`, `traversal_probability`, and filtering thresholds.
 >
-> ℹ️ With `skip_bodyId=False`, bodyId-level tables (`{source}_to_{target}_allpaths_bodyId.csv`) are written alongside the type-level ones; with `output_format='xlsx'`, tables are written as multi-sheet Excel workbooks. The structure above reflects the UI defaults (`skip_bodyId=True`, `output_format='csv'`).
+> ℹ️ With `skip_bodyId=False`, bodyId-level tables are written alongside the type-level ones: `data_details/connection_info_bodyId.csv` (edge table), `{source}_to_{target}_allpaths_bodyId_paths.csv` (bodyId-level path table, same score columns as the type table), and `data_details/conn_mat_bodyId_weight.csv` / `_ratio.csv` / `_prob.csv` bodyId-level matrices. With `output_format='xlsx'`, tables are written as multi-sheet Excel workbooks instead of CSVs (sheets mirror the CSV file names, e.g. `connection_info_bodyId`, `conn_mat_type_weight`). The structure above reflects the UI defaults (`skip_bodyId=True`, `output_format='csv'`).
 
 ---
 
@@ -149,7 +162,7 @@ Example: `find-network_MCNS_aMe_w3r0p0_20260815_142745/`
 
 ### Key Output Files
 *   **`data_details/connection_type.csv`**: Direct connections aggregated by type pair (same columns as Section 1)
-*   **`data_details/neurons.csv`**: The resolved neuron set
+*   **`data_details/neurons.csv`**: The resolved neuron set — key columns `bodyId`, `instance`, `type`, `pre`, `post`, `downstream`, `upstream`, `synweight`, plus the full NeuPrint neuron table
 *   **`data_details/parameters.csv`**, **`parameters.txt`**, **`all_attributes.json`**, **`user_warning_notes.txt`**: Run metadata
 *   **`visualization/Network_{folder}.html`** / **`Heatmap_{folder}.html`**: Network and heatmap views (no Sankey in network mode)
 *   **`visualization/visualization_data/{folder}_data_connections.csv`**, **`{folder}_data_original_paths.csv`**, **`network_edges_input.csv`**: Data backing the HTML files
@@ -192,7 +205,7 @@ Example: `plot-network_custom_edgelist_20260815_142334/`
 *   **`{base}_network.html`**: Interactive pathway graph
 *   **`{base}_heatmap.html`**: Edge weight heatmap
 *   **`{base}_Sankey.html`**: Sankey flow diagram
-*   **`{base}_data.xlsx`**: Workbook with sheets `connections`, `original_paths`, `connMatrix_weight`, `connMatrix_ratio`, `connMatrix_prob`
+*   **`{base}_data.xlsx`**: Workbook with sheets `connections`, `original_paths`, `connMatrix_weight`, `connMatrix_ratio`, `connMatrix_prob`, plus `connMatrix_nt_type` when the input carries neurotransmitter data. Long-form CSVs of these tables (`{base}_data_connections.csv`, `{base}_data_connMatrix_{weight|ratio|prob|nt_type}.csv`) are written alongside.
 *   The "Create Empty Canvas" mode writes only an HTML drawing canvas.
 
 ---
@@ -212,17 +225,21 @@ Example: `homologs_MCNS_to_FAFB_aMe12_20260815_143540/`
 ### Key Output Files
 
 #### Results (`results/`)
-*   **`homolog_results.csv`**: Full results with all similarity columns, sorted by the chosen metric.
-*   **`bodyid_results.csv`**: BodyId-level results (sorted by source, then metric).
-*   **`type_summary.csv`**: Aggregated results at the neuron type level.
+*   **`homolog_results.csv`**: Full results with all similarity columns, sorted by the chosen metric. Columns: `source_bodyId`, `source_type`, `target_bodyId`, `target_type`, `target_dataset`, `adjacency_score`, `shared_type_count`, `union_type_count`, `rank_corr`, `rank_corr_raw`, `rank_union`, `jaccard`, `weighted_jaccard`, `cosine`, `combined`, `is_same_type`, `is_same_dataset`, `source_status`, `target_status`, `weak_source`, `weak_target`, `source_partner_count`, `target_partner_count`, `morph_cosine`, `morph_pearson` (metric definitions in the Appendix).
+*   **`bodyid_results.csv`**: BodyId-level results (sorted by source, then metric). Same score columns, one row per source×target bodyId pair, without `target_dataset`/`weighted_jaccard`/`morph_*`.
+*   **`type_summary.csv`**: Aggregated results at the neuron type level. Columns: `query`, `source_dataset`, `target_dataset`, `source_type`, `target_type`, `avg_rank_corr`, `n_bodyid_comparisons`, `avg_jaccard`, `avg_combined`, `avg_rank_union`, `avg_cosine`, `avg_adjacency_score`, `avg_shared_type_count`, `avg_union_type_count`, `n_complete_sources`, `n_incomplete_sources`.
 *   **`source_status_summary.json`**: Per-source-neuron status (resolved bodyIds, candidate counts).
+*   **`shuffle_test.json`**: Random-control (shuffle) test statistics — only when `run_shuffle_test=True`.
 
 #### Profiles (`profiles/`)
-*   **`query/{type}.csv`** and **`query/source_bodyids.csv`**: Connectivity profiles of the query neuron(s)
-*   **`matches/{type}.csv`** and **`matches/top_target_bodyids.csv`**: Profiles of the top candidate matches
+*   **`query/{type}.csv`** and **`query/source_bodyids.csv`**: Connectivity profiles of the query neuron(s). Profile columns: `neuron_type`, `dataset`, `direction`, `partner_type`, `weight`, `rank`.
+*   **`matches/{type}.csv`** and **`matches/top_target_bodyids.csv`**: Profiles of the top candidate matches (same columns).
 
 #### Overlaps (`overlaps/`)
-*   **`{source}_vs_{target}.csv`**: Partner overlap details for top candidates (which partners are shared vs unique).
+*   **`{source}_vs_{target}.csv`**: Partner overlap details for top candidates (which partners are shared vs unique). Columns: `partner_type`, `in_a`, `in_b`, `weight_a`, `weight_b`, `rank_a`, `rank_b`, `status`, `direction`.
+
+#### Visualization (`visualization/`)
+*   **`{type}_{bodyId}.html`**: Interactive 3D skeleton plots of top matches — only when skeleton visualization is enabled.
 
 #### Metadata
 *   **`README.txt`**: Analysis parameters, summary, and column descriptions.
@@ -244,8 +261,8 @@ Finds morphologically similar neurons (vectorized skeleton comparison).
 Example: `similar-morphology_flywire_FAFB_v783_aMe12_20260815_143601/`
 
 ### Key Output Files
-*   **`results.csv`**: BodyId-level similarity results
-*   **`type_summary.csv`**: Type-level summary
+*   **`results.csv`**: BodyId-level similarity results — columns `rank`, `source_bodyId`, `source_type`, `target_bodyId`, `target_type`, `target_instance`, `profile_similarity`, `roi_similarity`, `similarity`, `is_same_type`, `intra_type_similarity`, `method`, `metric`
+*   **`type_summary.csv`**: Type-level summary — columns `rank`, `target_type`, `similarity`, `n_bodyids`, `profile_similarity`, `roi_similarity`, `is_intra_type`, `intra_type_similarity`, `method`, `metric`
 *   **`README.txt`**: Run summary
 
 ### 6b. Connection Profile Similarity (HomologFinder)
@@ -283,7 +300,7 @@ Example: `cross-dataset_aMe12_to_PPL101_MFB_v626B_v888_20260815_142812/` (male-c
 *   **`comparison_report.txt`**: Plain text summary
 *   **`parameters.json`**: JSON dump of all `ComparisonParameters` (metadata, datasets, resolved source/target groups, thresholds, algorithm and feature flags)
 *   **`label_map.json`**: Label mappings for source/target neurons across datasets (includes `metadata.auto_type_mapping`)
-*   **`dataset_metadata_comparison.csv`**: Per-dataset metadata comparison (also present under `comparison_results/`)
+*   **`dataset_metadata_comparison.csv`**: Per-dataset metadata comparison (also present under `comparison_results/`). Columns: `dataset`, `total_neurons`, `typed_neurons`, `untyped_neurons`, `type_coverage_pct`, `total_presynaptic`, `total_postsynaptic`, `total_synapses`, `roi_count`, `coverage_notes`
 *   **`auto_type_mapping.csv`** / **`auto_type_mapping_conflicts.csv`**: Cross-dataset type mapping tables (see [AUTO_TYPE_MAPPING](AUTO_TYPE_MAPPING.md))
 
 #### Report Data (`comparison_report_used_data/`)
@@ -291,14 +308,16 @@ Example: `cross-dataset_aMe12_to_PPL101_MFB_v626B_v888_20260815_142812/` (male-c
 *   **`ratio_data_t{N}.csv`**: Ratio data for threshold N
 
 #### Comparison Results (`comparison_results/`)
-*   **`edge_presence_matrix.csv`** / **`edge_presence_matrix_minsyn_{N}.csv`**: Edge presence across datasets (per threshold N)
-*   **`edge_weight_comparison.csv`**: Edge weights compared across all datasets
+*   **`edge_presence_matrix.csv`** / **`edge_presence_matrix_minsyn_{N}.csv`**: Edge presence across datasets (per threshold N). Columns: `edge_key` (`source -> target`), `source`, `target`, one presence column per dataset (`{dataset}_t{N}`, boolean), one weight column per dataset (`w_{dataset}_t{N}`), one count column per dataset (`{dataset}_count`), and `conserved_at_lowest`
+*   **`edge_weight_comparison.csv`**: Edge weights compared across all datasets. Columns: `edge_key`, `source`, `target`, `threshold`, `presence_count`, `total_datasets`, one `weight_{dataset}` column per dataset, `max_weight`, `avg_weight`, `weight_diff`, `weight_ratio`
 *   **`path_presence_matrix.csv`** / **`path_presence_matrix_minsyn_{N}.csv`**: Path presence across datasets
-*   **`unified_edge_comparison.csv`** / **`unified_summary.csv`**: Combined edge data and run summary
+*   **`unified_edge_comparison.csv`** / **`unified_summary.csv`**: Combined edge data and run summary. Unified edge columns: `edge_key`, `source`, `target`, `threshold`, per-dataset `{dataset}_weight` / `{dataset}_present` pairs, `conservation`. Summary columns: `dataset`, `threshold`, `total_edges`, `total_weight`, `mean_weight`, `unique_sources`, `unique_targets`
 *   **`unique_to_{dataset}.csv`**: Edges unique to each dataset (one file per dataset that has unique edges)
 *   **`top_edges_comparison.csv`** / **`top_edges_overlap.csv`**: Top conserved/divergent edges and their overlap
-*   **`degree_in.csv`** / **`degree_out.csv`** / **`degree_statistics.csv`**: Degree analysis by type
-*   **`neuron_counts_by_type.csv`** / **`neuron_counts_summary.csv`**: Neuron counts per type and overall
+*   **`degree_in.csv`** / **`degree_out.csv`** / **`degree_statistics.csv`**: Degree analysis by type — columns `threshold`, `type_post` (or `type_pre`), `in_degree` (or `out_degree`), `total_weight`, `dataset`
+*   **`neuron_counts_summary.csv`**: Overall neuron counts per dataset — columns `dataset`, `source_count`, `target_count`, `total_neurons`, hemisphere splits (`source_L/R/U`, `target_L/R/U`, `total_L/R/U`), `source_types`, `target_types`
+*   **`neuron_counts_by_type.csv`**: Neuron counts per type per dataset (written when per-type counts are available)
+*   **`neuron_counts_by_group.csv`**: Neuron counts per custom group per dataset (only when custom groups exist)
 *   **`motif_analysis.csv`**, **`threshold_sensitivity.csv`**, **`path_count_comparison.csv`**: Network motif, sensitivity, and path-count analyses
 
 #### Visualizations (`comparison_visualizations/`)
@@ -307,7 +326,10 @@ Example: `cross-dataset_aMe12_to_PPL101_MFB_v626B_v888_20260815_142812/` (male-c
 *   **`visualization_data/`**: CSVs backing the report (`edge_overlap.csv`, `key_findings_per_threshold.csv`, `overlap_matrices_per_threshold.csv`, `path_counts.csv`, `path_heatmap_{N}.csv`, `edge_heatmap_{N}.csv`)
 
 #### Similarity Matrices (`similarity_matrices/`)
-*   **`similarity_threshold_{N}.csv`**: Cross-dataset similarity rows for threshold N
+*   **`similarity_threshold_{N}.csv`**: Cross-dataset similarity rows for threshold N. Columns: `dataset_1`, `dataset_2`, `jaccard_similarity`, `ruzicka_similarity`, `pearson_correlation`, `edges_in_d1`, `edges_in_d2`, `common_edges`, `union_edges`, `unique_to_d1`, `unique_to_d2`, `edge_rank_correlation`, `cosine_similarity`, `path_rank_correlation`, `spearman_rank_correlation`, `rv_coefficient`, `threshold`
+
+#### Conserved Reciprocal Graph (`conserved_reciprocal_graph/`)
+*   **`conserved_reciprocal_t{N}_network.html`**: Network graph of hemisphere-conserved reciprocal connections, one file per threshold (only when both hemisphere-conservation and reciprocal options are enabled)
 
 #### Dataset Data (`dataset_data/`)
 *   **`{dataset_folder}/minsyn_{N}/`**: Raw `FindNeuronConnection` outputs per dataset/threshold (see Section 1), plus **`connections_edge.csv`** (raw edge list). Includes `hemisphere_symmetry/` and `find_reciprocal/` subfolders when those options are enabled.
@@ -340,10 +362,10 @@ Example: `profiling_MCNS_aMe_20260815_143922/` (query `aMe.*` over male-cns:v1.0
 *   **`results/bodyid_similarity_{metric}_{direction}.csv`**: BodyId-to-bodyId comparisons
 *   **`results/type_avg_bodyid_similarity_{metric}_{direction}.csv`**: Type similarities averaged from bodyId pairs
 *   **`visualization/heatmap_intra_{direction}_{metric}.html`** and **`visualization/heatmap_intra_type_avg_{direction}_{metric}.html`**: Interactive heatmaps
-*   Metrics: `jaccard`, `weighted_jaccard`, `cosine`, `rank_corr`, `rank_corr_union`, `combined`; directions: `upstream`, `downstream`, `combined`
+*   Metrics: `jaccard`, `weighted_jaccard`, `cosine`, `rank_corr`, `rank_union`, `combined`; directions: `upstream`, `downstream`, `combined`
 
 #### Cross-Dataset Results (`cross_dataset/`)
-*   **`mapping_summary.csv`**: Resolved type names per dataset with same-name flags
+*   **`mapping_summary.csv`**: Resolved type names per dataset with same-name flags — columns `anchor`, one column per queried dataset, `same name`
 *   **`all_types/results/similarity_{direction}_{metric}.csv`**: N×M similarity matrices comparing the queried types across datasets
 *   **`all_types/visualization/heatmap_inter_all_types_{direction}_{metric}.html`**: Interactive cross-dataset heatmaps
 
@@ -366,9 +388,9 @@ The `NeuronBridgeFinder` class (in `src/neuronbridge_finder.py`) provides EM↔L
 
 EM→LM mapping (driver lines matching EM neurons). Example: `NB-find-lines_MCNS_aMe12_20260815_145107/`
 
-*   **`{query}_lines.csv`**: All matched driver lines with scores
+*   **`{query}_lines.csv`**: All matched driver lines with scores (one file per query; NeuronBridge result columns `line`, `score`, `match_type`, `library`, ... plus `source_query` / `source_bodyId`)
 *   **`line_summary.csv`**: Summary statistics per line
-*   **`gal4_lexa_summary.csv`** / **`split_gal4_summary.csv`**: Per-library summaries (written when `separate_splitgal4=True`, the UI default)
+*   **`gal4_lexa_summary.csv`** / **`split_gal4_summary.csv`**: Per-library summaries (written when `separate_splitgal4=True`; the class default is False, the UI default True)
 *   **`images/`**: Downloaded CDM/FlyLight images (only when image download is enabled)
 *   **`parameters.json`**: Analysis parameters
 
@@ -376,14 +398,14 @@ EM→LM mapping (driver lines matching EM neurons). Example: `NB-find-lines_MCNS
 
 LM→EM mapping (EM neurons matching a driver line). Example: `NB-find-neurons_SS01015_20260815_143937/`
 
-*   **`all_neurons.csv`**: Combined matched neurons across all datasets
-*   **`{line}_neurons.csv`**: Matched neurons for the line
-*   **`{line}_{dataset_folder}_neurons.csv`** / **`{line}_{dataset_folder}_types.csv`**: Per-dataset matches and type aggregates
-*   **`{line}_type_mapped.csv`**: Cross-dataset type mapping summary
+*   **`all_neurons.csv`**: Combined matched neurons across all datasets — columns `bodyId`, `dataset`, `instance`, `type`, `status`, `score`, `image_id`, `lm_sample`, `match_type`, `library`, `source_line`
+*   **`{line}_neurons.csv`**: Matched neurons for the line (combined; same columns minus `source_line`)
+*   **`{line}_{dataset_folder}_neurons.csv`** / **`{line}_{dataset_folder}_types.csv`**: Per-dataset matches and type aggregates. Type-aggregate columns: `type`, `labeled_N`, `max_score`, `median_score`, `Q3_score`, `Q1_score`, `avg_score`, `typed_N_in_dataset`
+*   **`{line}_type_mapped.csv`**: Cross-dataset type mapping summary — columns `canonical_type`, `best_max_score`, per-dataset `{dataset}_type` / `{dataset}_max_score` / `{dataset}_N` columns, `total_labeled_N`
 *   **`labeling_distribution.html`**: Score distribution visualization
 *   **`parameters.json`**: Analysis parameters
 *   **`user_warning_notes.txt`**: Notes when score-cutoff behavior affects interpretation
-*   **`plot-3d_{dataset}/`**: Per-dataset 3D skeleton visualizations (only when `visualize_top_n > 0`)
+*   **`plot-3d_{ABBREV}_{dataset_folder}/`**: Per-dataset 3D skeleton visualizations (only when `visualize_top_n > 0`; same layout as Section 3)
 
 ### 9c. Co-Labeling Mode (`NB-colabeling_{lines}_{ts}/`)
 
@@ -406,16 +428,16 @@ full requested top-N, including matches below the cutoff; see
 
 #### Labeling Distribution
 *   **`labeling_distribution_by_type.html`** / **`labeling_distribution_by_neuron.html`** / **`labeling_distribution_stacked.html`**: Distribution visualizations
-*   **`distribution_data_by_type.csv`** / **`distribution_data_by_neuron.csv`**: Raw distribution data
+*   **`distribution_data_by_type.csv`** / **`distribution_data_by_neuron.csv`**: Raw distribution data (by type: `type`, `score`, `source_line`, `dataset`; by neuron: `bodyId`, `dataset`, `instance`, `type`, `status`, `score`, `image_id`, `lm_sample`, `match_type`, `library`, `_passes_min_score`, `source_line`)
 
 #### Supporting Data
-*   **`labeling_info.csv`**: Case-sensitive type × Line matrix with dataset column
-*   **`line_summary.csv`**: Summary statistics per line
+*   **`labeling_info.csv`**: Case-sensitive type × Line matrix with dataset column — columns `type`, `dataset`, one boolean column per line
+*   **`line_summary.csv`**: Summary statistics per line — columns `line`, `n_neurons`, `n_types`, `mean_score`, `max_score`, `n_neurons_HMS`, `n_types_HMS`, `n_neurons_MS`, `n_types_MS`, `Qf`, `colabel_sparsity`
 *   **`line_labeled_neurons/`**: Per-line neuron details (`{line}_neurons.csv`, `{line}_{dataset_folder}_neurons.csv`, `{line}_{dataset_folder}_types.csv`, `{line}_type_mapped.csv`)
 *   **`parameters.json`**: Analysis parameters
 *   **`user_warning_notes.txt`**: Notes describing score-cutoff filtering and retained top-N records
 *   **`colabeling_report.html`**: Comprehensive HTML report
-*   **`plot-3d_{dataset}/`**: Per-dataset 3D visualizations (only when `visualize_top_n > 0`)
+*   **`plot-3d_{ABBREV}_{dataset_folder}/`**: Per-dataset 3D visualizations (only when `visualize_top_n > 0`; same layout as Section 3)
 
 ### Expression Matrix Columns
 - Row index: Neuron type (with or without dataset prefix)
@@ -475,6 +497,32 @@ When resolving types, the priority is: male-cns > flywire > manc > hemibrain > o
 
 ---
 
+## 12. Exported Run User Guide (`_UserGuide_please_read_me`)
+
+Every successful UI run exports a self-contained guide into the run folder
+root: **`_UserGuide_please_read_me.html`** by default (the leading `_` keeps
+it sorted first). It is written by the UI after the tool finishes — all tool
+tabs get one; failed or cancelled runs get none.
+
+Contents:
+
+*   Tool name, run folder, generation timestamp, and the key run parameters
+*   **Warnings & notes**: the rendered content of the run's
+    `user_warning_notes.txt`, or "No warnings were recorded for this run."
+*   **Output files**: every file in the run folder, grouped by the tool's
+    file spec, with a description; repeated score/metric columns are
+    described once via a shared column glossary (name, meaning, range/type);
+    matrix-style tables are described by layout instead of per-column lists.
+    Files the spec does not recognize are still listed with a generic
+    description. Top-level HTML visualizations are linked directly.
+
+Format is configurable in **Settings → Default Settings → Run Guide Format**:
+`html` (default), `txt`, `markdown` (written as `.md`), or `disabled` to skip
+writing it. The `DROCAT_RUN_GUIDE_FORMAT` environment variable overrides the
+setting (useful for scripts and tests).
+
+---
+
 ## Appendix: Output Column Reference
 
 ### Connection Data Columns
@@ -503,14 +551,20 @@ When resolving types, the priority is: male-cns > flywire > manc > hemibrain > o
 
 ### Similarity Metric Columns
 
-| Column            | Description                     | Range   |
-| ----------------- | ------------------------------- | ------- |
-| `jaccard`         | Jaccard similarity              | 0-1     |
-| `weighted_jaccard`| Score-weighted Jaccard          | 0-1     |
-| `cosine`          | Cosine similarity               | 0-1     |
-| `rank_corr`       | Spearman rank correlation       | -1 to 1 |
-| `rank_corr_union` | Normalized rank correlation     | 0-1     |
-| `combined_score`  | Weighted combination of metrics | 0-1     |
-| `confidence`      | Match confidence                | 0-1     |
+| Column                | Description                                                    | Range        |
+| --------------------- | -------------------------------------------------------------- | ------------ |
+| `jaccard`             | Jaccard similarity of the two partner sets                     | 0-1          |
+| `weighted_jaccard`    | Score-weighted Jaccard similarity                              | 0-1          |
+| `cosine`              | Cosine similarity of the partner-weight vectors                | 0-1          |
+| `rank_corr`           | Spearman rank correlation of partner weights, normalized `(raw + 1) / 2` | 0-1 |
+| `rank_corr_raw`       | Raw Spearman rank correlation of partner weights               | -1 to 1      |
+| `rank_union`          | Spearman rank correlation over the union of both partner sets  | -1 to 1      |
+| `combined`            | Weighted combination of the individual similarity metrics      | 0-1          |
+| `confidence`          | Categorical match confidence derived from `combined`           | High / Medium / Low / Very Low |
+| `morph_cosine`        | Morphology vector cosine similarity (when enrichment ran)      | 0-1          |
+| `morph_pearson`       | Morphology vector Pearson correlation (when enrichment ran)    | -1 to 1      |
+| `adjacency_score`     | Direct adjacency (synaptic contact) score between the pair     | number       |
+| `shared_type_count`   | Partner types shared by both profiles                          | integer      |
+| `union_type_count`    | Unique partner types across both profiles                      | integer      |
 
 > 📖 **Formula Details**: See [ScoreCalculation_Guide](core-features/ScoreCalculation_Guide.md) for complete mathematical definitions.

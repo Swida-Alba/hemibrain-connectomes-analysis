@@ -46,7 +46,24 @@ vp.visualize()
 | `source` / `from` / `*_pre` | str     | ✅        | Source node           |
 | `target` / `to` / `*_post`  | str     | ✅        | Target node           |
 | `weight`                    | numeric | ✅        | Connection weight     |
+| `color` / `edge_color`      | str     | ❌        | Per-edge color (hex or rgba) |
 | `nt_type`                   | str     | ❌        | Neurotransmitter type |
+| `source_group`              | str     | ❌        | Node classification of source (`source` / `intermediate` / `target`) |
+| `target_group`              | str     | ❌        | Node classification of target (`source` / `intermediate` / `target`) |
+| `ratio`                     | numeric | ❌        | Mapped to `connection_ratios` metric |
+| `probability`               | numeric | ❌        | Mapped to `traversal_probabilities` metric |
+| `nt_group` / `custom_groups`| str     | ❌        | Informational; accepted and ignored (NT grouping is re-derived from `nt_type`) |
+
+Any other numeric column is picked up as an additional edge metric.
+
+**Expanded edge list (CSV export round-trip).** The CSV written by the
+**📋 Edge List CSV** export button uses exactly these columns:
+`source, target, weight, color, nt_type, nt_group, source_group,
+target_group, custom_groups, ratio, probability`. Re-passing that CSV to
+`VisualizePath` rebuilds the same network - identical edges, weights, metric
+columns, NT types and the source/intermediate/target node grouping. Without
+`source_group` / `target_group`, a plain edge list would classify every node
+as *source* (each row is a 1-hop path whose first node is a source).
 
 ---
 
@@ -216,6 +233,20 @@ Restores complete graph state from exported JSON:
 Exports only node positions (no styles or groups):
 1. Click **📍 Layout** button
 2. Use to apply same layout to different networks
+
+### Export Edge List (CSV)
+
+Exports every edge of the current graph as an expanded edge-list CSV:
+1. Click **📋 Edge List CSV** button in Export section
+2. Columns: `source, target, weight, color, nt_type, nt_group, source_group,
+   target_group, custom_groups, ratio, probability`
+3. Includes Edit-Mode changes (edited weights, recolored edges,
+   added/deleted edges) and the complete table even when the view is filtered
+
+The file is a valid [Edge-List Format](#edge-list-format) input: re-import it
+in the Net-Viz tab (or pass it to `VisualizePath`) to rebuild the same
+network, including the source/intermediate/target node grouping via the
+`source_group` / `target_group` columns.
 
 ---
 

@@ -125,8 +125,11 @@
         <li><b>Synapse Colors</b>: palette for the connection markers between
           layers (one color per consecutive-layer pair).</li>
         <li><b>Skip Synapses</b>: hide markers for a clean view.</li>
-        <li><b>Min Synapse Count</b>, <b>Synapse Size</b> (real or fixed),
-          <b>Opacity</b>, <b>Mode</b> (cone or scatter).</li>
+        <li><b>Min Synapse Count</b>, <b>Synapse Size</b> (a fold of the real
+          pre&rarr;post distance: <code>real</code> = 1x; any number or
+          <code>Nx real</code> can be typed), <b>Uniform Synapse Size</b>
+          (all markers use the median distance), <b>Opacity</b>,
+          <b>Mode</b> (cone or scatter).</li>
       </ul>
     </div>
     <div class="card">
@@ -191,6 +194,14 @@
   <div class="callout warn">
     <b>3D export needs Chrome</b> when Export Method = webdriver and
     Export Views is on; use kaleido if Chrome is unavailable.
+  </div>
+
+  <div class="callout info">
+    <b>Exported run guide:</b> every successful run also writes
+    <code>_UserGuide_please_read_me.html</code> into the run folder — a
+    self-contained explanation of every output file, every table column, and
+    any warnings recorded for the run. Format (html / txt / markdown /
+    disabled) is set in Settings → Default Settings → Run Guide Format.
   </div>
 </main>
 </body>

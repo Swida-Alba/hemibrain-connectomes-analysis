@@ -615,6 +615,7 @@ class VisualizePath:
         self.node_colors_input = node_colors
         self.custom_node_colors = None  # Will be populated in _load_custom_colors()
         self.custom_edge_colors = None  # Will be populated if edge-list has color column
+        self.custom_node_groups = None  # Will be populated if edge-list has source/target_group columns
         
         self.network_layout = network_layout
         self.showfig = showfig
@@ -1710,6 +1711,14 @@ class VisualizePath:
            - 'from' / 'to' / 'weight'
            - 'pre' / 'post' / 'weight'
            
+           Optional (the expanded Edge List CSV export round-trips directly):
+           - 'color': per-edge color (hex or rgba)
+           - 'nt_type': neurotransmitter type
+           - 'source_group' / 'target_group': endpoint node groups
+             (source/intermediate/target) used for node classification
+           - 'nt_group' / 'custom_groups': informational, ignored
+           - 'ratio' / 'probability': mapped to the standard metric columns
+           
         The system automatically detects the format and converts edge-list
         to internal path format for visualization.
         """
@@ -1892,6 +1901,12 @@ class VisualizePath:
         Automatically detects and converts all numeric columns as additional metrics
         (e.g., ratio, probability, or any other numeric metric columns).
         
+        Also recognizes the expanded Edge List CSV export columns: 'nt_type'
+        (categorical, detected by name so all-empty columns are not misread
+        as numeric), 'source_group'/'target_group' (endpoint node groups kept
+        in self.custom_node_groups for node classification in build_network),
+        and 'nt_group'/'custom_groups' (informational, skipped).
+        
         Parameters
         ----------
         source_col : str
@@ -1915,32 +1930,63 @@ class VisualizePath:
         if color_col:
             exclude_cols.add(color_col)
         
+        # Columns of the expanded edge-list CSV export (Edge List CSV button).
+        # Grouping is metadata, never a numeric metric: nt_group derives from
+        # nt_type, source_group/target_group classify the endpoint nodes, and
+        # custom_groups preserves in-HTML custom group names.
+        nt_alias_names = {'nt_type', 'nt', 'neurotransmitter'}
+        group_info_names = {'nt_group', 'custom_groups'}
+        
+        # Look for the nt_type and endpoint-group columns BY NAME - dtype is
+        # unreliable: an all-empty nt_type column reads as NaN and looks numeric.
+        nt_type_col = None
+        source_group_col = None
+        target_group_col = None
+        for col in self.path_df.columns:
+            if col in exclude_cols:
+                continue
+            col_lower = str(col).lower()
+            if nt_type_col is None and col_lower in nt_alias_names:
+                nt_type_col = col
+            elif source_group_col is None and col_lower == 'source_group':
+                source_group_col = col
+            elif target_group_col is None and col_lower == 'target_group':
+                target_group_col = col
+        
         # Find all numeric columns that could be additional metrics
         numeric_cols = []
         additional_metric_names = []
         
-        # Also look for nt_type column (categorical)
-        nt_type_col = None
+        skip_cols = set(exclude_cols)
+        skip_cols_lower = set(group_info_names)
+        if nt_type_col:
+            skip_cols.add(nt_type_col)
+        if source_group_col:
+            skip_cols.add(source_group_col)
+        if target_group_col:
+            skip_cols.add(target_group_col)
         
         for col in self.path_df.columns:
-            if col not in exclude_cols:
-                # Check if column is numeric
-                if pd.api.types.is_numeric_dtype(self.path_df[col]):
-                    if col != weight_col:  # Weight is primary metric
-                        numeric_cols.append(col)
-                        # Store original column name for later use
-                        additional_metric_names.append(col)
-                # Check for nt_type column
-                elif col.lower() in ['nt_type', 'nt', 'neurotransmitter']:
-                    nt_type_col = col
+            if col in skip_cols or str(col).lower() in skip_cols_lower or col == weight_col:
+                continue
+            # Check if column is numeric
+            if pd.api.types.is_numeric_dtype(self.path_df[col]):
+                numeric_cols.append(col)
+                # Store original column name for later use
+                additional_metric_names.append(col)
         
         # Initialize storage for additional metrics
         additional_metrics = {col: [] for col in numeric_cols}
         nt_types_list = []
+        # Endpoint group classification from the expanded export (node -> group)
+        node_group_overrides = {}
         
         self._vprint(f"  Detected numeric columns: {[weight_col] + numeric_cols}")
         if nt_type_col:
             self._vprint(f"  Detected neurotransmitter column: {nt_type_col}")
+        if source_group_col or target_group_col:
+            self._vprint(f"  Detected endpoint group columns: "
+                         f"{[c for c in (source_group_col, target_group_col) if c]}")
         
         for idx, row in self.path_df.iterrows():
             source = str(row[source_col])
@@ -1959,10 +2005,24 @@ class VisualizePath:
                 value = row[col] if pd.notna(row[col]) else 0
                 additional_metrics[col].append([value])
             
-            # Store nt_type if available
+            # Store nt_type if available (empty cells mean unknown)
             if nt_type_col:
                 nt_val = row[nt_type_col] if pd.notna(row[nt_type_col]) else None
+                if nt_val is not None and not str(nt_val).strip():
+                    nt_val = None
                 nt_types_list.append([nt_val])
+            
+            # Record endpoint node groups from the expanded export so
+            # build_network can classify nodes (a plain edge list cannot
+            # infer source/target identity)
+            if source_group_col is not None:
+                grp = row[source_group_col]
+                if pd.notna(grp) and str(grp).strip():
+                    node_group_overrides[source] = str(grp).strip()
+            if target_group_col is not None:
+                grp = row[target_group_col]
+                if pd.notna(grp) and str(grp).strip():
+                    node_group_overrides[target] = str(grp).strip()
             
             # Store edge color if provided
             if color_col and color_col in row and pd.notna(row[color_col]):
@@ -1985,10 +2045,14 @@ class VisualizePath:
             'ratio': 'connection_ratios',
             'connection_ratio': 'connection_ratios',
             'conn_ratio': 'connection_ratios',
+            # already-normalized names (renamed by _normalize_column_names)
+            'connection_ratios': 'connection_ratios',
             'probability': 'traversal_probabilities',
             'prob': 'traversal_probabilities',
             'traversal_probability': 'traversal_probabilities',
-            'trav_prob': 'traversal_probabilities'
+            'trav_prob': 'traversal_probabilities',
+            # already-normalized names (renamed by _normalize_column_names)
+            'traversal_probabilities': 'traversal_probabilities'
         }
         
         for col in numeric_cols:
@@ -2011,6 +2075,14 @@ class VisualizePath:
             self._vprint(f"  ✓ Loaded custom colors for {len(custom_edge_colors)} edges")
         else:
             self.custom_edge_colors = None
+        
+        # Endpoint node groups from the expanded export drive node
+        # classification in build_network
+        if node_group_overrides:
+            self.custom_node_groups = node_group_overrides
+            self._vprint(f"  ✓ Loaded endpoint groups for {len(node_group_overrides)} nodes")
+        else:
+            self.custom_node_groups = None
         
         # Ensure standard optional columns exist (for compatibility)
         if 'connection_ratios' not in self.path_df.columns:
@@ -2292,7 +2364,27 @@ class VisualizePath:
         for node in target_nodes:
             G.nodes[node]['node_type'] = 'target'
         
-        self._vprint(f"Network: {len(source_nodes)} source, {len(intermediate_nodes)} intermediate, {len(target_nodes)} target nodes")
+        # Edge lists carrying endpoint-group columns (the expanded Edge List
+        # CSV export) override the position-based classification: every edge
+        # is a two-node path, so without them ALL nodes would read "source".
+        if getattr(self, 'custom_node_groups', None):
+            valid_groups = {'source', 'intermediate', 'target'}
+            overridden = 0
+            for node, group in self.custom_node_groups.items():
+                if group in valid_groups and node in all_nodes:
+                    G.nodes[node]['node_type'] = group
+                    overridden += 1
+            if overridden:
+                self._vprint(f"Applied endpoint groups from edge list to {overridden} nodes")
+        
+        # Count from the FINAL node attributes so endpoint-group overrides
+        # (expanded edge-list export) are reflected in the summary.
+        final_counts = {'source': 0, 'intermediate': 0, 'target': 0}
+        for node in all_nodes:
+            final_counts[G.nodes[node].get('node_type', 'intermediate')] += 1
+        self._vprint(f"Network: {final_counts['source']} source, "
+                     f"{final_counts['intermediate']} intermediate, "
+                     f"{final_counts['target']} target nodes")
         
         self.conn_df = conn_df
         self.G_network = G
@@ -4871,6 +4963,10 @@ class VisualizePath:
                 <div style="display: flex; gap: 6px; margin-bottom: 6px;">
                     <button class="btn" onclick="exportLayout()" style="flex: 1; padding: 6px; font-size: 11px; background: #607d8b;">📤 Export Layout</button>
                     <button class="btn" onclick="importLayout()" style="flex: 1; padding: 6px; font-size: 11px; background: #607d8b;">📥 Import Layout</button>
+                </div>
+                
+                <div style="display: flex; gap: 6px; margin-bottom: 6px;">
+                    <button class="btn" onclick="exportEdgeListCSV()" title="Export every edge as CSV (source, target, weight, color, NT, grouping)" style="flex: 1; padding: 6px; font-size: 11px; background: #2e7d32;">📋 Edge List CSV</button>
                 </div>
                 
                 <!-- Background Color Toggle -->
@@ -8680,6 +8776,116 @@ class VisualizePath:
             URL.revokeObjectURL(url);
             
             updateHoverInfo('✓ Exported graph with settings: ' + nodesData.length + ' nodes, ' + edgesData.length + ' edges' + (Object.keys(customGroups).length > 0 ? ', ' + Object.keys(customGroups).length + ' custom groups' : ''));
+        }}
+        
+        // ===== EDGE LIST CSV EXPORT =====
+        // Exports every edge of the CURRENT graph (in-HTML edits included:
+        // changed weights/colors, added/deleted edges, relabeled nodes) as a
+        // CSV edge list. The first three columns plus color follow the
+        // Net-Viz edge-list input format, so the file can be re-imported
+        // directly; nt_type is recognized on import as well. Grouping is
+        // recorded as the endpoint node groups (source/intermediate/target)
+        // plus any custom-group membership; NT grouping mirrors the Python
+        // get_nt_group mapping.
+        
+        function csvEscapeField(value) {{
+            const s = (value === null || value === undefined) ? '' : String(value);
+            if (/[",\\n\\r]/.test(s)) {{
+                return '"' + s.replace(/"/g, '""') + '"';
+            }}
+            return s;
+        }}
+        
+        function getNtGroupCSV(ntType) {{
+            if (ntType === null || ntType === undefined) return 'unknown';
+            const ntStr = String(ntType).trim();
+            const groups = {{
+                'excitatory': ['acetylcholine', 'ACH', 'ach', 'glutamate', 'GLUT', 'glut'],
+                'inhibitory': ['gaba', 'GABA'],
+                'modulatory': ['dopamine', 'DA', 'da', 'serotonin', 'SER', 'ser', '5-HT', '5-ht', 'octopamine', 'OCT', 'oct'],
+                'unknown': ['unknown', 'none', '']
+            }};
+            const ntLower = ntStr.toLowerCase();
+            for (const group of Object.keys(groups)) {{
+                const members = groups[group];
+                if (members.indexOf(ntStr) !== -1 || members.some(m => m.toLowerCase() === ntLower)) {{
+                    return group;
+                }}
+            }}
+            return 'unknown';
+        }}
+        
+        // Pure CSV builder (no DOM access) - the Node test harness extracts
+        // and executes this function against headless Cytoscape.
+        function buildEdgeListCSV() {{
+            const header = ['source', 'target', 'weight', 'color', 'nt_type', 'nt_group',
+                            'source_group', 'target_group', 'custom_groups', 'ratio', 'probability'];
+            // element id -> names of the custom groups containing it
+            const membership = {{}};
+            Object.keys(customGroups).forEach(name => {{
+                (customGroups[name].ids || []).forEach(id => {{
+                    if (!membership[id]) membership[id] = [];
+                    membership[id].push(name);
+                }});
+            }});
+            const labelOf = node => node.data('label') || node.id();
+            const lines = [header.join(',')];
+            cy.edges().forEach(edge => {{
+                // Prefer the signed original weight (edit mode keeps it in
+                // sync with the display weight; drawn edges set both).
+                const weightRaw = edge.data('original_weight');
+                const weight = (weightRaw !== undefined && weightRaw !== null && !isNaN(parseFloat(weightRaw)))
+                    ? parseFloat(weightRaw)
+                    : (parseFloat(edge.data('weight')) || 0);
+                // Base appearance is seeded from the computed style at load
+                // time and kept in sync by every color edit, so it is the
+                // authoritative current color; fall back to the live style.
+                // Cytoscape reports computed colors as rgb()/rgba() strings, so
+                // normalize through extractColorHex to always emit a hex value.
+                const rawColor = edge.data(EDGE_BASE_COLOR_KEY) || edge.style('line-color');
+                const color = extractColorHex(rawColor);
+                const nt = edge.data('nt_type') || '';
+                const sourceNode = edge.source();
+                const targetNode = edge.target();
+                // ratio/probability default to 0 when absent - export them
+                // as empty cells so re-import does not invent metrics
+                const ratio = edge.data('ratio');
+                const prob = edge.data('probability');
+                const row = [
+                    labelOf(sourceNode),
+                    labelOf(targetNode),
+                    weight,
+                    color,
+                    nt,
+                    nt ? getNtGroupCSV(nt) : '',
+                    sourceNode.data('node_type') || 'intermediate',
+                    targetNode.data('node_type') || 'intermediate',
+                    (membership[edge.id()] || []).join(';'),
+                    ratio ? ratio : '',
+                    prob ? prob : ''
+                ];
+                lines.push(row.map(csvEscapeField).join(','));
+            }});
+            return lines.join('\\n');
+        }}
+        
+        function exportEdgeListCSV() {{
+            const edgeCount = cy.edges().length;
+            if (edgeCount === 0) {{
+                updateHoverInfo('⚠️ No edges to export');
+                return;
+            }}
+            const csv = buildEdgeListCSV();
+            const dataBlob = new Blob([csv], {{type: 'text/csv;charset=utf-8'}});
+            const url = URL.createObjectURL(dataBlob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = 'network_edge_list_' + new Date().toISOString().slice(0,10) + '.csv';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+            updateHoverInfo('✓ Exported ' + edgeCount + ' edge(s) as CSV (source, target, weight, color, NT, grouping)');
         }}
         
         // Import graph (trigger file input)

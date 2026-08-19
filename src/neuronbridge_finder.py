@@ -7260,7 +7260,8 @@ class NeuronBridgeFinder:
                 }
                 for key in (
                     'min_synapse_num', 'synapse_size', 'synapse_mode',
-                    'synapse_alpha', 'synapse_colors', 'mesh_roi',
+                    'uniform_synapse_size',
+                    'synapse_alpha', 'synapse_colors', 'neuron_alpha', 'mesh_roi',
                     'mesh_color', 'mesh_alpha', 'brain_mesh_color',
                     'vnc_mesh_color',
                     'neuprint_skeleton_pipeline',

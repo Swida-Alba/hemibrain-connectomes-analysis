@@ -119,6 +119,9 @@ def create_find_shortest_tab():
         with ui.card().classes("w-full drocat-card").props('id="card-findshortest-core"'):
             section_header("Core Parameters", "tune")
             with param_grid(3):
+                # Intentionally 5 (not the shared max_interlayer default): the
+                # shortest-path tab targets deeper searches; keep in sync with
+                # the e2e test asserting this divergence.
                 max_interlayer = number_input(
                     "Max Intermediate Layers", 5, 0, None,
                     hint="Maximum number of intermediate neuron layers between source "

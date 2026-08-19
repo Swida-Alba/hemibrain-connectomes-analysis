@@ -54,6 +54,20 @@ Any other numeric column:
 - `confidence` → Custom metric (no toggle, but preserved)
 - `reliability` → Custom metric (no toggle, but preserved)
 
+### Expanded Edge-List Columns (CSV Export Round-Trip)
+
+The **📋 Edge List CSV** export writes all 11 columns below, and the file can
+be re-imported as-is to rebuild the same network:
+
+| Column | Role |
+| ------ | ---- |
+| `source` / `target` / `weight` | Edges (required) |
+| `color` | Per-edge color (hex or rgba) |
+| `nt_type` | Neurotransmitter type (empty = unknown) |
+| `source_group` / `target_group` | Node classification (`source` / `intermediate` / `target`) of each endpoint |
+| `ratio` / `probability` | Mapped to `connection_ratios` / `traversal_probabilities` |
+| `nt_group` / `custom_groups` | Informational; accepted and ignored |
+
 ## Input Format Options
 
 ### 1. DataFrame

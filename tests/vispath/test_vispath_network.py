@@ -337,6 +337,24 @@ class TestGeneratedHtmlStructure:
         # self-loops never count toward orphan connectivity
         assert "e.source().id() !== e.target().id()" in js
 
+    def test_edge_list_csv_export_present(self, network_html):
+        """The in-HTML Edge List CSV export button and its backing functions
+        are present, and the documented column order is used."""
+        html = network_html.read_text(encoding="utf-8")
+        js = _script_text(network_html)
+        # button in the Export Controls column
+        assert 'onclick="exportEdgeListCSV()"' in html
+        assert "Edge List CSV" in html
+        # export logic lives in the inline script
+        assert "function exportEdgeListCSV" in js
+        assert "function buildEdgeListCSV" in js
+        assert "function getNtGroupCSV" in js
+        assert "function csvEscapeField" in js
+        # documented column order (source/target/weight re-importable, plus
+        # color, NT and grouping info)
+        assert "'source', 'target', 'weight', 'color', 'nt_type', 'nt_group'," in js
+        assert "'source_group', 'target_group', 'custom_groups', 'ratio', 'probability'" in js
+
 
 # =============================================================================
 # Node-based logic tests (real functions extracted from the generated HTML)
@@ -360,6 +378,216 @@ class TestHistoryLogicNode:
             f"history harness failed:\n{res.stdout}\n{res.stderr}"
         )
         assert "ALL HISTORY TESTS PASSED" in res.stdout
+
+
+class TestEdgeListExportNode:
+    def test_all_edge_list_export_scenarios(self, network_html, node_cache):
+        node = _ensure_node_with_cytoscape(node_cache)
+        res = _run_node_harness(node, "edgelist_harness.js", network_html, node_cache)
+        assert res.returncode == 0, (
+            f"edge-list export harness failed:\n{res.stdout}\n{res.stderr}"
+        )
+        assert "ALL EDGE-LIST EXPORT TESTS PASSED" in res.stdout
+
+
+# =============================================================================
+# Input/export match on a REAL pathfinding result
+# =============================================================================
+
+class TestEdgeListExportMatchesPathfindingInput:
+    """The in-HTML CSV export must carry the same (source, target, weight)
+    rows that build_network aggregated from a genuine FindAllPath result.
+
+    The network is plotted from the untrimmed graph so every conn_df edge is
+    present, then the harness extracts the REAL buildEdgeListCSV from the
+    generated HTML and dumps the exported rows for comparison.
+    """
+
+    ALLPATHS = (
+        PROJECT_ROOT / "local_data" / "scratch_shortest_smoke"
+        / "findallpath_crosscheck" / "aMe12_to_PPL101_etc_allpaths_type.csv"
+    )
+
+    def _exported_rows(self, node, node_cache, tmp_path):
+        assert self.ALLPATHS.exists(), f"missing pathfinding fixture: {self.ALLPATHS}"
+        vp = VisualizePath(
+            path_file=str(self.ALLPATHS),
+            output_folder=str(tmp_path),
+            showfig=False,
+            verbose=False,
+            network_layout="dagre",
+        )
+        conn_df, G = vp.build_network()
+        html_path = tmp_path / "pathfinding_network.html"
+        # plot the full (untrimmed) graph so every conn_df edge is exported
+        vp._plot_cytoscape_network(
+            G, output_path=str(html_path), layout="dagre", open_browser=False
+        )
+        res = _run_node_harness(node, "edgelist_harness.js", html_path, node_cache)
+        assert res.returncode == 0, (
+            f"edge-list export harness failed:\n{res.stdout}\n{res.stderr}"
+        )
+        marker = "EXPORTED_CSV_JSON::"
+        line = next(
+            (l for l in res.stdout.splitlines() if l.startswith(marker)), None
+        )
+        assert line is not None, f"harness did not emit exported CSV:\n{res.stdout}"
+        import json
+        rows = json.loads(line[len(marker):])
+        return conn_df, rows
+
+    def test_export_matches_pathfinding_conn_df(self, node_cache, tmp_path):
+        node = _ensure_node_with_cytoscape(node_cache)
+        conn_df, rows = self._exported_rows(node, node_cache, tmp_path)
+
+        header = rows[0]
+        assert header[:3] == ["source", "target", "weight"]
+        # one exported row per aggregated connection
+        assert len(rows) - 1 == len(conn_df), (
+            f"exported {len(rows) - 1} edges, conn_df has {len(conn_df)}"
+        )
+
+        exported = {(r[0], r[1], float(r[2])) for r in rows[1:]}
+        expected = {
+            (str(s), str(t), float(w))
+            for s, t, w in zip(conn_df["source"], conn_df["target"], conn_df["weight"])
+        }
+        assert exported == expected, (
+            "exported edge set differs from pathfinding input.\n"
+            f"missing: {expected - exported}\nextra: {exported - expected}"
+        )
+
+    def test_export_carries_nt_and_grouping_columns(self, node_cache, tmp_path):
+        node = _ensure_node_with_cytoscape(node_cache)
+        _conn_df, rows = self._exported_rows(node, node_cache, tmp_path)
+        header = rows[0]
+        # every documented column is present and populated per row
+        assert header == [
+            "source", "target", "weight", "color", "nt_type", "nt_group",
+            "source_group", "target_group", "custom_groups", "ratio", "probability",
+        ]
+        for r in rows[1:]:
+            assert r[3].startswith("#"), f"color not a hex string: {r[3]}"
+            assert r[6] in ("source", "intermediate", "target"), r[6]
+            assert r[7] in ("source", "intermediate", "target"), r[7]
+            if r[4]:  # an nt_type implies a consistent nt_group
+                assert r[5] in ("excitatory", "inhibitory", "modulatory", "unknown")
+
+
+# =============================================================================
+# Net-Viz must accept the EXPANDED edge list (same 11 columns the in-HTML
+# Edge List CSV export writes) and reconstruct the same network.
+# =============================================================================
+
+class TestExpandedEdgeListReimport:
+    """Feeding the expanded Edge List CSV back into VisualizePath recreates
+    the same edges, metrics, NT types and node classification."""
+
+    ALLPATHS = (
+        PROJECT_ROOT / "local_data" / "scratch_shortest_smoke"
+        / "findallpath_crosscheck" / "aMe12_to_PPL101_etc_allpaths_type.csv"
+    )
+
+    def _expanded_csv_from_pathfinding(self, tmp_path):
+        """Build the expanded CSV exactly as the in-HTML export would."""
+        vp = VisualizePath(
+            path_file=str(self.ALLPATHS),
+            output_folder=str(tmp_path / "orig"),
+            showfig=False,
+            verbose=False,
+        )
+        conn_df, G = vp.build_network()
+        has_nt = "nt_type" in conn_df.columns
+        rows = []
+        for _, r in conn_df.iterrows():
+            nt = r["nt_type"] if has_nt and pd.notna(r["nt_type"]) else ""
+            rows.append({
+                "source": r["source"],
+                "target": r["target"],
+                "weight": r["weight"],
+                "color": "#646464",
+                "nt_type": nt,
+                "nt_group": "",
+                "source_group": G.nodes[r["source"]].get("node_type", "intermediate"),
+                "target_group": G.nodes[r["target"]].get("node_type", "intermediate"),
+                "custom_groups": "",
+                "ratio": r["ratio"] if pd.notna(r["ratio"]) else "",
+                "probability": r["probability"] if pd.notna(r["probability"]) else "",
+            })
+        csv_path = tmp_path / "expanded_edge_list.csv"
+        pd.DataFrame(rows).to_csv(csv_path, index=False)
+        return conn_df, G, csv_path
+
+    def test_pathfinding_export_reimports_identically(self, tmp_path):
+        assert self.ALLPATHS.exists(), f"missing pathfinding fixture: {self.ALLPATHS}"
+        conn_df, G, csv_path = self._expanded_csv_from_pathfinding(tmp_path)
+
+        vp2 = VisualizePath(
+            path_file=str(csv_path),
+            output_folder=str(tmp_path / "reimport"),
+            showfig=False,
+            verbose=False,
+        )
+        conn2, G2 = vp2.build_network()
+
+        # same edge set with the same weights
+        assert len(conn2) == len(conn_df)
+        exported = {(s, t, float(w)) for s, t, w in
+                    zip(conn2["source"], conn2["target"], conn2["weight"])}
+        expected = {(s, t, float(w)) for s, t, w in
+                    zip(conn_df["source"], conn_df["target"], conn_df["weight"])}
+        assert exported == expected
+
+        # ratio/probability metrics survive the round trip
+        assert "ratio" in conn2.columns and conn2["ratio"].notna().sum() == len(conn_df)
+        assert "probability" in conn2.columns and conn2["probability"].notna().sum() == len(conn_df)
+
+        # node classification is restored from source_group/target_group
+        # (a plain edge list would classify EVERY node as "source")
+        for node in G.nodes():
+            assert G2.nodes[node]["node_type"] == G.nodes[node]["node_type"], node
+        counts = {t for t in (G2.nodes[n]["node_type"] for n in G2.nodes())}
+        assert counts == {"source", "intermediate", "target"}
+
+    def test_nt_type_and_grouping_columns_accepted(self, tmp_path):
+        """A populated nt_type column (plus the grouping columns) survives."""
+        df = pd.DataFrame({
+            "source": ["S", "A", "B"],
+            "target": ["A", "B", "T"],
+            "weight": [10, 20, 30],
+            "color": ["#FF0000", "#00FF00", "#0000FF"],
+            "nt_type": ["acetylcholine", "gaba", "dopamine"],
+            "nt_group": ["excitatory", "inhibitory", "modulatory"],
+            "source_group": ["source", "intermediate", "intermediate"],
+            "target_group": ["intermediate", "intermediate", "target"],
+            "custom_groups": ["", "", ""],
+            "ratio": [0.5, 0.4, 0.3],
+            "probability": [0.9, 0.8, 0.7],
+        })
+        vp = VisualizePath(
+            path_file=df,
+            output_folder=str(tmp_path),
+            showfig=False,
+            verbose=False,
+        )
+        conn, G = vp.build_network()
+
+        # aggregation may reorder rows; compare per-edge and as a set
+        assert set(conn["nt_type"]) == {"acetylcholine", "gaba", "dopamine"}
+        nt_by_edge = {
+            (s, t): nt for s, t, nt in
+            zip(conn["source"], conn["target"], conn["nt_type"])
+        }
+        assert nt_by_edge == {("S", "A"): "acetylcholine",
+                              ("A", "B"): "gaba",
+                              ("B", "T"): "dopamine"}
+        assert G.nodes["S"]["node_type"] == "source"
+        assert G.nodes["T"]["node_type"] == "target"
+        assert G.nodes["A"]["node_type"] == "intermediate"
+        assert G.nodes["B"]["node_type"] == "intermediate"
+        # grouping info columns never leak into conn_df as metrics
+        assert "nt_group" not in conn.columns
+        assert "custom_groups" not in conn.columns
 
 
 # =============================================================================

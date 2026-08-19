@@ -86,16 +86,15 @@ KC.*</code></pre>
     connection matrices - is in the
     <a href="network.html#input-files">Network guide</a>.</p>
 
-  <h2>Layer mapping CSV (3D skeleton, optional)</h2>
-  <p>Each row maps a neuron to a display layer. Columns:
-    <code>group</code> and <code>id_type_instance</code>.</p>
-  <div class="example">
-    <div class="example-title">Example layer_map.csv</div>
-    <pre><code>group,id_type_instance
-Input,aMe12
-Input,aMe10
-Output,MBON01</code></pre>
-  </div>
+  <h2>Neuron layers (3D skeleton)</h2>
+  <p>The Skeleton tab arranges neurons into display layers with the
+    built-in <b>layer tree editor</b> — no CSV upload needed. Drag layer
+    rows to reorder them and drag neuron chips between layers; each layer
+    accepts types, instances, bodyIds or regex patterns, and an optional
+    custom name. The editor serializes to the same nested-list format the
+    script-level <code>layer_map_csv</code> parser produces, so a scene
+    built in the UI is identical to one built from a mapping file.
+    See the <a href="skeleton.html">3D Skeleton guide</a>.</p>
 
   <div class="callout warn">
     <b>Common mistakes</b>

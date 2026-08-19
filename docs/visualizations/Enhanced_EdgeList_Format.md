@@ -44,6 +44,28 @@ All numeric columns (excluding source, target, and color columns) are automatica
 - CSV files (`.csv`)
 - Excel files (`.xlsx`, `.xls`)
 
+### 4. Expanded Export Columns (CSV Round-Trip)
+
+The **📋 Edge List CSV** export in the network HTML writes an expanded edge
+list with these exact columns:
+
+```
+source, target, weight, color, nt_type, nt_group, source_group,
+target_group, custom_groups, ratio, probability
+```
+
+Re-importing that CSV (Net-Viz tab or `VisualizePath` directly) rebuilds the
+same network:
+
+| Column | Handling |
+| ------ | -------- |
+| `source` / `target` / `weight` | Edges of the network |
+| `color` | Per-edge color (hex or rgba) |
+| `nt_type` | Neurotransmitter type; drives NT edge groups (empty = unknown) |
+| `source_group` / `target_group` | Restores the `source` / `intermediate` / `target` classification of each endpoint node. Without them every node of a plain edge list is classified as *source* |
+| `ratio` / `probability` | Mapped to `connection_ratios` / `traversal_probabilities` (toggleable) |
+| `nt_group` / `custom_groups` | Informational; accepted and ignored (NT grouping is re-derived from `nt_type`) |
+
 ## Usage Examples
 
 ### Example 1: Basic Format

@@ -1749,6 +1749,18 @@ def number_input(
         max=max_val,
         step=step,
     ).classes("w-full drocat-input")
+    # A cleared field yields None, which crashes the int()/float()
+    # coercions in run handlers; restore the last valid value instead so
+    # every consumer keeps receiving a number.
+    _last_valid = {"value": value}
+
+    def _restore_last_valid(event):
+        if event.value is None:
+            inp.set_value(_last_valid["value"])
+        else:
+            _last_valid["value"] = event.value
+
+    inp.on_value_change(_restore_last_valid)
     if hint:
         inp.tooltip(hint)
     return inp

@@ -1,0 +1,1278 @@
+"""
+DROCAT exported run user guide.
+
+After every successful UI run, a ``_UserGuide_please_read_me`` file is
+written into the run's output folder. It describes every file in the run
+folder, every column of the exported tables (via a shared, score/metric
+directed column glossary), and renders the run's ``user_warning_notes.txt``
+content when present.
+
+One content model (``TOOL_GUIDE_SPECS`` + ``COLUMN_GLOSSARY``) drives three
+renderers (HTML, Markdown, plain text), so the descriptions never diverge
+between formats. The format is configurable in Settings → Default Settings
+("Run Guide Format"): ``html`` (default), ``txt``, ``markdown`` or
+``disabled``. The ``DROCAT_RUN_GUIDE_FORMAT`` environment variable overrides
+the setting (used by tests and scripts for determinism).
+"""
+
+import fnmatch
+import html
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+GUIDE_BASENAME = "_UserGuide_please_read_me"
+GUIDE_FORMAT_ENV = "DROCAT_RUN_GUIDE_FORMAT"
+GUIDE_FORMATS = ("html", "txt", "markdown", "disabled")
+GUIDE_EXTENSIONS = {"html": ".html", "txt": ".txt", "markdown": ".md"}
+
+WARNING_FILENAME = "user_warning_notes.txt"
+NO_WARNINGS_TEXT = "No warnings were recorded for this run."
+
+
+# =============================================================================
+# Column glossary — every repeated column is described exactly once.
+# Values are (description, value type/range).
+# =============================================================================
+
+COLUMN_GLOSSARY = {
+    # --- Identifiers ---------------------------------------------------------
+    "bodyId": ("Unique numeric neuron identifier.", "integer"),
+    "instance": ("Instance (individual) name of the neuron.", "text"),
+    "type": ("Neuron type name.", "text"),
+    "type_pre": ("Presynaptic (source) neuron type of the edge.", "text"),
+    "type_post": ("Postsynaptic (target) neuron type of the edge.", "text"),
+    "source": ("Edge source neuron type.", "text"),
+    "target": ("Edge target neuron type.", "text"),
+    "edge_key": ("Canonical edge identifier: 'source -> target'.", "text"),
+    "group": ("Custom query group the neuron belongs to.", "text"),
+    "dataset": ("Dataset the record comes from.", "text"),
+    "direction": ("Synaptic direction relative to the query: upstream or downstream.", "text"),
+    "partner_type": ("Partner neuron type in a connectivity profile.", "text"),
+    "neuron_type": ("Neuron type owning the profile row.", "text"),
+    "query": ("Query neuron/type the row belongs to.", "text"),
+    "line": ("Driver line name.", "text"),
+    "source_line": ("Driver line that produced the match.", "text"),
+    # --- Synapse counts / edge scores ----------------------------------------
+    "pre": ("Number of presynaptic sites of the neuron.", "integer"),
+    "post": ("Number of postsynaptic sites of the neuron.", "integer"),
+    "downstream": ("Downstream synapse count (NeuPrint synapse category).", "integer"),
+    "upstream": ("Upstream synapse count (NeuPrint synapse category).", "integer"),
+    "synweight": ("Synapse weight of the neuron (post + downstream).", "number"),
+    "weight": ("Synapse count of the connection.", "integer"),
+    "weights": ("Per-edge synapse counts along the path.", "list of integers"),
+    "weight_a": ("Partner weight in profile A (query).", "number"),
+    "weight_b": ("Partner weight in profile B (candidate).", "number"),
+    "weight_L": ("Edge weight on the left hemisphere (L-L or L-R pairing).", "integer"),
+    "weight_R": ("Edge weight on the right hemisphere (R-R or R-L pairing).", "integer"),
+    "weight_LR": ("Weight of the left-to-right counterpart edge.", "integer"),
+    "weight_RL": ("Weight of the right-to-left counterpart edge.", "integer"),
+    "diff": ("Absolute weight difference between the paired hemisphere edges.", "integer"),
+    "ratio": ("Strength ratio of the paired hemisphere edges.", "number"),
+    "present_LR": ("Left-to-right edge present.", "boolean"),
+    "present_RL": ("Right-to-left edge present.", "boolean"),
+    "total_weight": ("Total connection weight of the layer/path group.", "number"),
+    # --- Connection scores ----------------------------------------------------
+    "connection_ratio": (
+        "Fraction of the postsynaptic neuron's input coming from this "
+        "partner: weight / postsynaptic total.", "0-1"),
+    "ratios": ("Per-edge connection ratios along the path.", "list of 0-1"),
+    "min_ratio": ("Smallest edge connection ratio along the path.", "0-1"),
+    "traversal_probability": (
+        "Probability that a signal traverses the edge: "
+        "min(1.0, connection_ratio / 0.3).", "0-1"),
+    "probabilities": ("Per-edge traversal probabilities along the path.", "list of 0-1"),
+    "block_probability": ("Probability the signal is blocked: 1 - traversal_probability.", "0-1"),
+    "path": ("Path as a neuron-type sequence, e.g. aMe12 → SMP238 → PPL101.", "text"),
+    "path_prob": ("Overall path probability (product of edge traversal probabilities).", "0-1"),
+    "min_weight": ("Smallest edge weight along the path.", "integer"),
+    "length": ("Number of hops (edges) in the path.", "integer"),
+    "nt_type": ("Predicted neurotransmitter type (ACh, GABA, glutamate, ...).", "text"),
+    "nt_types": ("Neurotransmitter types along the path.", "text"),
+    "conn_layer": ("Layer transition label of the connection, e.g. '0->1'.", "text"),
+    "probability": ("Edge traversal probability.", "0-1"),
+    # --- Enrollment / status flags --------------------------------------------
+    "isInPath": ("Whether the source neuron participates in at least one found path.", "boolean"),
+    "Checked": ("Whether the target neuron was reached/checked during traversal.", "boolean"),
+    "Layer": ("Traversal layer at which the target neuron was reached.", "integer"),
+    "viz_layer": ("Layer index assigned to the neuron in the 3D visualization.", "integer"),
+    "status": ("Resolution/match status label.", "text"),
+    "source_status": ("Resolution status of the source neuron profile.", "text"),
+    "target_status": ("Resolution status of the target neuron profile.", "text"),
+    "weak_source": ("Source profile has fewer than the minimum partner types.", "boolean"),
+    "weak_target": ("Target profile has fewer than the minimum partner types.", "boolean"),
+    "source_partner_count": ("Number of partners in the source profile.", "integer"),
+    "target_partner_count": ("Number of partners in the target profile.", "integer"),
+    "in_a": ("Partner is present in profile A (query).", "boolean"),
+    "in_b": ("Partner is present in profile B (candidate).", "boolean"),
+    "rank": ("Row rank (1 = best).", "integer"),
+    "rank_a": ("Rank of the partner within profile A.", "integer"),
+    "rank_b": ("Rank of the partner within profile B.", "integer"),
+    "is_same_type": ("Source and target share the same neuron type.", "boolean"),
+    "is_same_dataset": ("Source and target come from the same dataset.", "boolean"),
+    "is_intra_type": ("The candidate is the same type as the query.", "boolean"),
+    "conserved": ("Edge exists on both compared sides/conditions.", "boolean"),
+    "present_L": ("Edge present on the left side.", "boolean"),
+    "present_R": ("Edge present on the right side.", "boolean"),
+    "note": ("Free-text annotation (e.g. why an edge is unconserved).", "text"),
+    # --- Profile similarity metrics --------------------------------------------
+    "jaccard": ("Jaccard similarity of the two partner sets.", "0-1"),
+    "weighted_jaccard": ("Score-weighted Jaccard similarity.", "0-1"),
+    "cosine": ("Cosine similarity of the partner-weight vectors.", "0-1"),
+    "rank_corr": (
+        "Spearman rank correlation of partner weights, normalized to 0-1 "
+        "((raw + 1) / 2).", "0-1"),
+    "rank_corr_raw": ("Raw Spearman rank correlation of partner weights.", "-1 to 1"),
+    "rank_union": (
+        "Spearman rank correlation computed over the union of both partner "
+        "sets.", "-1 to 1"),
+    "combined": ("Weighted combination of the individual similarity metrics.", "0-1"),
+    "similarity": ("Overall similarity score used for sorting.", "0-1"),
+    "profile_similarity": ("Connectivity-profile similarity component.", "0-1"),
+    "roi_similarity": ("ROI overlap similarity component.", "0-1"),
+    "intra_type_similarity": ("Similarity restricted to same-type candidates.", "0-1"),
+    "method": ("Similarity method used (vector / nblast).", "text"),
+    "metric": ("Distance metric used (cosine / pearson).", "text"),
+    "morph_cosine": ("Morphology vector cosine similarity (when enrichment ran).", "0-1"),
+    "morph_pearson": ("Morphology vector Pearson correlation (when enrichment ran).", "-1 to 1"),
+    "adjacency_score": ("Direct adjacency (synaptic contact) score between the pair.", "number"),
+    "shared_type_count": ("Number of partner types shared by both profiles.", "integer"),
+    "union_type_count": ("Number of unique partner types across both profiles.", "integer"),
+    # --- Type-level aggregates --------------------------------------------------
+    "avg_rank_corr": ("Mean rank_corr over all bodyId pairs of the type pair.", "0-1"),
+    "avg_jaccard": ("Mean jaccard over all bodyId pairs of the type pair.", "0-1"),
+    "avg_combined": ("Mean combined score over all bodyId pairs of the type pair.", "0-1"),
+    "avg_rank_union": ("Mean rank_union over all bodyId pairs of the type pair.", "-1 to 1"),
+    "avg_cosine": ("Mean cosine over all bodyId pairs of the type pair.", "0-1"),
+    "avg_adjacency_score": ("Mean adjacency score over all bodyId pairs.", "number"),
+    "avg_shared_type_count": ("Mean shared partner-type count.", "number"),
+    "avg_union_type_count": ("Mean union partner-type count.", "number"),
+    "n_bodyid_comparisons": ("Number of bodyId-vs-bodyId comparisons aggregated.", "integer"),
+    "n_bodyids": ("Number of bodyIds of the candidate type.", "integer"),
+    "n_complete_sources": ("Source bodyIds with complete profiles.", "integer"),
+    "n_incomplete_sources": ("Source bodyIds with incomplete profiles.", "integer"),
+    "source_dataset": ("Dataset of the query/source neurons.", "text"),
+    "target_dataset": ("Dataset of the candidate/target neurons.", "text"),
+    "source_bodyId": ("BodyId of the source neuron.", "integer"),
+    "source_type": ("Type of the source neuron.", "text"),
+    "target_bodyId": ("BodyId of the candidate neuron.", "integer"),
+    "target_type": ("Type of the candidate neuron.", "text"),
+    "target_instance": ("Instance name of the candidate neuron.", "text"),
+    "anchor": ("Anchor type name the mapping row was resolved from.", "text"),
+    "same name": ("The dataset uses the identical type name (no mapping needed).", "boolean"),
+    # --- Cross-dataset comparison ------------------------------------------------
+    "threshold": ("Minimum synapse threshold applied.", "integer"),
+    "conservation": ("Number/fraction of datasets in which the edge is present.", "text"),
+    "conserved_at_lowest": ("Edge present in every dataset at the lowest threshold.", "boolean"),
+    "jaccard_similarity": ("Jaccard similarity of the two datasets' edge sets.", "0-1"),
+    "ruzicka_similarity": ("Ruzicka (weighted Jaccard) similarity of edge weights.", "0-1"),
+    "pearson_correlation": ("Pearson correlation of matched edge weights.", "-1 to 1"),
+    "edges_in_d1": ("Number of edges in dataset 1.", "integer"),
+    "edges_in_d2": ("Number of edges in dataset 2.", "integer"),
+    "common_edges": ("Number of edges present in both datasets.", "integer"),
+    "union_edges": ("Number of unique edges across both datasets.", "integer"),
+    "unique_to_d1": ("Edges present only in dataset 1.", "integer"),
+    "unique_to_d2": ("Edges present only in dataset 2.", "integer"),
+    "edge_rank_correlation": ("Spearman correlation of edge-weight ranks.", "-1 to 1"),
+    "cosine_similarity": ("Cosine similarity of edge-weight vectors.", "0-1"),
+    "path_rank_correlation": ("Spearman correlation of path-probability ranks.", "-1 to 1"),
+    "spearman_rank_correlation": ("Spearman rank correlation of the compared values.", "-1 to 1"),
+    "rv_coefficient": ("RV coefficient (multivariate correlation) of the edge matrices.", "0-1"),
+    "dataset_1": ("First dataset of the pairwise comparison.", "text"),
+    "dataset_2": ("Second dataset of the pairwise comparison.", "text"),
+    # --- Dataset metadata ---------------------------------------------------------
+    "total_neurons": ("Total number of neurons in the dataset.", "integer"),
+    "typed_neurons": ("Number of neurons with a type assignment.", "integer"),
+    "untyped_neurons": ("Number of neurons without a type assignment.", "integer"),
+    "type_coverage_pct": ("Fraction of neurons that are typed.", "percent"),
+    "total_presynaptic": ("Total presynaptic site count.", "integer"),
+    "total_postsynaptic": ("Total postsynaptic site count.", "integer"),
+    "total_synapses": ("Total synapse count.", "integer"),
+    "roi_count": ("Number of ROI regions covered.", "integer"),
+    "coverage_notes": ("Free-text coverage/caveat notes.", "text"),
+    "base_pre": ("Hemisphere-neutral (suffix-stripped) presynaptic type.", "text"),
+    "base_post": ("Hemisphere-neutral (suffix-stripped) postsynaptic type.", "text"),
+    # --- NeuronBridge ---------------------------------------------------------------
+    "score": (
+        "NeuronBridge match score; higher means a better EM↔LM match "
+        "(typical range 0-50000).", "number"),
+    "image_id": ("Identifier of the matched light-microscopy image.", "text"),
+    "lm_sample": ("Light-microscopy sample identifier.", "text"),
+    "match_type": ("Match algorithm that produced the score (cds / pppm).", "text"),
+    "library": ("Driver-line library (e.g. Split-GAL4, GAL4/LexA).", "text"),
+    "canonical_type": ("Cross-dataset standardized (canonical) type name.", "text"),
+    "best_max_score": ("Highest max score across datasets for the canonical type.", "number"),
+    "total_labeled_N": ("Total number of labeled neurons across datasets.", "integer"),
+    "n_neurons": ("Number of matched neurons for the line.", "integer"),
+    "n_types": ("Number of distinct neuron types matched.", "integer"),
+    "mean_score": ("Mean NeuronBridge score of the matched neurons.", "number"),
+    "max_score": ("Best NeuronBridge score among the matched neurons.", "number"),
+    "n_neurons_HMS": ("Neurons with a high match score (above the high cutoff).", "integer"),
+    "n_types_HMS": ("Types with a high match score.", "integer"),
+    "n_neurons_MS": ("Neurons above the minimum score cutoff.", "integer"),
+    "n_types_MS": ("Types above the minimum score cutoff.", "integer"),
+    "Qf": ("Quality factor of the line labeling.", "number"),
+    "colabel_sparsity": ("Sparsity of the line's co-labeling pattern.", "number"),
+    "labeled_N": ("Number of labeled neurons of the type.", "integer"),
+    "avg_score": ("Average NeuronBridge score of the matched neurons.", "number"),
+    "median_score": ("Median NeuronBridge score of the matched neurons.", "number"),
+    "Q1_score": ("First-quartile NeuronBridge score of the matched neurons.", "number"),
+    "Q3_score": ("Third-quartile NeuronBridge score of the matched neurons.", "number"),
+    "typed_N_in_dataset": ("Number of typed neurons in the dataset.", "integer"),
+    "_passes_min_score": ("Whether the match passes the run's min_score cutoff.", "boolean"),
+}
+
+
+def glossary_entry(column: str) -> tuple:
+    """Return (description, range) for a column, with a safe fallback."""
+    return COLUMN_GLOSSARY.get(
+        column, ("(see docs/OUTPUT_FILES.md)", ""))
+
+
+# =============================================================================
+# Per-tool file specifications. Each entry describes one file (or a glob of
+# files) in the run folder. ``columns`` reference COLUMN_GLOSSARY keys;
+# ``matrix`` marks matrix-style tables whose axes, not columns, carry meaning.
+# =============================================================================
+
+_NEURON_TABLE_NOTE = (
+    "plus the full NeuPrint neuron-table columns (size, status, soma side, "
+    "cross-dataset type names, ...)"
+)
+
+_PATH_COLUMNS = [
+    "path", "weights", "probabilities", "ratios", "min_weight",
+    "path_prob", "min_ratio", "length", "nt_types",
+]
+
+_CONNECTION_TYPE_COLUMNS = [
+    "type_pre", "type_post", "weight", "connection_ratio",
+    "traversal_probability", "block_probability", "nt_type",
+]
+
+_HOMOLOG_RESULT_COLUMNS = [
+    "source_bodyId", "source_type", "target_bodyId", "target_type",
+    "target_dataset", "adjacency_score", "shared_type_count",
+    "union_type_count", "rank_corr", "rank_corr_raw", "rank_union",
+    "jaccard", "weighted_jaccard", "cosine", "combined", "is_same_type",
+    "is_same_dataset", "source_status", "target_status", "weak_source",
+    "weak_target", "source_partner_count", "target_partner_count",
+]
+
+_FIND_NETWORK = {
+    "title": "Find Network",
+    "summary": (
+        "Direct connections among the neurons matching one query set "
+        "(patterns supported)."
+    ),
+    "files": [
+        {"pattern": "data_details/connection_type.csv",
+         "description": "Direct connections aggregated by type pair.",
+         "columns": _CONNECTION_TYPE_COLUMNS},
+        {"pattern": "data_details/neurons.csv",
+         "description": "The resolved neuron set. Key columns: bodyId, "
+                        "instance, type, pre, post — " + _NEURON_TABLE_NOTE},
+        {"pattern": "data_details/parameters.csv",
+         "description": "Run parameters as a table."},
+        {"pattern": "parameters.txt",
+         "description": "Human-readable record of all run parameters."},
+        {"pattern": "all_attributes.json",
+         "description": "Serialized run attributes (machine-readable)."},
+        {"pattern": WARNING_FILENAME,
+         "description": "Warnings/notes collected during the run "
+                        "(rendered in the Warnings section above)."},
+        {"pattern": "visualization/Network_*.html",
+         "description": "Interactive network graph of the found connections."},
+        {"pattern": "visualization/Heatmap_*.html",
+         "description": "Connection weight heatmap."},
+        {"pattern": "visualization/visualization_data/*_data_connections.csv",
+         "description": "Edge list backing the HTML visualizations.",
+         "columns": ["source", "target", "weight", "ratio", "probability",
+                     "nt_type"]},
+        {"pattern": "visualization/visualization_data/*_data_original_paths.csv",
+         "description": "Original path records backing the HTML files."},
+        {"pattern": "visualization/visualization_data/network_edges_input.csv",
+         "description": "Input edge list used to build the network.",
+         "columns": ["source", "target", "weight"]},
+    ],
+}
+
+_PATHFINDING_FILES = [
+    {"pattern": "*_allpaths_type.csv",
+     "description": "Primary path table (type-level, UI default).",
+     "columns": _PATH_COLUMNS},
+    {"pattern": "*_allpaths_bodyId_paths.csv",
+     "description": "BodyId-level path table (written when Skip BodyId is "
+                    "off). Same score columns plus bodyId-level endpoints.",
+     "columns": _PATH_COLUMNS},
+    {"pattern": "source_neurons.csv",
+     "description": "Resolved source neurons. Key columns: isInPath, bodyId, "
+                    "instance, type, pre, post — " + _NEURON_TABLE_NOTE,
+     "columns": ["isInPath"]},
+    {"pattern": "target_neurons.csv",
+     "description": "Resolved target neurons. Key columns: Checked, Layer, "
+                    "bodyId, instance, type — " + _NEURON_TABLE_NOTE,
+     "columns": ["Checked", "Layer"]},
+    {"pattern": "all_attributes.json",
+     "description": "Serialized run attributes (machine-readable)."},
+    {"pattern": "parameters.txt",
+     "description": "Human-readable record of all run parameters."},
+    {"pattern": WARNING_FILENAME,
+     "description": "Warnings/notes collected during the run (rendered in "
+                    "the Warnings section above)."},
+    {"pattern": "data_details/connection_type.csv",
+     "description": "Edges aggregated by type pair.",
+     "columns": _CONNECTION_TYPE_COLUMNS},
+    {"pattern": "data_details/conn_mat_type_weight.csv",
+     "description": "Type-level edge-weight matrix.",
+     "matrix": "rows/columns = neuron types, values = synapse counts"},
+    {"pattern": "data_details/conn_mat_type_ratio.csv",
+     "description": "Type-level connection-ratio matrix.",
+     "matrix": "rows/columns = neuron types, values = connection_ratio"},
+    {"pattern": "data_details/conn_mat_type_prob.csv",
+     "description": "Type-level traversal-probability matrix.",
+     "matrix": "rows/columns = neuron types, values = traversal_probability"},
+    {"pattern": "data_details/conn_mat_type_nt.csv",
+     "description": "Type-level neurotransmitter matrix.",
+     "matrix": "rows/columns = neuron types, values = nt_type"},
+    {"pattern": "data_details/neurons_included.csv",
+     "description": "All neurons participating in the found connections.",
+     "columns": ["group", "bodyId", "type", "instance", "nt_type"]},
+    {"pattern": "data_details/total_weight_layer.csv",
+     "description": "Total weight per intermediate layer.",
+     "columns": ["conn_layer", "weight"]},
+    {"pattern": "data_details/parameters.csv",
+     "description": "Run parameters as a table."},
+    {"pattern": "data_details/connection_info_bodyId.csv",
+     "description": "BodyId-level edge table (written when Skip BodyId is "
+                    "off)."},
+    {"pattern": "visualization/Network_*.html",
+     "description": "Interactive network graph of the found paths."},
+    {"pattern": "visualization/Heatmap_*.html",
+     "description": "Connection weight heatmap."},
+    {"pattern": "visualization/Sankey_*.html",
+     "description": "Sankey flow diagram of the pathways."},
+    {"pattern": "visualization/visualization_data/*_data_connections.csv",
+     "description": "Edge list backing the HTML visualizations.",
+     "columns": ["source", "target", "weight", "ratio", "probability",
+                 "nt_type"]},
+    {"pattern": "visualization/visualization_data/*_data_original_paths.csv",
+     "description": "Original path records backing the HTML files."},
+    {"pattern": "hemisphere_symmetry/symmetry_summary.json",
+     "description": "Ipsilateral/contralateral Jaccard and conserved/union "
+                    "counts (when Symmetry Analysis is on)."},
+    {"pattern": "hemisphere_symmetry/symmetry_ipsi.csv",
+     "description": "L-L vs R-R edge comparisons.",
+     "columns": ["base_pre", "base_post", "weight_L", "weight_R",
+                 "present_L", "present_R", "conserved", "ratio"]},
+    {"pattern": "hemisphere_symmetry/symmetry_contra.csv",
+     "description": "L-R vs R-L edge comparisons.",
+     "columns": ["base_pre", "base_post", "weight_LR", "weight_RL",
+                 "present_LR", "present_RL", "conserved", "ratio"]},
+    {"pattern": "hemisphere_symmetry/conserved_edges.csv",
+     "description": "Edges conserved across hemispheres.",
+     "columns": ["base_pre", "base_post", "type", "note"]},
+    {"pattern": "hemisphere_symmetry/unconserved_edges.csv",
+     "description": "Edges not conserved across hemispheres.",
+     "columns": ["base_pre", "base_post", "type", "note"]},
+    {"pattern": "hemisphere_symmetry/pairwise_strength.csv",
+     "description": "Weight comparisons for matched hemisphere edge pairs.",
+     "columns": ["base_pre", "base_post", "type", "weight_L", "weight_R",
+                 "diff", "ratio", "weight_LR", "weight_RL"]},
+    {"pattern": "hemisphere_symmetry/type_counts_by_role.csv",
+     "description": "Per-type source/intermediate/target counts."},
+    {"pattern": "find_reciprocal/reciprocal_connection_type.csv",
+     "description": "Type-level reciprocal connections (when Find Reciprocal "
+                    "is on).",
+     "columns": _CONNECTION_TYPE_COLUMNS},
+    {"pattern": "find_reciprocal/reciprocal_type_network.html",
+     "description": "Reciprocal network visualization."},
+    {"pattern": "find_reciprocal/reciprocal_type_heatmap.html",
+     "description": "Reciprocal heatmap visualization."},
+    {"pattern": "find_reciprocal/parameters.csv",
+     "description": "Reciprocal-analysis parameters."},
+]
+
+# Symmetry columns also appear as base_pre/base_post pairs (defined in the
+# glossary above).
+
+_HOMOLOG_FILES = [
+    {"pattern": "results/homolog_results.csv",
+     "description": "Full type-level results with all similarity columns, "
+                    "sorted by the chosen metric.",
+     "columns": _HOMOLOG_RESULT_COLUMNS + ["morph_cosine", "morph_pearson"]},
+    {"pattern": "results/bodyid_results.csv",
+     "description": "BodyId-level results (sorted by source, then metric).",
+     "columns": [
+         "source_bodyId", "source_type", "target_bodyId", "target_type",
+         "combined", "rank_corr", "rank_corr_raw", "rank_union", "jaccard",
+         "cosine", "adjacency_score", "shared_type_count",
+         "union_type_count", "is_same_type", "is_same_dataset",
+         "source_status", "target_status", "weak_source", "weak_target",
+         "source_partner_count", "target_partner_count"]},
+    {"pattern": "results/type_summary.csv",
+     "description": "Aggregated results at the neuron type level.",
+     "columns": [
+         "query", "source_dataset", "target_dataset", "source_type",
+         "target_type", "avg_rank_corr", "n_bodyid_comparisons",
+         "avg_jaccard", "avg_combined", "avg_rank_union", "avg_cosine",
+         "avg_adjacency_score", "avg_shared_type_count",
+         "avg_union_type_count", "n_complete_sources",
+         "n_incomplete_sources"]},
+    {"pattern": "results/source_status_summary.json",
+     "description": "Per-source-neuron status (resolved bodyIds, candidate "
+                    "counts)."},
+    {"pattern": "results/intra_type_results.csv",
+     "description": "Intra-type comparison table (same-dataset similarity "
+                    "searches only).",
+     "columns": _HOMOLOG_RESULT_COLUMNS},
+    {"pattern": "profiles/query/*.csv",
+     "description": "Connectivity profile of the query neuron(s).",
+     "columns": ["neuron_type", "dataset", "direction", "partner_type",
+                 "weight", "rank"]},
+    {"pattern": "profiles/query/source_bodyids.csv",
+     "description": "BodyIds enrolled for the query neuron(s)."},
+    {"pattern": "profiles/matches/*.csv",
+     "description": "Connectivity profiles of the top candidate matches.",
+     "columns": ["neuron_type", "dataset", "direction", "partner_type",
+                 "weight", "rank"]},
+    {"pattern": "profiles/matches/top_target_bodyids.csv",
+     "description": "BodyIds enrolled for the top candidate matches."},
+    {"pattern": "overlaps/*.csv",
+     "description": "Partner overlap details for top candidates (which "
+                    "partners are shared vs unique).",
+     "columns": ["partner_type", "in_a", "in_b", "weight_a", "weight_b",
+                 "rank_a", "rank_b", "status", "direction"]},
+    {"pattern": "README.txt",
+     "description": "Analysis parameters, summary, and column descriptions."},
+]
+
+TOOL_GUIDE_SPECS = {
+    "find_path": {
+        "title": "Complete Paths",
+        "summary": "Multi-hop pathways between source and target neuron "
+                   "groups in a single dataset.",
+        "files": _PATHFINDING_FILES,
+    },
+    "find_shortest": {
+        "title": "Shortest Paths",
+        "summary": "Minimum-hop paths between source and target neuron "
+                   "groups (all ties kept).",
+        "files": _PATHFINDING_FILES,
+    },
+    "find_network": _FIND_NETWORK,
+    "plot3d_skeleton": {
+        "title": "3D Skeleton Visualization",
+        "summary": "3D visualization of neuron skeletons, synapses, and ROI "
+                   "meshes.",
+        "files": [
+            {"pattern": "*.html",
+             "description": "The interactive 3D scene. Open in a web browser "
+                            "to view neurons, synapses, and ROIs."},
+            {"pattern": "*_neuron_info.csv",
+             "description": "Merged neuron metadata table for all layers. "
+                            "Key columns: viz_layer, bodyId, instance, type, "
+                            "pre, post — " + _NEURON_TABLE_NOTE,
+             "columns": ["viz_layer"]},
+            {"pattern": "parameters.txt",
+             "description": "Visualization parameters (colors, alphas, "
+                            "modes, backend, ...)."},
+            {"pattern": WARNING_FILENAME,
+             "description": "Notes/warnings collected during rendering "
+                            "(rendered in the Warnings section above)."},
+            {"pattern": "*.png",
+             "description": "Exported screenshots (when Export Views is on)."},
+            {"pattern": "*.gif",
+             "description": "Exported rotating animation (when Export Video "
+                            "is on)."},
+            {"pattern": "*.mp4",
+             "description": "Exported rotating video (when Export Video is "
+                            "on)."},
+        ],
+    },
+    "plot_path": {
+        "title": "Net-Viz (Path Network Visualization)",
+        "summary": "Pathway graphs rendered from Complete Paths outputs or a "
+                   "custom edge-list CSV.",
+        "files": [
+            {"pattern": "*_network.html",
+             "description": "Interactive pathway graph."},
+            {"pattern": "*_heatmap.html",
+             "description": "Edge weight heatmap."},
+            {"pattern": "*_Sankey.html",
+             "description": "Sankey flow diagram."},
+            {"pattern": "*_data.xlsx",
+             "description": "Data workbook with sheets: connections, "
+                            "original_paths, connMatrix_weight, "
+                            "connMatrix_ratio, connMatrix_prob (plus "
+                            "connMatrix_nt_type when the input carries "
+                            "neurotransmitter data)."},
+        ],
+    },
+    "find_homologs": {
+        "title": "Homolog Finding",
+        "summary": "Potential homologs across (or within) datasets, found by "
+                   "connectivity-profile similarity.",
+        "files": _HOMOLOG_FILES,
+    },
+    "find_similar_profile": {
+        "title": "Connection Profile Similarity",
+        "summary": "Connectivity-similar neurons within one dataset (same "
+                   "engine as Homolog Finding).",
+        "files": _HOMOLOG_FILES,
+    },
+    "find_similar_morphology": {
+        "title": "Morphological Similarity",
+        "summary": "Morphologically similar neurons found by skeleton "
+                   "comparison.",
+        "files": [
+            {"pattern": "results.csv",
+             "description": "BodyId-level similarity results.",
+             "columns": [
+                 "rank", "source_bodyId", "source_type", "target_bodyId",
+                 "target_type", "target_instance", "profile_similarity",
+                 "roi_similarity", "similarity", "is_same_type",
+                 "intra_type_similarity", "method", "metric"]},
+            {"pattern": "type_summary.csv",
+             "description": "Type-level summary.",
+             "columns": [
+                 "rank", "target_type", "similarity", "n_bodyids",
+                 "profile_similarity", "roi_similarity", "is_intra_type",
+                 "intra_type_similarity", "method", "metric"]},
+            {"pattern": "README.txt",
+             "description": "Run summary and parameter record."},
+        ],
+    },
+    "connectivity_profiling": {
+        "title": "Connectivity Profiling",
+        "summary": "Connectivity profiles and their pairwise similarity "
+                   "within and across datasets.",
+        "files": [
+            {"pattern": "report.html",
+             "description": "Overall HTML report linking every metric and "
+                            "heatmap."},
+            {"pattern": "parameters.json",
+             "description": "All analysis parameters (query, datasets, "
+                            "top_k/top_m, thresholds, metrics)."},
+            {"pattern": "README.txt",
+             "description": "Human-readable summary with the output "
+                            "structure."},
+            {"pattern": "intra_dataset/*/results/similarity_*.csv",
+             "description": "Type-level N×N similarity matrices, one file "
+                            "per direction × metric.",
+             "matrix": "rows/columns = neuron types, values = similarity "
+                       "for the metric/direction in the file name"},
+            {"pattern": "intra_dataset/*/results/bodyid_similarity_*.csv",
+             "description": "BodyId-to-bodyId similarity matrices.",
+             "matrix": "rows/columns = bodyId_type labels, values = "
+                       "similarity"},
+            {"pattern": "intra_dataset/*/results/type_avg_bodyid_similarity_*.csv",
+             "description": "Type similarities averaged from bodyId pairs.",
+             "matrix": "rows/columns = neuron types, values = averaged "
+                       "similarity"},
+            {"pattern": "intra_dataset/*/visualization/heatmap_*.html",
+             "description": "Interactive intra-dataset heatmaps."},
+            {"pattern": "cross_dataset/mapping_summary.csv",
+             "description": "Resolved type names per dataset with same-name "
+                            "flags.",
+             "columns": ["anchor", "same name"]},
+            {"pattern": "cross_dataset/all_types/results/similarity_*.csv",
+             "description": "N×M similarity matrices comparing the queried "
+                            "types across datasets.",
+             "matrix": "rows = types in one dataset, columns = types in the "
+                       "other, values = similarity"},
+            {"pattern": "cross_dataset/all_types/visualization/heatmap_*.html",
+             "description": "Interactive cross-dataset heatmaps."},
+            {"pattern": "profiles/*/aggregated/*_profile.json",
+             "description": "Type-aggregated connectivity profiles."},
+            {"pattern": "profiles/*/individual/*_profile.json",
+             "description": "Individual bodyId connectivity profiles."},
+        ],
+    },
+    "inter_dataset": {
+        "title": "Cross-Dataset Comparison",
+        "summary": "Connectivity pathways compared across multiple datasets.",
+        "files": [
+            {"pattern": "comparison_report.html",
+             "description": "Comprehensive interactive HTML report (summary "
+                            "statistics, per-dataset networks, Sankey "
+                            "comparisons, presence heatmaps)."},
+            {"pattern": "comparison_report.txt",
+             "description": "Plain-text summary of the report."},
+            {"pattern": "parameters.json",
+             "description": "JSON dump of all comparison parameters."},
+            {"pattern": "label_map.json",
+             "description": "Label mappings for source/target neurons across "
+                            "datasets (incl. auto type mapping)."},
+            {"pattern": "dataset_metadata_comparison.csv",
+             "description": "Per-dataset metadata comparison.",
+             "columns": [
+                 "dataset", "total_neurons", "typed_neurons",
+                 "untyped_neurons", "type_coverage_pct", "total_presynaptic",
+                 "total_postsynaptic", "total_synapses", "roi_count",
+                 "coverage_notes"]},
+            {"pattern": "auto_type_mapping.csv",
+             "description": "Cross-dataset type mapping table."},
+            {"pattern": "auto_type_mapping_conflicts.csv",
+             "description": "Conflicting cross-dataset type mappings."},
+            {"pattern": "comparison_report_used_data/*.csv",
+             "description": "Aggregated metrics per dataset backing the "
+                            "report (avg_prob, avg_ratio, edge_count, "
+                            "total_weight, ratio_data_t{N})."},
+            {"pattern": "comparison_results/edge_presence_matrix*.csv",
+             "description": "Edge presence across datasets (one file per "
+                            "threshold). Presence flags, weights, counts and "
+                            "conservation per edge.",
+             "columns": ["edge_key", "source", "target", "conserved_at_lowest"]},
+            {"pattern": "comparison_results/edge_weight_comparison.csv",
+             "description": "Edge weights compared across all datasets."},
+            {"pattern": "comparison_results/path_presence_matrix*.csv",
+             "description": "Path presence across datasets."},
+            {"pattern": "comparison_results/unified_edge_comparison.csv",
+             "description": "Combined edge data: per-dataset weight/presence "
+                            "columns for every edge.",
+             "columns": ["edge_key", "source", "target", "threshold",
+                         "conservation"]},
+            {"pattern": "comparison_results/unified_summary.csv",
+             "description": "Run summary of the unified comparison."},
+            {"pattern": "comparison_results/unique_to_*.csv",
+             "description": "Edges unique to one dataset."},
+            {"pattern": "comparison_results/top_edges_comparison.csv",
+             "description": "Top conserved/divergent edges."},
+            {"pattern": "comparison_results/top_edges_overlap.csv",
+             "description": "Overlap of the top edges across datasets."},
+            {"pattern": "comparison_results/degree_*.csv",
+             "description": "Degree analysis by type (in/out/statistics)."},
+            {"pattern": "comparison_results/neuron_counts_*.csv",
+             "description": "Neuron counts per type and overall."},
+            {"pattern": "comparison_results/motif_analysis.csv",
+             "description": "Network motif analysis."},
+            {"pattern": "comparison_results/threshold_sensitivity.csv",
+             "description": "Threshold sensitivity analysis."},
+            {"pattern": "comparison_results/path_count_comparison.csv",
+             "description": "Path-count comparison across datasets."},
+            {"pattern": "comparison_visualizations/*.png",
+             "description": "Static heatmaps and path-count plots per "
+                            "threshold."},
+            {"pattern": "comparison_visualizations/by_ratio/**",
+             "description": "Connection-ratio heatmaps (PNG + backing CSV)."},
+            {"pattern": "comparison_visualizations/by_probability/**",
+             "description": "Traversal-probability heatmaps (PNG + backing "
+                            "CSV)."},
+            {"pattern": "comparison_visualizations/visualization_data/*.csv",
+             "description": "CSVs backing the HTML report (edge overlap, key "
+                            "findings, overlap matrices, path counts)."},
+            {"pattern": "similarity_matrices/similarity_threshold_*.csv",
+             "description": "Cross-dataset similarity rows per threshold.",
+             "columns": [
+                 "dataset_1", "dataset_2", "jaccard_similarity",
+                 "ruzicka_similarity", "pearson_correlation", "edges_in_d1",
+                 "edges_in_d2", "common_edges", "union_edges", "unique_to_d1",
+                 "unique_to_d2", "edge_rank_correlation", "cosine_similarity",
+                 "path_rank_correlation", "spearman_rank_correlation",
+                 "rv_coefficient", "threshold"]},
+            {"pattern": "conserved_reciprocal_graph/*.html",
+             "description": "Network graph of hemisphere-conserved "
+                            "reciprocal connections (when both options are "
+                            "on)."},
+            {"pattern": "dataset_data/**",
+             "description": "Raw per-dataset FindNeuronConnection runs "
+                            "(one subfolder per dataset/threshold, same "
+                            "layout as Complete Paths, plus "
+                            "connections_edge.csv)."},
+        ],
+    },
+    "nb_find_lines": {
+        "title": "NeuronBridge — Find Driver Lines",
+        "summary": "EM→LM mapping: driver lines matching the queried EM "
+                   "neurons.",
+        "files": [
+            {"pattern": "*_lines.csv",
+             "description": "All matched driver lines with scores.",
+             "columns": ["line", "score", "match_type", "library"]},
+            {"pattern": "line_summary.csv",
+             "description": "Summary statistics per line.",
+             "columns": ["line", "n_neurons", "n_types", "mean_score",
+                         "max_score"]},
+            {"pattern": "gal4_lexa_summary.csv",
+             "description": "GAL4/LexA library summary (when Separate "
+                            "Split-GAL4 is on)."},
+            {"pattern": "split_gal4_summary.csv",
+             "description": "Split-GAL4 library summary (when Separate "
+                            "Split-GAL4 is on)."},
+            {"pattern": "images/**",
+             "description": "Downloaded CDM/FlyLight images (only when "
+                            "image download is enabled)."},
+            {"pattern": "parameters.json",
+             "description": "Analysis parameters."},
+            {"pattern": WARNING_FILENAME,
+             "description": "Notes collected during the run (rendered in "
+                            "the Warnings section above)."},
+        ],
+    },
+    "nb_find_neuron": {
+        "title": "NeuronBridge — Find EM Neurons",
+        "summary": "LM→EM mapping: EM neurons matching a driver line.",
+        "files": [
+            {"pattern": "all_neurons.csv",
+             "description": "Combined matched neurons across all datasets.",
+             "columns": ["bodyId", "dataset", "instance", "type", "status",
+                         "score", "image_id", "lm_sample", "match_type",
+                         "library", "source_line"]},
+            {"pattern": "*_neurons.csv",
+             "description": "Matched neurons for the line (combined and "
+                            "per-dataset).",
+             "columns": ["bodyId", "dataset", "instance", "type", "status",
+                         "score"]},
+            {"pattern": "*_types.csv",
+             "description": "Per-dataset type aggregates of the matches.",
+             "columns": ["type", "labeled_N", "max_score", "median_score",
+                         "Q3_score", "Q1_score", "avg_score",
+                         "typed_N_in_dataset"]},
+            {"pattern": "*_type_mapped.csv",
+             "description": "Cross-dataset type mapping summary.",
+             "columns": ["canonical_type", "best_max_score",
+                         "total_labeled_N"]},
+            {"pattern": "labeling_distribution.html",
+             "description": "Score distribution visualization."},
+            {"pattern": "parameters.json",
+             "description": "Analysis parameters."},
+            {"pattern": WARNING_FILENAME,
+             "description": "Notes when score-cutoff behavior affects "
+                            "interpretation (rendered in the Warnings "
+                            "section above)."},
+            {"pattern": "plot-3d_*/**",
+             "description": "Per-dataset 3D skeleton visualizations (only "
+                            "when Visualize Top N > 0)."},
+        ],
+    },
+    "nb_colabel": {
+        "title": "NeuronBridge — Co-Labeling Analysis",
+        "summary": "Multi-line co-labeling analysis of driver lines.",
+        "files": [
+            {"pattern": "expression_matrix.csv",
+             "description": "Type × line score matrix (types prefixed with "
+                            "dataset abbreviations).",
+             "matrix": "rows = neuron types, columns = driver lines, "
+                       "values = max NeuronBridge score"},
+            {"pattern": "expression_matrix_merged.csv",
+             "description": "Same matrix with types merged across datasets "
+                            "(max score aggregation).",
+             "matrix": "rows = merged types, columns = driver lines, "
+                       "values = max score"},
+            {"pattern": "expression_matrix*.html",
+             "description": "Interactive expression-matrix heatmaps."},
+            {"pattern": "expression_matrix_viz.csv",
+             "description": "Reduced matrix for visualization."},
+            {"pattern": "expression_matrix_merged_viz.csv",
+             "description": "Reduced merged matrix for visualization."},
+            {"pattern": "colabeling_matrix_jaccard.csv",
+             "description": "Binary Jaccard similarity between lines.",
+             "matrix": "rows/columns = driver lines, values = Jaccard "
+                       "similarity"},
+            {"pattern": "colabeling_matrix_weighted_jaccard.csv",
+             "description": "Weighted Jaccard similarity between lines.",
+             "matrix": "rows/columns = driver lines, values = weighted "
+                       "Jaccard similarity"},
+            {"pattern": "colabeling_matrix_*.html",
+             "description": "Interactive co-labeling similarity heatmaps."},
+            {"pattern": "labeling_distribution_*.html",
+             "description": "Labeling distribution visualizations (by type, "
+                            "by neuron, stacked)."},
+            {"pattern": "distribution_data_by_type.csv",
+             "description": "Raw distribution data per type.",
+             "columns": ["type", "score", "source_line", "dataset"]},
+            {"pattern": "distribution_data_by_neuron.csv",
+             "description": "Raw distribution data per neuron.",
+             "columns": ["bodyId", "dataset", "instance", "type", "status",
+                         "score", "image_id", "lm_sample", "match_type",
+                         "library", "_passes_min_score", "source_line"]},
+            {"pattern": "labeling_info.csv",
+             "description": "Case-sensitive type × line matrix with dataset "
+                            "column.",
+             "columns": ["type", "dataset"]},
+            {"pattern": "line_summary.csv",
+             "description": "Summary statistics per line.",
+             "columns": ["line", "n_neurons", "n_types", "mean_score",
+                         "max_score", "n_neurons_HMS", "n_types_HMS",
+                         "n_neurons_MS", "n_types_MS", "Qf",
+                         "colabel_sparsity"]},
+            {"pattern": "line_labeled_neurons/**",
+             "description": "Per-line neuron details (neurons, per-dataset "
+                            "neurons/types, type mapping)."},
+            {"pattern": "parameters.json",
+             "description": "Analysis parameters."},
+            {"pattern": WARNING_FILENAME,
+             "description": "Notes describing score-cutoff filtering and "
+                            "retained top-N records (rendered in the "
+                            "Warnings section above)."},
+            {"pattern": "colabeling_report.html",
+             "description": "Comprehensive HTML report."},
+            {"pattern": "plot-3d_*/**",
+             "description": "Per-dataset 3D visualizations (only when "
+                            "Visualize Top N > 0)."},
+        ],
+    },
+    "flylight_download": {
+        "title": "FlyLight Image Download",
+        "summary": "Confocal image downloads for driver lines.",
+        "files": [
+            {"pattern": "**/*_mip.png",
+             "description": "Downloaded maximum-intensity-projection images, "
+                            "organized by collection and line. File names "
+                            "encode slide, sex, zoom, region, and driver "
+                            "type."},
+            {"pattern": "**/*.jpg",
+             "description": "Downloaded JPG images (when jpg format is "
+                            "requested)."},
+            {"pattern": "*_summary.pdf",
+             "description": "Summary document with the downloaded images "
+                            "(when a PDF summary is requested)."},
+            {"pattern": "*_summary.pptx",
+             "description": "Summary slides with the downloaded images "
+                            "(when a PPTX summary is requested)."},
+        ],
+    },
+}
+
+
+# =============================================================================
+# Content assembly
+# =============================================================================
+
+def _match_files(run_folder: Path, pattern: str) -> list:
+    """Return sorted relative POSIX paths in the run folder matching pattern."""
+    matches = []
+    for path in run_folder.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(run_folder).as_posix()
+        if fnmatch.fnmatch(rel, pattern):
+            matches.append(rel)
+    return sorted(matches)
+
+
+def _describe_unmatched(path_rel: str) -> str:
+    """Generic fallback description for files no spec entry covered."""
+    suffix = Path(path_rel).suffix.lower()
+    if suffix == ".csv":
+        return "Tabular data file."
+    if suffix in (".xlsx", ".xls"):
+        return "Excel workbook."
+    if suffix == ".json":
+        return "JSON data file."
+    if suffix == ".html":
+        return "HTML visualization."
+    if suffix in (".png", ".jpg", ".jpeg", ".tif", ".tiff"):
+        return "Image file."
+    if suffix in (".gif", ".mp4", ".avi", ".mov"):
+        return "Video/animation file."
+    if suffix in (".pdf", ".pptx"):
+        return "Summary document."
+    if suffix in (".txt", ".md", ".log"):
+        return "Text file."
+    return "Output file."
+
+
+def assemble_run_content(run_folder: Path, tool_name: str,
+                         params: Optional[dict]) -> dict:
+    """Build the format-independent content model for one run folder."""
+    spec = TOOL_GUIDE_SPECS.get(tool_name, {
+        "title": tool_name.replace("_", " ").title(),
+        "summary": "",
+        "files": [],
+    })
+    params = params or {}
+
+    # Match spec entries against the actual files present in the folder.
+    # Each real file is claimed by the FIRST matching entry so overlapping
+    # patterns (e.g. *_neurons.csv vs all_neurons.csv) never list it twice.
+    entries = []
+    matched_all = set()
+    for file_spec in spec["files"]:
+        matched = [
+            rel for rel in _match_files(run_folder, file_spec["pattern"])
+            if rel not in matched_all
+        ]
+        matched_all.update(matched)
+        entries.append({
+            "pattern": file_spec["pattern"],
+            "description": file_spec["description"],
+            "columns": file_spec.get("columns", []),
+            "matrix": file_spec.get("matrix"),
+            "matched": matched,
+        })
+
+    # Everything the spec did not cover (including unexpected outputs).
+    leftovers = []
+    for path in sorted(run_folder.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(run_folder).as_posix()
+        if rel.startswith(GUIDE_BASENAME) or rel in matched_all:
+            continue
+        leftovers.append({"path": rel,
+                          "description": _describe_unmatched(rel)})
+
+    warnings = _read_warnings(run_folder)
+
+    return {
+        "tool_name": tool_name,
+        "title": spec["title"],
+        "summary": spec["summary"],
+        "folder": run_folder.name,
+        "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "params": params,
+        "entries": entries,
+        "leftovers": leftovers,
+        "warnings": warnings,
+    }
+
+
+def _read_warnings(run_folder: Path) -> Optional[str]:
+    """Return the run's user_warning_notes.txt content, or None."""
+    note_path = run_folder / WARNING_FILENAME
+    if note_path.exists():
+        try:
+            text = note_path.read_text(encoding="utf-8", errors="replace")
+            if text.strip():
+                return text.strip()
+        except OSError:
+            pass
+    return None
+
+
+def _key_params(params: dict) -> list:
+    """Pick the most informative run parameters for the summary table."""
+    priority = (
+        "dataset", "datasets", "source_dataset", "target_dataset",
+        "sourceNeurons", "targetNeurons", "source_neurons", "target_neurons",
+        "source", "query", "line_names", "lines", "line_name",
+        "min_synapse_num", "min_synapse_threshold", "min_ratio",
+        "min_traversal_probability", "max_interlayer", "thresholds",
+        "output_format", "skip_bodyId", "similarity_metric", "top_n",
+        "top_k", "top_m", "match_type",
+    )
+    rows = []
+    for key in priority:
+        if key in params and params[key] not in (None, "", []):
+            rows.append((key, params[key]))
+    return rows[:12]
+
+
+# =============================================================================
+# Renderers
+# =============================================================================
+
+def render_txt(content: dict) -> str:
+    lines = []
+    bar = "=" * 72
+    lines.append(bar)
+    lines.append(f"DROCAT RUN GUIDE — {content['title']}")
+    lines.append(bar)
+    lines.append("")
+    if content["summary"]:
+        lines.append(content["summary"])
+        lines.append("")
+    lines.append(f"Run folder : {content['folder']}")
+    lines.append(f"Generated  : {content['generated']}")
+    lines.append("")
+
+    key_params = _key_params(content["params"])
+    if key_params:
+        lines.append("RUN PARAMETERS")
+        lines.append("-" * 72)
+        for key, value in key_params:
+            lines.append(f"  {key}: {value}")
+        lines.append("")
+
+    lines.append("WARNINGS & NOTES")
+    lines.append("-" * 72)
+    lines.append(content["warnings"] or NO_WARNINGS_TEXT)
+    lines.append("")
+
+    lines.append("OUTPUT FILES")
+    lines.append("-" * 72)
+    for entry in content["entries"]:
+        if not entry["matched"]:
+            continue
+        names = ", ".join(entry["matched"][:4])
+        if len(entry["matched"]) > 4:
+            names += f", ... ({len(entry['matched'])} files)"
+        lines.append(f"* {names}")
+        lines.append(f"    {entry['description']}")
+        if entry["matrix"]:
+            lines.append(f"    Layout: {entry['matrix']}")
+        for column in entry["columns"]:
+            description, value_range = glossary_entry(column)
+            suffix = f" [{value_range}]" if value_range else ""
+            lines.append(f"      - {column}: {description}{suffix}")
+        lines.append("")
+
+    if content["leftovers"]:
+        lines.append("OTHER FILES IN THIS RUN")
+        lines.append("-" * 72)
+        for item in content["leftovers"]:
+            lines.append(f"* {item['path']}")
+            lines.append(f"    {item['description']}")
+        lines.append("")
+
+    lines.append(bar)
+    lines.append("Full output reference: docs/OUTPUT_FILES.md in the "
+                 "DROCAT installation.")
+    lines.append(bar)
+    return "\n".join(lines) + "\n"
+
+
+def render_markdown(content: dict) -> str:
+    md = []
+    md.append(f"# DROCAT Run Guide — {content['title']}")
+    md.append("")
+    if content["summary"]:
+        md.append(content["summary"])
+        md.append("")
+    md.append(f"- **Run folder:** `{content['folder']}`")
+    md.append(f"- **Generated:** {content['generated']}")
+    md.append("")
+
+    key_params = _key_params(content["params"])
+    if key_params:
+        md.append("## Run parameters")
+        md.append("")
+        md.append("| Parameter | Value |")
+        md.append("| --- | --- |")
+        for key, value in key_params:
+            md.append(f"| `{key}` | `{value}` |")
+        md.append("")
+
+    md.append("## Warnings & notes")
+    md.append("")
+    if content["warnings"]:
+        md.append("```")
+        md.append(content["warnings"])
+        md.append("```")
+    else:
+        md.append(NO_WARNINGS_TEXT)
+    md.append("")
+
+    md.append("## Output files")
+    md.append("")
+    for entry in content["entries"]:
+        if not entry["matched"]:
+            continue
+        names = ", ".join(f"`{m}`" for m in entry["matched"][:4])
+        if len(entry["matched"]) > 4:
+            names += f", … ({len(entry['matched'])} files)"
+        md.append(f"### {names}")
+        md.append("")
+        md.append(entry["description"])
+        if entry["matrix"]:
+            md.append("")
+            md.append(f"*Layout: {entry['matrix']}*")
+        if entry["columns"]:
+            md.append("")
+            md.append("| Column | Description | Range |")
+            md.append("| --- | --- | --- |")
+            for column in entry["columns"]:
+                description, value_range = glossary_entry(column)
+                md.append(f"| `{column}` | {description} | {value_range} |")
+        md.append("")
+
+    if content["leftovers"]:
+        md.append("## Other files in this run")
+        md.append("")
+        for item in content["leftovers"]:
+            md.append(f"- `{item['path']}` — {item['description']}")
+        md.append("")
+
+    md.append("---")
+    md.append("")
+    md.append("Full output reference: `docs/OUTPUT_FILES.md` in the DROCAT "
+              "installation.")
+    return "\n".join(md) + "\n"
+
+
+_HTML_STYLE = """
+body { font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial,
+       sans-serif; margin: 0; background: #f4f6fb; color: #1f2733; }
+main { max-width: 960px; margin: 24px auto; padding: 0 20px 48px; }
+.head { background: #12305e; color: #fff; border-radius: 12px;
+        padding: 20px 24px; margin-bottom: 20px; }
+.head h1 { margin: 0 0 6px; font-size: 1.5em; }
+.head .meta { color: #b9c6dd; font-size: 0.9em; }
+h2 { font-size: 1.15em; margin: 28px 0 10px; color: #12305e; }
+.card { background: #fff; border: 1px solid #dde4ef; border-radius: 10px;
+        padding: 14px 18px; margin-bottom: 12px; }
+.warn { background: #fff8e6; border: 1px solid #ecd9a0; border-radius: 10px;
+        padding: 14px 18px; white-space: pre-wrap; font-size: 0.92em; }
+.ok { background: #eefaf0; border: 1px solid #bfe5c8; border-radius: 10px;
+      padding: 12px 18px; color: #1f6b34; }
+table { border-collapse: collapse; width: 100%; margin-top: 8px;
+        font-size: 0.9em; }
+th, td { border: 1px solid #dde4ef; padding: 5px 9px; text-align: left;
+         vertical-align: top; }
+th { background: #f0f4fb; }
+code { background: #eef1f7; border-radius: 4px; padding: 1px 5px;
+       font-size: 0.9em; }
+.fname { font-weight: 600; color: #12305e; }
+.desc { margin: 6px 0; }
+.small { color: #5b6b84; font-size: 0.85em; }
+"""
+
+
+def _html_escape(text) -> str:
+    return html.escape(str(text))
+
+
+def render_html(content: dict) -> str:
+    parts = []
+    parts.append("<!doctype html>")
+    parts.append('<html lang="en">')
+    parts.append("<head>")
+    parts.append('<meta charset="utf-8">')
+    parts.append('<meta name="viewport" content="width=device-width, '
+                 'initial-scale=1">')
+    parts.append(f"<title>DROCAT Run Guide — "
+                 f"{_html_escape(content['title'])}</title>")
+    parts.append(f"<style>{_HTML_STYLE}</style>")
+    parts.append("</head>")
+    parts.append("<body>")
+    parts.append("<main>")
+
+    parts.append('<div class="head">')
+    parts.append(f"<h1>DROCAT Run Guide — {_html_escape(content['title'])}"
+                 "</h1>")
+    if content["summary"]:
+        parts.append(f"<p>{_html_escape(content['summary'])}</p>")
+    parts.append(f'<div class="meta">Run folder: '
+                 f"<code>{_html_escape(content['folder'])}</code> · "
+                 f"Generated: {_html_escape(content['generated'])}</div>")
+    parts.append("</div>")
+
+    key_params = _key_params(content["params"])
+    if key_params:
+        parts.append("<h2>Run parameters</h2>")
+        parts.append('<div class="card">')
+        parts.append("<table><tr><th>Parameter</th><th>Value</th></tr>")
+        for key, value in key_params:
+            parts.append(f"<tr><td><code>{_html_escape(key)}</code></td>"
+                         f"<td><code>{_html_escape(value)}</code></td></tr>")
+        parts.append("</table></div>")
+
+    parts.append("<h2>Warnings &amp; notes</h2>")
+    if content["warnings"]:
+        parts.append(f'<div class="warn">{_html_escape(content["warnings"])}'
+                     "</div>")
+    else:
+        parts.append(f'<div class="ok">{_html_escape(NO_WARNINGS_TEXT)}'
+                     "</div>")
+
+    parts.append("<h2>Output files</h2>")
+    for entry in content["entries"]:
+        if not entry["matched"]:
+            continue
+        parts.append('<div class="card">')
+        names = []
+        for rel in entry["matched"][:6]:
+            if rel.endswith(".html") and "/" not in rel:
+                names.append(f'<a href="{_html_escape(rel)}">'
+                             f"<code>{_html_escape(rel)}</code></a>")
+            else:
+                names.append(f"<code>{_html_escape(rel)}</code>")
+        shown = ", ".join(names)
+        if len(entry["matched"]) > 6:
+            shown += f", … ({len(entry['matched'])} files total)"
+        parts.append(f'<div class="fname">{shown}</div>')
+        parts.append(f'<div class="desc">{_html_escape(entry["description"])}'
+                     "</div>")
+        if entry["matrix"]:
+            parts.append(f'<div class="small">Layout: '
+                         f'{_html_escape(entry["matrix"])}</div>')
+        if entry["columns"]:
+            parts.append("<table>"
+                         "<tr><th>Column</th><th>Description</th>"
+                         "<th>Range</th></tr>")
+            for column in entry["columns"]:
+                description, value_range = glossary_entry(column)
+                parts.append(
+                    f"<tr><td><code>{_html_escape(column)}</code></td>"
+                    f"<td>{_html_escape(description)}</td>"
+                    f"<td>{_html_escape(value_range)}</td></tr>")
+            parts.append("</table>")
+        parts.append("</div>")
+
+    if content["leftovers"]:
+        parts.append("<h2>Other files in this run</h2>")
+        parts.append('<div class="card"><table>'
+                     "<tr><th>File</th><th>Description</th></tr>")
+        for item in content["leftovers"]:
+            parts.append(f"<tr><td><code>{_html_escape(item['path'])}</code>"
+                         f"</td><td>{_html_escape(item['description'])}</td>"
+                         "</tr>")
+        parts.append("</table></div>")
+
+    parts.append('<p class="small">Full output reference: '
+                 "<code>docs/OUTPUT_FILES.md</code> in the DROCAT "
+                 "installation.</p>")
+    parts.append("</main>")
+    parts.append("</body>")
+    parts.append("</html>")
+    return "\n".join(parts) + "\n"
+
+
+_RENDERERS = {
+    "html": render_html,
+    "txt": render_txt,
+    "markdown": render_markdown,
+}
+
+
+# =============================================================================
+# Public API
+# =============================================================================
+
+def resolve_guide_format(preferred: Optional[str] = None) -> str:
+    """Resolve the effective guide format.
+
+    Order: explicit argument > DROCAT_RUN_GUIDE_FORMAT env var > the saved
+    user default (Settings) > built-in default 'html'. Invalid values fall
+    back to the built-in default.
+    """
+    if preferred in GUIDE_FORMATS:
+        return preferred
+    env_value = os.environ.get(GUIDE_FORMAT_ENV, "").strip().lower()
+    if env_value in GUIDE_FORMATS:
+        return env_value
+    try:
+        from .config import get_user_default
+        saved = str(get_user_default("run_guide_format")).strip().lower()
+        if saved in GUIDE_FORMATS:
+            return saved
+    except Exception:
+        pass
+    return "html"
+
+
+def write_run_guide(run_folder, tool_name: str,
+                    params: Optional[dict] = None,
+                    fmt: Optional[str] = None) -> Optional[Path]:
+    """Write the exported run guide into *run_folder*.
+
+    Returns the written path, or None when the guide is disabled or could
+    not be written. Never raises: a failed guide write must not break a run.
+    """
+    try:
+        resolved = resolve_guide_format(fmt)
+        if resolved == "disabled":
+            return None
+        folder = Path(run_folder)
+        if not folder.is_dir():
+            return None
+        content = assemble_run_content(folder, tool_name, params)
+        text = _RENDERERS[resolved](content)
+        guide_path = folder / (GUIDE_BASENAME + GUIDE_EXTENSIONS[resolved])
+        guide_path.write_text(text, encoding="utf-8")
+        return guide_path
+    except Exception:
+        return None
