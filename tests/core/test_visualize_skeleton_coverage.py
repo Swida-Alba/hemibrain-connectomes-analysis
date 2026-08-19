@@ -1326,3 +1326,162 @@ class TestCompatWrappers:
                 folder / f'img_{i}.png')
         out = vs_module.img2pptx(str(folder), output_pptx=str(tmp_path / 'out.pptx'))
         assert os.path.exists(out)
+
+
+# ---------------------------------------------------------------------------
+# real constructor (__post_init__) branch coverage — fully hermetic:
+# getNeurons / file converters / token manager are monkeypatched and all
+# cache + output paths are redirected to tmp_path.
+# ---------------------------------------------------------------------------
+class TestRealConstructor:
+    @pytest.fixture
+    def hermetic_ctor(self, monkeypatch):
+        """Patch every remote/cache touch-point used by __post_init__."""
+        import utils.token_manager as tm_module
+
+        calls = []
+
+        def fake_get_neurons(layer_input, dataset='hemibrain:v1.2.1',
+                             client=None, verbose=True,
+                             search_columns='auto', **kwargs):
+            calls.append((list(layer_input), dataset))
+            ndf = pd.DataFrame({
+                'bodyId': [101, 202],
+                'type': ['DA1_lPN', 'DA1_lPN'],
+                'instance': ['DA1_lPN_L', 'DA1_lPN_R'],
+            })
+            rdf = pd.DataFrame({'ROI': ['AL(L)', 'AL(R)'],
+                                'volume': [1000.0, 1200.0]})
+            return ndf, rdf, 'DA1_lPN', {'type': 'DA1_lPN'}
+
+        monkeypatch.setattr(vs_module.sv, 'getNeurons', fake_get_neurons)
+        monkeypatch.setattr(
+            vs_module.FAFB_file_converter, 'ensure_flywire_data',
+            lambda dataset, dataset_dir: True)
+        monkeypatch.setattr(
+            vs_module.BANC_file_converter, 'ensure_banc_data',
+            lambda dataset, dataset_dir: True)
+        monkeypatch.setattr(tm_module.token_manager, 'get_token',
+                            lambda name, direct=None: None)
+        monkeypatch.delenv('NEUPRINT_APPLICATION_CREDENTIALS', raising=False)
+        monkeypatch.delenv('CAVE_TOKEN', raising=False)
+        return calls
+
+    @staticmethod
+    def ctor_kwargs(tmp_path, **extra):
+        kw = dict(
+            script_path=str(tmp_path),
+            output_dir=str(tmp_path / 'out'),
+            data_folder=str(tmp_path / 'data'),
+            include_timestamp=False,
+            verbose=False,
+        )
+        kw.update(extra)
+        return kw
+
+    def test_hemibrain_defaults(self, tmp_path, hermetic_ctor):
+        vis = VisualizeSkeleton(
+            dataset='hemibrain:v1.2.1', neuron_layers=['DA1_lPN'],
+            **self.ctor_kwargs(tmp_path))
+        assert vis.client_type == 'neuprint'
+        assert vis.skeleton_mesh_simplification == 0.90
+        assert vis.exportable_meshes == []
+        # light background -> Category10 palette, first entry #1f77b4
+        assert len(vis.neuron_colors) == 1
+        assert vis.neuron_colors[0].startswith('rgba(31, 119, 180')
+        assert vis._base_neuron_colors == tuple(vis.neuron_colors)
+        assert len(hermetic_ctor) == 1
+        assert isinstance(vis.fig_3d, go.Figure)
+        assert os.path.isdir(vis.save_folder)
+        params = Path(vis.save_folder) / 'parameters.txt'
+        assert params.exists()
+        text = params.read_text()
+        assert 'Dataset:          hemibrain:v1.2.1' in text
+        assert vis.saveas == 'DA1_lPN'
+        assert vis.layer_names == ['DA1_lPN']
+
+    def test_string_layer_spec_parsing(self, tmp_path, hermetic_ctor):
+        # 'A -> B' string splits into two layers; numeric token -> int
+        vis = VisualizeSkeleton(
+            dataset='hemibrain:v1.2.1', neuron_layers='DA1_lPN -> 202',
+            **self.ctor_kwargs(tmp_path))
+        assert vis.neuron_layers == ['DA1_lPN', 202]
+        assert len(hermetic_ctor) == 2
+        assert len(vis.layer_names) == 2
+
+    def test_fafb_flywire_autodetect(self, tmp_path, hermetic_ctor):
+        vis = VisualizeSkeleton(
+            dataset='flywire_FAFB_v783',
+            neuron_layers=['720575028614304'],
+            cache_synapses=True,
+            **self.ctor_kwargs(tmp_path, verbose=True))
+        assert vis.client_type == 'flywire'          # auto-detected
+        assert vis.version == 783                    # parsed from dataset
+        assert vis.cache_synapses is False           # disabled for FAFB
+        assert vis.verbose == 'full'                 # True normalized
+        pipeline = vis._resolved_fafb_pipeline()
+        expected = 0.90 if pipeline in {'fast', 'direct'} else 0.95
+        assert vis.skeleton_mesh_simplification == expected
+        assert vis._flywire_skeleton_access['is_fafb'] is True
+        assert vis._flywire_skeleton_access['ready'] is False
+
+    def test_dark_background_palette(self, tmp_path, hermetic_ctor):
+        vis = VisualizeSkeleton(
+            dataset='hemibrain:v1.2.1', neuron_layers=['DA1_lPN'],
+            background_color='black',
+            **self.ctor_kwargs(tmp_path))
+        # dark background -> Set3 palette, first entry #8dd3c7
+        assert vis.neuron_colors[0].startswith('rgba(141, 211, 199')
+
+    def test_empty_neuron_layers_mesh_only(self, tmp_path, hermetic_ctor):
+        vis = VisualizeSkeleton(
+            dataset='hemibrain:v1.2.1', neuron_layers='',
+            **self.ctor_kwargs(tmp_path))
+        assert vis.neuron_layers == []
+        assert hermetic_ctor == []           # no layer fetches at all
+        assert vis.saveas == 'brain_mesh'
+        assert 'brain_mesh' in os.path.basename(vis.save_folder)
+
+    def test_color_expansion_for_many_layers(self, tmp_path, hermetic_ctor):
+        layers = [['DA1_lPN'] if i % 2 else 'DA1_lPN' for i in range(12)]
+        vis = VisualizeSkeleton(
+            dataset='hemibrain:v1.2.1', neuron_layers=layers,
+            **self.ctor_kwargs(tmp_path))
+        assert len(vis.neuron_colors) == 12
+        assert len(vis.layer_names) == 12
+        assert len(hermetic_ctor) == 12
+        assert len(vis.synapse_colors) == 11
+
+    def test_banc_dataset_rejected(self, tmp_path, hermetic_ctor):
+        with pytest.raises(RuntimeError, match='BANC'):
+            VisualizeSkeleton(
+                dataset='BANC_v4', neuron_layers=['A00c'],
+                **self.ctor_kwargs(tmp_path))
+        assert hermetic_ctor == []
+
+    def test_invalid_synapse_mode_raises(self, tmp_path, hermetic_ctor):
+        with pytest.raises(ValueError, match='synapse_mode'):
+            VisualizeSkeleton(
+                dataset='hemibrain:v1.2.1', neuron_layers=['DA1_lPN'],
+                synapse_mode='bogus', **self.ctor_kwargs(tmp_path))
+
+    def test_invalid_legend_and_color_modes(self, tmp_path, hermetic_ctor):
+        with pytest.raises(ValueError, match='legend_mode'):
+            VisualizeSkeleton(
+                dataset='hemibrain:v1.2.1', neuron_layers=['DA1_lPN'],
+                legend_mode='huge', **self.ctor_kwargs(tmp_path))
+        with pytest.raises(ValueError, match='color_mode'):
+            VisualizeSkeleton(
+                dataset='hemibrain:v1.2.1', neuron_layers=['DA1_lPN'],
+                color_mode='rainbow', **self.ctor_kwargs(tmp_path))
+
+    def test_manc_vnc_mesh_defaults(self, tmp_path, hermetic_ctor):
+        # MANC auto-enables the VNC mesh unless brain_mesh='none'
+        vis = VisualizeSkeleton(
+            dataset='manc:v1.0', neuron_layers=['A00c'],
+            brain_mesh='template', **self.ctor_kwargs(tmp_path))
+        assert vis.vnc_mesh is True
+        vis2 = VisualizeSkeleton(
+            dataset='manc:v1.0', neuron_layers=['A00c'],
+            brain_mesh='none', **self.ctor_kwargs(tmp_path / 'none'))
+        assert vis2.vnc_mesh is False

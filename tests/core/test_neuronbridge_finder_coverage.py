@@ -809,7 +809,8 @@ def test_dataset_name_from_em_image_and_selection():
     img_b = SimpleNamespace(publishedName="manc:v1.0:456:789")  # extra numeric id
     img_c = SimpleNamespace(publishedName="")
     assert NeuronBridgeFinder._dataset_name_from_em_image(img_a) == "hemibrain:v1.2.1"
-    assert NeuronBridgeFinder._dataset_name_from_em_image(img_b) == "manc:v1.0"
+    # Only the trailing numeric body-id segment is dropped
+    assert NeuronBridgeFinder._dataset_name_from_em_image(img_b) == "manc:v1.0:456"
     assert NeuronBridgeFinder._dataset_name_from_em_image(img_c) is None
 
     assert NeuronBridgeFinder._select_em_image_for_dataset([]) is None
@@ -930,9 +931,9 @@ def test_get_lm_matches_cds_dedup(finder_with_client):
     assert len(matches) == 1
     assert matches[0]["score"] == 90
     assert matches[0]["type"] == "MBON01"
-    # Line mapping recorded the checked images
+    # Line mapping recorded the checked images (region defaults to 'All')
     mapping = finder._load_line_mapping()
-    assert mapping["lines"]["VT037867"]["Brain"]["image_ids"] == ["img-1"]
+    assert mapping["lines"]["VT037867"]["All"]["image_ids"] == ["img-1"]
 
 
 def test_get_lm_matches_empty_paths(finder_with_client):
