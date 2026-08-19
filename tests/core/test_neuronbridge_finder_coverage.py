@@ -1078,7 +1078,9 @@ def test_build_colabeling_matrix_methods(finder, monkeypatch):
 
     matrix, _ = finder._build_colabeling_matrix(
         ["L1", "L2"], similarity_method="weighted_jaccard", min_score=4.0)
-    assert matrix.loc["L1", "L2"] == pytest.approx((9.0 + 3.0) / (10.0 + 5.0))
+    # min_score drops L2's score-3 row: intersection min(10,9)=9,
+    # union max(10,9)+max(5,0)=15 -> 9/15
+    assert matrix.loc["L1", "L2"] == pytest.approx(0.6)
 
     matrix, _ = finder._build_colabeling_matrix(
         ["L1", "L2"], similarity_method="rank_correlation")
