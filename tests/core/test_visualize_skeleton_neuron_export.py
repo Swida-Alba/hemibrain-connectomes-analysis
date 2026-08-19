@@ -26,12 +26,26 @@ def test_neuron_info_export_merges_layers_without_roi_counts(tmp_path):
 
     assert output_path == str(tmp_path / "male-cns_v1_0_neuron_info.csv")
     exported = pd.read_csv(output_path)
-    assert list(exported.columns) == ["bodyId", "type", "viz_layer", "instance"]
-    assert exported["viz_layer"].tolist() == [
-        "query_l-LNv_x1",
-        "r1_aMe12_x2",
-        "r1_aMe12_x2",
-    ]
+    assert list(exported.columns) == ["viz_layer", "bodyId", "type", "instance"]
+    assert exported["viz_layer"].tolist() == [0, 1, 1]
     assert exported["bodyId"].tolist() == [101, 201, 202]
     assert not (tmp_path / "male-cns_v1_0_neuron_info.xlsx").exists()
     assert "roi_count" not in exported.columns
+
+
+def test_neuron_info_export_drops_serialized_index_column(tmp_path):
+    visualizer = object.__new__(VisualizeSkeleton)
+    visualizer.save_folder = str(tmp_path)
+    visualizer.saveas = "demo"
+    visualizer.layer_names = ["layer_a"]
+    # Upstream loaders can hand back a serialized positional index column
+    # under an empty / 'Unnamed: 0' / 'column_1' style name.
+    visualizer.neuron_dfs = [
+        pd.DataFrame({"": [0, 1], "bodyId": [101, 102], "type": ["a", "b"]}),
+    ]
+
+    output_path = visualizer._save_neuron_info_csv()
+
+    exported = pd.read_csv(output_path)
+    assert list(exported.columns) == ["viz_layer", "bodyId", "type"]
+    assert exported["viz_layer"].tolist() == [0, 0]

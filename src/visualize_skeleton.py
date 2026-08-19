@@ -5303,10 +5303,10 @@ class VisualizeSkeleton:
     def _save_neuron_info_csv(self):
         """Save all resolved neuron metadata in one CSV file.
 
-        Each source frame represents one visualization layer.  Keep the
-        layer's finalized display name on every row so the merged table can
-        be used without relying on per-layer Excel sheets or positional
-        indices.
+        Each source frame represents one visualization layer.  The numeric
+        ``viz_layer`` column records the layer index on every row so the
+        merged table can be used without relying on per-layer Excel sheets
+        or positional indices.  It is placed directly before ``bodyId``.
 
         Returns
         -------
@@ -5322,21 +5322,23 @@ class VisualizeSkeleton:
                 continue
 
             frame = neuron_df.copy()
+            # Drop serialized-index columns (unnamed / 'column_1' style)
+            # carried over from upstream data sources.
+            frame = sv.drop_leading_index_columns(frame)
             # Ensure the export owns this column even if an upstream data
             # source happens to provide a column with the same name.
             frame = frame.drop(columns=['viz_layer'], errors='ignore')
-            layer_name = (
-                self.layer_names[i]
-                if i < len(self.layer_names)
-                else f'layer_{i}'
+            frame.insert(
+                frame.columns.get_loc('bodyId') if 'bodyId' in frame.columns else 0,
+                'viz_layer',
+                i,
             )
-            frame['viz_layer'] = layer_name
             frames.append(frame)
 
         if frames:
             neuron_info = pd.concat(frames, ignore_index=True, sort=False)
         else:
-            neuron_info = pd.DataFrame(columns=['viz_layer'])
+            neuron_info = pd.DataFrame(columns=['viz_layer', 'bodyId'])
 
         file_path = os.path.join(
             self.save_folder, self.saveas + '_neuron_info.csv'

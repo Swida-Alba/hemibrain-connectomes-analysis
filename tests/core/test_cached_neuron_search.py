@@ -245,3 +245,40 @@ def test_fast_metadata_loader_does_not_use_stale_parquet(tmp_path):
     assert statvis._load_dataframe_fast(str(csv))["type"].tolist() == [
         "from-parquet"
     ]
+
+
+def test_fast_loader_drops_serialized_index_column(tmp_path):
+    """CSVs written with to_csv(index=True) must not leak their index."""
+    import src.statvis as statvis
+
+    csv = tmp_path / "indexed_neuron_df.csv"
+    pd.DataFrame({"bodyId": ["1", "2"], "type": ["a", "b"]}).to_csv(
+        csv, index=True
+    )
+
+    df = statvis._load_dataframe_fast(str(csv))
+    assert list(df.columns) == ["bodyId", "type"]
+
+
+def test_drop_leading_index_columns_variants():
+    import src.statvis as statvis
+
+    # pandas names an unnamed index 'Unnamed: 0'; polars may auto-name it.
+    for name in ("", "Unnamed: 0", "column_1", "index"):
+        df = pd.DataFrame({name: [0, 1], "bodyId": ["1", "2"]})
+        assert list(statvis.drop_leading_index_columns(df).columns) == ["bodyId"]
+
+    # Polars frames are supported too.
+    pl_df = pl.DataFrame({"column_1": [0, 1], "bodyId": ["1", "2"]})
+    assert statvis.drop_leading_index_columns(pl_df).columns == ["bodyId"]
+
+    # An unnamed leading column holding real (non-integer) data is kept.
+    df = pd.DataFrame({"": ["x", "y"], "bodyId": ["1", "2"]})
+    assert list(statvis.drop_leading_index_columns(df).columns) == ["", "bodyId"]
+
+    # Non-leading columns with index-like names are left alone.
+    df = pd.DataFrame({"bodyId": ["1"], "index": [7]})
+    assert list(statvis.drop_leading_index_columns(df).columns) == [
+        "bodyId",
+        "index",
+    ]

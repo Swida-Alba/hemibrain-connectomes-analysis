@@ -1090,6 +1090,10 @@ class FindNeuronConnection:
         is_polars = isinstance(df, pl.DataFrame)
         
         if is_polars:
+            # Polars has no index, so any leading serialized-index column
+            # (unnamed / 'Unnamed: 0' / 'column_1') is positional noise;
+            # never write it into exported CSVs.
+            df = sv.drop_leading_index_columns(df)
             # Synapse counts are integer-valued even when an upstream
             # dataframe has promoted them to Float64 (for example 5.0).
             # Ratios and probabilities are intentionally not included here.
@@ -1118,7 +1122,9 @@ class FindNeuronConnection:
                 if index:
                     df_to_save = df.reset_index()
                 else:
-                    df_to_save = df
+                    # Drop serialized-index columns (unnamed / 'Unnamed: 0'
+                    # / 'column_1') carried over from upstream data files.
+                    df_to_save = sv.drop_leading_index_columns(df)
                     
                 df_to_save = self._normalize_export_count_columns_pandas(df_to_save)
                 pl_df = pl.from_pandas(df_to_save)
@@ -8905,8 +8911,8 @@ class FindNeuronConnection:
                 worksheet.set_column('A:A', 30, dataWriter.book.add_format({'bold': True, 'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
                 worksheet.set_column('B:B', 30, dataWriter.book.add_format({'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
                 
-                self.source_df.to_excel(dataWriter,sheet_name='source_info')
-                self.target_df.to_excel(dataWriter,sheet_name='target_info')
+                self.source_df.to_excel(dataWriter,sheet_name='source_info',index=False)
+                self.target_df.to_excel(dataWriter,sheet_name='target_info',index=False)
                 self.source_in_conn.to_excel(dataWriter,sheet_name='source_in_connection')
                 self.target_in_conn.to_excel(dataWriter,sheet_name='target_in_connection')
                 self.conn_type.to_excel(dataWriter,sheet_name='connection_groupby_type')
@@ -10319,8 +10325,8 @@ class FindNeuronConnection:
                 worksheet.set_column('A:A', 30, writer.book.add_format({'bold': True, 'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
                 worksheet.set_column('B:B', 30, writer.book.add_format({'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
                 
-                self.source_df.to_excel(writer,sheet_name='source_neurons')
-                self.target_df.to_excel(writer,sheet_name='target_neurons')
+                self.source_df.to_excel(writer,sheet_name='source_neurons',index=False)
+                self.target_df.to_excel(writer,sheet_name='target_neurons',index=False)
                 totalweight_df.to_excel(writer,sheet_name='total_weight_layer')
                 conn_types.to_excel(writer,sheet_name='connection_type')
                 self._save_matrices_to_excel(conn_types, writer, level='type')
@@ -12677,8 +12683,8 @@ class FindNeuronConnection:
                 worksheet.set_column('A:A', 30, writer.book.add_format({'bold': True, 'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
                 worksheet.set_column('B:B', 30, writer.book.add_format({'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
                 
-                self.source_df.to_excel(writer,sheet_name='source_neurons')
-                self.target_df.to_excel(writer,sheet_name='target_neurons')
+                self.source_df.to_excel(writer,sheet_name='source_neurons',index=False)
+                self.target_df.to_excel(writer,sheet_name='target_neurons',index=False)
                 totalweight_df.to_excel(writer,sheet_name='total_weight_layer')
                 
                 if isinstance(conn_types, pl.DataFrame):

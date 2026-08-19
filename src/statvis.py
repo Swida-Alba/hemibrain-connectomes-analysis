@@ -1,5 +1,6 @@
 import gc
 import os
+import re
 import sys
 import json
 import threading
@@ -149,6 +150,57 @@ def _flywire_neuron_table_path(dataset: str, project_root: str):
 HAS_POLARS = True
 
 
+# Column names produced when a CSV was written with a serialized pandas
+# index: an empty header, ``index``, pandas' ``Unnamed: 0`` placeholders or
+# polars' ``column_1`` auto-names.
+_INDEX_LIKE_COLUMN_RE = re.compile(
+    r'^(?:|index|level_\d+|Unnamed: \d+(?: level_\d+)?|column_\d+)$'
+)
+
+
+def drop_leading_index_columns(df):
+    """Drop leading serialized-index columns from a DataFrame.
+
+    Neuron-metadata CSVs written with ``to_csv(index=True)`` carry a leading
+    positional index column; depending on the reader it arrives unnamed, as
+    ``Unnamed: 0`` (pandas) or ``column_1`` (polars).  These columns are
+    noise for downstream exports (source_neurons.csv, neuron_info.csv, ...),
+    so drop the leading run of index-like columns.
+
+    Guards keep real data safe: at least one non-index column must remain and
+    the first dropped column must hold integer values, which a positional
+    index always does but a genuine data column practically never does.
+    Accepts pandas and polars frames.
+    """
+    columns = list(df.columns)
+    drop_names = []
+    for name in columns:
+        if not _INDEX_LIKE_COLUMN_RE.match(str(name)):
+            break
+        if len(columns) - len(drop_names) <= 1:
+            break
+        drop_names.append(name)
+    if not drop_names:
+        return df
+
+    try:
+        import polars as pl
+        is_polars = isinstance(df, pl.DataFrame)
+    except ImportError:
+        is_polars = False
+
+    if is_polars:
+        first_values = df.get_column(drop_names[0]).to_numpy()
+    else:
+        first_values = df[drop_names[0]].to_numpy()
+    numeric = pd.to_numeric(pd.Series(first_values), errors='coerce')
+    if numeric.isna().any() or not (numeric % 1 == 0).all():
+        return df
+    if is_polars:
+        return df.drop(*drop_names)
+    return df.drop(columns=drop_names)
+
+
 def _load_dataframe_fast(file_path: str, dtype_overrides: dict = None) -> pd.DataFrame:
     """
     Load a DataFrame using the fastest available method.
@@ -187,7 +239,7 @@ def _load_dataframe_fast(file_path: str, dtype_overrides: dict = None) -> pd.Dat
             for col, dtype in dtype_overrides.items():
                 if col in df.columns:
                     df[col] = df[col].astype(dtype)
-        return df
+        return drop_leading_index_columns(df)
     
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
@@ -215,12 +267,13 @@ def _load_dataframe_fast(file_path: str, dtype_overrides: dict = None) -> pd.Dat
                 for col, dtype in dtype_overrides.items():
                     if col in df.columns:
                         df[col] = df[col].astype(dtype)
-            return df
+            return drop_leading_index_columns(df)
         except Exception:
             pass  # Fall back to pandas
     
     # Fallback to pandas
-    return pd.read_csv(file_path, low_memory=False, dtype=dtype_overrides)
+    df = pd.read_csv(file_path, low_memory=False, dtype=dtype_overrides)
+    return drop_leading_index_columns(df)
 
 
 def _get_cached_neuron_df(dataset: str, dataset_path_body: str):

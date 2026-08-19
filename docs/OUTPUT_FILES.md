@@ -169,8 +169,9 @@ Example: `plot-3d_MCNS_aMe12_SMP238_PPL101_20260815_151243/` (layer names joined
 ### Key Output Files
 *   **`{layer_names}.html`**: The interactive 3D visualization. Open in a web browser to view neurons, synapses, and ROIs.
 *   **`{layer_names}_neuron_info.csv`**: One merged neuron metadata table for
-    all visualization layers. The `viz_layer` column identifies the
-    user-facing layer name for each row; ROI-count data is not exported.
+    all visualization layers. The numeric `viz_layer` column records the
+    layer index for each row and sits directly before `bodyId`; ROI-count
+    data is not exported.
 *   **`parameters.txt`**: Visualization parameters (colors, alphas, modes, backend, etc.)
 *   **`user_warning_notes.txt`**: Notes/warnings collected during rendering
 *   When `export_views=True` (or a view list) or `export_video=True` is requested, PNG screenshots and/or videos/GIFs are written into the same folder.
