@@ -119,6 +119,7 @@ def test_run_path_analysis_selects_find_tool_by_path_mode(monkeypatch):
             datasets=['hemibrain:v1.2.1'],
             source_neurons=['aMe12'], target_neurons=['PPL101'],
             thresholds=[5], max_interlayer=0, path_mode=path_mode,
+            output_folder="",  # no filesystem scaffold needed for wiring check
             verbose=False,
         )
         analyzer = ComparisonAnalyzer(params, verbose=False)
@@ -190,7 +191,7 @@ def test_aggregate_and_find_paths_shortest_flags_only_shortest_route():
     params = ComparisonParameters(
         datasets=['hemibrain:v1.2.1'],
         source_neurons=['TS'], target_neurons=['TT'],
-        thresholds=[1], verbose=False,
+        thresholds=[1], output_folder="", verbose=False,
     )
     analyzer = ComparisonAnalyzer(params, verbose=False)
 
