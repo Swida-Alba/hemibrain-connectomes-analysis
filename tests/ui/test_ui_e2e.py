@@ -1883,9 +1883,10 @@ class TestRunner:
         assert _list_subdirs(str(tmp_path / "nope")) == []
         assert _list_subdirs(str(tmp_path / "a_file.txt")) == []
 
-    def test_native_directory_picker_uses_desktop_adapter(self, tmp_path, monkeypatch):
-        """The direct picker is isolated behind a platform adapter so it can
-        be tested without opening a real desktop dialog."""
+    def test_native_directory_picker_uses_osascript(self, tmp_path, monkeypatch):
+        """macOS uses the native choose-folder panel through osascript
+        (isolated behind a platform adapter) so no real desktop dialog opens
+        during tests."""
         import ui.components.common as common
 
         calls = []
@@ -1910,6 +1911,65 @@ class TestRunner:
         assert selected == str(tmp_path)
         assert calls and calls[0][0][0] == "/usr/bin/osascript"
         assert "choose folder" in calls[0][0][-1]
+
+    def test_macos_picker_unavailable_without_osascript(self, tmp_path, monkeypatch):
+        """Without osascript, macOS reports the picker as unavailable so
+        callers fall back to the in-browser dialog."""
+        import ui.components.common as common
+
+        monkeypatch.setattr(common.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(common.shutil, "which", lambda name: None)
+        available, selected = common._native_directory_picker_sync(
+            "Choose output", str(tmp_path)
+        )
+        assert available is False
+        assert selected is None
+
+    def test_macos_picker_instant_cancel_reports_unavailable(self, tmp_path, monkeypatch):
+        """An instant -128 (no dialog could have been shown and dismissed
+        that fast) means the panel failed to appear; report unavailable so
+        the caller falls back to the in-browser dialog."""
+        import ui.components.common as common
+
+        class InstantCancel:
+            returncode = 1
+            stdout = ""
+            stderr = "execution error: User canceled. (-128)"
+
+        monkeypatch.setattr(common.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(common.shutil, "which", lambda name: "/usr/bin/osascript")
+        monkeypatch.setattr(
+            common.subprocess, "run", lambda *a, **k: InstantCancel()
+        )
+        available, selected = common._native_directory_picker_sync(
+            "Choose output", str(tmp_path)
+        )
+        assert available is False
+        assert selected is None
+
+    def test_macos_picker_slow_cancel_returns_none(self, tmp_path, monkeypatch):
+        """A cancel after the dialog was shown (elapsed >= 2s) is a genuine
+        user cancel: supported picker, no path, no second dialog."""
+        import time
+        import ui.components.common as common
+
+        class SlowCancel:
+            returncode = 1
+            stdout = ""
+            stderr = "execution error: User canceled. (-128)"
+
+        def fake_run(command, **kwargs):
+            time.sleep(2.5)
+            return SlowCancel()
+
+        monkeypatch.setattr(common.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(common.shutil, "which", lambda name: "/usr/bin/osascript")
+        monkeypatch.setattr(common.subprocess, "run", fake_run)
+        available, selected = common._native_directory_picker_sync(
+            "Choose output", str(tmp_path)
+        )
+        assert available is True
+        assert selected is None
 
     def test_windows_native_directory_picker_uses_folder_browser_dialog(
         self, tmp_path, monkeypatch

@@ -10,6 +10,7 @@ import itertools
 import os
 import re
 import shutil
+import time
 
 from nicegui import ui
 from typing import List, Optional, Callable, Tuple
@@ -1828,6 +1829,55 @@ def _shell_quote_applescript(value: str) -> str:
     return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def _macos_native_directory_picker_sync(
+    title: str,
+    initial: str,
+) -> Tuple[bool, Optional[str]]:
+    """Run the native macOS folder picker (``choose folder``) via osascript.
+
+    The dialog runs as a subprocess so the UI event loop is never blocked.
+
+    A session-level failure mode exists where the panel cannot be presented
+    at all: osascript then returns -128 "User canceled" almost instantly
+    without ever showing a window. A genuine cancel takes at least a moment
+    (the user has to see and dismiss the dialog), so an instant -128 is
+    reported as "picker unavailable" to let callers fall back to the
+    in-app browser dialog instead of silently doing nothing.
+    """
+    executable = shutil.which("osascript")
+    if not executable:
+        return False, None
+    script = (
+        f"set startFolder to POSIX file {_shell_quote_applescript(str(initial))}\n"
+        f"set chosenFolder to choose folder with prompt "
+        f"{_shell_quote_applescript(title)} default location startFolder\n"
+        "POSIX path of chosenFolder"
+    )
+    try:
+        started = time.monotonic()
+        completed = subprocess.run(
+            [executable, "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        elapsed = time.monotonic() - started
+    except (OSError, subprocess.TimeoutExpired):
+        return False, None
+    if completed.returncode == 0:
+        selected = completed.stdout.strip()
+        return True, selected or None
+    # macOS uses -128 for the normal Cancel action.
+    if "-128" in completed.stderr or "User canceled" in completed.stderr:
+        if elapsed < 2.0:
+            # No dialog could have been shown and dismissed this fast:
+            # the panel never appeared, so treat it as unavailable.
+            return False, None
+        return True, None
+    return False, None
+
+
 def _shell_quote_powershell(value: str) -> str:
     """Quote a path for a single-quoted PowerShell string literal."""
     return "'" + str(value).replace("'", "''") + "'"
@@ -1852,32 +1902,11 @@ def _native_directory_picker_sync(
     system = platform.system()
 
     if system == "Darwin":
-        executable = shutil.which("osascript")
-        if not executable:
-            return False, None
-        script = (
-            f"set startFolder to POSIX file {_shell_quote_applescript(str(initial_path))}\n"
-            f"set chosenFolder to choose folder with prompt "
-            f"{_shell_quote_applescript(title)} default location startFolder\n"
-            "POSIX path of chosenFolder"
-        )
-        try:
-            completed = subprocess.run(
-                [executable, "-e", script],
-                capture_output=True,
-                text=True,
-                timeout=120,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return False, None
-        if completed.returncode == 0:
-            selected = completed.stdout.strip()
-            return True, selected or None
-        # macOS uses -128 for the normal Cancel action.
-        if "-128" in completed.stderr or "User canceled" in completed.stderr:
-            return True, None
-        return False, None
+        # Native ``choose folder`` panel via osascript. In rare broken
+        # sessions the panel cannot be presented at all; that failure is
+        # detected inside the helper (instant -128) so the caller falls back
+        # to the in-app browser dialog instead of silently doing nothing.
+        return _macos_native_directory_picker_sync(title, str(initial_path))
 
     if system == "Windows":
         executable = shutil.which("powershell") or shutil.which("pwsh")
@@ -2178,10 +2207,16 @@ def dir_input(
         if selected:
             _set_selected(selected)
         elif not available:
-            ui.notify(
-                "The system folder picker is unavailable in this environment.",
-                type="warning",
-            )
+            await browse_panel()
+
+    async def browse_panel():
+        selected = await dir_browser_dialog(
+            title=f"Select {label}",
+            initial=inp.value or str(PROJECT_ROOT),
+            default_output=inp.value or get_default_output_dir(),
+        )
+        if selected:
+            _set_selected(selected)
 
     def reset_tab_override():
         if not scope or global_default:
@@ -2196,10 +2231,8 @@ def dir_input(
             inp.update()
             ui.notify("This tab now uses the Settings default", type="positive")
 
-    # The output-directory control deliberately exposes one folder action.
-    # It always means "open the native desktop picker"; the in-app browser
-    # remains available as a standalone compatibility helper, but it must
-    # never appear as an unexpected second layer from this button.
+    # One folder action: the native desktop picker first, with the in-app
+    # browser dialog as its fallback when no desktop picker is available.
     with inp.add_slot("append"):
         ui.button(icon="folder_open", on_click=browse_system).props(
             "flat dense round"
