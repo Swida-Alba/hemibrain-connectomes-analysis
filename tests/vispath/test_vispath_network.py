@@ -591,6 +591,65 @@ class TestExpandedEdgeListReimport:
 
 
 # =============================================================================
+# Uploaded edge-list colors: the file's 'color' column must win over the UI
+# link color in the generated network canvas.
+# =============================================================================
+
+class TestEdgeListFileColors:
+    """Per-edge colors from an uploaded edge list override the Net-Viz link
+    color; edges without a file color keep the link-color fallback."""
+
+    def _html_with_colors(self, tmp_path, colors=None):
+        df = pd.DataFrame({
+            "source": ["S", "A"],
+            "target": ["A", "T"],
+            "weight": [10, 20],
+        })
+        if colors is not None:
+            df["color"] = colors
+        vp = VisualizePath(
+            path_file=df,
+            output_folder=str(tmp_path),
+            showfig=False,
+            verbose=False,
+            network_layout="dagre",
+        )
+        conn_df, G = vp.build_network()
+        html_path = tmp_path / "colored_network.html"
+        vp._plot_cytoscape_network(
+            G, output_path=str(html_path), layout="dagre", open_browser=False
+        )
+        return vp, html_path
+
+    def test_file_colors_reach_the_stylesheet(self, tmp_path):
+        """The canvas edge style maps from per-edge data instead of baking
+        the UI link color into every edge."""
+        vp, html_path = self._html_with_colors(
+            tmp_path, colors=["#FF0000", "#00FF00"]
+        )
+        js = _script_text(html_path)
+        assert "'line-color': 'data(color)'" in js
+        assert "'target-arrow-color': 'data(color)'" in js
+        assert f"'line-color': '{vp.edge_color}'" not in js
+
+    def test_file_colors_land_in_edge_data(self, tmp_path):
+        vp, html_path = self._html_with_colors(
+            tmp_path, colors=["#FF0000", "#00FF00"]
+        )
+        html = html_path.read_text(encoding="utf-8")
+        for color in ("#FF0000", "#00FF00"):
+            assert f'"color": "{color}"' in html, f"missing edge color {color}"
+
+    def test_edges_without_file_color_keep_link_color(self, tmp_path):
+        vp, html_path = self._html_with_colors(tmp_path)
+        html = html_path.read_text(encoding="utf-8")
+        js = _script_text(html_path)
+        assert "'line-color': 'data(color)'" in js
+        # both edges fall back to the configured link color
+        assert html.count(f'"color": "{vp.edge_color}"') == 2, html
+
+
+# =============================================================================
 # Network trim for plotting: source/target reservation + threshold warning
 # =============================================================================
 

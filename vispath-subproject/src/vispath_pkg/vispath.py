@@ -4389,6 +4389,13 @@ class VisualizePath:
             if self.edge_labels and (source, target) in self.edge_labels:
                 custom_labels_json = self.edge_labels[(source, target)]
             
+            # Per-edge color from the uploaded edge list (the optional
+            # 'color' column) wins over the UI link color, which is only
+            # the fallback for edges the file does not color.
+            edge_color = self.edge_color
+            if self.custom_edge_colors and (source, target) in self.custom_edge_colors:
+                edge_color = self.custom_edge_colors[(source, target)]
+            
             edges_data.append({
                 'data': {
                     'source': source,
@@ -4397,6 +4404,7 @@ class VisualizePath:
                     'original_weight': weight,  # Store original for hover modification
                     'is_negative': 1 if is_negative else 0,  # Use 1/0 instead of True/False for JavaScript
                     'nt_type': nt_type if nt_type else '',  # Store NT type for CSS styling
+                    'color': edge_color,  # Per-edge color (file color or link_color fallback)
                     'ratio': ratio if not np.isnan(ratio) else 0,
                     'probability': prob if not np.isnan(prob) else 0,
                     'tooltip': tooltip,
@@ -5318,8 +5326,8 @@ class VisualizePath:
                     selector: 'edge',
                     style: {{
                         'width': 'mapData(scaled_width, {min_scaled_width}, {max_scaled_width}, 1, 10)',
-                        'line-color': '{self.edge_color}',  // Use link_color parameter
-                        'target-arrow-color': '{self.edge_color}',
+                        'line-color': 'data(color)',  // Per-edge color from the uploaded edge list (falls back to link_color)
+                        'target-arrow-color': 'data(color)',
                         'target-arrow-shape': 'triangle',
                         'curve-style': 'bezier',
                         'arrow-scale': 1.5,

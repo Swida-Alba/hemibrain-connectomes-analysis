@@ -902,6 +902,10 @@ def create_net_viz_tab():
             ui.label(
                 "Path mode exports HTML and connection tables; empty mode exports an HTML canvas."
             ).classes("text-caption drocat-muted")
+            ui.label(
+                "Edge list files with a 'color' column keep their per-edge colors; "
+                "the Color Scheme applies to the remaining edges and node roles."
+            ).classes("text-caption drocat-muted")
 
     with results_col:
         net_viz_output.create(run_label="Generate Network", run_icon="account_tree")
