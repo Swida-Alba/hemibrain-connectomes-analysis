@@ -30,6 +30,7 @@
 - **UI port 8080 busy**: set `DROCAT_UI_PORT` to a free port (for example,
   `DROCAT_UI_PORT=8081 ./run_DROCAT.command`) or stop the other process.
 - **3D export requires Chrome**: PNG/video exports in `plot3dSkeleton` use Chrome + WebDriver (or the slower Kaleido fallback). Install Chrome if exports fail.
+- **Metadata-only wheels (img2pdf / asciitree)**: on a flaky network pip can silently "succeed" a PEP 517 sdist build while producing a metadata-only wheel (no module files), and the bad wheel is then cached. The installers detect this at the verification step and retry once after clearing the pip wheel cache (rebuilding the sdists); if the retry also fails, the install aborts.
 - **Sandboxed agents**: dependency downloads, token checks, and dataset fetches need network; request escalation when running inside a restricted sandbox.
 
 ## Verification recap
@@ -42,5 +43,7 @@ The bundled `scripts/verify_install.py` checks:
 4. Bundled NeuronBridge client import plus optional integrations (warn-only): `caveclient`, `cloudvolume`, `navis`, `flybrains`, `selenium`, `webdriver_manager`, `fitz`, `psutil`, `trimesh`.
 5. Installed versions against the platform and UI requirement manifests.
 6. `pip check` dependency consistency.
-7. Token file with a non-placeholder `NEUPRINT_TOKEN` (advisory unless `--require-token` is used).
+7. Token check reading `config_local.json` then `config.json` for a
+   non-placeholder `NEUPRINT_TOKEN` (advisory unless `--require-token` is
+   used).
 8. UI package import (`ui.app`).

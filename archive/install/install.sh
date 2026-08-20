@@ -272,7 +272,35 @@ run_in_env python -m pip install -e . --no-deps
 
 printf "\n%b[5/5] Verifying the environment...%b\n" "$BLUE" "$NC"
 run_in_env python -m pip check
-run_in_env python skills/drocat-install/scripts/verify_install.py --project "$PROJECT_ROOT"
+# pip can silently install a metadata-only wheel when a PEP 517 sdist build
+# is corrupted mid-build on a flaky network (observed with img2pdf and
+# asciitree: "Successfully installed" but the modules are missing). The
+# bundled verifier catches it; before aborting, clear the pip wheel cache
+# (which would otherwise re-serve the bad wheels) and rebuild once.
+VERIFY_OK=""
+for attempt in 1 2; do
+    if [[ "$attempt" -eq 2 ]]; then
+        printf "%bVerification failed; clearing the pip wheel cache and rebuilding dependencies once.%b\n" "$YELLOW" "$NC"
+        pip_cache_dir="${PIP_CACHE_DIR:-}"
+        if [[ -z "$pip_cache_dir" ]]; then
+            if [[ "$(uname -s)" == "Darwin" ]]; then
+                pip_cache_dir="$HOME/Library/Caches/pip"
+            else
+                pip_cache_dir="$HOME/.cache/pip"
+            fi
+        fi
+        rm -rf "$pip_cache_dir/wheels"
+        run_in_env python -m pip install --upgrade -r requirements.txt -r ui/requirements.txt
+    fi
+    if run_in_env python skills/drocat-install/scripts/verify_install.py --project "$PROJECT_ROOT"; then
+        VERIFY_OK=1
+        break
+    fi
+done
+if [[ -z "$VERIFY_OK" ]]; then
+    printf "%bERROR: environment verification failed after one rebuild retry.%b\n" "$RED" "$NC" >&2
+    exit 1
+fi
 
 printf "\n%bInstallation complete.%b\n" "$GREEN" "$NC"
 printf 'Environment: %s\n' "$ENV_NAME"

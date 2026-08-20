@@ -283,7 +283,26 @@ Invoke-InEnvironment @("python", "-m", "pip", "install", "-e", ".", "--no-deps")
 
 Write-Step "5/5" "Verifying the environment"
 Invoke-InEnvironment @("python", "-m", "pip", "check")
-Invoke-InEnvironment @("python", "skills\drocat-install\scripts\verify_install.py", "--project", $ProjectRoot)
+# pip can silently install a metadata-only wheel when a PEP 517 sdist build
+# is corrupted mid-build on a flaky network (observed with img2pdf and
+# asciitree: "Successfully installed" but the modules are missing). The
+# bundled verifier catches it; before aborting, clear the pip wheel cache
+# (which would otherwise re-serve the bad wheels) and rebuild once.
+$Verified = $false
+for ($Attempt = 1; $Attempt -le 2 -and -not $Verified; $Attempt++) {
+    if ($Attempt -eq 2) {
+        Write-Host "Verification failed; clearing the pip wheel cache and rebuilding dependencies once." -ForegroundColor Yellow
+        Remove-Item (Join-Path $PipCacheDir "wheels") -Recurse -Force -ErrorAction SilentlyContinue
+        Invoke-InEnvironment @("python", "-m", "pip", "install", "--upgrade", "-r", "requirements-windows.txt", "-r", "ui\requirements.txt")
+    }
+    try {
+        Invoke-InEnvironment @("python", "skills\drocat-install\scripts\verify_install.py", "--project", $ProjectRoot)
+        $Verified = $true
+    } catch {
+        $Verified = $false
+    }
+}
+if (-not $Verified) { throw "Environment verification failed after one rebuild retry." }
 
 Write-Host ""
 Write-Host "Installation complete." -ForegroundColor Green

@@ -89,6 +89,10 @@ class TestInstallers:
         assert 'if [[ -z "$ENV_OVERRIDE" ]]' in text
         # token_info files are removed: the notice must not reference them
         assert "token_info" not in text
+        # verification failure retries once after clearing the pip wheel cache
+        assert "VERIFY_OK" in text
+        assert 'rm -rf "$pip_cache_dir/wheels"' in text
+        assert "rebuilding dependencies once" in text
 
     def test_install_sh_token_notice_has_no_terminal_prompt(self):
         """Tokens are NOT collected in the terminal: the installer only prints
@@ -155,6 +159,10 @@ class TestInstallers:
         assert "PIP_CACHE_DIR" in text
         assert "cache\\pip" in text
         assert "PIP_NO_CACHE_DIR" in text
+        # verification failure retries once after clearing the pip wheel cache
+        assert "$Verified" in text
+        assert 'Remove-Item (Join-Path $PipCacheDir "wheels")' in text
+        assert "rebuilding dependencies once" in text
 
     def test_install_bat_wraps_ps1(self):
         text = (ROOT / "archive/install/install.bat").read_text(encoding="utf-8")
