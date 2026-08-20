@@ -514,9 +514,11 @@ def update_neuron_post_counts(neuron_path, conn_path, save_csv_path=None):
         print(f"  ⚠️ Error updating post counts: {e}")
         return False
 
-def print_download_instructions(downloads_dir):
+def print_download_instructions(downloads_dir, dataset_name="flywire_FAFB_v783"):
+    # The dataset name is passed through so the printed folder and dataset
+    # identifier always match the dataset being prepared.
     if _print_flywire_download_instructions is not None:
-        _print_flywire_download_instructions("flywire_FAFB_v783", Path(downloads_dir).parent)
+        _print_flywire_download_instructions(dataset_name, Path(downloads_dir).parent)
     else:
         print(f"\033[31mError: Missing converted files or source files.\033[0m")
         print(f"\033[33mPlease download the following files from: \033[34mhttps://codex.flywire.ai/api/download?dataset=fafb\033[0m")
@@ -698,7 +700,7 @@ def ensure_flywire_data(dataset_name, dataset_dir):
         print("\n" + "="*60)
         print("MISSING CRITICAL FILES")
         print("="*60)
-        print_download_instructions(downloads_dir)
+        print_download_instructions(downloads_dir, dataset_name)
         return False
 
     return True
