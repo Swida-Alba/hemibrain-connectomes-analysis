@@ -14,6 +14,30 @@ except ImportError:
     except ImportError:
         print_download_instructions = None
 
+def _read_banc_csv(read_path, string_columns=()):
+    """Read a (possibly gzipped) BANC CSV via Polars and return pandas.
+
+    Polars decompresses gzip with multiple threads and parses CSV with
+    vectorized kernels, while the returned frame keeps the same column
+    semantics (string columns keep the nullable pandas 'string' dtype).
+    """
+    import polars as pl
+
+    # Only override columns that actually exist: polars would otherwise
+    # create null placeholder columns for missing names.
+    header = pl.read_csv(read_path, n_rows=0)
+    overrides = {
+        column: pl.Utf8
+        for column in string_columns
+        if column in header.columns
+    }
+    frame = pl.read_csv(read_path, schema_overrides=overrides)
+    result = frame.to_pandas()
+    for column in overrides:
+        result[column] = result[column].astype('string')
+    return result
+
+
 def process_neurons_to_parquet(read_path, save_path, save_csv_path=None):
     """
     Process neurons.csv.gz into neuron_df parquet format for BANC.
@@ -31,11 +55,7 @@ def process_neurons_to_parquet(read_path, save_path, save_csv_path=None):
     try:
         # Read neurons
         print("  Reading neuron data...")
-        df = pd.read_csv(
-            read_path,
-            compression='gzip' if read_path.endswith('.gz') else None,
-            dtype={'Root ID': 'string', 'bodyId': 'string'},
-        )
+        df = _read_banc_csv(read_path, string_columns=('Root ID', 'bodyId'))
         
         # Rename columns to match coana expectations
         # BANC columns: ['Root ID', 'Top in/out region', 'Community labels', 'Predicted NT type', 
@@ -105,6 +125,10 @@ def process_connections_to_parquet(read_path, save_path):
     """
     Process connections_princeton.csv.gz into merged_connections parquet format.
     Aggregates weights across ROIs.
+
+    The read + aggregation run in Polars: multi-threaded gzip and vectorized
+    groupby are far faster than the pandas pipeline on large tables, with
+    identical results.
     """
     if os.path.exists(save_path):
         print(f"  ✓ Found existing converted file: {save_path}")
@@ -117,48 +141,73 @@ def process_connections_to_parquet(read_path, save_path):
         return False
 
     try:
-        df = pd.read_csv(
-            read_path,
-            compression='gzip' if read_path.endswith('.gz') else None,
-            dtype={
-                'pre_root_id': 'string',
-                'post_root_id': 'string',
-                'bodyId_pre': 'string',
-                'bodyId_post': 'string',
-            },
-        )
-        
-        # Rename for consistency
-        # BANC columns: ['pre_root_id', 'post_root_id', 'neuropil', 'syn_count', 'nt_type']
+        import polars as pl
+
+        # Read IDs as strings so the exact decimal digits survive.  Only
+        # override columns that actually exist (polars would otherwise
+        # create null placeholder columns for missing names).
+        header = pl.read_csv(read_path, n_rows=0)
+        overrides = {
+            column: pl.Utf8
+            for column in ('pre_root_id', 'post_root_id', 'bodyId_pre', 'bodyId_post')
+            if column in header.columns
+        }
+        df = pl.read_csv(read_path, schema_overrides=overrides)
+
+        # Rename for consistency (only columns that exist - polars raises
+        # for missing names, where pandas silently ignored them)
         rename_map = {
             'pre_root_id': 'bodyId_pre',
             'post_root_id': 'bodyId_post',
             'syn_count': 'weight',
             'neuropil': 'roi'
         }
-        df = df.rename(columns=rename_map)
-        
-        # Ensure strings
-        normalize_flywire_id_columns(df, ['bodyId_pre', 'bodyId_post'])
-        
+        df = df.rename({
+            old: new for old, new in rename_map.items() if old in df.columns
+        })
+
+        # Canonical ID strings (strip whitespace, drop leading zeros, accept
+        # integral '123.0' spellings) - same semantics as
+        # normalize_flywire_id_columns, vectorized.
+        def _canonical_ids(column: str):
+            s = pl.col(column).cast(pl.Utf8).str.strip_chars()
+            s = s.str.replace(r'^([0-9]+)\.0+$', '${1}')
+            s = s.str.strip_chars_start('0')
+            return pl.when(s.str.len_chars() == 0).then(pl.lit('0')).otherwise(s)
+
+        for column in ('bodyId_pre', 'bodyId_post'):
+            if column in df.columns:
+                df = df.with_columns(_canonical_ids(column).alias(column))
+
         # Aggregate weights and ROIs (sum weights, join ROIs)
         print("  Aggregating connections across ROIs...")
         if 'roi' in df.columns:
-            df = df.groupby(['bodyId_pre', 'bodyId_post'], as_index=False).agg({
-                'weight': 'sum',
-                'roi': lambda x: '|'.join(sorted(set(str(v) for v in x if pd.notnull(v) and str(v) != 'nan')))
-            })
+            roi_expr = (
+                pl.col('roi').cast(pl.Utf8)
+                .filter(
+                    pl.col('roi').cast(pl.Utf8).is_not_null()
+                    & (pl.col('roi').cast(pl.Utf8) != 'nan')
+                )
+                .unique()
+                .sort()
+                .str.join('|')
+            )
+            df = df.group_by(['bodyId_pre', 'bodyId_post']).agg([
+                pl.col('weight').sum().alias('weight'),
+                roi_expr.alias('roi'),
+            ])
         else:
             print("  Note: 'roi' column not found, aggregating weights only.")
-            df = df.groupby(['bodyId_pre', 'bodyId_post'], as_index=False)['weight'].sum()
-            df['roi'] = 'WholeBrain'
+            df = df.group_by(['bodyId_pre', 'bodyId_post']).agg(
+                pl.col('weight').sum().alias('weight')
+            ).with_columns(pl.lit('WholeBrain').alias('roi'))
 
         # Sort by pre, post
         print("  Sorting connections...")
-        df = df.sort_values(['bodyId_pre', 'bodyId_post'])
+        df = df.sort(['bodyId_pre', 'bodyId_post'])
 
         print(f"  Saving to Parquet: {save_path}...")
-        df.to_parquet(save_path, index=False, compression='snappy')
+        df.write_parquet(save_path, compression='snappy')
 
         file_size_mb = os.path.getsize(save_path) / (1024 * 1024)
         print(f"  ✓ Conversion complete. Output size: {file_size_mb:.2f} MB")
