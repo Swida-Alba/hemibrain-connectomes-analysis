@@ -6,6 +6,14 @@ try:
 except ImportError:
     from flywire_ids import normalize_flywire_id_columns
 
+try:
+    from .utils.flywire_readiness import print_download_instructions
+except ImportError:
+    try:
+        from utils.flywire_readiness import print_download_instructions
+    except ImportError:
+        print_download_instructions = None
+
 def process_neurons_to_parquet(read_path, save_path, save_csv_path=None):
     """
     Process neurons.csv.gz into neuron_df parquet format for BANC.
@@ -215,6 +223,9 @@ def ensure_banc_data(dataset_name, dataset_dir):
     Ensure BANC data is available and converted for the given dataset.
     """
     print(f"\nChecking BANC data for {dataset_name}...")
+    print("  ℹ️  One-time preparation: raw downloads in downloads/ are converted "
+          "into the local parquet tables used by every DROCAT workflow. "
+          "Already-converted files are skipped on re-runs.")
     
     if not os.path.exists(dataset_dir):
         os.makedirs(dataset_dir, exist_ok=True)
@@ -273,11 +284,15 @@ def ensure_banc_data(dataset_name, dataset_dir):
             print(f"  ⚠️ Could not check post counts: {e}")
 
     if not all_critical_present:
-        print("\n" + "="*60)
-        print("MISSING CRITICAL FILES")
-        print("Please download missing files to:", downloads_dir)
-        print("See https://codex.flywire.ai/api/download?dataset=banc")
-        print("="*60 + "\n")
+        print()
+        if print_download_instructions is not None:
+            print_download_instructions(dataset_name, dataset_dir)
+        else:
+            print("=" * 60)
+            print("MISSING CRITICAL FILES")
+            print("Please download missing files to:", downloads_dir)
+            print("See https://codex.flywire.ai/api/download?dataset=banc")
+            print("=" * 60 + "\n")
         return False
 
     return True

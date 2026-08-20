@@ -1,5 +1,6 @@
 import os
 import shutil
+from pathlib import Path
 import pandas as pd
 import numpy as np
 import zipfile
@@ -13,6 +14,14 @@ try:
     from .flywire_ids import normalize_flywire_id_columns
 except ImportError:
     from flywire_ids import normalize_flywire_id_columns
+
+try:
+    from .utils.flywire_readiness import print_download_instructions as _print_flywire_download_instructions
+except ImportError:
+    try:
+        from utils.flywire_readiness import print_download_instructions as _print_flywire_download_instructions
+    except ImportError:
+        _print_flywire_download_instructions = None
 
 def _parse_swc_batch(zip_path, filenames):
     """Helper function to parse a batch of SWC files from a zip."""
@@ -506,10 +515,14 @@ def update_neuron_post_counts(neuron_path, conn_path, save_csv_path=None):
         return False
 
 def print_download_instructions(downloads_dir):
-    print(f"\033[31mError: Missing converted files or source files.\033[0m")
-    print(f"\033[33mPlease download the following files from: \033[34mhttps://codex.flywire.ai/api/download?dataset=fafb\033[0m")
-    print(f"\033[33mAnd save them to: \033[34m{downloads_dir}\033[0m")
+    if _print_flywire_download_instructions is not None:
+        _print_flywire_download_instructions("flywire_FAFB_v783", Path(downloads_dir).parent)
+    else:
+        print(f"\033[31mError: Missing converted files or source files.\033[0m")
+        print(f"\033[33mPlease download the following files from: \033[34mhttps://codex.flywire.ai/api/download?dataset=fafb\033[0m")
+        print(f"\033[33mAnd save them to: \033[34m{downloads_dir}\033[0m")
     
+    print("\nFile status:")
     files_info = [
         ("classification.csv.gz", "Neuron Classification"),
         ("names.csv.gz", "Optional neuron metadata: names"),
@@ -555,6 +568,9 @@ def ensure_flywire_data(dataset_name, dataset_dir):
     Checks each component (neurons, connections, synapses, skeletons) independently.
     """
     print(f"\nChecking FlyWire data for {dataset_name}...")
+    print("  ℹ️  One-time preparation: raw downloads in downloads/ are converted "
+          "into the local parquet tables used by every DROCAT workflow. "
+          "Already-converted files are skipped on re-runs.")
     
     if not os.path.exists(dataset_dir):
         os.makedirs(dataset_dir, exist_ok=True)

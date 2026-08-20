@@ -1547,23 +1547,20 @@ class FindNeuronConnection:
             success = FAFB_file_converter.ensure_flywire_data(self.dataset, dataset_dir)
             
         if not success:
-            # For FAFB, provide option to use CAVE API
+            # Canonical one-time download + conversion instructions (same
+            # message as the converters print), then the FAFB CAVE fallback
+            # note. BANC has no public CAVE connectivity path.
+            try:
+                from .utils.flywire_readiness import print_download_instructions
+            except ImportError:
+                from utils.flywire_readiness import print_download_instructions
+            print_download_instructions(self.dataset, dataset_dir)
             if 'BANC' not in self.dataset:
-                print("\n\033[33m" + "="*70 + "\033[0m")
-                print("\033[33mFAFB LOCAL DATA NOT FOUND\033[0m")
-                print("\033[33m" + "="*70 + "\033[0m")
-                print("\nYou have two options:")
-                print("\n\033[32m1. Download local data (RECOMMENDED for performance):\033[0m")
-                print("   Follow the instructions above to download the synapse table.")
-                print(f"   Save to: datasets/{dataset_safe}/")
-                print("\n\033[36m2. Use CAVE API (slow, for testing/small queries):\033[0m")
+                print("\n\033[36mAlternative: use CAVE API (slow, for testing/small queries):\033[0m")
                 print("   Set force_API_fetching=True in your script:")
                 print("   fnc = FindNeuronConnection(..., force_API_fetching=True)")
                 print("\n   ⚠️  WARNING: CAVE API is slow for large queries.")
                 print("   Downloading local data is strongly recommended.\n")
-            else:
-                print("\n\033[31mCRITICAL ERROR: BANC data preparation failed.\033[0m")
-                print("Please follow the instructions above to download the required files.")
             sys.exit(1)
 
     source_path: str = os.path.dirname(os.path.abspath(__file__))
@@ -7199,6 +7196,13 @@ class FindNeuronConnection:
         cancelled = False
         batch_connections = 0
         total_batches = (total + batch_size - 1) // batch_size
+
+        # Emit the first progress event before any fetch so embedding UIs
+        # immediately show the real target (0/N) instead of an empty 0/0
+        # while the first batch is still in flight (in parallel mode the
+        # per-batch callback would otherwise wait for a completed batch).
+        if progress_callback:
+            progress_callback(0, total, f"Batch 1/{total_batches}")
         
         _print(f"\nFetching connections for {total:,} neurons...")
         _print(f"  Strategy: Fetch each batch's downstream, append to cache immediately")

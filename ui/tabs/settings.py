@@ -159,23 +159,38 @@ def create_settings_tab():
                 parallel_input.set_enabled(not st["running"] and not skeleton_running)
                 if st["running"]:
                     pull_done_synced["value"] = False
-                    total = st["total"] or 1
-                    frac = min(st["current"] / total, 1.0)
-                    progress.set_value(frac)
                     operation_label = (
                         "complete connections"
                         if st.get("operation") == "connections"
                         else "full dataset"
                     )
-                    status_label.text = (
-                        f"Pulling {operation_label} for {st['dataset']}: {st['info']} "
-                        f"({st['current']:,}/{st['total']:,} neurons, "
-                        f"{frac * 100:.2f}%) | {_format_eta(st)}"
-                    )
+                    if st["total"] and st["total"] > 0:
+                        # Fetch phase: neuron totals are known, show a
+                        # determinate bar.
+                        progress.props(remove="indeterminate")
+                        total = st["total"] or 1
+                        frac = min(st["current"] / total, 1.0)
+                        progress.set_value(frac)
+                        status_label.text = (
+                            f"Pulling {operation_label} for {st['dataset']}: {st['info']} "
+                            f"({st['current']:,}/{st['total']:,} neurons, "
+                            f"{frac * 100:.2f}%) | {_format_eta(st)}"
+                        )
+                    else:
+                        # Preparation phase (client connect / dataset download
+                        # / index build): no totals yet — an indeterminate bar
+                        # plus the phase message keeps the pull from looking
+                        # frozen at 0/0.
+                        progress.props(add="indeterminate")
+                        status_label.text = (
+                            f"Preparing {operation_label} pull for "
+                            f"{st['dataset']}: {st['info']}"
+                        )
                     return
                 if not st["done"]:
                     return
                 if not pull_done_synced["value"]:
+                    progress.props(remove="indeterminate")
                     # A pull creates the local cache files directly. Refresh
                     # selector labels immediately so they do not wait for a
                     # full page rebuild (or a separate availability refresh).
@@ -896,7 +911,9 @@ def _load_tokens() -> dict:
         if not config_path.exists():
             continue
         try:
-            cfg = json.loads(config_path.read_text(encoding="utf-8"))
+            # utf-8-sig tolerates the UTF-8 BOM that Windows editors
+            # prepend to saved JSON files.
+            cfg = json.loads(config_path.read_text(encoding="utf-8-sig"))
         except Exception:
             cfg = None
         cfg_tokens = (cfg or {}).get("tokens") if isinstance(cfg, dict) else None

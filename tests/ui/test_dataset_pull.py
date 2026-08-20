@@ -191,6 +191,89 @@ class TestDatasetPuller:
 
 
 # ---------------------------------------------------------------------------
+# Puller phase reporting: the Settings tab must not look frozen at 0/0
+# during client connect / dataset download / index build.
+# ---------------------------------------------------------------------------
+
+class TestDatasetPullerPhases:
+    def test_prepare_phase_is_reported_before_fetch(self, monkeypatch):
+        """Before the batched fetch starts, the state reports a 'prepare'
+        phase with an informative message (no neuron totals yet)."""
+        import coana
+        import threading
+
+        events = []
+        build_started = threading.Event()
+        init_done = threading.Event()
+
+        class TrackingFNC:
+            def __init__(self, *args, **kwargs):
+                events.append("init")
+                init_done.wait(5)  # hold the prepare phase observable
+
+            def build_connection_cache(self, **kwargs):
+                events.append("build")
+                build_started.set()
+                progress_callback = kwargs.get("progress_callback")
+                if progress_callback:
+                    progress_callback(10, 10, "Batch 1/1")
+                return {
+                    "total_neurons": 10, "already_cached": 0, "newly_cached": 10,
+                    "failed_neurons": [], "total_connections": 30,
+                    "elapsed_time": 0.1, "cancelled": False,
+                }
+
+        monkeypatch.setattr(coana, "FindNeuronConnection", TrackingFNC)
+        puller = DatasetPuller()
+        assert puller.start("hemibrain:v1.2.1") is True
+        # while the client/init phase runs, the state says what it is doing
+        assert _wait_until(lambda: puller.state["phase"] == "prepare")
+        assert "preparing local data" in puller.state["info"].lower()
+        assert puller.state["total"] == 0
+        init_done.set()
+        assert build_started.wait(5)
+        assert _wait_until(lambda: puller.state["done"])
+        st = puller.state
+        assert st["phase"] == "fetch"
+        assert st["total"] == 10
+        assert events == ["init", "build"]
+
+    def test_cancel_during_preparation_skips_fetch(self, monkeypatch):
+        """Cancel pressed while the client/init phase is still running stops
+        the pull without ever starting the batched fetch."""
+        import coana
+        import threading
+
+        built = {"called": False}
+        release_init = threading.Event()
+
+        class BlockingInitFNC:
+            def __init__(self, *args, **kwargs):
+                release_init.wait(5)
+
+            def build_connection_cache(self, **kwargs):
+                built["called"] = True
+                return {
+                    "total_neurons": 0, "already_cached": 0, "newly_cached": 0,
+                    "failed_neurons": [], "total_connections": 0,
+                    "elapsed_time": 0.0, "cancelled": False,
+                }
+
+        monkeypatch.setattr(coana, "FindNeuronConnection", BlockingInitFNC)
+        puller = DatasetPuller()
+        assert puller.start("hemibrain:v1.2.1") is True
+        assert _wait_until(lambda: puller.state["phase"] == "prepare")
+        puller.cancel()
+        release_init.set()
+        assert _wait_until(lambda: puller.state["done"])
+        st = puller.state
+        assert st["cancelled"] is True
+        assert built["called"] is False
+        assert "Cancelled during preparation" in st["info"]
+        assert st["summary"]["cancelled"] is True
+
+
+# ---------------------------------------------------------------------------
 # build_connection_cache cancel_event + quiet consolidation (real code)
 # ---------------------------------------------------------------------------
 
@@ -423,6 +506,61 @@ class TestBuildConnectionCacheCancel:
         assert summary["newly_cached"] == 2
         conn_path = tmp_path / "cache" / "fake_v2" / "connections.parquet"
         assert conn_path.exists()
+
+    def test_first_progress_event_reports_total_before_any_fetch(self, tmp_path, monkeypatch):
+        """The first progress event (0, total) fires before the first batch
+        fetch, so embedding UIs immediately show the real target instead of
+        an empty 0/0 (in parallel mode the per-batch callback would otherwise
+        wait for a completed batch)."""
+        import coana
+        import neuprint
+        import threading
+        import time
+        import pandas as pd
+
+        class FakeClient:
+            def __init__(self, *a, **k):
+                pass
+
+        monkeypatch.setattr(neuprint, "Client", FakeClient)
+
+        fc = coana.FindNeuronConnection(
+            dataset="fake:v6",
+            use_cache=True,
+            cache_only=False,
+            verbose=False,
+            script_path=str(tmp_path),
+            cache_folder=str(tmp_path / "cache" / "fake_v6"),
+        )
+
+        events = []
+        fetch_started = threading.Event()
+
+        def fake_fetch(upstream_bodyIds, downstream_bodyIds=None,
+                          cancel_event=None, status_callback=None):
+            fetch_started.set()
+            time.sleep(0.05)
+            return pd.DataFrame({
+                "bodyId_pre": upstream_bodyIds,
+                "bodyId_post": [str(int(b) + 1000) for b in upstream_bodyIds],
+                "weight": [5] * len(upstream_bodyIds),
+                "roi": ["fake"] * len(upstream_bodyIds),
+            })
+
+        monkeypatch.setattr(fc, "_fetch_connections_bulk", fake_fetch)
+
+        summary = fc.build_connection_cache(
+            neuron_bodyIds=[str(i) for i in range(6)],
+            batch_size=2,
+            quiet=True,
+            max_workers=3,
+            progress_callback=lambda c, t, info: events.append((c, t)),
+        )
+        assert summary["newly_cached"] == 6
+        assert events, "progress events were emitted"
+        # the very first event carries the real target before any fetch
+        assert events[0] == (0, 6), events
+        assert len(events) >= 2, events
 
 
 class TestRepeatPullCacheStatus:

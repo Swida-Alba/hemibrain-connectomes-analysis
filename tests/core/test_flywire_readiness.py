@@ -12,11 +12,51 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from utils.flywire_readiness import (  # noqa: E402
     FlyWireSkeletonAccessError,
     flywire_skeleton_readiness,
+    print_download_instructions,
     require_flywire_skeleton_access,
 )
 from morphology import MorphologyComparer  # noqa: E402
 from visualize_skeleton import VisualizeSkeleton  # noqa: E402
 
+
+# =============================================================================
+# Unified missing-local-files download instructions (FAFB and BANC)
+# =============================================================================
+
+class TestPrintDownloadInstructions:
+    def _capture(self, dataset, tmp_path, capsys):
+        print_download_instructions(dataset, tmp_path / "datasets" / dataset)
+        return capsys.readouterr().out
+
+    def test_fafb_instructions_are_canonical(self, tmp_path, capsys):
+        text = self._capture("flywire_FAFB_v783", tmp_path, capsys)
+        assert "ONE-TIME" in text
+        assert "one-time" in text.lower()
+        assert "https://codex.flywire.ai/api/download?dataset=fafb" in text
+        assert "classification.csv.gz" in text
+        assert "connections_princeton_no_threshold.csv.gz" in text
+        assert "python src/FAFB_file_converter.py" in text
+        # downloads folder of the dataset directory
+        assert str(tmp_path / "datasets" / "flywire_FAFB_v783" / "downloads") in text
+
+    def test_banc_instructions_use_banc_url_and_converter(self, tmp_path, capsys):
+        text = self._capture("flywire_BANC_v626", tmp_path, capsys)
+        assert "https://codex.flywire.ai/api/download?dataset=banc" in text
+        assert "neurons.csv.gz" in text
+        assert "connections_princeton.csv.gz" in text
+        assert "python src/BANC_file_converter.py" in text
+        assert "python src/FAFB_file_converter.py" not in text
+
+    def test_instructions_work_without_explicit_dataset_dir(self, capsys):
+        print_download_instructions("flywire_FAFB_v783")
+        text = capsys.readouterr().out
+        assert "https://codex.flywire.ai/api/download?dataset=fafb" in text
+        assert "python src/FAFB_file_converter.py" in text
+
+
+# =============================================================================
+# Guards for FlyWire skeleton-backed workflows
+# =============================================================================
 
 def test_banc_is_always_blocked_and_does_not_expose_token(tmp_path):
     log = []

@@ -84,14 +84,20 @@ def prepare_flywire_data(data_dir):
         if conn_file.exists() and types_file.exists():
              pass # Proceed to generate neuron df if needed
         else:
-            # Generic error message for missing files
+            # Generic error message for missing files (one-time download +
+            # conversion; same story the converters print)
+            dataset_key = 'banc' if is_banc_dataset(dataset_name) else 'fafb'
+            converter = 'BANC_file_converter' if dataset_key == 'banc' else 'FAFB_file_converter'
             raise FileNotFoundError(
                 f"Required data files not found in {data_dir}.\n"
-                f"Please ensure the following files exist in {downloads_dir}:\n"
+                f"This is a one-time preparation step: download the files from\n"
+                f"https://codex.flywire.ai/api/download?dataset={dataset_key}\n"
+                f"save them into {downloads_dir}, then run the one-time conversion:\n"
+                f"python src/{converter}.py\n"
+                f"Required files in {downloads_dir}:\n"
                 "1. connections_princeton_no_threshold.csv.gz (or connections_princeton.csv.gz)\n"
                 "2. consolidated_cell_types.csv.gz (or neurons.csv.gz)\n"
                 "3. sk_lod1_783_healed.zip (optional, for visualization)\n"
-                "If using BANC, ensure BANC_file_converter has run successfully."
             )
         
     # Extract if needed

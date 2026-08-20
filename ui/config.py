@@ -23,7 +23,9 @@ def load_local_config() -> dict:
     """Load the user-editable local UI configuration (output dir, etc.)."""
     try:
         if LOCAL_CONFIG_FILE.exists():
-            data = json.loads(LOCAL_CONFIG_FILE.read_text(encoding="utf-8"))
+            # utf-8-sig tolerates the UTF-8 BOM that Windows editors
+            # prepend to saved JSON files.
+            data = json.loads(LOCAL_CONFIG_FILE.read_text(encoding="utf-8-sig"))
             if isinstance(data, dict):
                 return data
     except (OSError, ValueError):

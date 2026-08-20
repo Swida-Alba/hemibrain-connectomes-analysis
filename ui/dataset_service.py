@@ -282,7 +282,9 @@ class DatasetService:
             if not config_path.exists():
                 continue
             try:
-                with open(config_path, "r", encoding="utf-8") as f:
+                # utf-8-sig tolerates the UTF-8 BOM that Windows editors
+                # prepend to saved JSON files.
+                with open(config_path, "r", encoding="utf-8-sig") as f:
                     cfg = json.load(f)
                 cfg_tokens = cfg.get("tokens") or {}
                 if isinstance(cfg_tokens, dict):

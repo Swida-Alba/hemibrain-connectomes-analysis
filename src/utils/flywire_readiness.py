@@ -37,6 +37,55 @@ def dataset_folder(dataset: object) -> str:
     return str(dataset or "").replace(":", "_").replace(".", "_")
 
 
+def print_download_instructions(
+    dataset: object,
+    dataset_dir: str | Path | None = None,
+) -> None:
+    """Print the canonical one-time download + conversion instructions for a
+    FlyWire dataset (FAFB or BANC) whose local tables are missing.
+
+    Single source of truth for the missing-local-files message, used by both
+    converters, coana's data preparation and the skeleton-readiness guard, so
+    every entry point tells the same story: download from Codex, save into
+    ``datasets/<dataset>/downloads/``, run the converter once (one-time
+    preparation; re-runs reuse the converted tables).
+    """
+
+    dataset_name = str(dataset or "")
+    key = "banc" if is_banc_dataset(dataset_name) else "fafb"
+    converter = "BANC_file_converter" if key == "banc" else "FAFB_file_converter"
+    if dataset_dir is None:
+        root = Path(__file__).resolve().parents[2]
+        dataset_dir = root / "datasets" / dataset_folder(dataset_name)
+    download_dir = Path(dataset_dir) / "downloads"
+    required = (
+        "neurons.csv.gz + connections_princeton.csv.gz"
+        if key == "banc"
+        else "classification.csv.gz + connections_princeton_no_threshold.csv.gz"
+    )
+    print()
+    print("=" * 70)
+    print(f"MISSING LOCAL FILES — ONE-TIME DOWNLOAD + CONVERSION REQUIRED")
+    print(f"Local tables for '{dataset_name}' were not found. DROCAT queries need the")
+    print("raw FlyWire downloads converted into local parquet tables first; this is a")
+    print("ONE-TIME preparation step (re-runs reuse the converted tables):")
+    print()
+    print(f"  1. Download the required files from:")
+    print(f"     https://codex.flywire.ai/api/download?dataset={key}")
+    print(f"     Required: {required}")
+    print(f"  2. Save the downloads into:")
+    print(f"     {download_dir}")
+    print(f"  3. Run the one-time converter:")
+    print(f"     python src/{converter}.py")
+    print()
+    if key == "fafb":
+        print("  Optional FAFB extras (names/coordinates/neurons/cell_stats/")
+        print("  consolidated_cell_types .csv.gz, synapse table, sk_lod1_783_healed.zip)")
+        print("  can be saved into the same folder for enriched neurons, synapse")
+        print("  markers and skeleton visualization.")
+    print("=" * 70)
+
+
 def _configured_cave_token(project_root: Path) -> Optional[str]:
     """Read a CAVE token without ever returning it to a caller-facing log.
 
@@ -63,7 +112,9 @@ def _cave_token_from_config(project_root: Path) -> Optional[str]:
     for filename in ("config_local.json", "config.json"):
         config_path = project_root / filename
         try:
-            data = json.loads(config_path.read_text(encoding="utf-8"))
+            # utf-8-sig tolerates the UTF-8 BOM that Windows editors
+            # prepend to saved JSON files.
+            data = json.loads(config_path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             continue
         section = data.get("tokens") if isinstance(data, dict) else None
@@ -189,7 +240,9 @@ def require_flywire_skeleton_access(
         log(
             "Use a non-BANC dataset for 3D skeleton visualization or "
             "morphological similarity. BANC remains available for supported "
-            "local connectivity/path analyses."
+            "local connectivity/path analyses; prepare its tables once via "
+            "https://codex.flywire.ai/api/download?dataset=banc + "
+            "python src/BANC_file_converter.py."
         )
         raise FlyWireSkeletonAccessError(message)
 
@@ -220,7 +273,9 @@ def require_flywire_skeleton_access(
             "For repeatable/offline runs, download sk_lod1_783_healed.zip "
             "from https://codex.flywire.ai/api/download?dataset=fafb, place "
             f"it in datasets/{dataset_name}/downloads/, then run "
-            "python src/FAFB_file_converter.py."
+            "python src/FAFB_file_converter.py (one-time preparation: the "
+            "converter turns the raw downloads into the local tables used by "
+            "all workflows; re-runs reuse them)."
         )
         return status
 
@@ -234,7 +289,9 @@ def require_flywire_skeleton_access(
         "sk_lod1_783_healed.zip from "
         "https://codex.flywire.ai/api/download?dataset=fafb, place it in "
         f"datasets/{dataset_name}/downloads/, then run "
-        "python src/FAFB_file_converter.py."
+        "python src/FAFB_file_converter.py (one-time preparation; the "
+        "converter also builds the neuron/connection tables FAFB queries "
+        "require)."
     )
     log(
         "Or configure CAVE_TOKEN in config.json (or the environment) "

@@ -143,7 +143,7 @@ class CAVEDataFetcher:
         for filename in ('config_local.json', 'config.json'):
             config_path = os.path.join(self.project_root, filename)
             try:
-                with open(config_path, 'r', encoding='utf-8') as f:
+                with open(config_path, 'r', encoding='utf-8-sig') as f:
                     data = json.load(f)
             except (OSError, ValueError):
                 continue

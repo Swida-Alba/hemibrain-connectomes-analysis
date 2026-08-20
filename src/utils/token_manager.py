@@ -53,7 +53,9 @@ class TokenManager:
         if not config_path:
             return
         try:
-            with open(config_path, 'r', encoding='utf-8') as f:
+            # utf-8-sig tolerates the UTF-8 BOM that Windows editors (e.g.
+            # Notepad) prepend to JSON files; plain utf-8 would reject it.
+            with open(config_path, 'r', encoding='utf-8-sig') as f:
                 data = json.load(f)
         except Exception as e:
             print(f"Warning: Failed to read {filename}: {e}")

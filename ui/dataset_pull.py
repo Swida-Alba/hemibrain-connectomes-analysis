@@ -34,6 +34,7 @@ class DatasetPuller:
             "running": False,
             "dataset": None,
             "operation": "full_dataset",
+            "phase": "idle",
             "current": 0,
             "total": 0,
             "info": "",
@@ -78,6 +79,7 @@ class DatasetPuller:
                 "running": True,
                 "dataset": dataset,
                 "operation": operation,
+                "phase": "prepare",
                 "current": 0,
                 "total": 0,
                 "info": "Connecting to dataset...",
@@ -118,6 +120,15 @@ class DatasetPuller:
         with self._lock:
             self._state["info"] = msg
 
+    def _phase(self, name: str, msg: str) -> None:
+        """Report a named pipeline phase (``prepare`` / ``fetch``) so the UI
+        can show what the pull is doing before the first progress callback
+        (client connect, dataset download, index build) — these phases have
+        no neuron totals yet and used to look like a hang at 0/0."""
+        with self._lock:
+            self._state["phase"] = name
+            self._state["info"] = msg
+
     def _run(
         self,
         dataset: str,
@@ -128,11 +139,44 @@ class DatasetPuller:
         try:
             from coana import FindNeuronConnection
 
+            # Phase 1/2 — client init + local data preparation.  A first pull
+            # may download the full neuron table here (statvis.pull_dataset),
+            # which can take several minutes with no neuron totals yet.
+            self._phase(
+                "prepare",
+                "Connecting to the dataset server and preparing local data "
+                "(a first pull may download the full neuron table — this can "
+                "take several minutes; press Cancel to stop after it).",
+            )
             fc = FindNeuronConnection(
                 dataset=dataset,
                 use_cache=True,
                 cache_only=False,
                 verbose=False,
+            )
+            if self._cancel_event.is_set():
+                # Cancelled during preparation (e.g. while the full neuron
+                # table was being downloaded): stop before the fetch loop.
+                with self._lock:
+                    self._state["summary"] = {
+                        "total_neurons": 0,
+                        "already_cached": 0,
+                        "newly_cached": 0,
+                        "failed_neurons": [],
+                        "total_connections": 0,
+                        "elapsed_time": 0.0,
+                        "cancelled": True,
+                    }
+                    self._state["cancelled"] = True
+                    self._state["info"] = "Cancelled during preparation."
+                    self._state["done"] = True
+                return
+
+            # Phase 2/2 — batched connection fetch; per-batch progress
+            # callbacks now drive the determinate bar.
+            self._phase(
+                "fetch",
+                "Fetching connections in batches...",
             )
             summary = fc.build_connection_cache(
                 batch_size=batch_size,
