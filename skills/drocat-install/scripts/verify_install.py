@@ -249,28 +249,32 @@ def main() -> int:
     except Exception as exc:
         check("pip dependency consistency", False, str(exc))
 
-    # Token file
-    local_token = project / "token_info_local.txt"
-    token_file = local_token if local_token.exists() else project / "token_info.txt"
-    if token_file.exists():
-        text = token_file.read_text(encoding="utf-8", errors="replace")
-        has_neuprint = any(
-            line.strip().startswith("NEUPRINT_TOKEN=")
-            and "YOUR_" not in line
-            and len(line.split("=", 1)[1].strip().strip("'\"")) > 20
-            for line in text.splitlines()
+    # Token file (config.json; legacy token_info*.txt files are deprecated
+    # and no longer read anywhere).
+    config_token = project / "config.json"
+    if config_token.exists():
+        try:
+            cfg = json.loads(config_token.read_text(encoding="utf-8"))
+            neuprint_value = (cfg.get("tokens") or {}).get("neuprint") or ""
+        except Exception:
+            neuprint_value = ""
+        has_neuprint = (
+            isinstance(neuprint_value, str)
+            and neuprint_value.strip()
+            and "YOUR_" not in neuprint_value
+            and len(neuprint_value.strip().strip("'\"")) > 20
         )
         check(
-            "token_info (NeuPrint token configured)"
+            "tokens (NeuPrint token configured)"
             + ("" if args.require_token else " (optional)"),
             has_neuprint or not args.require_token,
-            str(token_file),
+            str(config_token),
         )
     else:
         check(
-            "token_info file" + ("" if args.require_token else " (optional)"),
+            "tokens file" + ("" if args.require_token else " (optional)"),
             not args.require_token,
-            "missing token_info.txt / token_info_local.txt",
+            "missing config.json",
         )
 
     # UI import (project must be on sys.path)
