@@ -67,7 +67,7 @@ TODO_*.md
 # tokens
 cave_token.txt
 token_info_local.txt
-config.json
+config_local.json
 ui/local_config.json
 ui/neuron_history.json
 ui/line_history.json

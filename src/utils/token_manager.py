@@ -6,8 +6,9 @@ class TokenManager:
     
     Token Priority (in order of precedence):
     1. Direct input (if provided)
-    2. config.json tokens section (project config, gitignored)
-    3. Environment variables
+    2. config_local.json tokens section (gitignored local override)
+    3. config.json tokens section (committed clean defaults)
+    4. Environment variables
     
     Token Type Detection (for direct input without specifying type):
     - NeuPrint tokens: JWT format, typically 150+ characters with '.' separators
@@ -22,7 +23,7 @@ class TokenManager:
         self.tokens = self._load_tokens_from_files()
         
     def _load_tokens_from_files(self):
-        """Load tokens from the project config.json (the only token file)."""
+        """Load tokens from config_local.json (override) then config.json."""
         tokens = {}
         
         # Check current directory and project root
@@ -30,16 +31,19 @@ class TokenManager:
         # Project root is ../../ relative to this file
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-        self._parse_config_json(project_root, tokens)
+        # config.json ships clean on GitHub; the gitignored config_local.json
+        # overrides it per key (non-empty values only).
+        self._parse_config_file(project_root, 'config.json', tokens)
+        self._parse_config_file(project_root, 'config_local.json', tokens)
             
         return tokens
 
-    def _parse_config_json(self, project_root, tokens_dict):
-        """Load the tokens section of config.json (the only token file)."""
+    def _parse_config_file(self, project_root, filename, tokens_dict):
+        """Load the tokens section of one project config file."""
         import json
         search_paths = [
-            'config.json', # Current working directory
-            os.path.join(project_root, 'config.json') # Project root
+            filename, # Current working directory
+            os.path.join(project_root, filename) # Project root
         ]
         config_path = None
         for path in search_paths:
@@ -52,7 +56,7 @@ class TokenManager:
             with open(config_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
         except Exception as e:
-            print(f"Warning: Failed to read config.json: {e}")
+            print(f"Warning: Failed to read {filename}: {e}")
             return
         section = data.get('tokens') if isinstance(data, dict) else None
         if not isinstance(section, dict):
@@ -70,7 +74,7 @@ class TokenManager:
         
         Priority order:
         1. Direct input (if provided)
-        2. config.json tokens section
+        2. config_local.json / config.json tokens section
         3. Environment variable
         
         Args:

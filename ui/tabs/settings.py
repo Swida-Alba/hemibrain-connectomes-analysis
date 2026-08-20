@@ -345,7 +345,7 @@ def create_settings_tab():
                 if missing == ["neuprint"]:
                     token_reminder_text.text = (
                         "⚠️ NeuPrint token not configured - it is required for NeuPrint datasets. "
-                        "Set it below or in config.json."
+                        "Set it below or in config_local.json."
                     )
                 elif missing == ["cave"]:
                     token_reminder_text.text = (
@@ -356,7 +356,7 @@ def create_settings_tab():
                     token_reminder_text.text = (
                         "⚠️ No API tokens configured. The NeuPrint token is required for NeuPrint "
                         "datasets; the CAVE token is optional (only needed for FlyWire FAFB online "
-                        "fetching). Set them below or in config.json."
+                        "fetching). Set them below or in config_local.json."
                     )
                 token_reminder_text.update()
 
@@ -796,7 +796,9 @@ python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter impor
         _refresh_token_reminder()
 
     def save_tokens():
-        config_path = PROJECT_ROOT / "config.json"
+        # Tokens are written to the gitignored config_local.json override so
+        # the committed config.json stays clean on GitHub.
+        config_path = PROJECT_ROOT / "config_local.json"
         entered_neuprint = (neuprint_token.value or "").strip()
         entered_cave = (cave_token.value or "").strip()
         saved_tokens = dict(token_state)
@@ -810,8 +812,8 @@ python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter impor
         elif clear_blank.value:
             saved_tokens.pop("cave", None)
 
-        # config.json is the project config: keep the versioned env map and
-        # any other sections, and only replace the tokens section.
+        # Keep the versioned env map and any other sections of the local
+        # config, and only replace the tokens section.
         data = {}
         if config_path.exists():
             try:
@@ -836,7 +838,7 @@ python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter impor
             clear_blank.value = False
             _update_token_status()
 
-            ui.notify("Tokens saved to config.json", type="positive")
+            ui.notify("Tokens saved to config_local.json", type="positive")
             from ..dataset_service import get_dataset_service
             service = get_dataset_service()
             service._token = saved_tokens.get("neuprint") or None
@@ -883,13 +885,16 @@ python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter impor
 
 
 def _load_tokens() -> dict:
-    """Load valid tokens from the project config.json (the only token file).
+    """Load valid tokens from config_local.json (override) then config.json.
 
-    A ``YOUR_*`` placeholder is treated as unconfigured.
+    A ``YOUR_*`` placeholder is treated as unconfigured; an empty local
+    value falls through to the committed config.json.
     """
     tokens = {}
-    config_path = PROJECT_ROOT / "config.json"
-    if config_path.exists():
+    for filename in ("config.json", "config_local.json"):
+        config_path = PROJECT_ROOT / filename
+        if not config_path.exists():
+            continue
         try:
             cfg = json.loads(config_path.read_text(encoding="utf-8"))
         except Exception:

@@ -18,14 +18,17 @@ class TestRunDrocatLaunchers:
         assert "is not DROCAT" in text
         # token reminder for users who skipped the installer prompt
         assert "config.json" in text
+        assert "config_local.json" in text
         assert "NeuPrint token is not configured yet" in text
         assert "CAVE token is optional" in text
-        # version-specific custom env override from config.json
+        # version-specific custom env override: local config first
         assert "json_value envs" in text
         assert "ENV_OVERRIDE" in text
         assert "json_value tokens" in text
-        # the resolved environment is written back into config.json
+        assert 'for cfg in "$CONFIG_LOCAL" "$CONFIG_FILE"' in text
+        # the resolved environment is written back into config_local.json
         assert "update_config_env" in text
+        assert "CONFIG_LOCAL" in text
         # double-click UX: keep the window open on failure
         assert "Press Return to close" in text
 
@@ -37,12 +40,14 @@ class TestRunDrocatLaunchers:
         assert "netstat -ano" in text
         assert "NeuPrint token is not configured yet" in text
         assert "CAVE token is optional" in text
-        # version-specific custom env override from config.json
+        # version-specific custom env override: local config first
         assert "config.json" in text
+        assert "config_local.json" in text
         assert "ENV_OVERRIDE" in text
         assert "envs.'!DROCAT_VERSION!'" in text
-        # the resolved environment is written back into config.json
-        assert "Set-Content -LiteralPath '!CONFIG_FILE!'" in text
+        assert text.count("LiteralPath '!CONFIG_LOCAL!'") >= 2
+        # the resolved environment is written back into config_local.json
+        assert "Set-Content -LiteralPath '!CONFIG_LOCAL!'" in text
         # conda is resolved to its FULL path at both detection sites: a
         # quoted bare name is not resolved through PATH/PATHEXT by `call`
         assert text.count("for /f \"delims=\" %%c in ('where conda')") == 2
@@ -74,11 +79,16 @@ class TestInstallers:
         assert "config.example.json" in text
         assert 'json_value envs "$DROCAT_VERSION"' in text
         assert "ENV_OVERRIDE" in text
+        assert "CONFIG_LOCAL" in text
+        # the auto-fill write-back targets the LOCAL config only
+        assert 'update_config_env "$DROCAT_VERSION" "$ENV_NAME" "$CONFIG_LOCAL"' in text
         # a configured custom env is strict: wrong Python aborts instead of
         # silently switching to a default name, and the entry is never
         # overwritten by the auto-fill write-back
         assert "exists but is not Python" in text
         assert 'if [[ -z "$ENV_OVERRIDE" ]]' in text
+        # token_info files are removed: the notice must not reference them
+        assert "token_info" not in text
 
     def test_install_sh_token_notice_has_no_terminal_prompt(self):
         """Tokens are NOT collected in the terminal: the installer only prints
@@ -87,14 +97,15 @@ class TestInstallers:
         text = (ROOT / "archive/install/install.sh").read_text(encoding="utf-8")
         assert "UI Settings tab" in text
         assert "config.json" in text
+        assert "config_local.json" in text
         assert "required for NeuPrint datasets" in text
         assert "only needed for FlyWire FAFB online fetching" in text
         # no interactive paste prompt remains
         assert "read -r -p" not in text
         assert "Paste them here in the terminal" not in text
         assert "Non-interactive: skipping" not in text
-        # token_info files are deprecated: the notice must not reference them
-        assert "token_info_local.txt" not in text
+        # token_info files are removed: the notice must not reference them
+        assert "token_info" not in text
 
     def test_install_ps1_token_notice_has_no_terminal_prompt(self):
         text = (ROOT / "archive/install/install.ps1").read_text(encoding="utf-8")
@@ -104,24 +115,28 @@ class TestInstallers:
         assert "Read-Host" not in text
         assert "IsInputRedirected" not in text
         assert "Paste them here in the terminal" not in text
+        # token_info files are removed: the notice must not reference them
+        assert "token_info" not in text
 
     def test_install_ps1_config_json_env_override(self):
         text = (ROOT / "archive/install/install.ps1").read_text(encoding="utf-8")
-        # config.json: created from the committed template, versioned env
-        # override consulted before the default drocat-<version> auto-find
+        # config.json ships clean; the gitignored config_local.json override
+        # is consulted first for the versioned env and the tokens
         assert "config.example.json" in text
-        assert 'Config.envs."$DrocatVersion"' in text
+        assert "$ConfigLocal" in text
+        assert "$ConfigLocalData" in text
         assert "$EnvOverride" in text
         assert "config.json" in text
-        # the resolved environment is written back into config.json
+        # the resolved environment is written back into config_local.json
         assert "Set-ConfigEnvOverride" in text
+        assert "Set-Content $ConfigLocal" in text
         # a configured custom env is strict: wrong Python throws instead of
         # silently switching to a default name, and the entry is never
         # overwritten by the auto-fill write-back
         assert "exists but is not Python" in text
         assert "if (-not $EnvOverride) { Set-ConfigEnvOverride" in text
-        # token_info files are deprecated: the notice must not reference them
-        assert "token_info_local.txt" not in text
+        # token_info files are removed: the notice must not reference them
+        assert "token_info" not in text
 
     def test_install_ps1_windows_powershell_51_hardening(self):
         """Windows PowerShell 5.1 turns native stderr into a terminating

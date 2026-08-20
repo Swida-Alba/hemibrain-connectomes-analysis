@@ -24,19 +24,28 @@ $DrocatVersion = "4.5.0"
 $VersionLine = Select-String -Path "$ProjectRoot\ui\config.py" -Pattern '^APP_VERSION = "([^"]+)"' -ErrorAction SilentlyContinue
 if ($VersionLine) { $DrocatVersion = $VersionLine.Matches[0].Groups[1].Value }
 $EnvBase = "drocat-$DrocatVersion"
+# config.json ships clean on GitHub (committed defaults); the gitignored
+# config_local.json is the per-user override and wins per key.
 $ConfigFile = Join-Path $ProjectRoot "config.json"
+$ConfigLocal = Join-Path $ProjectRoot "config_local.json"
 $ConfigExample = Join-Path $ProjectRoot "config.example.json"
 
-# Create the local config.json from the committed template on first run so
-# the versioned env override and token slots exist before anything reads them.
+# Create the local override config from the committed template on first run
+# so the versioned env override and token slots exist before anything reads
+# them. config.json itself ships with the repository.
+if (-not (Test-Path $ConfigLocal) -and (Test-Path $ConfigExample)) {
+    Copy-Item $ConfigExample $ConfigLocal
+    Write-Host "Created config_local.json from config.example.json (edit it to set a custom env name or tokens)." -ForegroundColor Yellow
+}
 if (-not (Test-Path $ConfigFile) -and (Test-Path $ConfigExample)) {
     Copy-Item $ConfigExample $ConfigFile
-    Write-Host "Created config.json from config.example.json (edit it to set a custom env name or tokens)." -ForegroundColor Yellow
+    Write-Host "Created config.json from config.example.json (missing in this checkout)." -ForegroundColor Yellow
 }
 
-# config.json: version-specific custom env (envs.<version>) and tokens.
-# envs.<version> is only consulted for the CURRENT release, so upgrading
-# DROCAT never reuses an older release's custom environment.
+# Version-specific custom env (envs.<version>) and tokens: the local config
+# wins; the committed config.json is the fallback. envs.<version> is only
+# consulted for the CURRENT release, so upgrading DROCAT never reuses an
+# older release's custom environment.
 $Config = $null
 if (Test-Path $ConfigFile) {
     try {
@@ -45,17 +54,29 @@ if (Test-Path $ConfigFile) {
         $Config = $null
     }
 }
+$ConfigLocalData = $null
+if (Test-Path $ConfigLocal) {
+    try {
+        $ConfigLocalData = Get-Content $ConfigLocal -Raw | ConvertFrom-Json
+    } catch {
+        $ConfigLocalData = $null
+    }
+}
 $EnvOverride = ""
-if ($Config -and $Config.envs) {
+if ($ConfigLocalData -and $ConfigLocalData.envs) {
+    $EnvOverride = [string]$ConfigLocalData.envs."$DrocatVersion"
+}
+if (-not $EnvOverride -and $Config -and $Config.envs) {
     $EnvOverride = [string]$Config.envs."$DrocatVersion"
 }
 
 function Set-ConfigEnvOverride([string]$Version, [string]$EnvName) {
-    # Persist the selected environment into config.json so an empty entry is
-    # filled with the auto-created name; custom names are written back unchanged.
-    if (-not (Test-Path $ConfigFile)) { return }
+    # Persist the selected environment into the LOCAL config so an empty
+    # entry is filled with the auto-created name. The committed config.json
+    # is never rewritten, and a configured custom name is never touched.
+    if (-not (Test-Path $ConfigLocal)) { return }
     try {
-        $Cfg = Get-Content $ConfigFile -Raw | ConvertFrom-Json
+        $Cfg = Get-Content $ConfigLocal -Raw | ConvertFrom-Json
     } catch {
         return
     }
@@ -63,7 +84,7 @@ function Set-ConfigEnvOverride([string]$Version, [string]$EnvName) {
         $Cfg | Add-Member -NotePropertyName "envs" -NotePropertyValue ([pscustomobject]@{}) -Force
     }
     $Cfg.envs | Add-Member -NotePropertyName $Version -NotePropertyValue $EnvName -Force
-    $Cfg | ConvertTo-Json -Depth 5 | Set-Content $ConfigFile -Encoding UTF8
+    $Cfg | ConvertTo-Json -Depth 5 | Set-Content $ConfigLocal -Encoding UTF8
 }
 
 function Write-Step([string]$Step, [string]$Message) {
@@ -231,8 +252,9 @@ if (-not $script:EnvName) {
     }
 }
 if (-not $script:EnvName) { throw "Could not select a usable $EnvBase environment." }
-# Persist the auto-selected environment into config.json when no custom name
-# was configured (empty entry -> auto-fill). A custom name is never rewritten.
+# Persist the auto-selected environment into the LOCAL config when no
+# custom name was configured (empty entry -> auto-fill). The committed
+# config.json is never rewritten; a custom name is never touched.
 if (-not $EnvOverride) { Set-ConfigEnvOverride $DrocatVersion $script:EnvName }
 
 Set-Location $ProjectRoot
@@ -270,27 +292,29 @@ Write-Host "Launch with: run_DROCAT.bat"
 
 # --- Token configuration notice ---
 # Tokens are NOT collected in the terminal: they are set in the UI Settings
-# tab after launch, or by editing config.json at the repository root (see
-# token_info.txt for the migration notes). The NeuPrint token is required
-# for NeuPrint datasets; the CAVE token is optional and only needed for
-# FlyWire FAFB online fetching.
+# tab after launch, or by editing config_local.json at the repository root
+# (the gitignored override; config.json ships clean). The NeuPrint token is
+# required for NeuPrint datasets; the CAVE token is optional and only needed
+# for FlyWire FAFB online fetching.
 Write-Host ""
 Write-Host "[Token setup]" -ForegroundColor Cyan
 $NeuprintNow = ""
 $CaveNow = ""
-if ($Config -and $Config.tokens) {
-    if ($Config.tokens.neuprint) { $NeuprintNow = [string]$Config.tokens.neuprint }
-    if ($Config.tokens.cave) { $CaveNow = [string]$Config.tokens.cave }
+foreach ($Cfg in @($ConfigLocalData, $Config)) {
+    if ($Cfg -and $Cfg.tokens) {
+        if (-not $NeuprintNow -and $Cfg.tokens.neuprint) { $NeuprintNow = [string]$Cfg.tokens.neuprint }
+        if (-not $CaveNow -and $Cfg.tokens.cave) { $CaveNow = [string]$Cfg.tokens.cave }
+    }
 }
 if ($NeuprintNow -and $NeuprintNow -ne "YOUR_NEUPRINT_TOKEN_HERE") {
-    Write-Host "NeuPrint token already configured in config.json."
+    Write-Host "NeuPrint token already configured in config_local.json or config.json."
 } else {
     Write-Host "NeuPrint token not configured - required for NeuPrint datasets."
 }
 if ($CaveNow -and $CaveNow -ne "YOUR_CAVE_TOKEN_HERE") {
-    Write-Host "CAVE token already configured in config.json."
+    Write-Host "CAVE token already configured in config_local.json or config.json."
 } else {
     Write-Host "CAVE token optional - only needed for FlyWire FAFB online fetching."
 }
-Write-Host "Set tokens in the UI Settings tab after launching, or edit config.json"
+Write-Host "Set tokens in the UI Settings tab after launching, or edit config_local.json"
 Write-Host "(repository root, format: tokens.neuprint / tokens.cave)."

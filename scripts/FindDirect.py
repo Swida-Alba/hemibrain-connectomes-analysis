@@ -11,7 +11,7 @@ from coana import FindNeuronConnection
 if __name__ == '__main__':
     
     fc = FindNeuronConnection(
-        # Token automatically loaded from token_info.txt (recommended) or set token='' here
+        # Token automatically loaded from config_local.json (recommended) or set token='' here
         output_dir='../local_data/connection_data',
         # dataset='flywire_FAFB_v783',  # Combined dataset and version in one parameter
         dataset = 'male-cns:v0.9',

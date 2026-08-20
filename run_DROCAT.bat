@@ -30,11 +30,14 @@ set "DROCAT_VERSION=!DROCAT_VERSION:"=!"
 set "ENV_BASE=drocat-!DROCAT_VERSION!"
 set "REPAIRED=0"
 set "CONFIG_FILE=%SCRIPT_DIR%config.json"
+set "CONFIG_LOCAL=%SCRIPT_DIR%config_local.json"
 set "ENV_OVERRIDE="
-REM Version-specific custom env override from config.json: envs.<version>
-REM is only consulted for the CURRENT release, so upgrading DROCAT never
-REM reuses an older release's custom environment.
-if exist "!CONFIG_FILE!" for /f "usebackq delims=" %%e in (`powershell -NoProfile -Command "try { $c = Get-Content -Raw -LiteralPath '!CONFIG_FILE!' | ConvertFrom-Json; if ($c.envs.'!DROCAT_VERSION!') { $c.envs.'!DROCAT_VERSION!' } } catch {}"`) do set "ENV_OVERRIDE=%%e"
+REM Version-specific custom env override from the local config first, then
+REM the committed config.json: envs.<version> is only consulted for the
+REM CURRENT release, so upgrading DROCAT never reuses an older release's
+REM custom environment.
+if exist "!CONFIG_LOCAL!" for /f "usebackq delims=" %%e in (`powershell -NoProfile -Command "try { $c = Get-Content -Raw -LiteralPath '!CONFIG_LOCAL!' | ConvertFrom-Json; if ($c.envs.'!DROCAT_VERSION!') { $c.envs.'!DROCAT_VERSION!' } } catch {}"`) do if not defined ENV_OVERRIDE set "ENV_OVERRIDE=%%e"
+if not defined ENV_OVERRIDE if exist "!CONFIG_FILE!" for /f "usebackq delims=" %%e in (`powershell -NoProfile -Command "try { $c = Get-Content -Raw -LiteralPath '!CONFIG_FILE!' | ConvertFrom-Json; if ($c.envs.'!DROCAT_VERSION!') { $c.envs.'!DROCAT_VERSION!' } } catch {}"`) do set "ENV_OVERRIDE=%%e"
 
 :resolve_reset
 set "ENV_NAME="
@@ -64,18 +67,20 @@ if errorlevel 1 goto repair
 call "!CONDA_BIN!" run -n "!ENV_NAME!" python -m pip check >nul 2>nul
 if errorlevel 1 goto repair
 
-REM Persist the resolved environment into config.json when no custom name
-REM was configured, so the auto-found env is pinned for later runs.
-if not defined ENV_OVERRIDE if exist "!CONFIG_FILE!" powershell -NoProfile -Command "try { $c = Get-Content -Raw -LiteralPath '!CONFIG_FILE!' | ConvertFrom-Json; if (-not $c.envs) { $c | Add-Member -NotePropertyName 'envs' -NotePropertyValue ([pscustomobject]@{}) -Force }; $c.envs | Add-Member -NotePropertyName '!DROCAT_VERSION!' -NotePropertyValue '!ENV_NAME!' -Force; $c | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath '!CONFIG_FILE!' -Encoding UTF8 } catch {}"
+REM Persist the resolved environment into the LOCAL config when no custom
+REM name was configured, so the auto-found env is pinned for later runs.
+REM The committed config.json is never rewritten.
+if not defined ENV_OVERRIDE if exist "!CONFIG_LOCAL!" powershell -NoProfile -Command "try { $c = Get-Content -Raw -LiteralPath '!CONFIG_LOCAL!' | ConvertFrom-Json; if (-not $c.envs) { $c | Add-Member -NotePropertyName 'envs' -NotePropertyValue ([pscustomobject]@{}) -Force }; $c.envs | Add-Member -NotePropertyName '!DROCAT_VERSION!' -NotePropertyValue '!ENV_NAME!' -Force; $c | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath '!CONFIG_LOCAL!' -Encoding UTF8 } catch {}"
 
 REM Token hint: remind users who skipped the installer prompt.
 set "NP_TOKEN="
-if exist "!CONFIG_FILE!" for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "try { $c = Get-Content -Raw -LiteralPath '!CONFIG_FILE!' | ConvertFrom-Json; if ($c.tokens.neuprint) { $c.tokens.neuprint } } catch {}"`) do set "NP_TOKEN=%%t"
+if exist "!CONFIG_LOCAL!" for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "try { $c = Get-Content -Raw -LiteralPath '!CONFIG_LOCAL!' | ConvertFrom-Json; if ($c.tokens.neuprint) { $c.tokens.neuprint } } catch {}"`) do set "NP_TOKEN=%%t"
+if not defined NP_TOKEN if exist "!CONFIG_FILE!" for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "try { $c = Get-Content -Raw -LiteralPath '!CONFIG_FILE!' | ConvertFrom-Json; if ($c.tokens.neuprint) { $c.tokens.neuprint } } catch {}"`) do set "NP_TOKEN=%%t"
 set "HINT=0"
 if not defined NP_TOKEN set "HINT=1"
 if defined NP_TOKEN echo !NP_TOKEN! | findstr /C:"YOUR_NEUPRINT_TOKEN_HERE" >nul && set "HINT=1"
 if defined NP_TOKEN echo !NP_TOKEN! | findstr /C:"NEUPRINT_TOKEN=''" >nul && set "HINT=1"
-if "!HINT!"=="1" echo Tip: the NeuPrint token is not configured yet - set it in the Settings tab or config.json (the CAVE token is optional; only needed for FlyWire FAFB online fetching).
+if "!HINT!"=="1" echo Tip: the NeuPrint token is not configured yet - set it in the Settings tab or config_local.json (the CAVE token is optional; only needed for FlyWire FAFB online fetching).
 goto launch
 
 :repair

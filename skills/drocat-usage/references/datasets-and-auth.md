@@ -41,9 +41,10 @@ After conversion, require both `<dataset>_allneurons_neuron_df.parquet` and
 
 Preferred sources, in order:
 
-1. `config.json` tokens section at the repository root (gitignored);
-2. environment variables handled by the project's token manager;
-3. an explicit token argument only when the user has supplied it for this run.
+1. `config_local.json` tokens section at the repository root (gitignored override);
+2. `config.json` tokens section (committed clean defaults);
+3. environment variables handled by the project's token manager;
+4. an explicit token argument only when the user has supplied it for this run.
 
 Typical file entries are:
 

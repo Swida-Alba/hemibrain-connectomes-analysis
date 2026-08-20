@@ -2276,20 +2276,43 @@ class TestDatasetService:
 
         assert settings_module._load_tokens() == {}
 
-    def test_settings_save_tokens_writes_config_json_and_keeps_envs(self, tmp_path, monkeypatch):
-        """Save Tokens writes config.json and preserves the versioned env map."""
+    def test_settings_token_loader_prefers_config_local(self, tmp_path, monkeypatch):
+        """config_local.json wins per key over the committed config.json."""
+        from ui.tabs import settings as settings_module
+
+        (tmp_path / "config.json").write_text(
+            '{"tokens": {"neuprint": "cfg-np", "cave": "cfg-cave"}}\n',
+            encoding="utf-8",
+        )
+        (tmp_path / "config_local.json").write_text(
+            '{"tokens": {"neuprint": "local-np"}}\n', encoding="utf-8"
+        )
+        monkeypatch.setattr(settings_module, "PROJECT_ROOT", tmp_path)
+
+        assert settings_module._load_tokens() == {
+            "neuprint": "local-np",
+            "cave": "cfg-cave",
+        }
+
+    def test_settings_save_tokens_writes_config_local_and_keeps_envs(self, tmp_path, monkeypatch):
+        """Save Tokens writes the gitignored config_local.json and preserves
+        the versioned env map; the committed config.json stays untouched."""
         import json as _json
         from nicegui import Client
         from nicegui.page import page
         from ui.tabs import settings as settings_module
 
         (tmp_path / "config.json").write_text(
+            _json.dumps({"tokens": {"neuprint": "committed-np", "cave": ""}, "envs": {"4.5.0": ""}}),
+            encoding="utf-8",
+        )
+        (tmp_path / "config_local.json").write_text(
             _json.dumps({"envs": {"4.5.0": "my-custom-env"}, "tokens": {"neuprint": "", "cave": ""}}),
             encoding="utf-8",
         )
         monkeypatch.setattr(settings_module, "PROJECT_ROOT", tmp_path)
 
-        client = Client(page("/settings-save-tokens-config-json"))
+        client = Client(page("/settings-save-tokens-config-local"))
         with client:
             settings_module.create_settings_tab()
 
@@ -2304,10 +2327,13 @@ class TestDatasetService:
         )
         next(iter(save_btn._event_listeners.values())).handler(None)
 
-        saved = _json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+        saved = _json.loads((tmp_path / "config_local.json").read_text(encoding="utf-8"))
         assert saved["tokens"] == {"neuprint": "saved-np", "cave": ""}
         # the versioned env map must survive a token save
         assert saved["envs"] == {"4.5.0": "my-custom-env"}
+        # the committed config.json is never rewritten
+        committed = _json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+        assert committed["tokens"] == {"neuprint": "committed-np", "cave": ""}
 
     def test_settings_dataset_cache_card(self):
         """The Settings tab exposes full-dataset and complete-connection pulls:

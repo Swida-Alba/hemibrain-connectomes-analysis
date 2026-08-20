@@ -169,6 +169,14 @@ class TestConstruction:
         f = make_fetcher(tmp_path)
         assert f._load_token('CAVE_TOKEN') is None
 
+    def test_config_local_overrides_config_json(self, tmp_path):
+        (tmp_path / 'config.json').write_text(
+            '{"tokens": {"cave": "cfg-tok"}}\n', encoding='utf-8')
+        (tmp_path / 'config_local.json').write_text(
+            '{"tokens": {"cave": "local-tok"}}\n', encoding='utf-8')
+        f = make_fetcher(tmp_path)
+        assert f._load_token('CAVE_TOKEN') == 'local-tok'
+
     def test_config_json_placeholder_ignored(self, tmp_path, monkeypatch):
         (tmp_path / 'config.json').write_text(
             '{"tokens": {"cave": "YOUR_CAVE_TOKEN_HERE"}}\n', encoding='utf-8')

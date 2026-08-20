@@ -4,7 +4,7 @@ Real-data end-to-end suite for DROCAT.
 
 Drives the exact UI execution layer (ui.runner.ScriptRunner) - the same code
 path triggered by clicking "Run" in the web UI - against live NeuPrint /
-NeuronBridge data with the tokens in config.json.
+NeuronBridge data with the tokens in config_local.json / config.json.
 
 Usage (from project root, inside the `drocat` conda env):
     python tests/e2e/run_real_data_e2e.py

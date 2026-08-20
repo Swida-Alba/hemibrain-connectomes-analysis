@@ -12,7 +12,7 @@ from src.coana import FindNeuronConnection
 
 if __name__ == '__main__':
     fc = FindNeuronConnection(
-        # Token automatically loaded from token_info.txt (recommended) or set token='' here
+        # Token automatically loaded from config_local.json (recommended) or set token='' here
         output_dir='../local_data/connection_data',
         dataset='male-cns:v0.9', 
         # dataset='hemibrain:v1.2.1',

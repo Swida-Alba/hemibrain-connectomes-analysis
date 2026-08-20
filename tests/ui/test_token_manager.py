@@ -39,6 +39,20 @@ class TestTokenManager:
         assert manager.get_token("NEUPRINT_TOKEN") == "env-tok"
         monkeypatch.delenv("NEUPRINT_TOKEN")
 
+    def test_config_local_overrides_config_json(self, tmp_path, monkeypatch):
+        """The gitignored config_local.json wins per key over config.json."""
+        (tmp_path / "config.json").write_text(
+            '{"tokens": {"neuprint": "cfg-np", "cave": "cfg-cave"}}\n',
+            encoding="utf-8",
+        )
+        (tmp_path / "config_local.json").write_text(
+            '{"tokens": {"neuprint": "local-np"}}\n', encoding="utf-8"
+        )
+        monkeypatch.chdir(tmp_path)
+        manager = TokenManager()
+        assert manager.tokens.get("NEUPRINT_TOKEN") == "local-np"
+        assert manager.tokens.get("CAVE_TOKEN") == "cfg-cave"
+
     def test_config_json_empty_values_fall_back_to_env(self, tmp_path, monkeypatch):
         (tmp_path / "config.json").write_text(
             '{"tokens": {"neuprint": "", "cave": ""}}\n', encoding="utf-8"

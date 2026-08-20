@@ -43,7 +43,7 @@ defines this completion contract.
 - **📖 [Network Features Guide](./visualizations/VisualizePath_Network_Features.md)**
 
 ### 🔐 Authentication Improvements
-- **config.json recommended**: Store all API tokens in the gitignored project config (NeuPrint, CAVE)
+- **config_local.json recommended**: Store API tokens in the gitignored local override (NeuPrint, CAVE); `config.json` ships clean on GitHub
 - **Automatic loading**: No need to pass tokens manually in scripts
 - **Secure storage**: Keep credentials out of version control
 - **📖 [Authentication Setup](./INSTALLATION.md#4-authentication)**

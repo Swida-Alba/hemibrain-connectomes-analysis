@@ -23,7 +23,10 @@ if [[ -z "$DROCAT_VERSION" ]]; then
 fi
 DROCAT_VERSION="${DROCAT_VERSION:-4.5.0}"
 ENV_BASE="drocat-${DROCAT_VERSION}"
+# config.json ships clean on GitHub (committed defaults); the gitignored
+# config_local.json is the per-user override and wins per key.
 CONFIG_FILE="$PROJECT_ROOT/config.json"
+CONFIG_LOCAL="$PROJECT_ROOT/config_local.json"
 
 # Minimal JSON reader for config.json - a format this project generates and
 # keeps simple (string values only, one level of section objects). Commas are
@@ -57,9 +60,9 @@ json_value() {
     '
 }
 
-# Update envs.<version> in config.json with the environment actually used.
-# Called after environment selection so an empty entry is filled with the
-# auto-created name (custom names are written back unchanged).
+# Update envs.<version> in the LOCAL config (config_local.json) with the
+# environment actually used, so an empty entry is filled with the
+# auto-created name. The committed config.json is never rewritten.
 update_config_env() {
     # $1 = version, $2 = env name, $3 = file
     [[ -f "$3" ]] || return 0
@@ -82,12 +85,18 @@ update_config_env() {
     chmod 600 "$3"
 }
 
-# Create the local config.json from the committed template on first run so
-# the versioned env override and token slots exist before anything reads them.
+# Create the local override config from the committed template on first
+# run so the versioned env override and token slots exist before anything
+# reads them. config.json itself ships with the repository.
+if [[ ! -f "$CONFIG_LOCAL" && -f "$PROJECT_ROOT/config.example.json" ]]; then
+    cp "$PROJECT_ROOT/config.example.json" "$CONFIG_LOCAL"
+    chmod 600 "$CONFIG_LOCAL"
+    printf '%s\n' "Created config_local.json from config.example.json (edit it to set a custom env name or tokens)."
+fi
 if [[ ! -f "$CONFIG_FILE" && -f "$PROJECT_ROOT/config.example.json" ]]; then
     cp "$PROJECT_ROOT/config.example.json" "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE"
-    printf '%s\n' "Created config.json from config.example.json (edit it to set a custom env name or tokens)."
+    printf '%s\n' "Created config.json from config.example.json (missing in this checkout)."
 fi
 
 printf "%b\n" "$BLUE"
@@ -174,15 +183,19 @@ env_usable() {
 }
 
 printf "\n%b[2/5] Selecting a Python %s environment...%b\n" "$BLUE" "$PYTHON_VERSION" "$NC"
-# Version-specific custom env override from config.json: envs.<version> is
-# only consulted for the CURRENT release, so upgrading DROCAT never reuses
-# an older release's custom environment.
+# Version-specific custom env override: envs.<version> is only consulted
+# for the CURRENT release, so upgrading DROCAT never reuses an older
+# release's custom environment. The local config wins; the committed
+# config.json is the fallback.
 ENV_NAME=""
 ENV_OVERRIDE=""
-if [[ -f "$CONFIG_FILE" ]]; then
-    ENV_OVERRIDE="$(json_value envs "$DROCAT_VERSION" "$CONFIG_FILE" || true)"
-    ENV_OVERRIDE="$(printf '%s' "$ENV_OVERRIDE" | tr -d '[:space:]')"
-fi
+for cfg in "$CONFIG_LOCAL" "$CONFIG_FILE"; do
+    if [[ -f "$cfg" ]]; then
+        ENV_OVERRIDE="$(json_value envs "$DROCAT_VERSION" "$cfg" || true)"
+        ENV_OVERRIDE="$(printf '%s' "$ENV_OVERRIDE" | tr -d '[:space:]')"
+        [[ -n "$ENV_OVERRIDE" ]] && break
+    fi
+done
 if [[ -n "$ENV_OVERRIDE" ]]; then
     if env_exists "$ENV_OVERRIDE"; then
         if env_usable "$ENV_OVERRIDE"; then
@@ -228,12 +241,13 @@ fi
     printf "%bERROR: could not select a usable %s environment.%b\n" "$RED" "$ENV_BASE" "$NC" >&2
     exit 1
 }
-# Persist the auto-selected environment back into config.json when no custom
-# name was configured (an empty entry is filled with the auto-created name
-# so launchers and scripts resolve it directly). A configured custom name
-# is never rewritten.
+# Persist the auto-selected environment into the LOCAL config
+# (config_local.json) when no custom name was configured - an empty entry
+# is filled with the auto-created name so launchers and scripts resolve it
+# directly. The committed config.json is never rewritten, and a configured
+# custom name is never touched.
 if [[ -z "$ENV_OVERRIDE" ]]; then
-    update_config_env "$DROCAT_VERSION" "$ENV_NAME" "$CONFIG_FILE"
+    update_config_env "$DROCAT_VERSION" "$ENV_NAME" "$CONFIG_LOCAL"
 fi
 
 run_in_env() {
@@ -266,30 +280,38 @@ printf '%s\n' 'Launch with: ./run_DROCAT.command'
 
 # --- Token configuration notice ---
 # Tokens are NOT collected in the terminal: they are set in the UI Settings
-# tab after launch, or by editing config.json at the repository root (see
-# token_info.txt for the migration notes). The NeuPrint token is required
-# for NeuPrint datasets; the CAVE token is optional and only needed for
-# FlyWire FAFB online fetching.
+# tab after launch, or by editing config_local.json at the repository root
+# (the gitignored override; config.json ships clean). The NeuPrint token is
+# required for NeuPrint datasets; the CAVE token is optional and only needed
+# for FlyWire FAFB online fetching.
 printf '\n%b[Token setup]%b\n' "$BLUE" "$NC"
 configure_tokens() {
     local neuprint_now="" cave_now=""
-    if [[ -f "$CONFIG_FILE" ]]; then
-        neuprint_now="$(json_value tokens neuprint "$CONFIG_FILE" || true)"
-        neuprint_now="$(printf '%s' "$neuprint_now" | tr -d '[:space:]')"
-        cave_now="$(json_value tokens cave "$CONFIG_FILE" || true)"
-        cave_now="$(printf '%s' "$cave_now" | tr -d '[:space:]')"
-    fi
+    for cfg in "$CONFIG_LOCAL" "$CONFIG_FILE"; do
+        if [[ -f "$cfg" ]]; then
+            neuprint_now="$(json_value tokens neuprint "$cfg" || true)"
+            neuprint_now="$(printf '%s' "$neuprint_now" | tr -d '[:space:]')"
+            [[ -n "$neuprint_now" ]] && break
+        fi
+    done
+    for cfg in "$CONFIG_LOCAL" "$CONFIG_FILE"; do
+        if [[ -f "$cfg" ]]; then
+            cave_now="$(json_value tokens cave "$cfg" || true)"
+            cave_now="$(printf '%s' "$cave_now" | tr -d '[:space:]')"
+            [[ -n "$cave_now" ]] && break
+        fi
+    done
     if [[ -n "$neuprint_now" && "$neuprint_now" != "YOUR_NEUPRINT_TOKEN_HERE" ]]; then
-        printf '%s\n' "✓ NeuPrint token already configured in config.json."
+        printf '%s\n' "✓ NeuPrint token already configured in config_local.json or config.json."
     else
         printf '%s\n' "⚠ NeuPrint token not configured - required for NeuPrint datasets."
     fi
     if [[ -n "$cave_now" && "$cave_now" != "YOUR_CAVE_TOKEN_HERE" ]]; then
-        printf '%s\n' "✓ CAVE token already configured in config.json."
+        printf '%s\n' "✓ CAVE token already configured in config_local.json or config.json."
     else
         printf '%s\n' "ℹ CAVE token optional - only needed for FlyWire FAFB online fetching."
     fi
-    printf '%s\n' "Set tokens in the UI Settings tab after launching, or edit config.json"
+    printf '%s\n' "Set tokens in the UI Settings tab after launching, or edit config_local.json"
     printf '%s\n' "(repository root, format: tokens.neuprint / tokens.cave)."
 }
 configure_tokens

@@ -230,7 +230,7 @@ AuthError: Invalid token
 
 **Solutions:**
 
-1. **Put the token in config.json** in project root (recommended):
+1. **Put the token in config_local.json** in project root (recommended, gitignored):
    ```json
    {
      "tokens": {

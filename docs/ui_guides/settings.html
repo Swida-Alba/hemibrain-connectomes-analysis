@@ -24,9 +24,10 @@
     <tr><td>NeuPrint Token</td><td>All NeuPrint datasets (hemibrain, male-cns, optic-lobe, manc, ...)</td><td>neuprint.janelia.org/account</td></tr>
     <tr><td>CAVE Token</td><td>FAFB CAVE API fetching or skeleton fallback (not local conversion)</td><td>codex.flywire.ai/auth_token</td></tr>
   </table>
-  <p>Tokens are saved to <code>config.json</code> (gitignored, template
-    <code>config.example.json</code>) which also holds the versioned conda
-    environment setting. For safety,
+  <p>Tokens are saved to <code>config_local.json</code> (gitignored local
+    override; template <code>config.example.json</code>) which also holds the
+    versioned conda environment setting; the committed
+    <code>config.json</code> is the clean fallback. For safety,
     the Settings page never pre-fills a saved secret into the browser. A
     <b>configured (kept hidden)</b> status means the saved value will be used;
     leave its field blank to keep it, or enter a new value to replace it.</p>

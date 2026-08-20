@@ -25,7 +25,10 @@ main() {
     fi
     DROCAT_VERSION="${DROCAT_VERSION:-4.5.0}"
     ENV_BASE="drocat-${DROCAT_VERSION}"
+    # config.json ships clean on GitHub (committed defaults); the gitignored
+    # config_local.json is the per-user override and wins per key.
     CONFIG_FILE="$SCRIPT_DIR/config.json"
+    CONFIG_LOCAL="$SCRIPT_DIR/config_local.json"
 
     # Minimal JSON reader for config.json (string values only, one level of
     # section objects; see config.example.json for the exact format). Commas
@@ -59,8 +62,9 @@ main() {
         '
     }
 
-    # Update envs.<version> in config.json with the environment actually
-    # used, so an auto-created env is pinned for later runs.
+    # Update envs.<version> in the LOCAL config (config_local.json) with the
+    # environment actually used, so an auto-created env is pinned for later
+    # runs. The committed config.json is never rewritten.
     update_config_env() {
         # $1 = version, $2 = env name, $3 = file
         [[ -f "$3" ]] || return 0
@@ -85,12 +89,16 @@ main() {
 
     # Version-specific custom env override: envs.<version> is only consulted
     # for the CURRENT release, so upgrading DROCAT never reuses an older
-    # release's custom environment. An empty value means default auto-find.
+    # release's custom environment. The local config wins; the committed
+    # config.json is the fallback. An empty value means default auto-find.
     ENV_OVERRIDE=""
-    if [[ -f "$CONFIG_FILE" ]]; then
-        ENV_OVERRIDE="$(json_value envs "$DROCAT_VERSION" "$CONFIG_FILE" || true)"
-        ENV_OVERRIDE="$(printf '%s' "$ENV_OVERRIDE" | tr -d '[:space:]')"
-    fi
+    for cfg in "$CONFIG_LOCAL" "$CONFIG_FILE"; do
+        if [[ -f "$cfg" ]]; then
+            ENV_OVERRIDE="$(json_value envs "$DROCAT_VERSION" "$cfg" || true)"
+            ENV_OVERRIDE="$(printf '%s' "$ENV_OVERRIDE" | tr -d '[:space:]')"
+            [[ -n "$ENV_OVERRIDE" ]] && break
+        fi
+    done
 
     find_conda() {
         if command -v conda >/dev/null 2>&1; then
@@ -150,10 +158,11 @@ main() {
     fi
     [[ -n "$ENV_NAME" ]] || { printf '%s\n' "ERROR: no usable $ENV_BASE environment was found." >&2; return 1; }
 
-    # Persist the resolved environment into config.json when no custom name
-    # was configured, so the auto-found env is pinned for later runs.
-    if [[ -z "$ENV_OVERRIDE" && -f "$CONFIG_FILE" ]]; then
-        update_config_env "$DROCAT_VERSION" "$ENV_NAME" "$CONFIG_FILE"
+    # Persist the resolved environment into the LOCAL config when no custom
+    # name was configured, so the auto-found env is pinned for later runs.
+    # The committed config.json is never rewritten.
+    if [[ -z "$ENV_OVERRIDE" && -f "$CONFIG_LOCAL" ]]; then
+        update_config_env "$DROCAT_VERSION" "$ENV_NAME" "$CONFIG_LOCAL"
     fi
 
     # An older environment can have importable packages while still containing
@@ -168,14 +177,17 @@ main() {
 
     # --- Token hint -----------------------------------------------------
     # Remind users who skipped the installer prompt that tokens can be set
-    # later in the UI Settings tab or in config.json.
+    # later in the UI Settings tab or in config_local.json.
     local neuprint_token=""
-    if [[ -f "$CONFIG_FILE" ]]; then
-        neuprint_token="$(json_value tokens neuprint "$CONFIG_FILE" || true)"
-        neuprint_token="$(printf '%s' "$neuprint_token" | tr -d '[:space:]')"
-    fi
+    for cfg in "$CONFIG_LOCAL" "$CONFIG_FILE"; do
+        if [[ -f "$cfg" ]]; then
+            neuprint_token="$(json_value tokens neuprint "$cfg" || true)"
+            neuprint_token="$(printf '%s' "$neuprint_token" | tr -d '[:space:]')"
+            [[ -n "$neuprint_token" ]] && break
+        fi
+    done
     if [[ -z "$neuprint_token" || "$neuprint_token" == "YOUR_NEUPRINT_TOKEN_HERE" ]]; then
-        printf '%s\n' "Tip: the NeuPrint token is not configured yet - set it in the UI Settings tab or in config.json (the CAVE token is optional; only needed for FlyWire FAFB online fetching)."
+        printf '%s\n' "Tip: the NeuPrint token is not configured yet - set it in the UI Settings tab or in config_local.json (the CAVE token is optional; only needed for FlyWire FAFB online fetching)."
     fi
 
     # --- Port-conflict guard ---------------------------------------------

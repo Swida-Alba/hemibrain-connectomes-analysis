@@ -40,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 from comparison.profile_comparator import HomologFinder
 
 if __name__ == "__main__":
-    # Token automatically loaded from token_info.txt (recommended) or set token='' here
+    # Token automatically loaded from config_local.json (recommended) or set token='' here
     finder = HomologFinder(
         source='aMe12', # type or bodyId
         source_dataset='male-cns:v0.9',

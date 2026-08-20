@@ -249,32 +249,40 @@ def main() -> int:
     except Exception as exc:
         check("pip dependency consistency", False, str(exc))
 
-    # Token file (config.json; legacy token_info*.txt files are deprecated
-    # and no longer read anywhere).
-    config_token = project / "config.json"
-    if config_token.exists():
+    # Token file: config_local.json (gitignored override) then config.json
+    # (committed clean defaults).
+    has_neuprint = False
+    token_source = None
+    for filename in ("config_local.json", "config.json"):
+        config_token = project / filename
+        if not config_token.exists():
+            continue
         try:
             cfg = json.loads(config_token.read_text(encoding="utf-8"))
             neuprint_value = (cfg.get("tokens") or {}).get("neuprint") or ""
         except Exception:
             neuprint_value = ""
+        token_source = str(config_token)
         has_neuprint = (
             isinstance(neuprint_value, str)
             and neuprint_value.strip()
             and "YOUR_" not in neuprint_value
             and len(neuprint_value.strip().strip("'\"")) > 20
         )
+        if has_neuprint:
+            break
+    if token_source:
         check(
             "tokens (NeuPrint token configured)"
             + ("" if args.require_token else " (optional)"),
             has_neuprint or not args.require_token,
-            str(config_token),
+            token_source,
         )
     else:
         check(
             "tokens file" + ("" if args.require_token else " (optional)"),
             not args.require_token,
-            "missing config.json",
+            "missing config_local.json / config.json",
         )
 
     # UI import (project must be on sys.path)

@@ -57,22 +57,23 @@ def _configured_cave_token(project_root: Path) -> Optional[str]:
 
 
 def _cave_token_from_config(project_root: Path) -> Optional[str]:
-    """Read the CAVE token from the project config.json, if present."""
+    """Read the CAVE token from config_local.json (override) or config.json."""
     import json
 
-    config_path = project_root / "config.json"
-    try:
-        data = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    section = data.get("tokens") if isinstance(data, dict) else None
-    if not isinstance(section, dict):
-        return None
-    value = section.get("cave")
-    if isinstance(value, str):
-        value = value.strip()
-        if value and not value.startswith("YOUR_"):
-            return value
+    for filename in ("config_local.json", "config.json"):
+        config_path = project_root / filename
+        try:
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        section = data.get("tokens") if isinstance(data, dict) else None
+        if not isinstance(section, dict):
+            continue
+        value = section.get("cave")
+        if isinstance(value, str):
+            value = value.strip()
+            if value and not value.startswith("YOUR_"):
+                return value
     return None
 
 

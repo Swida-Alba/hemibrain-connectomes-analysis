@@ -270,13 +270,17 @@ class DatasetService:
         return updated_at
 
     def _load_tokens(self):
-        """Load tokens from the project config.json (the only token file)."""
+        """Load tokens from config_local.json (override) then config.json."""
         if self._token is not None and self._cave_token is not None:
             return
 
         loaded = {}
-        config_path = PROJECT_ROOT / "config.json"
-        if config_path.exists():
+        # config.json ships clean on GitHub; the gitignored config_local.json
+        # wins per key when it carries a non-empty value.
+        for filename in ("config.json", "config_local.json"):
+            config_path = PROJECT_ROOT / filename
+            if not config_path.exists():
+                continue
             try:
                 with open(config_path, "r", encoding="utf-8") as f:
                     cfg = json.load(f)

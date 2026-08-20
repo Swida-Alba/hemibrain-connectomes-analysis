@@ -135,23 +135,26 @@ class CAVEDataFetcher:
         return None
 
     def _load_token_from_config(self, token_name: str) -> Optional[str]:
-        """Read a token from the project config.json tokens section."""
+        """Read a token from config_local.json (override) or config.json."""
         import json
-        config_path = os.path.join(self.project_root, 'config.json')
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            return None
-        section = data.get('tokens') if isinstance(data, dict) else None
-        if not isinstance(section, dict):
-            return None
         config_key = token_name.lower().replace('_token', '')
-        value = section.get(config_key)
-        if isinstance(value, str):
-            value = value.strip()
-            if value and not value.startswith('YOUR_'):
-                return value
+        # config.json ships clean on GitHub; the gitignored config_local.json
+        # wins per key when it carries a non-empty value.
+        for filename in ('config_local.json', 'config.json'):
+            config_path = os.path.join(self.project_root, filename)
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
+                continue
+            section = data.get('tokens') if isinstance(data, dict) else None
+            if not isinstance(section, dict):
+                continue
+            value = section.get(config_key)
+            if isinstance(value, str):
+                value = value.strip()
+                if value and not value.startswith('YOUR_'):
+                    return value
         return None
     
     def _get_config(self) -> dict:

@@ -4,7 +4,7 @@ Overall "lite" end-to-end suite for DROCAT — 13 scenarios.
 
 Drives the exact UI execution layer (ui.runner.ScriptRunner), the same code
 path triggered by clicking "Run" in the web UI, against live NeuPrint /
-NeuronBridge / CAVE data with the tokens in config.json.
+NeuronBridge / CAVE data with the tokens in config_local.json / config.json.
 
 Scenarios
 ---------
