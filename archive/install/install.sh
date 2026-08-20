@@ -23,6 +23,72 @@ if [[ -z "$DROCAT_VERSION" ]]; then
 fi
 DROCAT_VERSION="${DROCAT_VERSION:-4.5.0}"
 ENV_BASE="drocat-${DROCAT_VERSION}"
+CONFIG_FILE="$PROJECT_ROOT/config.json"
+
+# Minimal JSON reader for config.json - a format this project generates and
+# keeps simple (string values only, one level of section objects). Commas are
+# normalized to newlines first so pretty-printed and single-line JSON both
+# work.
+json_value() {
+    # $1 = section ("envs"|"tokens"), $2 = key, $3 = file
+    tr ',' '\n' < "$3" | awk -v section="$1" -v key="$2" '
+        {
+            line = $0
+            sub(/^[[:space:]]*/, "", line)
+            sub(/[[:space:]]*$/, "", line)
+            if (!in_section) {
+                if (line ~ "\"" section "\"") {
+                    in_section = 1
+                    sub(/^.*\"" section "\"/, "", line)
+                } else {
+                    next
+                }
+            }
+            if (line ~ "\"" key "\":") {
+                rest = substr(line, index(line, "\"" key "\":") + length("\"" key "\":"))
+                sub(/^[[:space:]]*/, "", rest)
+                gsub(/[{}]/, "", rest)
+                gsub(/^"|"$/, "", rest)
+                print rest
+                exit
+            }
+            if (line ~ /^[[:space:]]*}/) { in_section = 0 }
+        }
+    '
+}
+
+# Update envs.<version> in config.json with the environment actually used.
+# Called after environment selection so an empty entry is filled with the
+# auto-created name (custom names are written back unchanged).
+update_config_env() {
+    # $1 = version, $2 = env name, $3 = file
+    [[ -f "$3" ]] || return 0
+    local tmp
+    tmp="$(mktemp "${TMPDIR:-/tmp}/drocat-config.XXXXXX")"
+    awk -v version="$1" -v envname="$2" '
+        BEGIN { in_envs = 0; done = 0 }
+        {
+            line = $0
+            if (!done && line ~ /"envs"/) { in_envs = 1 }
+            pattern = "\"" version "\"[[:space:]]*:[[:space:]]*\"[^\"]*\""
+            if (in_envs && !done && line ~ pattern) {
+                sub(pattern, "\"" version "\": \"" envname "\"", line)
+                done = 1
+                in_envs = 0
+            }
+            print line
+        }
+    ' "$3" > "$tmp" && mv "$tmp" "$3"
+    chmod 600 "$3"
+}
+
+# Create the local config.json from the committed template on first run so
+# the versioned env override and token slots exist before anything reads them.
+if [[ ! -f "$CONFIG_FILE" && -f "$PROJECT_ROOT/config.example.json" ]]; then
+    cp "$PROJECT_ROOT/config.example.json" "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+    printf '%s\n' "Created config.json from config.example.json (edit it to set a custom env name or tokens)."
+fi
 
 printf "%b\n" "$BLUE"
 printf '%s\n' '╔═══════════════════════════════════════════════════════════════╗'
@@ -108,32 +174,61 @@ env_usable() {
 }
 
 printf "\n%b[2/5] Selecting a Python %s environment...%b\n" "$BLUE" "$PYTHON_VERSION" "$NC"
+# Version-specific custom env override from config.json: envs.<version> is
+# only consulted for the CURRENT release, so upgrading DROCAT never reuses
+# an older release's custom environment.
 ENV_NAME=""
-for index in $(seq 0 20); do
-    if [[ "$index" -eq 0 ]]; then
-        candidate="$ENV_BASE"
-    else
-        candidate="${ENV_BASE}-$((index + 1))"
-    fi
-    if env_exists "$candidate"; then
-        if env_usable "$candidate"; then
-            ENV_NAME="$candidate"
-            printf "%b✓ Reusing %s%b\n" "$GREEN" "$ENV_NAME" "$NC"
-            break
+ENV_OVERRIDE=""
+if [[ -f "$CONFIG_FILE" ]]; then
+    ENV_OVERRIDE="$(json_value envs "$DROCAT_VERSION" "$CONFIG_FILE" || true)"
+    ENV_OVERRIDE="$(printf '%s' "$ENV_OVERRIDE" | tr -d '[:space:]')"
+fi
+if [[ -n "$ENV_OVERRIDE" ]]; then
+    if env_exists "$ENV_OVERRIDE"; then
+        if env_usable "$ENV_OVERRIDE"; then
+            ENV_NAME="$ENV_OVERRIDE"
+            printf "%b✓ Reusing %s (custom env from config.json)%b\n" "$GREEN" "$ENV_NAME" "$NC"
+        else
+            printf "%bSkipping %s (custom env from config.json) because it is not Python %s; falling back to default names.%b\n" \
+                "$YELLOW" "$ENV_OVERRIDE" "$PYTHON_VERSION" "$NC"
         fi
-        printf "%bSkipping %s because it is not Python %s.%b\n" \
-            "$YELLOW" "$candidate" "$PYTHON_VERSION" "$NC"
-        continue
+    else
+        ENV_NAME="$ENV_OVERRIDE"
+        printf '%s\n' "Creating $ENV_NAME (custom env from config.json)..."
+        "$CONDA_BIN" create -n "$ENV_NAME" "python=$PYTHON_VERSION" -y
     fi
-    ENV_NAME="$candidate"
-    printf '%s\n' "Creating $ENV_NAME..."
-    "$CONDA_BIN" create -n "$ENV_NAME" "python=$PYTHON_VERSION" -y
-    break
-done
+fi
+if [[ -z "$ENV_NAME" ]]; then
+    for index in $(seq 0 20); do
+        if [[ "$index" -eq 0 ]]; then
+            candidate="$ENV_BASE"
+        else
+            candidate="${ENV_BASE}-$((index + 1))"
+        fi
+        if env_exists "$candidate"; then
+            if env_usable "$candidate"; then
+                ENV_NAME="$candidate"
+                printf "%b✓ Reusing %s%b\n" "$GREEN" "$ENV_NAME" "$NC"
+                break
+            fi
+            printf "%bSkipping %s because it is not Python %s.%b\n" \
+                "$YELLOW" "$candidate" "$PYTHON_VERSION" "$NC"
+            continue
+        fi
+        ENV_NAME="$candidate"
+        printf '%s\n' "Creating $ENV_NAME..."
+        "$CONDA_BIN" create -n "$ENV_NAME" "python=$PYTHON_VERSION" -y
+        break
+    done
+fi
 [[ -n "$ENV_NAME" ]] || {
     printf "%bERROR: could not select a usable %s environment.%b\n" "$RED" "$ENV_BASE" "$NC" >&2
     exit 1
 }
+# Persist the selected environment back into config.json: an empty entry is
+# filled with the auto-created name so launchers and scripts resolve it
+# directly; a custom name is written back unchanged.
+update_config_env "$DROCAT_VERSION" "$ENV_NAME" "$CONFIG_FILE"
 
 run_in_env() {
     "$CONDA_BIN" run -n "$ENV_NAME" --no-capture-output "$@"
@@ -165,26 +260,30 @@ printf '%s\n' 'Launch with: ./run_DROCAT.command'
 
 # --- Token configuration notice ---
 # Tokens are NOT collected in the terminal: they are set in the UI Settings
-# tab after launch, or by editing token_info_local.txt at the repository
-# root. The NeuPrint token is required for NeuPrint datasets; the CAVE token
-# is optional and only needed for FlyWire FAFB online fetching.
+# tab after launch, or by editing config.json at the repository root (see
+# token_info.txt for the migration notes). The NeuPrint token is required
+# for NeuPrint datasets; the CAVE token is optional and only needed for
+# FlyWire FAFB online fetching.
 printf '\n%b[Token setup]%b\n' "$BLUE" "$NC"
 configure_tokens() {
-    local token_file="$PROJECT_ROOT/token_info_local.txt"
     local neuprint_now="" cave_now=""
-    neuprint_now="$(sed -n "s/^NEUPRINT_TOKEN='\([^']*\)'/\1/p" "$token_file" 2>/dev/null | head -1)"
-    cave_now="$(sed -n "s/^CAVE_TOKEN='\([^']*\)'/\1/p" "$token_file" 2>/dev/null | head -1)"
+    if [[ -f "$CONFIG_FILE" ]]; then
+        neuprint_now="$(json_value tokens neuprint "$CONFIG_FILE" || true)"
+        neuprint_now="$(printf '%s' "$neuprint_now" | tr -d '[:space:]')"
+        cave_now="$(json_value tokens cave "$CONFIG_FILE" || true)"
+        cave_now="$(printf '%s' "$cave_now" | tr -d '[:space:]')"
+    fi
     if [[ -n "$neuprint_now" && "$neuprint_now" != "YOUR_NEUPRINT_TOKEN_HERE" ]]; then
-        printf '%s\n' "✓ NeuPrint token already configured in token_info_local.txt."
+        printf '%s\n' "✓ NeuPrint token already configured in config.json."
     else
         printf '%s\n' "⚠ NeuPrint token not configured - required for NeuPrint datasets."
     fi
     if [[ -n "$cave_now" && "$cave_now" != "YOUR_CAVE_TOKEN_HERE" ]]; then
-        printf '%s\n' "✓ CAVE token already configured in token_info_local.txt."
+        printf '%s\n' "✓ CAVE token already configured in config.json."
     else
         printf '%s\n' "ℹ CAVE token optional - only needed for FlyWire FAFB online fetching."
     fi
-    printf '%s\n' "Set tokens in the UI Settings tab after launching, or edit token_info_local.txt"
-    printf '%s\n' "(repository root, format: NEUPRINT_TOKEN='...' / CAVE_TOKEN='...')."
+    printf '%s\n' "Set tokens in the UI Settings tab after launching, or edit config.json"
+    printf '%s\n' "(repository root, format: tokens.neuprint / tokens.cave)."
 }
 configure_tokens

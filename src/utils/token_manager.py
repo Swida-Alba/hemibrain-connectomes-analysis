@@ -6,9 +6,8 @@ class TokenManager:
     
     Token Priority (in order of precedence):
     1. Direct input (if provided)
-    2. Local token_info_local.txt file (gitignored)
-    3. Local token_info.txt file  
-    4. Environment variables
+    2. config.json tokens section (project config, gitignored)
+    3. Environment variables
     
     Token Type Detection (for direct input without specifying type):
     - NeuPrint tokens: JWT format, typically 150+ characters with '.' separators
@@ -23,59 +22,47 @@ class TokenManager:
         self.tokens = self._load_tokens_from_files()
         
     def _load_tokens_from_files(self):
-        """Load tokens from local files."""
+        """Load tokens from the project config.json (the only token file)."""
         tokens = {}
         
         # Check current directory and project root
         # Assuming this file is in src/utils/
         # Project root is ../../ relative to this file
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        
-        # Files to check in order (later overrides earlier)
-        # 1. token_info.txt (template/defaults)
-        # 2. token_info_local.txt (user secrets)
-        filenames = ['token_info.txt', 'token_info_local.txt']
-        
-        for filename in filenames:
-            search_paths = [
-                filename, # Current working directory
-                os.path.join(project_root, filename) # Project root
-            ]
-            
-            file_path = None
-            for path in search_paths:
-                if os.path.exists(path):
-                    file_path = path
-                    break
-            
-            if file_path:
-                self._parse_file(file_path, tokens)
+
+        self._parse_config_json(project_root, tokens)
             
         return tokens
 
-    def _parse_file(self, file_path, tokens_dict):
-        """Parse a token file and update the tokens dictionary."""
+    def _parse_config_json(self, project_root, tokens_dict):
+        """Load the tokens section of config.json (the only token file)."""
+        import json
+        search_paths = [
+            'config.json', # Current working directory
+            os.path.join(project_root, 'config.json') # Project root
+        ]
+        config_path = None
+        for path in search_paths:
+            if os.path.exists(path):
+                config_path = path
+                break
+        if not config_path:
+            return
         try:
-            with open(file_path, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith('#'):
-                        continue
-                    
-                    # Parse KEY=VALUE
-                    if '=' in line:
-                        key, value = line.split('=', 1)
-                        key = key.strip()
-                        value = value.strip()
-                        
-                        # Remove quotes if present
-                        if (value.startswith("'") and value.endswith("'")) or \
-                           (value.startswith('"') and value.endswith('"')):
-                            value = value[1:-1]
-                            
-                        tokens_dict[key] = value
+            with open(config_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
         except Exception as e:
-            print(f"Warning: Failed to read token file {file_path}: {e}")
+            print(f"Warning: Failed to read config.json: {e}")
+            return
+        section = data.get('tokens') if isinstance(data, dict) else None
+        if not isinstance(section, dict):
+            return
+        for config_key, token_key in (
+                ('neuprint', 'NEUPRINT_TOKEN'),
+                ('cave', 'CAVE_TOKEN')):
+            value = section.get(config_key)
+            if isinstance(value, str) and value.strip():
+                tokens_dict[token_key] = value.strip()
 
     def get_token(self, token_name, direct_input=None):
         """
@@ -83,7 +70,7 @@ class TokenManager:
         
         Priority order:
         1. Direct input (if provided)
-        2. Local token file (token_info_local.txt > token_info.txt)
+        2. config.json tokens section
         3. Environment variable
         
         Args:
@@ -205,7 +192,7 @@ class TokenManager:
         if missing:
             raise ValueError(
                 f"Missing required token(s): {', '.join(missing)}.\n"
-                f"Please set them in token_info_local.txt or as environment variables.\n"
+                f"Please set them in config.json or as environment variables.\n"
                 f"Get NEUPRINT_TOKEN from: https://neuprint.janelia.org/account\n"
                 f"Get CAVE_TOKEN from: https://codex.flywire.ai/auth_token"
             )

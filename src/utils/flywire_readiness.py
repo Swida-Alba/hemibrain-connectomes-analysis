@@ -40,37 +40,40 @@ def dataset_folder(dataset: object) -> str:
 def _configured_cave_token(project_root: Path) -> Optional[str]:
     """Read a CAVE token without ever returning it to a caller-facing log.
 
-    The local file is checked before the environment to match the project's
-    token manager.  A ``YOUR_*`` placeholder is treated as unconfigured.
+    config.json (project config) is checked first; the environment is the
+    fallback, matching the project's token manager.  A ``YOUR_*`` placeholder
+    is treated as unconfigured.
     """
 
-    configured: Optional[str] = None
-    for filename in ("token_info_local.txt", "token_info.txt"):
-        path = project_root / filename
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        for line in lines:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            if key.strip() != "CAVE_TOKEN":
-                continue
-            value = value.strip().strip("'\"")
-            if value and not value.startswith("YOUR_"):
-                configured = value
-                break
-
-    if configured:
-        return configured
+    config_value = _cave_token_from_config(project_root)
+    if config_value:
+        return config_value
     environment_value = os.environ.get("CAVE_TOKEN", "").strip()
     return (
         environment_value
         if environment_value and not environment_value.startswith("YOUR_")
         else None
     )
+
+
+def _cave_token_from_config(project_root: Path) -> Optional[str]:
+    """Read the CAVE token from the project config.json, if present."""
+    import json
+
+    config_path = project_root / "config.json"
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    section = data.get("tokens") if isinstance(data, dict) else None
+    if not isinstance(section, dict):
+        return None
+    value = section.get("cave")
+    if isinstance(value, str):
+        value = value.strip()
+        if value and not value.startswith("YOUR_"):
+            return value
+    return None
 
 
 def _first_existing(paths: list[Path]) -> Optional[Path]:
@@ -233,7 +236,7 @@ def require_flywire_skeleton_access(
         "python src/FAFB_file_converter.py."
     )
     log(
-        "Or configure CAVE_TOKEN in token_info_local.txt (or the environment) "
+        "Or configure CAVE_TOKEN in config.json (or the environment) "
         "using https://codex.flywire.ai/auth_token and rerun. The converted "
         "local neuron/connection tables are still required for FAFB queries."
     )

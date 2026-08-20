@@ -6,7 +6,7 @@ Copy-paste examples for the DROCAT backend scripts. Run them from the repository
 conda activate drocat-4.5.0
 ```
 
-API tokens are loaded automatically from `token_info_local.txt` (see [docs/INSTALLATION.md](../INSTALLATION.md#4-authentication)). Output is written to `local_data/` by default.
+API tokens are loaded automatically from `config.json` (see [docs/INSTALLATION.md](../INSTALLATION.md#4-authentication)). Output is written to `local_data/` by default.
 
 ---
 

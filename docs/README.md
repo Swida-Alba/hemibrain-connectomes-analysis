@@ -43,7 +43,7 @@ defines this completion contract.
 - **📖 [Network Features Guide](./visualizations/VisualizePath_Network_Features.md)**
 
 ### 🔐 Authentication Improvements
-- **token_info.txt recommended**: Store all API tokens in one file (NeuPrint, CAVE, NeuronBridge)
+- **config.json recommended**: Store all API tokens in the gitignored project config (NeuPrint, CAVE)
 - **Automatic loading**: No need to pass tokens manually in scripts
 - **Secure storage**: Keep credentials out of version control
 - **📖 [Authentication Setup](./INSTALLATION.md#4-authentication)**

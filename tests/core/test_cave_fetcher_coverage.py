@@ -144,27 +144,43 @@ class TestConstruction:
         assert f.cave_token == 'fake-token'
         assert calls == ['CAVE_TOKEN']
 
-    def test_load_token_from_local_file(self, tmp_path):
-        (tmp_path / 'token_info_local.txt').write_text(
-            "# comment line\n"
-            "OTHER_TOKEN=zzz\n"
-            "not a key value line\n"
-            "CAVE_TOKEN='local-tok'\n", encoding='utf-8')
+    def test_load_token_from_config_json(self, tmp_path):
+        (tmp_path / 'config.json').write_text(
+            '{"tokens": {"cave": "cfg-tok"}}\n', encoding='utf-8')
         f = make_fetcher(tmp_path)
-        assert f._load_token('CAVE_TOKEN') == 'local-tok'
+        assert f._load_token('CAVE_TOKEN') == 'cfg-tok'
 
-    def test_load_token_falls_back_to_second_file_and_env(self, tmp_path,
-                                                          monkeypatch):
+    def test_config_json_wins_over_legacy_token_files(self, tmp_path):
+        """token_info files are deprecated; only config.json is read."""
         (tmp_path / 'token_info_local.txt').write_text(
-            "CAVE_TOKEN=YOUR_CAVE_TOKEN_HERE\n", encoding='utf-8')
+            "CAVE_TOKEN='legacy-tok'\n", encoding='utf-8')
         (tmp_path / 'token_info.txt').write_text(
-            "CAVE_TOKEN=shared-tok\n", encoding='utf-8')
+            "CAVE_TOKEN='template-tok'\n", encoding='utf-8')
+        (tmp_path / 'config.json').write_text(
+            '{"tokens": {"cave": "cfg-tok"}}\n', encoding='utf-8')
         f = make_fetcher(tmp_path)
-        # placeholder in the local file is skipped, second file wins
-        assert f._load_token('CAVE_TOKEN') == 'shared-tok'
+        assert f._load_token('CAVE_TOKEN') == 'cfg-tok'
 
-        (tmp_path / 'token_info.txt').unlink()
+    def test_legacy_token_files_ignored_without_config(self, tmp_path,
+                                                       monkeypatch):
+        monkeypatch.delenv('CAVE_TOKEN', raising=False)
+        (tmp_path / 'token_info_local.txt').write_text(
+            "CAVE_TOKEN='legacy-tok'\n", encoding='utf-8')
+        f = make_fetcher(tmp_path)
+        assert f._load_token('CAVE_TOKEN') is None
+
+    def test_config_json_placeholder_ignored(self, tmp_path, monkeypatch):
+        (tmp_path / 'config.json').write_text(
+            '{"tokens": {"cave": "YOUR_CAVE_TOKEN_HERE"}}\n', encoding='utf-8')
+        monkeypatch.delenv('CAVE_TOKEN', raising=False)
+        f = make_fetcher(tmp_path)
+        assert f._load_token('CAVE_TOKEN') is None
+
+    def test_load_token_falls_back_to_env(self, tmp_path, monkeypatch):
+        (tmp_path / 'config.json').write_text(
+            '{"tokens": {"cave": "YOUR_CAVE_TOKEN_HERE"}}\n', encoding='utf-8')
         monkeypatch.setenv('CAVE_TOKEN', 'env-tok')
+        f = make_fetcher(tmp_path)
         assert f._load_token('CAVE_TOKEN') == 'env-tok'
 
     def test_load_token_no_source_returns_none(self, tmp_path, monkeypatch):

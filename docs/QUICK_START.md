@@ -5,10 +5,17 @@ This guide provides a quick overview of how to perform common tasks using the Dr
 ## Prerequisites
 
 1. **Install the toolkit** - See [Installation Guide](INSTALLATION.md)
-2. **Set up authentication** - Copy `token_info.txt` to `token_info_local.txt` and add your API tokens:
-   ```
-   NEUPRINT_TOKEN='your_neuprint_token_here'
-   CAVE_TOKEN='your_cave_token_here'
+2. **Set up authentication** - Copy `config.example.json` to `config.json` and add your API tokens (one per line in the `tokens` section):
+   ```json
+   {
+     "tokens": {
+       "neuprint": "your_neuprint_token_here",
+       "cave": "your_cave_token_here"
+     },
+     "envs": {
+       "4.5.0": ""
+     }
+   }
    ```
    
    **Token Requirements:**
@@ -48,7 +55,7 @@ Find all paths between source and target neurons up to a specified number of hop
 from coana import FindNeuronConnection
 
 fc = FindNeuronConnection(
-    # Token automatically loaded from token_info.txt
+    # Token automatically loaded from config.json
     dataset='hemibrain:v1.2.1',
     sourceNeurons=['L2'],         # Supports bodyId, type, instance with regex
     targetNeurons=['l-LNv'],
@@ -74,7 +81,7 @@ Find direct connections between a set of neurons (1-hop).
 from coana import FindNeuronConnection
 
 fc = FindNeuronConnection(
-    # Token automatically loaded from token_info.txt
+    # Token automatically loaded from config.json
     dataset='hemibrain:v1.2.1',
     sourceNeurons=['aMe12'],
     targetNeurons=['KCg-d'],

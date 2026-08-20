@@ -1,5 +1,7 @@
 """Settings Tab - Token configuration, dataset status, and app settings."""
 
+import json
+
 from nicegui import run, ui
 
 from ..config import (
@@ -343,7 +345,7 @@ def create_settings_tab():
                 if missing == ["neuprint"]:
                     token_reminder_text.text = (
                         "⚠️ NeuPrint token not configured - it is required for NeuPrint datasets. "
-                        "Set it below or in token_info_local.txt."
+                        "Set it below or in config.json."
                     )
                 elif missing == ["cave"]:
                     token_reminder_text.text = (
@@ -354,7 +356,7 @@ def create_settings_tab():
                     token_reminder_text.text = (
                         "⚠️ No API tokens configured. The NeuPrint token is required for NeuPrint "
                         "datasets; the CAVE token is optional (only needed for FlyWire FAFB online "
-                        "fetching). Set them below or in token_info_local.txt."
+                        "fetching). Set them below or in config.json."
                     )
                 token_reminder_text.update()
 
@@ -794,7 +796,7 @@ python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter impor
         _refresh_token_reminder()
 
     def save_tokens():
-        local_file = PROJECT_ROOT / "token_info_local.txt"
+        config_path = PROJECT_ROOT / "config.json"
         entered_neuprint = (neuprint_token.value or "").strip()
         entered_cave = (cave_token.value or "").strip()
         saved_tokens = dict(token_state)
@@ -808,14 +810,23 @@ python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter impor
         elif clear_blank.value:
             saved_tokens.pop("cave", None)
 
-        content = (
-            "# DROCAT Token Configuration\n"
-            f"NEUPRINT_TOKEN={saved_tokens.get('neuprint', '')!r}\n"
-            f"CAVE_TOKEN={saved_tokens.get('cave', '')!r}\n"
-        )
+        # config.json is the project config: keep the versioned env map and
+        # any other sections, and only replace the tokens section.
+        data = {}
+        if config_path.exists():
+            try:
+                parsed = json.loads(config_path.read_text(encoding="utf-8"))
+                if isinstance(parsed, dict):
+                    data = parsed
+            except Exception:
+                data = {}
+        data["tokens"] = {
+            "neuprint": saved_tokens.get("neuprint", ""),
+            "cave": saved_tokens.get("cave", ""),
+        }
         try:
-            local_file.write_text(content, encoding="utf-8")
-            local_file.chmod(0o600)
+            config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            config_path.chmod(0o600)
             token_state.clear()
             token_state.update(saved_tokens)
             # Clear the client-side fields after saving so a browser DOM
@@ -825,7 +836,7 @@ python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter impor
             clear_blank.value = False
             _update_token_status()
 
-            ui.notify("Tokens saved to token_info_local.txt", type="positive")
+            ui.notify("Tokens saved to config.json", type="positive")
             from ..dataset_service import get_dataset_service
             service = get_dataset_service()
             service._token = saved_tokens.get("neuprint") or None
@@ -872,36 +883,23 @@ python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter impor
 
 
 def _load_tokens() -> dict:
-    """Load valid tokens with local values overriding the template.
+    """Load valid tokens from the project config.json (the only token file).
 
-    Parse the template first and the local file second, key by key.  The old
-    implementation stopped after seeing *any* token in the first file, so a
-    local CAVE-only file could hide a valid NeuPrint token from the template.
+    A ``YOUR_*`` placeholder is treated as unconfigured.
     """
     tokens = {}
-    for filename in ["token_info.txt", "token_info_local.txt"]:
-        is_local = filename == "token_info_local.txt"
-        token_path = PROJECT_ROOT / filename
-        if token_path.exists():
-            try:
-                for line in token_path.read_text().split("\n"):
-                    line = line.strip()
-                    if line.startswith("NEUPRINT_TOKEN="):
-                        token = line.split("=", 1)[1].strip().strip("'\"")
-                        if is_local:
-                            # A blank local value is an explicit clear and
-                            # must not fall back to a template secret.
-                            tokens["neuprint"] = token if token and not token.startswith("YOUR_") else ""
-                        elif "neuprint" not in tokens and token and not token.startswith("YOUR_"):
-                            tokens["neuprint"] = token
-                    elif line.startswith("CAVE_TOKEN="):
-                        token = line.split("=", 1)[1].strip().strip("'\"")
-                        if is_local:
-                            tokens["cave"] = token if token and not token.startswith("YOUR_") else ""
-                        elif "cave" not in tokens and token and not token.startswith("YOUR_"):
-                            tokens["cave"] = token
-            except Exception:
-                pass
+    config_path = PROJECT_ROOT / "config.json"
+    if config_path.exists():
+        try:
+            cfg = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            cfg = None
+        cfg_tokens = (cfg or {}).get("tokens") if isinstance(cfg, dict) else None
+        if isinstance(cfg_tokens, dict):
+            for key in ("neuprint", "cave"):
+                value = cfg_tokens.get(key)
+                if isinstance(value, str) and value.strip() and not value.startswith("YOUR_"):
+                    tokens[key] = value.strip()
     return tokens
 
 

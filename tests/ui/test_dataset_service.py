@@ -140,45 +140,47 @@ class TestHiddenDatasetFilter:
         assert set(available) == NEUPRINT_EXPECTED
 
 
-class TestTokenFilePrecedence:
-    """_load_tokens reads token_info.txt then token_info_local.txt; the local
-    file overrides per-key, and a blank local value clears the template."""
+class TestTokenConfigJson:
+    """_load_tokens reads the tokens section of config.json (the only
+    token file); placeholders and empty values are treated as unset."""
 
-    def _svc(self, monkeypatch, tmp_path, template, local):
-        if template is not None:
-            (tmp_path / "token_info.txt").write_text(template, encoding="utf-8")
-        if local is not None:
-            (tmp_path / "token_info_local.txt").write_text(local, encoding="utf-8")
+    def _svc(self, monkeypatch, tmp_path, config=None):
+        if config is not None:
+            (tmp_path / "config.json").write_text(config, encoding="utf-8")
         monkeypatch.setattr(ds_mod, "PROJECT_ROOT", tmp_path)
         return DatasetService()
 
-    def test_local_overrides_template(self, monkeypatch, tmp_path):
+    def test_reads_both_tokens(self, monkeypatch, tmp_path):
         svc = self._svc(
             monkeypatch, tmp_path,
-            "NEUPRINT_TOKEN='template-tok'\nCAVE_TOKEN='template-cave'\n",
-            "NEUPRINT_TOKEN='local-tok'\n",
+            '{"tokens": {"neuprint": "cfg-np", "cave": "cfg-cave"}}\n',
         )
-        assert svc.get_token() == "local-tok"
-        assert svc.get_cave_token() == "template-cave"
+        assert svc.get_token() == "cfg-np"
+        assert svc.get_cave_token() == "cfg-cave"
 
-    def test_blank_local_clears_template(self, monkeypatch, tmp_path):
+    def test_empty_value_is_unset(self, monkeypatch, tmp_path):
         svc = self._svc(
             monkeypatch, tmp_path,
-            "NEUPRINT_TOKEN='template-tok'\nCAVE_TOKEN='template-cave'\n",
-            "NEUPRINT_TOKEN=''\n",
+            '{"tokens": {"neuprint": "", "cave": "cfg-cave"}}\n',
         )
         assert svc.get_token() is None
-        assert svc.get_cave_token() == "template-cave"
+        assert svc.get_cave_token() == "cfg-cave"
 
-    def test_placeholder_local_ignored(self, monkeypatch, tmp_path):
+    def test_placeholder_ignored(self, monkeypatch, tmp_path):
         svc = self._svc(
             monkeypatch, tmp_path,
-            "NEUPRINT_TOKEN='template-tok'\n",
-            "NEUPRINT_TOKEN='YOUR_NEUPRINT_TOKEN_HERE'\n",
+            '{"tokens": {"neuprint": "YOUR_NEUPRINT_TOKEN_HERE"}}\n',
         )
         assert svc.get_token() is None
 
-    def test_no_files_returns_none(self, monkeypatch, tmp_path):
-        svc = self._svc(monkeypatch, tmp_path, None, None)
+    def test_legacy_token_files_ignored(self, monkeypatch, tmp_path):
+        (tmp_path / "token_info_local.txt").write_text(
+            "NEUPRINT_TOKEN='legacy-tok'\n", encoding="utf-8"
+        )
+        svc = self._svc(monkeypatch, tmp_path, None)
+        assert svc.get_token() is None
+
+    def test_no_config_returns_none(self, monkeypatch, tmp_path):
+        svc = self._svc(monkeypatch, tmp_path, None)
         assert svc.get_token() is None
         assert svc.get_cave_token() is None

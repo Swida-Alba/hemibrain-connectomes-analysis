@@ -7,10 +7,64 @@ $PythonVersion = "3.11"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 # The installer lives in archive\install; the repository root is two levels up.
 $ProjectRoot = (Resolve-Path (Join-Path $ScriptDir "..\..")).Path
+
+# Guard against an unwritable shared pip cache (restricted ACLs on
+# %LOCALAPPDATA%\pip\cache abort the whole install): use a project-local
+# cache directory, and fall back to disabling the pip cache entirely if
+# even that directory cannot be created.
+try {
+    $PipCacheDir = Join-Path $ProjectRoot "cache\pip"
+    New-Item -ItemType Directory -Force -Path $PipCacheDir -ErrorAction Stop | Out-Null
+    $env:PIP_CACHE_DIR = $PipCacheDir
+} catch {
+    $env:PIP_NO_CACHE_DIR = "1"
+}
+
 $DrocatVersion = "4.5.0"
 $VersionLine = Select-String -Path "$ProjectRoot\ui\config.py" -Pattern '^APP_VERSION = "([^"]+)"' -ErrorAction SilentlyContinue
 if ($VersionLine) { $DrocatVersion = $VersionLine.Matches[0].Groups[1].Value }
 $EnvBase = "drocat-$DrocatVersion"
+$ConfigFile = Join-Path $ProjectRoot "config.json"
+$ConfigExample = Join-Path $ProjectRoot "config.example.json"
+
+# Create the local config.json from the committed template on first run so
+# the versioned env override and token slots exist before anything reads them.
+if (-not (Test-Path $ConfigFile) -and (Test-Path $ConfigExample)) {
+    Copy-Item $ConfigExample $ConfigFile
+    Write-Host "Created config.json from config.example.json (edit it to set a custom env name or tokens)." -ForegroundColor Yellow
+}
+
+# config.json: version-specific custom env (envs.<version>) and tokens.
+# envs.<version> is only consulted for the CURRENT release, so upgrading
+# DROCAT never reuses an older release's custom environment.
+$Config = $null
+if (Test-Path $ConfigFile) {
+    try {
+        $Config = Get-Content $ConfigFile -Raw | ConvertFrom-Json
+    } catch {
+        $Config = $null
+    }
+}
+$EnvOverride = ""
+if ($Config -and $Config.envs) {
+    $EnvOverride = [string]$Config.envs."$DrocatVersion"
+}
+
+function Set-ConfigEnvOverride([string]$Version, [string]$EnvName) {
+    # Persist the selected environment into config.json so an empty entry is
+    # filled with the auto-created name; custom names are written back unchanged.
+    if (-not (Test-Path $ConfigFile)) { return }
+    try {
+        $Cfg = Get-Content $ConfigFile -Raw | ConvertFrom-Json
+    } catch {
+        return
+    }
+    if (-not $Cfg.envs) {
+        $Cfg | Add-Member -NotePropertyName "envs" -NotePropertyValue ([pscustomobject]@{}) -Force
+    }
+    $Cfg.envs | Add-Member -NotePropertyName $Version -NotePropertyValue $EnvName -Force
+    $Cfg | ConvertTo-Json -Depth 5 | Set-Content $ConfigFile -Encoding UTF8
+}
 
 function Write-Step([string]$Step, [string]$Message) {
     Write-Host "[$Step] $Message" -ForegroundColor Cyan
@@ -66,21 +120,49 @@ function Install-Miniconda {
 }
 
 function Get-EnvironmentNames {
-    $Raw = (& $script:CondaPath env list --json | Out-String)
-    if ($LASTEXITCODE -ne 0) { throw "Could not list conda environments." }
+    # EAP Continue: Windows PowerShell 5.1 aborts on ANY native stderr line
+    # under EAP Stop (same root cause as Invoke-InEnvironment).
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $Raw = (& $script:CondaPath env list --json | Out-String)
+        if ($LASTEXITCODE -ne 0) { throw "Could not list conda environments." }
+    }
+    finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
     $Data = $Raw | ConvertFrom-Json
     return @($Data.envs | ForEach-Object { Split-Path $_ -Leaf })
 }
 
 function Test-EnvironmentPython([string]$Name) {
-    & $script:CondaPath run -n $Name python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" 2>$null | Out-Null
-    return ($LASTEXITCODE -eq 0)
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $script:CondaPath run -n $Name python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" 2>$null | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    }
+    finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
 }
 
 function Invoke-InEnvironment([string[]]$Command) {
-    & $script:CondaPath run -n $script:EnvName --no-capture-output @Command
-    if ($LASTEXITCODE -ne 0) {
-        throw "Command failed in $script:EnvName (exit $LASTEXITCODE): $($Command -join ' ')"
+    # Windows PowerShell 5.1 converts ANY native stderr line into a
+    # terminating NativeCommandError when $ErrorActionPreference is "Stop"
+    # (pip warnings such as "Connection interrupted while downloading"
+    # would abort an otherwise-successful install). Run native commands
+    # with EAP Continue and rely on $LASTEXITCODE instead.
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $script:CondaPath run -n $script:EnvName --no-capture-output @Command
+        if ($LASTEXITCODE -ne 0) {
+            throw "Command failed in $script:EnvName (exit $LASTEXITCODE): $($Command -join ' ')"
+        }
+    }
+    finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
     }
 }
 
@@ -100,31 +182,71 @@ Write-Host "Using $script:CondaPath" -ForegroundColor Green
 Write-Step "2/5" "Selecting a Python $PythonVersion environment"
 $Existing = Get-EnvironmentNames
 $script:EnvName = $null
-for ($Index = 0; $Index -le 20; $Index++) {
-    $Candidate = if ($Index -eq 0) { $EnvBase } else { "$EnvBase-$($Index + 1)" }
-    if ($Existing -contains $Candidate) {
-        if (Test-EnvironmentPython $Candidate) {
-            $script:EnvName = $Candidate
-            Write-Host "Reusing $Candidate" -ForegroundColor Green
-            break
+if ($EnvOverride) {
+    if ($Existing -contains $EnvOverride) {
+        if (Test-EnvironmentPython $EnvOverride) {
+            $script:EnvName = $EnvOverride
+            Write-Host "Reusing $EnvOverride (custom env from config.json)" -ForegroundColor Green
+        } else {
+            Write-Host "Skipping $EnvOverride (custom env from config.json) because it is not Python $PythonVersion." -ForegroundColor Yellow
         }
-        Write-Host "Skipping $Candidate because it is not Python $PythonVersion." -ForegroundColor Yellow
-        continue
+    } else {
+        $script:EnvName = $EnvOverride
+        Write-Host "Creating $EnvOverride (custom env from config.json)..."
+        $PreviousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            & $script:CondaPath create -n $EnvOverride "python=$PythonVersion" -y
+        } finally {
+            $ErrorActionPreference = $PreviousErrorActionPreference
+        }
+        if ($LASTEXITCODE -ne 0) { throw "Could not create $EnvOverride." }
     }
-    $script:EnvName = $Candidate
-    Write-Host "Creating $Candidate..."
-    & $script:CondaPath create -n $Candidate "python=$PythonVersion" -y
-    if ($LASTEXITCODE -ne 0) { throw "Could not create $Candidate." }
-    break
+}
+if (-not $script:EnvName) {
+    for ($Index = 0; $Index -le 20; $Index++) {
+        $Candidate = if ($Index -eq 0) { $EnvBase } else { "$EnvBase-$($Index + 1)" }
+        if ($Existing -contains $Candidate) {
+            if (Test-EnvironmentPython $Candidate) {
+                $script:EnvName = $Candidate
+                Write-Host "Reusing $Candidate" -ForegroundColor Green
+                break
+            }
+            Write-Host "Skipping $Candidate because it is not Python $PythonVersion." -ForegroundColor Yellow
+            continue
+        }
+        $script:EnvName = $Candidate
+        Write-Host "Creating $Candidate..."
+        $PreviousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            & $script:CondaPath create -n $Candidate "python=$PythonVersion" -y
+        } finally {
+            $ErrorActionPreference = $PreviousErrorActionPreference
+        }
+        if ($LASTEXITCODE -ne 0) { throw "Could not create $Candidate." }
+        break
+    }
 }
 if (-not $script:EnvName) { throw "Could not select a usable $EnvBase environment." }
+Set-ConfigEnvOverride $DrocatVersion $script:EnvName
 
 Set-Location $ProjectRoot
 Write-Step "3/5" "Installing pinned dependencies"
 Invoke-InEnvironment @("python", "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel")
 
-& $script:CondaPath run -n $script:EnvName python -m pip show neuronbridge-python *> $null
-if ($LASTEXITCODE -eq 0) {
+# Probe for the legacy neuronbridge-python distribution. On a fresh install
+# pip prints "WARNING: Package(s) not found" to stderr, which Windows
+# PowerShell 5.1 turns into a terminating NativeCommandError under EAP Stop;
+# missing is the desired state, so swallow it and rely on $LASTEXITCODE.
+$LegacyNeuronbridge = $false
+try {
+    & $script:CondaPath run -n $script:EnvName python -m pip show neuronbridge-python *> $null
+    $LegacyNeuronbridge = ($LASTEXITCODE -eq 0)
+} catch {
+    $LegacyNeuronbridge = $false
+}
+if ($LegacyNeuronbridge) {
     Write-Host "Removing legacy neuronbridge-python dependency..."
     Invoke-InEnvironment @("python", "-m", "pip", "uninstall", "-y", "neuronbridge-python")
 }
@@ -144,28 +266,27 @@ Write-Host "Launch with: run_DROCAT.bat"
 
 # --- Token configuration notice ---
 # Tokens are NOT collected in the terminal: they are set in the UI Settings
-# tab after launch, or by editing token_info_local.txt at the repository
-# root. The NeuPrint token is required for NeuPrint datasets; the CAVE token
-# is optional and only needed for FlyWire FAFB online fetching.
+# tab after launch, or by editing config.json at the repository root (see
+# token_info.txt for the migration notes). The NeuPrint token is required
+# for NeuPrint datasets; the CAVE token is optional and only needed for
+# FlyWire FAFB online fetching.
 Write-Host ""
 Write-Host "[Token setup]" -ForegroundColor Cyan
-$TokenFile = Join-Path $ProjectRoot "token_info_local.txt"
 $NeuprintNow = ""
 $CaveNow = ""
-if (Test-Path $TokenFile) {
-    $Content = Get-Content $TokenFile -Raw -ErrorAction SilentlyContinue
-    if ($Content -match "NEUPRINT_TOKEN='([^']*)'") { $NeuprintNow = $Matches[1] }
-    if ($Content -match "CAVE_TOKEN='([^']*)'") { $CaveNow = $Matches[1] }
+if ($Config -and $Config.tokens) {
+    if ($Config.tokens.neuprint) { $NeuprintNow = [string]$Config.tokens.neuprint }
+    if ($Config.tokens.cave) { $CaveNow = [string]$Config.tokens.cave }
 }
 if ($NeuprintNow -and $NeuprintNow -ne "YOUR_NEUPRINT_TOKEN_HERE") {
-    Write-Host "NeuPrint token already configured in token_info_local.txt."
+    Write-Host "NeuPrint token already configured in config.json."
 } else {
     Write-Host "NeuPrint token not configured - required for NeuPrint datasets."
 }
 if ($CaveNow -and $CaveNow -ne "YOUR_CAVE_TOKEN_HERE") {
-    Write-Host "CAVE token already configured in token_info_local.txt."
+    Write-Host "CAVE token already configured in config.json."
 } else {
     Write-Host "CAVE token optional - only needed for FlyWire FAFB online fetching."
 }
-Write-Host "Set tokens in the UI Settings tab after launching, or edit token_info_local.txt"
-Write-Host "(repository root, format: NEUPRINT_TOKEN='...' / CAVE_TOKEN='...')."
+Write-Host "Set tokens in the UI Settings tab after launching, or edit config.json"
+Write-Host "(repository root, format: tokens.neuprint / tokens.cave)."

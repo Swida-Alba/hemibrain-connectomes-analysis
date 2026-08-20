@@ -13,7 +13,11 @@ echo DROCAT - Drosophila Connectome Analysis Toolkit
 echo Preparing the versioned environment and launching the UI...
 echo.
 
-where conda >nul 2>nul && set "CONDA_BIN=conda"
+REM Resolve conda to its FULL path: `call "conda"` does not resolve a
+REM quoted bare name through PATH/PATHEXT (the conda.bat shim is never
+REM found), so every health check would fail and the launcher would loop
+REM through :repair forever.
+where conda >nul 2>nul && for /f "delims=" %%c in ('where conda') do if not defined CONDA_BIN set "CONDA_BIN=%%c"
 if not defined CONDA_BIN if exist "%USERPROFILE%\miniconda3\Scripts\conda.exe" set "CONDA_BIN=%USERPROFILE%\miniconda3\Scripts\conda.exe"
 if not defined CONDA_BIN if exist "%USERPROFILE%\anaconda3\Scripts\conda.exe" set "CONDA_BIN=%USERPROFILE%\anaconda3\Scripts\conda.exe"
 if not defined CONDA_BIN if exist "%USERPROFILE%\miniforge3\Scripts\conda.exe" set "CONDA_BIN=%USERPROFILE%\miniforge3\Scripts\conda.exe"
@@ -25,6 +29,12 @@ for /f "tokens=3" %%v in ('findstr /C:"APP_VERSION = " "%SCRIPT_DIR%ui\config.py
 set "DROCAT_VERSION=!DROCAT_VERSION:"=!"
 set "ENV_BASE=drocat-!DROCAT_VERSION!"
 set "REPAIRED=0"
+set "CONFIG_FILE=%SCRIPT_DIR%config.json"
+set "ENV_OVERRIDE="
+REM Version-specific custom env override from config.json: envs.<version>
+REM is only consulted for the CURRENT release, so upgrading DROCAT never
+REM reuses an older release's custom environment.
+if exist "!CONFIG_FILE!" for /f "usebackq delims=" %%e in (`powershell -NoProfile -Command "try { $c = Get-Content -Raw -LiteralPath '!CONFIG_FILE!' | ConvertFrom-Json; if ($c.envs.'!DROCAT_VERSION!') { $c.envs.'!DROCAT_VERSION!' } } catch {}"`) do set "ENV_OVERRIDE=%%e"
 
 :resolve_reset
 set "ENV_NAME="
@@ -32,6 +42,7 @@ set /a N=0
 :resolve
 if !N! EQU 0 (
     set "CAND=!ENV_BASE!"
+    if defined ENV_OVERRIDE set "CAND=!ENV_OVERRIDE!"
 ) else (
     set /a SUFFIX=N+1
     set "CAND=!ENV_BASE!-!SUFFIX!"
@@ -53,14 +64,18 @@ if errorlevel 1 goto repair
 call "!CONDA_BIN!" run -n "!ENV_NAME!" python -m pip check >nul 2>nul
 if errorlevel 1 goto repair
 
+REM Persist the resolved environment into config.json when no custom name
+REM was configured, so the auto-found env is pinned for later runs.
+if not defined ENV_OVERRIDE if exist "!CONFIG_FILE!" powershell -NoProfile -Command "try { $c = Get-Content -Raw -LiteralPath '!CONFIG_FILE!' | ConvertFrom-Json; if (-not $c.envs) { $c | Add-Member -NotePropertyName 'envs' -NotePropertyValue ([pscustomobject]@{}) -Force }; $c.envs | Add-Member -NotePropertyName '!DROCAT_VERSION!' -NotePropertyValue '!ENV_NAME!' -Force; $c | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath '!CONFIG_FILE!' -Encoding UTF8 } catch {}"
+
 REM Token hint: remind users who skipped the installer prompt.
 set "NP_TOKEN="
-if exist "%SCRIPT_DIR%token_info_local.txt" for /f "usebackq tokens=*" %%t in (`findstr /B "NEUPRINT_TOKEN=" "%SCRIPT_DIR%token_info_local.txt"`) do set "NP_TOKEN=%%t"
+if exist "!CONFIG_FILE!" for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "try { $c = Get-Content -Raw -LiteralPath '!CONFIG_FILE!' | ConvertFrom-Json; if ($c.tokens.neuprint) { $c.tokens.neuprint } } catch {}"`) do set "NP_TOKEN=%%t"
 set "HINT=0"
 if not defined NP_TOKEN set "HINT=1"
 if defined NP_TOKEN echo !NP_TOKEN! | findstr /C:"YOUR_NEUPRINT_TOKEN_HERE" >nul && set "HINT=1"
 if defined NP_TOKEN echo !NP_TOKEN! | findstr /C:"NEUPRINT_TOKEN=''" >nul && set "HINT=1"
-if "!HINT!"=="1" echo Tip: the NeuPrint token is not configured yet - set it in the Settings tab or token_info_local.txt (the CAVE token is optional; only needed for FlyWire FAFB online fetching).
+if "!HINT!"=="1" echo Tip: the NeuPrint token is not configured yet - set it in the Settings tab or config.json (the CAVE token is optional; only needed for FlyWire FAFB online fetching).
 goto launch
 
 :repair
@@ -74,7 +89,9 @@ if not errorlevel 1 (
     powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%archive\install\install.ps1"
 )
 if errorlevel 1 goto error
-where conda >nul 2>nul && set "CONDA_BIN=conda"
+REM Re-detect conda the same way (full path) after the installer may have
+REM installed Miniconda or changed the PATH.
+where conda >nul 2>nul && for /f "delims=" %%c in ('where conda') do if not defined CONDA_BIN set "CONDA_BIN=%%c"
 if not defined CONDA_BIN if exist "%USERPROFILE%\miniconda3\Scripts\conda.exe" set "CONDA_BIN=%USERPROFILE%\miniconda3\Scripts\conda.exe"
 if not defined CONDA_BIN if exist "%USERPROFILE%\anaconda3\Scripts\conda.exe" set "CONDA_BIN=%USERPROFILE%\anaconda3\Scripts\conda.exe"
 if not defined CONDA_BIN if exist "%USERPROFILE%\miniforge3\Scripts\conda.exe" set "CONDA_BIN=%USERPROFILE%\miniforge3\Scripts\conda.exe"
@@ -91,11 +108,16 @@ if not defined APP_PORT set "APP_PORT=8080"
 if defined DROCAT_UI_PORT set "APP_PORT=!DROCAT_UI_PORT!"
 
 set "OWNER_PID="
-for /f "tokens=5" %%p in ('netstat -ano ^| findstr /R ":!APP_PORT! .*LISTENING"') do if not defined OWNER_PID set "OWNER_PID=%%p"
+REM /C: keeps the regex together: findstr treats an unquoted space as a
+REM separator between search terms, so ":!APP_PORT! .*LISTENING" would
+REM match EVERY LISTENING line (picking PID 4, System, as the owner).
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr /R /C:":!APP_PORT! .*LISTENING"') do if not defined OWNER_PID set "OWNER_PID=%%p"
 if not defined OWNER_PID goto start_ui
 
 set "OWNER_CMD="
-for /f "delims=" %%c in ('powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter 'ProcessId=!OWNER_PID!').CommandLine"') do set "OWNER_CMD=%%c"
+for /f "delims=" %%c in ('powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter 'ProcessId=!OWNER_PID!' -ErrorAction SilentlyContinue).CommandLine"') do set "OWNER_CMD=%%c"
+REM System-owned ports (PID 4) cannot be inspected; show a fallback label.
+if not defined OWNER_CMD set "OWNER_CMD=PID !OWNER_PID! (command line unavailable)"
 echo.
 echo Port !APP_PORT! is already in use by PID !OWNER_PID!:
 echo     !OWNER_CMD!
@@ -128,7 +150,7 @@ exit /b 1
 set /a NEW_PORT=!APP_PORT!+1
 :pick_new_port_loop
 if !NEW_PORT! GTR 65535 goto conflict_abort
-netstat -ano | findstr /R ":!NEW_PORT! .*LISTENING" >nul 2>nul
+netstat -ano | findstr /R /C:":!NEW_PORT! .*LISTENING" >nul 2>nul
 if not errorlevel 1 (
     set /a NEW_PORT+=1
     goto pick_new_port_loop
@@ -141,7 +163,7 @@ goto start_ui
 set /a WAIT=0
 :wait_port_free_loop
 set "OWNER_PID="
-for /f "tokens=5" %%p in ('netstat -ano ^| findstr /R ":!APP_PORT! .*LISTENING"') do if not defined OWNER_PID set "OWNER_PID=%%p"
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr /R /C:":!APP_PORT! .*LISTENING"') do if not defined OWNER_PID set "OWNER_PID=%%p"
 if not defined OWNER_PID goto start_ui
 set /a WAIT+=1
 if !WAIT! GEQ 20 goto conflict_abort

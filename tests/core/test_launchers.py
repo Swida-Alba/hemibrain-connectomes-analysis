@@ -17,9 +17,15 @@ class TestRunDrocatLaunchers:
         assert "Kill the existing DROCAT process" in text
         assert "is not DROCAT" in text
         # token reminder for users who skipped the installer prompt
-        assert "token_info_local.txt" in text
+        assert "config.json" in text
         assert "NeuPrint token is not configured yet" in text
         assert "CAVE token is optional" in text
+        # version-specific custom env override from config.json
+        assert "json_value envs" in text
+        assert "ENV_OVERRIDE" in text
+        assert "json_value tokens" in text
+        # the resolved environment is written back into config.json
+        assert "update_config_env" in text
         # double-click UX: keep the window open on failure
         assert "Press Return to close" in text
 
@@ -31,6 +37,22 @@ class TestRunDrocatLaunchers:
         assert "netstat -ano" in text
         assert "NeuPrint token is not configured yet" in text
         assert "CAVE token is optional" in text
+        # version-specific custom env override from config.json
+        assert "config.json" in text
+        assert "ENV_OVERRIDE" in text
+        assert "envs.'!DROCAT_VERSION!'" in text
+        # the resolved environment is written back into config.json
+        assert "Set-Content -LiteralPath '!CONFIG_FILE!'" in text
+        # conda is resolved to its FULL path at both detection sites: a
+        # quoted bare name is not resolved through PATH/PATHEXT by `call`
+        assert text.count("for /f \"delims=\" %%c in ('where conda')") == 2
+        # /C: keeps the port regex together (findstr splits on spaces),
+        # on all three port-check sites
+        assert text.count("findstr /R /C:\":!APP_PORT! .*LISTENING\"") == 2
+        assert "findstr /R /C:\":!NEW_PORT! .*LISTENING\"" in text
+        # System-owned PIDs (4) cannot be inspected; fallback label shown
+        assert "-ErrorAction SilentlyContinue" in text
+        assert "(command line unavailable)" in text
         assert "pause" in text
 
     def test_ui_prints_browser_fallback_after_nicegui_ready(self):
@@ -47,20 +69,27 @@ class TestInstallers:
         assert 'verify_install.py --project "$PROJECT_ROOT"' in text
         assert 'cd "$PROJECT_ROOT"' in text
         assert "run_DROCAT.command" in text
+        # config.json: created from the committed template, versioned env
+        # override consulted before the default drocat-<version> auto-find
+        assert "config.example.json" in text
+        assert 'json_value envs "$DROCAT_VERSION"' in text
+        assert "ENV_OVERRIDE" in text
 
     def test_install_sh_token_notice_has_no_terminal_prompt(self):
         """Tokens are NOT collected in the terminal: the installer only prints
-        a status notice pointing to the UI Settings tab / token_info_local.txt,
+        a status notice pointing to the UI Settings tab / config.json,
         with the CAVE token marked optional."""
         text = (ROOT / "archive/install/install.sh").read_text(encoding="utf-8")
         assert "UI Settings tab" in text
-        assert "token_info_local.txt" in text
+        assert "config.json" in text
         assert "required for NeuPrint datasets" in text
         assert "only needed for FlyWire FAFB online fetching" in text
         # no interactive paste prompt remains
         assert "read -r -p" not in text
         assert "Paste them here in the terminal" not in text
         assert "Non-interactive: skipping" not in text
+        # token_info files are deprecated: the notice must not reference them
+        assert "token_info_local.txt" not in text
 
     def test_install_ps1_token_notice_has_no_terminal_prompt(self):
         text = (ROOT / "archive/install/install.ps1").read_text(encoding="utf-8")
@@ -70,6 +99,37 @@ class TestInstallers:
         assert "Read-Host" not in text
         assert "IsInputRedirected" not in text
         assert "Paste them here in the terminal" not in text
+
+    def test_install_ps1_config_json_env_override(self):
+        text = (ROOT / "archive/install/install.ps1").read_text(encoding="utf-8")
+        # config.json: created from the committed template, versioned env
+        # override consulted before the default drocat-<version> auto-find
+        assert "config.example.json" in text
+        assert 'Config.envs."$DrocatVersion"' in text
+        assert "$EnvOverride" in text
+        assert "config.json" in text
+        # the resolved environment is written back into config.json
+        assert "Set-ConfigEnvOverride" in text
+        # token_info files are deprecated: the notice must not reference them
+        assert "token_info_local.txt" not in text
+
+    def test_install_ps1_windows_powershell_51_hardening(self):
+        """Windows PowerShell 5.1 turns native stderr into a terminating
+        NativeCommandError under EAP Stop; the installer must not abort on
+        pip warnings (pip show / pip install)."""
+        text = (ROOT / "archive/install/install.ps1").read_text(encoding="utf-8")
+        # legacy neuronbridge-python probe is guarded (missing = desired)
+        assert "$LegacyNeuronbridge" in text
+        assert "$LASTEXITCODE -eq 0" in text
+        # native commands run with EAP Continue and exit-code checks
+        assert '$ErrorActionPreference = "Continue"' in text
+        assert "$PreviousErrorActionPreference" in text
+        assert "$LASTEXITCODE -ne 0" in text
+        # unwritable shared pip cache is redirected to a project-local dir,
+        # with PIP_NO_CACHE_DIR as the final fallback
+        assert "PIP_CACHE_DIR" in text
+        assert "cache\\pip" in text
+        assert "PIP_NO_CACHE_DIR" in text
 
     def test_install_bat_wraps_ps1(self):
         text = (ROOT / "archive/install/install.bat").read_text(encoding="utf-8")

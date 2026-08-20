@@ -28,6 +28,27 @@ automatically before starting the UI.
 - If that name is taken by a non-3.11 env, it is left untouched and a suffix
   is used: `drocat-4.5.0-2`, `drocat-4.5.0-3`, ... Launchers resolve the same
   way. Legacy `drocat` envs are never modified.
+- **Custom env name (version-specific):** put the env name under the matching
+  release key in the project config `config.json` (`envs` section). The entry
+  is only consulted for *that* release, so upgrading DROCAT never reuses an
+  older release's custom environment. An empty value means default auto-find:
+
+  ```json
+  {
+    "tokens": { "neuprint": "", "cave": "" },
+    "envs": { "4.5.0": "my-custom-env" }
+  }
+  ```
+
+  If the custom env exists with Python 3.11 it is reused; if it does not
+  exist it is created; if it exists with a different Python it is left
+  untouched and the default `drocat-4.5.0` names are used instead.
+- **Auto-fill:** an empty `envs."4.5.0"` entry means "create/use the default
+  versioned env automatically". The installers and launchers write the
+  environment they actually used back into `config.json`, so after the
+  first install the entry holds the concrete env name (e.g.
+  `drocat-4.5.0`) and every script resolves it directly. A custom name is
+  always created by that name and written back unchanged.
 - All installers/launchers set `PYTHONNOUSERSITE=1`, so packages from a
   user-level Python cannot contaminate the environment.
 - Do **not** install `neuronbridge-python` — DROCAT bundles its own client
@@ -51,21 +72,36 @@ python skills/drocat-install/scripts/verify_install.py --project .
 
 NeuPrint datasets need a **NeuPrint token** (required). The **CAVE token is
 optional** — it is only needed for FlyWire FAFB *online* fetching; local
-converted FlyWire tables work without it. Two equivalent ways — both
-read/write the same gitignored `token_info_local.txt`:
+converted FlyWire tables work without it. Tokens live in the gitignored
+project config `config.json` (the legacy `token_info.txt` /
+`token_info_local.txt` files are deprecated and no longer read). Two
+equivalent ways:
 
 1. **UI Settings tab** — paste the tokens there after launching; the tab
-   reminds you when tokens are missing.
-2. **Token file** — copy the template and edit it:
+   reminds you when tokens are missing. Saving writes `config.json` and
+   keeps its `envs` section intact.
+2. **Config file** — copy the template and edit it:
 
 ```bash
-cp token_info.txt token_info_local.txt        # gitignored, takes precedence
+cp config.example.json config.json          # gitignored
 ```
 
-```text
-NEUPRINT_TOKEN='your_actual_neuprint_token'
-CAVE_TOKEN='your_actual_cave_token'           # optional
+```json
+{
+  "tokens": {
+    "neuprint": "your_actual_neuprint_token",
+    "cave": "your_actual_cave_token"
+  },
+  "envs": {
+    "4.5.0": ""
+  }
+}
 ```
+
+An empty token value means "not configured"; the environment variables
+(`NEUPRINT_TOKEN`, `CAVE_TOKEN`) remain a fallback for script mode.
+`config.json` is created automatically from `config.example.json` by the
+one-click installers when it is missing.
 
 - NeuPrint token: <https://neuprint.janelia.org/account>
 - CAVE token: <https://codex.flywire.ai/auth_token>
@@ -207,8 +243,8 @@ counts, enabling bodyId-level work, or exporting images/video.
 
 ### 5.6 Safety checklist
 
-- Never paste `NEUPRINT_TOKEN`, `CAVE_TOKEN`, or `token_info_local.txt` into a
-  prompt, patch, log, or report.
+- Never paste `NEUPRINT_TOKEN`, `CAVE_TOKEN`, or the contents of
+  `config.json` into a prompt, patch, log, or report.
 - Ask before remote queries that may download large datasets or spend API/data
   budget.
 - Keep `use_cache=True`; use `cache_only=True` only when cache coverage is

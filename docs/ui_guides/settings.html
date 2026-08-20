@@ -24,13 +24,14 @@
     <tr><td>NeuPrint Token</td><td>All NeuPrint datasets (hemibrain, male-cns, optic-lobe, manc, ...)</td><td>neuprint.janelia.org/account</td></tr>
     <tr><td>CAVE Token</td><td>FAFB CAVE API fetching or skeleton fallback (not local conversion)</td><td>codex.flywire.ai/auth_token</td></tr>
   </table>
-  <p>Tokens are saved to <code>token_info_local.txt</code> (gitignored) and
-    take precedence over the template <code>token_info.txt</code>. For safety,
+  <p>Tokens are saved to <code>config.json</code> (gitignored, template
+    <code>config.example.json</code>) which also holds the versioned conda
+    environment setting. For safety,
     the Settings page never pre-fills a saved secret into the browser. A
     <b>configured (kept hidden)</b> status means the saved value will be used;
     leave its field blank to keep it, or enter a new value to replace it.</p>
   <p>Enable <b>Clear a saved value when its field is blank</b> only when you
-    intentionally want to remove a token from the local file.</p>
+    intentionally want to remove a token from the config file.</p>
   <div class="callout tip">
     <b>Test NeuPrint</b> verifies the token by counting neurons in
     hemibrain:v1.2.1.

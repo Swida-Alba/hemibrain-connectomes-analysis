@@ -1,4 +1,4 @@
-"""Tests for TokenManager: file loading, precedence, env fallback, and
+"""Tests for TokenManager: config.json loading, precedence, env fallback, and
 token type auto-detection."""
 import sys
 from pathlib import Path
@@ -11,12 +11,17 @@ from src.utils.token_manager import TokenManager
 
 
 class TestTokenManager:
-    def test_loads_from_repo_files(self):
+    def test_loads_from_config_json(self, tmp_path, monkeypatch):
+        (tmp_path / "config.json").write_text(
+            '{"tokens": {"neuprint": "cfg-np", "cave": "cfg-cave"}}\n',
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
         manager = TokenManager()
-        assert "NEUPRINT_TOKEN" in manager.tokens
-        assert "CAVE_TOKEN" in manager.tokens
+        assert manager.tokens.get("NEUPRINT_TOKEN") == "cfg-np"
+        assert manager.tokens.get("CAVE_TOKEN") == "cfg-cave"
 
-    def test_direct_input_wins_over_files(self):
+    def test_direct_input_wins_over_config(self):
         manager = TokenManager()
         token = manager.get_token("NEUPRINT_TOKEN", direct_input="direct-tok")
         assert token == "direct-tok"
@@ -34,13 +39,28 @@ class TestTokenManager:
         assert manager.get_token("NEUPRINT_TOKEN") == "env-tok"
         monkeypatch.delenv("NEUPRINT_TOKEN")
 
-    def test_quoted_values_parsed(self, tmp_path, monkeypatch):
+    def test_config_json_empty_values_fall_back_to_env(self, tmp_path, monkeypatch):
+        (tmp_path / "config.json").write_text(
+            '{"tokens": {"neuprint": "", "cave": ""}}\n', encoding="utf-8"
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("CAVE_TOKEN", "env-cave")
+        try:
+            manager = TokenManager()
+            assert manager.tokens.get("NEUPRINT_TOKEN") is None
+            assert manager.get_token("CAVE_TOKEN") == "env-cave"
+        finally:
+            monkeypatch.delenv("CAVE_TOKEN")
+
+    def test_legacy_token_files_are_not_read(self, tmp_path, monkeypatch):
+        """token_info files are deprecated; only config.json is read."""
         (tmp_path / "token_info_local.txt").write_text(
-            "NEUPRINT_TOKEN='quoted-tok'\n", encoding="utf-8"
+            "NEUPRINT_TOKEN='legacy-np'\nCAVE_TOKEN='legacy-cave'\n", encoding="utf-8"
         )
         monkeypatch.chdir(tmp_path)
         manager = TokenManager()
-        assert manager.tokens.get("NEUPRINT_TOKEN") == "quoted-tok"
+        assert manager.tokens.get("NEUPRINT_TOKEN") is None
+        assert manager.tokens.get("CAVE_TOKEN") is None
 
     def test_detect_token_type(self):
         tm = TokenManager()
@@ -58,13 +78,14 @@ class TestTokenManager:
         with pytest.raises(ValueError, match="NEUPRINT_TOKEN"):
             manager.require_both_tokens()
 
-    def test_require_both_tokens_accepts_direct_input(self):
+    def test_direct_input_detects_neuprint(self, monkeypatch):
+        """A long JWT-like direct input detects as neuprint; CAVE may be absent."""
         manager = TokenManager()
-        result = manager.require_both_tokens(
-            direct_input="x" * 150 + ".y" * 10
-        )
-        # a long JWT-like direct input detects as neuprint; CAVE may be absent
+        monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
+        monkeypatch.delenv("CAVE_TOKEN", raising=False)
+        result = manager.get_auto_token(direct_input="x" * 150 + ".y" * 10)
         assert result["neuprint"]
+        assert result["detected_type"] == "neuprint"
 
     def test_get_auto_token_no_direct_input(self, monkeypatch):
         manager = TokenManager()

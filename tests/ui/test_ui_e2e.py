@@ -2248,8 +2248,20 @@ class TestDatasetService:
         token = service.get_token()
         assert token is None or isinstance(token, str)
 
-    def test_settings_token_loader_merges_template_and_local_values(self, tmp_path, monkeypatch):
-        """A local value overrides only its key, without hiding the other token."""
+    def test_settings_token_loader_reads_config_json(self, tmp_path, monkeypatch):
+        """_load_tokens reads the config.json tokens section per key."""
+        from ui.tabs import settings as settings_module
+
+        (tmp_path / "config.json").write_text(
+            '{"tokens": {"neuprint": "cfg-np", "cave": ""}}\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(settings_module, "PROJECT_ROOT", tmp_path)
+
+        assert settings_module._load_tokens() == {"neuprint": "cfg-np"}
+
+    def test_settings_token_loader_ignores_legacy_files(self, tmp_path, monkeypatch):
+        """token_info files are deprecated; only config.json is read."""
         from ui.tabs import settings as settings_module
 
         (tmp_path / "token_info.txt").write_text(
@@ -2257,15 +2269,45 @@ class TestDatasetService:
             encoding="utf-8",
         )
         (tmp_path / "token_info_local.txt").write_text(
-            "CAVE_TOKEN='local-cave'\n",
+            "NEUPRINT_TOKEN='local-np'\nCAVE_TOKEN='local-cave'\n",
             encoding="utf-8",
         )
         monkeypatch.setattr(settings_module, "PROJECT_ROOT", tmp_path)
 
-        assert settings_module._load_tokens() == {
-            "neuprint": "template-neuprint",
-            "cave": "local-cave",
-        }
+        assert settings_module._load_tokens() == {}
+
+    def test_settings_save_tokens_writes_config_json_and_keeps_envs(self, tmp_path, monkeypatch):
+        """Save Tokens writes config.json and preserves the versioned env map."""
+        import json as _json
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs import settings as settings_module
+
+        (tmp_path / "config.json").write_text(
+            _json.dumps({"envs": {"4.5.0": "my-custom-env"}, "tokens": {"neuprint": "", "cave": ""}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(settings_module, "PROJECT_ROOT", tmp_path)
+
+        client = Client(page("/settings-save-tokens-config-json"))
+        with client:
+            settings_module.create_settings_tab()
+
+        neuprint_input = next(
+            el for el in client.elements.values()
+            if (getattr(el, "_props", {}).get("label") == "NeuPrint Token")
+        )
+        neuprint_input.value = "saved-np"
+        save_btn = next(
+            el for el in client.elements.values()
+            if getattr(el, "text", "") == "Save Tokens"
+        )
+        next(iter(save_btn._event_listeners.values())).handler(None)
+
+        saved = _json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+        assert saved["tokens"] == {"neuprint": "saved-np", "cave": ""}
+        # the versioned env map must survive a token save
+        assert saved["envs"] == {"4.5.0": "my-custom-env"}
 
     def test_settings_dataset_cache_card(self):
         """The Settings tab exposes full-dataset and complete-connection pulls:
@@ -2676,8 +2718,8 @@ class TestDatasetService:
         built = []
 
         def build(neuprint: str, cave: str):
-            (tmp_path / "token_info_local.txt").write_text(
-                f"NEUPRINT_TOKEN='{neuprint}'\nCAVE_TOKEN='{cave}'\n",
+            (tmp_path / "config.json").write_text(
+                '{"tokens": {"neuprint": "' + neuprint + '", "cave": "' + cave + '"}}\n',
                 encoding="utf-8",
             )
             monkeypatch.setattr(settings_module, "PROJECT_ROOT", tmp_path)
@@ -5720,8 +5762,12 @@ class TestApp:
 
         secret_neuprint = "neuprint-secret-for-dom-test"
         secret_cave = "cave-secret-for-dom-test"
-        (tmp_path / "token_info_local.txt").write_text(
-            f"NEUPRINT_TOKEN='{secret_neuprint}'\nCAVE_TOKEN='{secret_cave}'\n",
+        (tmp_path / "config.json").write_text(
+            '{"tokens": {"neuprint": "'
+            + secret_neuprint
+            + '", "cave": "'
+            + secret_cave
+            + '"}}\n',
             encoding="utf-8",
         )
         monkeypatch.setattr(settings_module, "PROJECT_ROOT", tmp_path)

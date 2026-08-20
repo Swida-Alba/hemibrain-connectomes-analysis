@@ -41,15 +41,22 @@ After conversion, require both `<dataset>_allneurons_neuron_df.parquet` and
 
 Preferred sources, in order:
 
-1. `token_info_local.txt` at the repository root (gitignored);
+1. `config.json` tokens section at the repository root (gitignored);
 2. environment variables handled by the project's token manager;
 3. an explicit token argument only when the user has supplied it for this run.
 
 Typical file entries are:
 
-```text
-NEUPRINT_TOKEN='...'
-CAVE_TOKEN='...'
+```json
+{
+  "tokens": {
+    "neuprint": "...",
+    "cave": "..."
+  },
+  "envs": {
+    "4.5.0": ""
+  }
+}
 ```
 
 Never include token contents in logs, patches, notebooks, output reports, or

@@ -1,10 +1,38 @@
-# Token Information Template
-# Copy this file to 'token_info_local.txt' and fill in your tokens.
-# 'token_info_local.txt' is gitignored and will take precedence over this file.
+# Token Configuration - DEPRECATED (use config.json)
 
-# NeuPrint Token (https://neuprint.janelia.org/account)
-NEUPRINT_TOKEN='YOUR_NEUPRINT_TOKEN_HERE'
+This file is kept as a reference only. API tokens are now configured in the
+gitignored project config file `config.json` (template: `config.example.json`),
+which also holds the version-specific conda environment override.
 
-# CAVE Token (for FlyWire FAFB)
-# Get your token at: https://codex.flywire.ai/auth_token
-CAVE_TOKEN='YOUR_CAVE_TOKEN_HERE'
+## Migration
+
+1. Copy the template to your local config:
+
+   ```bash
+   cp config.example.json config.json        # gitignored
+   ```
+
+2. Put the two tokens on their own lines in `config.json`:
+
+   ```json
+   {
+     "tokens": {
+       "neuprint": "YOUR_NEUPRINT_TOKEN_HERE",
+       "cave": "YOUR_CAVE_TOKEN_HERE"
+     },
+     "envs": {
+       "4.5.0": ""
+     }
+   }
+   ```
+
+3. Delete this file (`token_info.txt`) and any local copy
+   (`token_info_local.txt`) once the tokens are in `config.json`.
+
+## Token sources
+
+- NeuPrint token (required): https://neuprint.janelia.org/account
+- CAVE token (optional, FlyWire FAFB online): https://codex.flywire.ai/auth_token
+- You can also set them in the UI Settings tab; saving writes `config.json`.
+- Environment variables (`NEUPRINT_TOKEN`, `CAVE_TOKEN`) remain a fallback
+  for script mode.

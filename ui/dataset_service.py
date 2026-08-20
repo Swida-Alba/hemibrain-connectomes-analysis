@@ -270,43 +270,24 @@ class DatasetService:
         return updated_at
 
     def _load_tokens(self):
-        """Load tokens from token_info_local.txt or token_info.txt."""
+        """Load tokens from the project config.json (the only token file)."""
         if self._token is not None and self._cave_token is not None:
             return
 
-        # Parse the template first and the local file second so local values
-        # override only their own key.  Stopping after the first token caused
-        # a local NeuPrint-only file to hide a valid CAVE token (and vice
-        # versa) from the other file.
         loaded = {}
-        for filename in ["token_info.txt", "token_info_local.txt"]:
-            is_local = filename == "token_info_local.txt"
-            token_path = PROJECT_ROOT / filename
-            if token_path.exists():
-                try:
-                    with open(token_path, "r") as f:
-                        for line in f:
-                            line = line.strip()
-                            if line.startswith("NEUPRINT_TOKEN="):
-                                token = line.split("=", 1)[1].strip().strip("'\"")
-                                if is_local:
-                                    # A blank local value explicitly clears
-                                    # the template value for this key.
-                                    loaded["neuprint"] = (
-                                        token if token and not token.startswith("YOUR_") else None
-                                    )
-                                elif "neuprint" not in loaded and token and not token.startswith("YOUR_"):
-                                    loaded["neuprint"] = token
-                            elif line.startswith("CAVE_TOKEN="):
-                                token = line.split("=", 1)[1].strip().strip("'\"")
-                                if is_local:
-                                    loaded["cave"] = (
-                                        token if token and not token.startswith("YOUR_") else None
-                                    )
-                                elif "cave" not in loaded and token and not token.startswith("YOUR_"):
-                                    loaded["cave"] = token
-                except OSError:
-                    continue
+        config_path = PROJECT_ROOT / "config.json"
+        if config_path.exists():
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                cfg_tokens = cfg.get("tokens") or {}
+                if isinstance(cfg_tokens, dict):
+                    for key in ("neuprint", "cave"):
+                        value = cfg_tokens.get(key)
+                        if isinstance(value, str) and value.strip() and not value.startswith("YOUR_"):
+                            loaded[key] = value.strip()
+            except (OSError, ValueError):
+                pass
 
         if self._token is None:
             self._token = loaded.get("neuprint")

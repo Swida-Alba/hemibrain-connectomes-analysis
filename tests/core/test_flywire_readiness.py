@@ -71,6 +71,27 @@ def test_fafb_local_source_is_ready_without_cave_token(tmp_path, monkeypatch):
     assert "CAVE fallback is disabled" in "\n".join(log)
 
 
+def test_fafb_cave_token_from_config_json_enables_fallback(tmp_path, monkeypatch):
+    """A CAVE token in the project config.json counts as configured."""
+    monkeypatch.delenv("CAVE_TOKEN", raising=False)
+    (tmp_path / "config.json").write_text(
+        '{"tokens": {"cave": "cfg-cave-token"}}\n', encoding="utf-8"
+    )
+
+    status = flywire_skeleton_readiness(
+        "flywire_FAFB_v783", project_root=tmp_path
+    )
+    assert status["cave_token"] is True
+    assert status["ready"] is True
+
+    log = []
+    require_flywire_skeleton_access(
+        "flywire_FAFB_v783", project_root=tmp_path, log=log.append
+    )
+    assert "CAVE_TOKEN is configured" in "\n".join(log)
+    assert "cfg-cave-token" not in "\n".join(log)
+
+
 def test_fafb_local_source_keeps_cave_fallback_enabled_with_token(tmp_path, monkeypatch):
     monkeypatch.setenv("CAVE_TOKEN", "configured-token")
     skeleton_zip = (

@@ -25,6 +25,72 @@ main() {
     fi
     DROCAT_VERSION="${DROCAT_VERSION:-4.5.0}"
     ENV_BASE="drocat-${DROCAT_VERSION}"
+    CONFIG_FILE="$SCRIPT_DIR/config.json"
+
+    # Minimal JSON reader for config.json (string values only, one level of
+    # section objects; see config.example.json for the exact format). Commas
+    # are normalized to newlines first so pretty-printed and single-line
+    # JSON both work.
+    json_value() {
+        # $1 = section ("envs"|"tokens"), $2 = key, $3 = file
+        tr ',' '\n' < "$3" | awk -v section="$1" -v key="$2" '
+            {
+                line = $0
+                sub(/^[[:space:]]*/, "", line)
+                sub(/[[:space:]]*$/, "", line)
+                if (!in_section) {
+                    if (line ~ "\"" section "\"") {
+                        in_section = 1
+                        sub(/^.*\"" section "\"/, "", line)
+                    } else {
+                        next
+                    }
+                }
+                if (line ~ "\"" key "\":") {
+                    rest = substr(line, index(line, "\"" key "\":") + length("\"" key "\":"))
+                    sub(/^[[:space:]]*/, "", rest)
+                    gsub(/[{}]/, "", rest)
+                    gsub(/^"|"$/, "", rest)
+                    print rest
+                    exit
+                }
+                if (line ~ /^[[:space:]]*}/) { in_section = 0 }
+            }
+        '
+    }
+
+    # Update envs.<version> in config.json with the environment actually
+    # used, so an auto-created env is pinned for later runs.
+    update_config_env() {
+        # $1 = version, $2 = env name, $3 = file
+        [[ -f "$3" ]] || return 0
+        local tmp
+        tmp="$(mktemp "${TMPDIR:-/tmp}/drocat-config.XXXXXX")"
+        awk -v version="$1" -v envname="$2" '
+            BEGIN { in_envs = 0; done = 0 }
+            {
+                line = $0
+                if (!done && line ~ /"envs"/) { in_envs = 1 }
+                pattern = "\"" version "\"[[:space:]]*:[[:space:]]*\"[^\"]*\""
+                if (in_envs && !done && line ~ pattern) {
+                    sub(pattern, "\"" version "\": \"" envname "\"", line)
+                    done = 1
+                    in_envs = 0
+                }
+                print line
+            }
+        ' "$3" > "$tmp" && mv "$tmp" "$3"
+        chmod 600 "$3"
+    }
+
+    # Version-specific custom env override: envs.<version> is only consulted
+    # for the CURRENT release, so upgrading DROCAT never reuses an older
+    # release's custom environment. An empty value means default auto-find.
+    ENV_OVERRIDE=""
+    if [[ -f "$CONFIG_FILE" ]]; then
+        ENV_OVERRIDE="$(json_value envs "$DROCAT_VERSION" "$CONFIG_FILE" || true)"
+        ENV_OVERRIDE="$(printf '%s' "$ENV_OVERRIDE" | tr -d '[:space:]')"
+    fi
 
     find_conda() {
         if command -v conda >/dev/null 2>&1; then
@@ -47,6 +113,12 @@ main() {
     resolve_env() {
         local index candidate
         ENV_NAME=""
+        if [[ -n "$ENV_OVERRIDE" ]] && "$CONDA_BIN" run -n "$ENV_OVERRIDE" python -c \
+            'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' \
+            >/dev/null 2>&1; then
+            ENV_NAME="$ENV_OVERRIDE"
+            return
+        fi
         for index in $(seq 0 20); do
             if [[ "$index" -eq 0 ]]; then
                 candidate="$ENV_BASE"
@@ -78,6 +150,12 @@ main() {
     fi
     [[ -n "$ENV_NAME" ]] || { printf '%s\n' "ERROR: no usable $ENV_BASE environment was found." >&2; return 1; }
 
+    # Persist the resolved environment into config.json when no custom name
+    # was configured, so the auto-found env is pinned for later runs.
+    if [[ -z "$ENV_OVERRIDE" && -f "$CONFIG_FILE" ]]; then
+        update_config_env "$DROCAT_VERSION" "$ENV_NAME" "$CONFIG_FILE"
+    fi
+
     # An older environment can have importable packages while still containing
     # incompatible distributions. Repair it through the same pinned installer.
     if ! "$CONDA_BIN" run -n "$ENV_NAME" python -c \
@@ -90,12 +168,14 @@ main() {
 
     # --- Token hint -----------------------------------------------------
     # Remind users who skipped the installer prompt that tokens can be set
-    # later in the UI Settings tab or in token_info_local.txt.
+    # later in the UI Settings tab or in config.json.
     local neuprint_token=""
-    [[ -f "$SCRIPT_DIR/token_info_local.txt" ]] && \
-        neuprint_token="$(sed -n "s/^NEUPRINT_TOKEN='\([^']*\)'/\1/p" "$SCRIPT_DIR/token_info_local.txt" | head -1)"
+    if [[ -f "$CONFIG_FILE" ]]; then
+        neuprint_token="$(json_value tokens neuprint "$CONFIG_FILE" || true)"
+        neuprint_token="$(printf '%s' "$neuprint_token" | tr -d '[:space:]')"
+    fi
     if [[ -z "$neuprint_token" || "$neuprint_token" == "YOUR_NEUPRINT_TOKEN_HERE" ]]; then
-        printf '%s\n' "Tip: the NeuPrint token is not configured yet - set it in the UI Settings tab or in token_info_local.txt (the CAVE token is optional; only needed for FlyWire FAFB online fetching)."
+        printf '%s\n' "Tip: the NeuPrint token is not configured yet - set it in the UI Settings tab or in config.json (the CAVE token is optional; only needed for FlyWire FAFB online fetching)."
     fi
 
     # --- Port-conflict guard ---------------------------------------------

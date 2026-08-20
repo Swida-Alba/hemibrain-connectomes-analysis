@@ -39,6 +39,7 @@ Jinja2==3.1.6              # HTML templating (>=3.1.6 required by nicegui)
 pillow==11.0.0             # Image processing
 polars==1.34.0             # Memory-efficient DataFrames for large cache operations
 pydantic==2.13.4           # Exact pair with pydantic-core 2.46.4; compatible with NiceGUI 3.15
+xarray<2024.4              # Transitive (navis/caveclient); newer releases require NumPy 2.x and backtrack against numpy==1.26.4
 
 # GUI Backends (for file picker and sheet selection dialogs)
 # -----------------------------------------------------------------------------

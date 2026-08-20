@@ -25,7 +25,7 @@
 
 - **Pinned dependency conflicts**: use the exact pins in `requirements.txt`, `requirements-windows.txt`, and `ui/requirements.txt`; do not upgrade individual packages. A successful install must pass `python -m pip check`.
 - **Requests warning about chardet**: repair the environment by rerunning the installer. DROCAT pins `chardet==5.2.0`; user-site packages are disabled with `PYTHONNOUSERSITE=1`.
-- **Token placeholders**: `token_info.txt` contains `YOUR_...` placeholders; the real tokens must live in the gitignored `token_info_local.txt`.
+- **Token placeholders**: `config.example.json` ships empty token values; the real tokens must live in the gitignored `config.json`. The legacy `token_info*.txt` files are deprecated and no longer read (token_info.txt documents the migration).
 - **Missing datasets**: `datasets/` and `cache/` are created automatically; the first query downloads the full neuron table for the selected dataset (needs token + network, can take minutes). FlyWire FAFB/BANC require manual downloads (see the Settings tab guide in the UI).
 - **UI port 8080 busy**: set `DROCAT_UI_PORT` to a free port (for example,
   `DROCAT_UI_PORT=8081 ./run_DROCAT.command`) or stop the other process.

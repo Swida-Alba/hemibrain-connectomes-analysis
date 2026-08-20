@@ -51,7 +51,7 @@ git checkout v4.5.0
   `~/.local/lib/python3.11/site-packages` as already installed and never
   installs them into the env.
 - Running `scripts/*.py` directly works from any working directory; the
-  toolkit resolves its own project root, so tokens in `token_info_local.txt`
+  toolkit resolves its own project root, so tokens in `config.json`
   are always loaded.
 - Dependency download and token checks need network access. In a sandboxed environment, request escalation for network commands.
 
@@ -62,23 +62,39 @@ git checkout v4.5.0
 - **macOS alternative:** `run_DROCAT.command` (double-click) creates/activates the env and launches the UI.
 - The launchers are self-healing: `run_DROCAT.command` / `run_DROCAT.bat` invoke the one-click installer when the environment is missing or inconsistent.
 - **Environment naming:** DROCAT uses a versioned env name read from `ui/config.py` (`drocat-4.5.0`). If that name already exists with Python 3.11, the installers reuse it and update dependencies in place (this is the env the launchers prefer, so re-runs actually update the env in use). If it exists with a different Python, never modify or delete it - warn the user and create the next free name instead (`drocat-4.5.0-2`, `drocat-4.5.0-3`, ...). The launchers resolve the same way (first usable env wins). Legacy unversioned `drocat` envs are left untouched.
+- **Custom env name (config.json):** a custom conda env name can be pinned per release in the project config `config.json` (created automatically from `config.example.json` by the installers when missing):
+
+  ```json
+  { "tokens": { "neuprint": "", "cave": "" }, "envs": { "4.5.0": "my-custom-env" } }
+  ```
+
+  The `envs` entry is version-specific: it is only consulted for the CURRENT `APP_VERSION`, so upgrading DROCAT never reuses an older release's custom environment. If the custom env exists with Python 3.11 it is reused; if missing it is created; if it exists with a different Python it is left untouched and the default `drocat-<version>` auto-find (with `-2`, `-3`, ... suffixes) is used instead. The launchers (`run_DROCAT.command` / `run_DROCAT.bat`) resolve the same override first.
+- **Auto-fill:** an empty `envs."4.5.0"` entry means "create/use the default versioned env automatically". After the environment is selected (auto-created or found), the installers AND the launchers write the actual env name back into `config.json`, so the entry is filled after the first run and every subsequent script resolves it directly. A custom name is always created by that name and written back unchanged.
 - DROCAT v4.5.0 bundles a lightweight NeuronBridge API client. Do **not** install `neuronbridge-python`: its Pydantic 2.9 constraint conflicts with the current NiceGUI stack. The installer removes that legacy distribution when repairing an older versioned environment.
 - Treat a failed dependency installation or `pip check` as an installation failure. Do not continue with a partially inconsistent environment.
 
 ### 4. Configure tokens
 
-- Copy `token_info.txt` to `token_info_local.txt` (the local file is gitignored and takes precedence).
+- Tokens live in the gitignored project config `config.json` - the ONLY token file. The legacy `token_info.txt` / `token_info_local.txt` files are deprecated and no longer read (token_info.txt now only documents the migration). The installers create `config.json` from `config.example.json` when it is missing.
+- Copy `config.example.json` to `config.json` if it does not exist (the local file is gitignored).
 - Ask the user for their tokens; never invent or reuse tokens without permission:
   - `NEUPRINT_TOKEN` from <https://neuprint.janelia.org/account>
   - `CAVE_TOKEN` (FlyWire only) from <https://codex.flywire.ai/auth_token>
 - File format:
 
-  ```
-  NEUPRINT_TOKEN='...'
-  CAVE_TOKEN='...'
+  ```json
+  {
+    "tokens": {
+      "neuprint": "...",
+      "cave": "..."
+    },
+    "envs": {
+      "4.5.0": ""
+    }
+  }
   ```
 
-- If `token_info_local.txt` already exists with non-placeholder tokens, keep them.
+- If `config.json` already exists with non-placeholder tokens, keep them. The UI Settings tab reads and writes the same `config.json` (preserving the `envs` section).
 
 ### 5. Verify
 
@@ -99,10 +115,10 @@ Required checks: Python 3.10-3.11, project layout, every installed version again
 
 ## Key facts
 
-- Conda env name: `drocat-4.5.0` (Python 3.11), with `-2`, `-3`, ... used only when an existing candidate has the wrong Python version.
+- Conda env name: `drocat-4.5.0` (Python 3.11), with `-2`, `-3`, ... used only when an existing candidate has the wrong Python version. A version-specific custom name can be set in `config.json` under `envs."4.5.0"`; an empty entry is auto-filled with the env actually used after the first install/launch.
 - UI: `python ui/app.py` → <http://127.0.0.1:8080>. Override with
   `DROCAT_UI_HOST`, `DROCAT_UI_PORT`, or `DROCAT_UI_SHOW=0` for headless use.
-- Token file: `token_info_local.txt` at the repo root.
+- Token file: `config.json` (gitignored) at the repo root; legacy `token_info*.txt` files are no longer read.
 - The UI runner adds `vispath-subproject/src` to `sys.path`; no separate pip install is needed for PlotPath.
 - Chrome + WebDriver are only needed for PNG/video exports in the 3D skeleton tool.
 - Neuron indexes are persistent "system files" in `neuron_indexes/` (not in

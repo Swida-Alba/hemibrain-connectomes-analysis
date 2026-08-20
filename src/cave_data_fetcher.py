@@ -77,7 +77,7 @@ class CAVEDataFetcher:
     """Dataset name (flywire_FAFB_v783 or flywire_BANC_v626)"""
     
     cave_token: str = None
-    """CAVE authentication token. If None, reads from token_info_local.txt"""
+    """CAVE authentication token. If None, reads from config.json"""
     
     materialization_version: int = None
     """Materialization version for CAVE queries. None = latest"""
@@ -123,26 +123,35 @@ class CAVEDataFetcher:
         # an API-cache tree just by constructing the fetcher.
     
     def _load_token(self, token_name: str) -> Optional[str]:
-        """Load token from token_info_local.txt or token_info.txt"""
-        for filename in ['token_info_local.txt', 'token_info.txt']:
-            token_path = os.path.join(self.project_root, filename)
-            if os.path.exists(token_path):
-                with open(token_path, 'r') as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line or line.startswith('#') or '=' not in line:
-                            continue
-                        key, value = line.split('=', 1)
-                        if key.strip() != token_name:
-                            continue
-                        token = value.strip().strip("'\"")
-                        if token and not token.startswith('YOUR_'):
-                            return token
+        """Load token from config.json, then the environment."""
+        token = self._load_token_from_config(token_name)
+        if token:
+            return token
         # Direct environment configuration is supported by the shared token
         # manager as well; keep CAVE fetches consistent with that behavior.
         token = os.environ.get(token_name, '').strip()
         if token and not token.startswith('YOUR_'):
             return token
+        return None
+
+    def _load_token_from_config(self, token_name: str) -> Optional[str]:
+        """Read a token from the project config.json tokens section."""
+        import json
+        config_path = os.path.join(self.project_root, 'config.json')
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return None
+        section = data.get('tokens') if isinstance(data, dict) else None
+        if not isinstance(section, dict):
+            return None
+        config_key = token_name.lower().replace('_token', '')
+        value = section.get(config_key)
+        if isinstance(value, str):
+            value = value.strip()
+            if value and not value.startswith('YOUR_'):
+                return value
         return None
     
     def _get_config(self) -> dict:

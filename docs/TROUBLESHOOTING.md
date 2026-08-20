@@ -230,10 +230,19 @@ AuthError: Invalid token
 
 **Solutions:**
 
-1. **Create token_info_local.txt** in project root (recommended):
+1. **Put the token in config.json** in project root (recommended):
+   ```json
+   {
+     "tokens": {
+       "neuprint": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+       "cave": ""
+     },
+     "envs": {
+       "4.5.0": ""
+     }
+   }
    ```
-   NEUPRINT_TOKEN='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
-   ```
+   (or set it in the UI Settings tab, which writes the same file)
 
 2. **Or set environment variable:**
    ```bash

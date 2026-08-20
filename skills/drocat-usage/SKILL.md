@@ -64,7 +64,7 @@ If a real blocker remains, state the exact blocker and the last completed step.
    user's request. Copy a template into `archive/scripts_local/` (or patch an
    explicitly requested source file) before a real scientific run.
 
-4. Never print, commit, or paste `token_info_local.txt`, API keys, cookies, or
+4. Never print, commit, or paste `config.json`, API keys, cookies, or
    full authentication environment variables. Read credentials through the
    repository token manager or the environment. Ask before changing tokens,
    downloading large datasets, or deleting/replacing result folders.
