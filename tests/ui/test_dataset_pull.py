@@ -618,3 +618,101 @@ class TestRepeatPullCacheStatus:
             assert s2["newly_cached"] == 0
         finally:
             coana._FNC_CACHE.pop("fake_v5", None)
+
+
+# ---------------------------------------------------------------------------
+# Neuron-index state writes: throttled sidecar + incremental dict updates
+# (a pull used to rewrite the full index parquet and rebuild the full lookup
+# dict on EVERY batch - O(N^2) across the pull, dominating the batch time).
+# ---------------------------------------------------------------------------
+
+class TestNeuronIndexStateThrottling:
+    def _make_fc(self, tmp_path, monkeypatch):
+        import coana
+        import neuprint
+        import pandas as pd
+
+        class FakeClient:
+            def __init__(self, *a, **k):
+                pass
+
+        monkeypatch.setattr(neuprint, "Client", FakeClient)
+        # Pre-create the dataset tables so __post_init__ skips the full
+        # neuron-table download (which would retry against the fake client).
+        dataset_dir = tmp_path / "datasets" / "fake_v7"
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+        (dataset_dir / "fake_v7_allneurons_neuron_df.csv").write_text(
+            "bodyId,type\n1,T1\n", encoding="utf-8"
+        )
+        pd.DataFrame({"bodyId": ["1"], "roi": ["EB"]}).to_parquet(
+            dataset_dir / "fake_v7_allneurons_roi_count_df.parquet"
+        )
+        return coana.FindNeuronConnection(
+            dataset="fake:v7",
+            use_cache=True,
+            cache_only=False,
+            verbose=False,
+            script_path=str(tmp_path),
+            cache_folder=str(tmp_path / "cache" / "fake_v7"),
+        )
+
+    def _seed_index(self, fc):
+        """Seed a small index with one row and load it into memory."""
+        import pandas as pd
+
+        index = pd.DataFrame([{
+            "bodyId": "1", "type": "T1", "instance": "", "post": 2,
+            "downstream_complete": False, "last_fetched": "",
+            "connection_count": 0,
+        }])
+        fc._save_neuron_index_state(index, force=True)
+        fc._load_neuron_index()
+
+    def test_batch_updates_skip_sidecar_write_but_keep_dict_in_sync(self, tmp_path, monkeypatch):
+        """Within the throttle window a batch must not rewrite the sidecar
+        parquet, yet the in-memory frame and lookup dict stay current."""
+        import time
+        from pathlib import Path
+
+        fc = self._make_fc(tmp_path, monkeypatch)
+        self._seed_index(fc)
+        state_path = Path(fc._get_neuron_index_state_path())
+        mtime_before = state_path.stat().st_mtime_ns
+
+        # Second batch arrives inside the 15 s throttle window.
+        fc._neuron_index_state_last_saved = time.time()
+        fc._update_neuron_index_batch(
+            ["1", "2", "3"], connection_counts={"1": 5, "2": 0, "3": 1}
+        )
+
+        # No disk write for this batch...
+        assert state_path.stat().st_mtime_ns == mtime_before
+        # ...but the dict already reflects the batch (incremental update).
+        # (Values come from numpy arrays, so compare with ==, not ``is``.)
+        assert fc._neuron_index_dict["1"]["downstream_complete"] == True
+        assert fc._neuron_index_dict["1"]["connection_count"] == 5
+        assert fc._neuron_index_dict["2"]["downstream_complete"] == True
+        assert fc._neuron_index_dict["3"]["connection_count"] == 1
+        assert fc._neuron_index_dict["3"]["row_idx"] == 2  # current frame row
+
+        # A forced write (completion/cancel) flushes the checkpoint.
+        fc._save_neuron_index_state(fc._neuron_index_cache, force=True)
+        assert state_path.stat().st_mtime_ns > mtime_before
+
+    def test_materialize_preserves_throttled_window_flags(self, tmp_path, monkeypatch):
+        """The final materialization must not lose flags that only live in
+        memory because the sidecar write was throttled."""
+        fc = self._make_fc(tmp_path, monkeypatch)
+        self._seed_index(fc)
+        import time
+
+        fc._neuron_index_state_last_saved = time.time()
+        fc._update_neuron_index_batch(["1", "2"], connection_counts={"1": 5, "2": 0})
+
+        # build_connection_cache folds the in-memory frame into the checkpoint
+        # before materializing.
+        fc._save_neuron_index_state(fc._neuron_index_cache, force=True)
+        assert fc._materialize_neuron_index(remove_state=True) is True
+        reloaded = fc._load_neuron_index(force_reload=True)
+        assert reloaded.loc[reloaded["bodyId"] == "1", "downstream_complete"].iloc[0] == True
+        assert reloaded.loc[reloaded["bodyId"] == "2", "connection_count"].iloc[0] == 0

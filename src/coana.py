@@ -2703,6 +2703,13 @@ class FindNeuronConnection:
                     mask = values.notna()
                     index_df.loc[mask, column] = values[mask]
             index_df = index_df.reset_index()
+            # State rows for neurons missing from the metadata index (new IDs
+            # appended during a pull) must survive the overlay, or the final
+            # materialization silently drops them.
+            missing_ids = state_by_id.index.difference(index_df['bodyId'].astype(str))
+            if len(missing_ids):
+                extra = state_by_id.loc[missing_ids].reset_index()
+                index_df = pd.concat([index_df, extra], ignore_index=True)
 
         if 'bodyId' not in index_df.columns:
             index_df = pd.DataFrame(columns=index_columns)
@@ -2736,13 +2743,36 @@ class FindNeuronConnection:
                 except OSError:
                     pass
 
-    def _save_neuron_index_state(self, index_df):
-        """Persist only cache-progress fields and refresh in-memory indexes."""
-        # ``use_cache=False`` must keep the complete fetch pipeline in memory.
-        # Guard the low-level writer as well as its callers because enrichment
-        # and legacy code paths can reach the state update helper directly.
+    def _save_neuron_index_state(self, index_df, touched_bodyids=None, force=False):
+        """Persist only cache-progress fields and refresh in-memory indexes.
+
+        The in-memory frame and the O(1) lookup dict are refreshed on every
+        call, but the sidecar parquet write is throttled (at most once per
+        15 s) and the dict is only rebuilt incrementally for the touched
+        rows: a pull used to rewrite the whole index parquet and rebuild the
+        full lookup dict on EVERY batch, i.e. O(N) per batch (O(N^2) across
+        the pull) of pure CPU work on top of the network fetches.  Between
+        checkpoints the frame is replayed from memory; a crash loses at
+        most the last 15 s window, which the connection batch files make
+        resumable anyway.
+
+        ``use_cache=False`` must keep the complete fetch pipeline in memory.
+        Guard the low-level writer as well as its callers because enrichment
+        and legacy code paths can reach the state update helper directly.
+        """
         if not self.use_cache:
             return
+
+        # In-memory truth is always current; only the disk checkpoint lags.
+        self._neuron_index_cache = index_df
+        self._refresh_neuron_index_dict(touched_bodyids)
+
+        import time
+        now = time.time()
+        last_saved = getattr(self, '_neuron_index_state_last_saved', 0.0)
+        if not force and (now - last_saved) < 15.0:
+            return
+        self._neuron_index_state_last_saved = now
 
         state_columns = [
             column for column in self._neuron_index_state_columns()
@@ -2754,9 +2784,56 @@ class FindNeuronConnection:
         state_path = self._get_neuron_index_state_path()
         os.makedirs(os.path.dirname(state_path), exist_ok=True)
         self._atomic_pandas_parquet(state, state_path, compression='gzip')
+        # The disk checkpoint changed: keep the signature in sync so the
+        # cached in-memory frame stays valid for ``_load_neuron_index``.
+        self._record_neuron_index_signature()
 
-        self._neuron_index_cache = index_df
-        self._build_neuron_index_dict()
+    def _refresh_neuron_index_dict(self, touched_bodyids=None):
+        """Keep the O(1) lookup dict in sync with the current frame.
+
+        A full rebuild is O(N); a pull touches only one batch per call, so
+        updating just those entries keeps the per-batch cost O(batch).  A
+        full rebuild is used when the touched set is unknown (None) or when
+        the dict is not built yet.
+        """
+        df = self._neuron_index_cache
+        if df is None or df.empty:
+            self._neuron_index_dict = {}
+            return
+        if not touched_bodyids:
+            self._build_neuron_index_dict()
+            return
+        ids = set(str(b) for b in touched_bodyids)
+        if not ids:
+            return
+        if self._neuron_index_dict is None:
+            self._neuron_index_dict = {}
+        # row_idx must point at the CURRENT frame rows (concat shifts them).
+        bodyids = df['bodyId'].astype(str)
+        positions = {
+            bid: idx for idx, bid in enumerate(bodyids)
+            if bid in ids
+        }
+        if not positions:
+            return
+        hit = bodyids.isin(set(positions))
+        rows = df.loc[hit]
+        downstream_complete = rows['downstream_complete'].values if 'downstream_complete' in rows.columns else [False] * len(rows)
+        types = rows['type'].values if 'type' in rows.columns else [''] * len(rows)
+        instances = rows['instance'].values if 'instance' in rows.columns else [''] * len(rows)
+        posts = rows['post'].values if 'post' in rows.columns else [0] * len(rows)
+        last_fetched = rows['last_fetched'].values if 'last_fetched' in rows.columns else [''] * len(rows)
+        connection_counts = rows['connection_count'].values if 'connection_count' in rows.columns else [0] * len(rows)
+        for idx, bid in enumerate(rows['bodyId'].astype(str).values):
+            self._neuron_index_dict[bid] = {
+                'downstream_complete': downstream_complete[idx] if downstream_complete[idx] is not None else False,
+                'type': types[idx] if types[idx] is not None else '',
+                'instance': instances[idx] if instances[idx] is not None else '',
+                'post': posts[idx] if posts[idx] is not None else 0,
+                'last_fetched': last_fetched[idx] if last_fetched[idx] is not None else '',
+                'connection_count': connection_counts[idx] if connection_counts[idx] is not None else 0,
+                'row_idx': positions[bid],
+            }
 
     def _ensure_neuron_index_from_metadata(self):
         """Create/update the local searchable index after metadata pull.
@@ -3843,11 +3920,17 @@ class FindNeuronConnection:
             self._record_neuron_index_signature()
             return
         
-        self._vprint(f'  ⏳ Building neuron index dict for fast lookups...', level='full')
+        # Keep the status lines out of an active progress bar: during a pull
+        # the bar's postfix already reports the index state, and separate
+        # lines would interleave with the bar updates.
+        inside_bar = bool(getattr(self, '_in_progress_bar', False))
+        if not inside_bar:
+            self._vprint(f'  ⏳ Building neuron index dict for fast lookups...', level='full')
         self._neuron_index_dict = {}
         
         # Build dict: bodyId → {downstream_complete: bool, ...}
-        # Use vectorized access for better performance
+        # Vectorized access + a single comprehension (C-level iteration)
+        # instead of a per-row Python loop.
         df = self._neuron_index_cache
         bodyids = df['bodyId'].astype(str).values
         downstream_complete = df['downstream_complete'].values if 'downstream_complete' in df.columns else [False] * len(df)
@@ -3857,18 +3940,24 @@ class FindNeuronConnection:
         last_fetched = df['last_fetched'].values if 'last_fetched' in df.columns else [''] * len(df)
         connection_counts = df['connection_count'].values if 'connection_count' in df.columns else [0] * len(df)
         
-        for idx in range(len(bodyids)):
-            self._neuron_index_dict[bodyids[idx]] = {
-                'downstream_complete': downstream_complete[idx] if downstream_complete[idx] is not None else False,
-                'type': types[idx] if types[idx] is not None else '',
-                'instance': instances[idx] if instances[idx] is not None else '',
-                'post': posts[idx] if posts[idx] is not None else 0,
-                'last_fetched': last_fetched[idx] if last_fetched[idx] is not None else '',
-                'connection_count': connection_counts[idx] if connection_counts[idx] is not None else 0,
-                'row_idx': idx  # Store row index for DataFrame updates
+        self._neuron_index_dict = {
+            bid: {
+                'downstream_complete': dc if dc is not None else False,
+                'type': ty if ty is not None else '',
+                'instance': inst if inst is not None else '',
+                'post': post if post is not None else 0,
+                'last_fetched': lf if lf is not None else '',
+                'connection_count': cc if cc is not None else 0,
+                'row_idx': idx,  # Store row index for DataFrame updates
             }
+            for idx, (bid, dc, ty, inst, post, lf, cc) in enumerate(zip(
+                bodyids, downstream_complete, types, instances,
+                posts, last_fetched, connection_counts,
+            ))
+        }
         
-        self._vprint(f'  ✓ Neuron index dict built: {len(self._neuron_index_dict):,} neurons', level='full')
+        if not inside_bar:
+            self._vprint(f'  ✓ Neuron index dict built: {len(self._neuron_index_dict):,} neurons', level='full')
         
         # Update module-level shared cache for other instances
         if hasattr(self, '_dataset_safe'):
@@ -4301,6 +4390,13 @@ class FindNeuronConnection:
             connection_count for each neuron. If None, sets connection_count=0.
         '''
         neuron_index = self._load_neuron_index()
+        # The string bodyId column is reused several times below; casting it
+        # once instead of per use avoids 4 full-index astype(str) passes per
+        # batch (176k rows each on the current datasets).
+        index_str = (
+            neuron_index['bodyId'].astype(str)
+            if not neuron_index.empty else None
+        )
         
         bodyids_str = (
             normalize_flywire_body_ids(bodyids)
@@ -4313,10 +4409,11 @@ class FindNeuronConnection:
         # it for every batch instead of reparsing the pulled neuron CSV.
         if (
             not neuron_index.empty
+            and index_str is not None
             and {'bodyId', 'type', 'instance', 'post'}.issubset(neuron_index.columns)
         ):
             neuron_info = neuron_index[
-                neuron_index['bodyId'].astype(str).isin(bodyids_set)
+                index_str.isin(bodyids_set)
             ][['bodyId', 'type', 'instance', 'post']].copy()
             missing_ids = bodyids_set - set(neuron_info['bodyId'].astype(str))
         else:
@@ -4366,15 +4463,19 @@ class FindNeuronConnection:
             instance_col = neuron_info['instance'].values if 'instance' in neuron_info.columns else [''] * len(neuron_info)
             post_col = neuron_info['post'].values if 'post' in neuron_info.columns else [0] * len(neuron_info)
             
-            for i in range(len(bodyid_col)):
-                neuron_info_dict[bodyid_col[i]] = {
-                    'type': type_col[i] if type_col[i] is not None else '',
-                    'instance': instance_col[i] if instance_col[i] is not None else '',
-                    'post': post_col[i] if post_col[i] is not None else 0
+            neuron_info_dict = {
+                bid: {
+                    'type': ty if ty is not None else '',
+                    'instance': inst if inst is not None else '',
+                    'post': post if post is not None else 0,
                 }
+                for bid, ty, inst, post in zip(
+                    bodyid_col, type_col, instance_col, post_col,
+                )
+            }
         
         # Check existing in index
-        existing_set = set(neuron_index['bodyId'].astype(str).values) if not neuron_index.empty else set()
+        existing_set = set(index_str.values) if index_str is not None else set()
         
         # Update existing entries.
         # Vectorized single-pass update: the previous per-bodyId loop ran
@@ -4383,8 +4484,7 @@ class FindNeuronConnection:
         # which dominated bulk cache building.
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         existing_bids = [bid for bid in bodyids_str if bid in existing_set]
-        if existing_bids and not neuron_index.empty:
-            index_str = neuron_index['bodyId'].astype(str)
+        if existing_bids and not neuron_index.empty and index_str is not None:
             hit_mask = index_str.isin(set(existing_bids))
             neuron_index.loc[hit_mask, 'downstream_complete'] = True
             neuron_index.loc[hit_mask, 'last_fetched'] = now
@@ -4415,7 +4515,7 @@ class FindNeuronConnection:
             neuron_index = pd.concat([neuron_index, new_df], ignore_index=True)
             neuron_index['downstream_complete'] = neuron_index['downstream_complete'].astype(bool)
         
-        self._save_neuron_index_state(neuron_index)
+        self._save_neuron_index_state(neuron_index, touched_bodyids=bodyids_str)
     
     # ============================================================================
     # Enrichment with Type/Instance
@@ -6287,11 +6387,15 @@ class FindNeuronConnection:
             self._vprint(f'     💡 This is a one-time operation. The cache will be reused for future analyses.', level='simple')
             
             try:
-                # Build the cache with progress feedback
+                # Build the cache with progress feedback.  Parallel workers
+                # cut the wall time ~4x on network-bound fetches (the default
+                # sequential run took ~10 s per 100-neuron batch); the shared
+                # builder serializes appends, so results are identical.
                 cache_result = self.build_connection_cache(
                     batch_size=100,
                     force_rebuild=False,
-                    quiet=False
+                    quiet=False,
+                    max_workers=4,
                 )
                 self._vprint(f'     ✓ Cache built: {cache_result.get("total_connections", 0):,} connections', level='simple')
             except Exception as e:
@@ -6510,11 +6614,14 @@ class FindNeuronConnection:
             self._vprint(f'     💡 This is a one-time operation. The cache will be reused for future analyses.', level='simple')
             
             try:
-                # Build the cache with progress feedback
+                # Build the cache with progress feedback.  Parallel workers
+                # cut the wall time ~4x on network-bound fetches; the shared
+                # builder serializes appends, so results are identical.
                 cache_result = self.build_connection_cache(
                     batch_size=100,
                     force_rebuild=False,
-                    quiet=False
+                    quiet=False,
+                    max_workers=4,
                 )
                 self._vprint(f'     ✓ Cache built: {cache_result.get("total_connections", 0):,} connections', level='simple')
             except Exception as e:
@@ -7222,11 +7329,18 @@ class FindNeuronConnection:
         
         batch_iter = range(0, total, batch_size)
         if not quiet:
+            # Nested builds (e.g. pathfinding auto-building the cache on its
+            # first run) must not clobber the outer bar's row: place the
+            # cache bar on its own row and clear it when done so the log/
+            # terminal keeps ONE persistent progress row per operation.
+            nested_bar = bool(getattr(tqdm, '_instances', None))
             batch_iter = tqdm(
                 batch_iter,
                 total=total_batches,
                 desc="Building cache",
-                unit="batch"
+                unit="batch",
+                position=1 if nested_bar else 0,
+                leave=not nested_bar,
             )
         
         try:
@@ -7268,7 +7382,11 @@ class FindNeuronConnection:
                         # Empty connections: mark as cached (connection_count=0)
                         self._update_neuron_index_batch(batch)
                         newly_cached.extend(batch)
-                    gc.collect()
+                    # Full-heap GC every batch is expensive on the multi-GB
+                    # heap a pull builds (refcounting already frees the batch
+                    # frames); throttle it to every 5 batches.
+                    if len(newly_cached) % (batch_size * 5) == 0:
+                        gc.collect()
                     if not quiet and hasattr(batch_iter, 'set_postfix_str'):
                         mem_usage = f"{process.memory_info().rss / 1024 / 1024:.0f}MB" if process else "?"
                         batch_iter.set_postfix_str(
@@ -7390,6 +7508,14 @@ class FindNeuronConnection:
         # incrementally.  On normal completion fold the four status columns
         # into it and remove the tiny sidecar; after cancellation retain the
         # sidecar so the next run can resume exactly from the checkpoint.
+        # Fold the freshest in-memory flags into the disk checkpoint first so
+        # the throttled sidecar window (<=15 s of batches) is not lost from
+        # the final index.
+        if (
+            self._neuron_index_cache is not None
+            and not self._neuron_index_cache.empty
+        ):
+            self._save_neuron_index_state(self._neuron_index_cache, force=True)
         self._materialize_neuron_index(remove_state=not cancelled)
         
         elapsed = time.time() - start_time
@@ -7755,7 +7881,7 @@ class FindNeuronConnection:
             # Persist through the state sidecar first, then fold the repair
             # into the canonical index and remove the sidecar. Otherwise a
             # stale sidecar would reassert the old completion flags.
-            self._save_neuron_index_state(ni_pd)
+            self._save_neuron_index_state(ni_pd, force=True)
             self._materialize_neuron_index(remove_state=True)
             _print(f"   ✓ Repaired {len(falsely_complete):,} entries")
         
