@@ -189,8 +189,11 @@ if [[ -n "$ENV_OVERRIDE" ]]; then
             ENV_NAME="$ENV_OVERRIDE"
             printf "%b✓ Reusing %s (custom env from config.json)%b\n" "$GREEN" "$ENV_NAME" "$NC"
         else
-            printf "%bSkipping %s (custom env from config.json) because it is not Python %s; falling back to default names.%b\n" \
-                "$YELLOW" "$ENV_OVERRIDE" "$PYTHON_VERSION" "$NC"
+            # A configured custom env must be the env used: never silently
+            # switch to a default name and clobber the config entry.
+            printf "%bERROR: %s (custom env from config.json) exists but is not Python %s. Fix or remove it, or clear the envs entry.%b\n" \
+                "$RED" "$ENV_OVERRIDE" "$PYTHON_VERSION" "$NC" >&2
+            exit 1
         fi
     else
         ENV_NAME="$ENV_OVERRIDE"
@@ -225,10 +228,13 @@ fi
     printf "%bERROR: could not select a usable %s environment.%b\n" "$RED" "$ENV_BASE" "$NC" >&2
     exit 1
 }
-# Persist the selected environment back into config.json: an empty entry is
-# filled with the auto-created name so launchers and scripts resolve it
-# directly; a custom name is written back unchanged.
-update_config_env "$DROCAT_VERSION" "$ENV_NAME" "$CONFIG_FILE"
+# Persist the auto-selected environment back into config.json when no custom
+# name was configured (an empty entry is filled with the auto-created name
+# so launchers and scripts resolve it directly). A configured custom name
+# is never rewritten.
+if [[ -z "$ENV_OVERRIDE" ]]; then
+    update_config_env "$DROCAT_VERSION" "$ENV_NAME" "$CONFIG_FILE"
+fi
 
 run_in_env() {
     "$CONDA_BIN" run -n "$ENV_NAME" --no-capture-output "$@"

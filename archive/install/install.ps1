@@ -188,7 +188,9 @@ if ($EnvOverride) {
             $script:EnvName = $EnvOverride
             Write-Host "Reusing $EnvOverride (custom env from config.json)" -ForegroundColor Green
         } else {
-            Write-Host "Skipping $EnvOverride (custom env from config.json) because it is not Python $PythonVersion." -ForegroundColor Yellow
+            # A configured custom env must be the env used: never silently
+            # switch to a default name and clobber the config entry.
+            throw "$EnvOverride (custom env from config.json) exists but is not Python $PythonVersion. Fix or remove it, or clear the envs entry."
         }
     } else {
         $script:EnvName = $EnvOverride
@@ -229,7 +231,9 @@ if (-not $script:EnvName) {
     }
 }
 if (-not $script:EnvName) { throw "Could not select a usable $EnvBase environment." }
-Set-ConfigEnvOverride $DrocatVersion $script:EnvName
+# Persist the auto-selected environment into config.json when no custom name
+# was configured (empty entry -> auto-fill). A custom name is never rewritten.
+if (-not $EnvOverride) { Set-ConfigEnvOverride $DrocatVersion $script:EnvName }
 
 Set-Location $ProjectRoot
 Write-Step "3/5" "Installing pinned dependencies"

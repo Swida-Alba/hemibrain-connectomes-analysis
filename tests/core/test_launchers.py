@@ -74,6 +74,11 @@ class TestInstallers:
         assert "config.example.json" in text
         assert 'json_value envs "$DROCAT_VERSION"' in text
         assert "ENV_OVERRIDE" in text
+        # a configured custom env is strict: wrong Python aborts instead of
+        # silently switching to a default name, and the entry is never
+        # overwritten by the auto-fill write-back
+        assert "exists but is not Python" in text
+        assert 'if [[ -z "$ENV_OVERRIDE" ]]' in text
 
     def test_install_sh_token_notice_has_no_terminal_prompt(self):
         """Tokens are NOT collected in the terminal: the installer only prints
@@ -110,6 +115,11 @@ class TestInstallers:
         assert "config.json" in text
         # the resolved environment is written back into config.json
         assert "Set-ConfigEnvOverride" in text
+        # a configured custom env is strict: wrong Python throws instead of
+        # silently switching to a default name, and the entry is never
+        # overwritten by the auto-fill write-back
+        assert "exists but is not Python" in text
+        assert "if (-not $EnvOverride) { Set-ConfigEnvOverride" in text
         # token_info files are deprecated: the notice must not reference them
         assert "token_info_local.txt" not in text
 
