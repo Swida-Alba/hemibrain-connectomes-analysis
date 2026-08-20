@@ -1735,8 +1735,8 @@ def main_page():
                 ("Skeleton", "view_in_ar"), ("Net-Viz", "account_tree"),
             ]),
             ("Similarity", "similarity", 3, [
-                ("Homologs", "compare"), ("Similar", "science"),
-                ("Profiling", "analytics"),
+                ("Homolog", "compare"), ("Morphology", "science"),
+                ("Connectivity", "analytics"),
             ]),
             ("NeuronBridge", "nb", 3, [
                 ("Find Lines", "biotech"), ("Find Neurons", "search"),
@@ -1790,11 +1790,11 @@ def main_page():
             with ui.tab_panel("Net-Viz").classes("p-0"):
                 create_net_viz_tab()
             # Similarity
-            with ui.tab_panel("Homologs").classes("p-0"):
+            with ui.tab_panel("Homolog").classes("p-0"):
                 create_find_homologs_tab()
-            with ui.tab_panel("Similar").classes("p-0"):
+            with ui.tab_panel("Morphology").classes("p-0"):
                 create_find_similar_tab()
-            with ui.tab_panel("Profiling").classes("p-0"):
+            with ui.tab_panel("Connectivity").classes("p-0"):
                 create_connectivity_profiling_tab()
             # NeuronBridge
             with ui.tab_panel("Find Lines").classes("p-0"):

@@ -2930,8 +2930,8 @@ class TestTabs:
             "Complete Paths": "connection", "Shortest Paths": "connection",
             "Network": "connection", "Cross-Dataset": "connection",
             "Skeleton": "visualization", "Net-Viz": "visualization",
-            "Homologs": "similarity", "Similar": "similarity",
-            "Profiling": "similarity",
+            "Homolog": "similarity", "Morphology": "similarity",
+            "Connectivity": "similarity",
             "Find Lines": "nb", "Find Neurons": "nb", "Co-Labeling": "nb",
             "Downloader": "flylight", "Settings": "settings",
         }
