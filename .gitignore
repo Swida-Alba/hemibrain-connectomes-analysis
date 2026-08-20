@@ -54,6 +54,7 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+.zcode/
 *.swp
 *.swo
 
@@ -66,6 +67,7 @@ TODO_*.md
 # tokens
 cave_token.txt
 token_info_local.txt
+config.json
 ui/local_config.json
 ui/neuron_history.json
 ui/line_history.json
@@ -80,3 +82,15 @@ __pycache__/
 # Build artifacts
 *.egg-info/
 .coverage
+
+# Coverage-80 task: UNFINISHED test work (paused 2026-08-19).
+# Plan/continuation doc: archive/planning/TODO_coverage80.md
+# NOTE: the tracked ones need `git rm --cached <file>` before these entries
+# take effect; see plan for details.
+tests/core/test_file_converters_coverage.py
+tests/core/test_build_scripts_coverage.py
+tests/core/test_cache_manager_coverage.py
+tests/core/test_neuronbridge_finder_coverage.py
+tests/core/test_visualize_skeleton_coverage.py
+tests/core/test_search_index_coverage.py
+tests/core/test_misc_utils_coverage.py
