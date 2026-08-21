@@ -264,6 +264,23 @@ class TestSkeletonPuller:
         assert _wait_until(lambda: puller.state["done"])
         assert puller.state["cancelled"] is True
 
+    def test_cancel_marks_cancel_requested_for_ui_hint(self, fake_download):
+        """cancel() exposes the request in the state so the Settings tab can
+        show a persistent 'Cancelling...' hint during the wind-down (in-flight
+        navis batch + persist phase)."""
+        fake_download["impl"].delay = 0.05
+        puller = SkeletonPuller()
+        puller.start("np:v1")
+        assert _wait_until(lambda: puller.state["total"] > 0)
+        assert puller.state["cancel_requested"] is False
+        puller.cancel()
+        assert puller.state["cancel_requested"] is True
+        assert _wait_until(lambda: puller.state["done"])
+        # a fresh pull resets the flag
+        assert puller.start("np:v1") is True
+        assert puller.state["cancel_requested"] is False
+        assert _wait_until(lambda: puller.state["done"])
+
     def test_error_reported(self, fake_download):
         fake_download["impl"].fail = True
         puller = SkeletonPuller()

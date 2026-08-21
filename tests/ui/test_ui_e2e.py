@@ -2461,6 +2461,109 @@ class TestDatasetService:
             for el in client.elements.values()
         )
 
+    def test_settings_cancel_shows_cancelling_hint_until_wind_down_ends(
+            self, monkeypatch):
+        """After Cancel, the status must show a persistent 'Cancelling...'
+        hint (with an indeterminate bar) while the puller is still winding
+        down (running + cancel_requested), instead of the frozen progress
+        text — for both the connection pull and the skeleton pull."""
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.dataset_pull as dataset_pull_module
+        import ui.skeleton_pull as skeleton_pull_module
+        from ui.tabs import settings as settings_module
+
+        class FakePuller:
+            def __init__(self):
+                self._state = {
+                    "running": False, "dataset": "male-cns:v1.0",
+                    "operation": "full_dataset", "phase": "fetch",
+                    "current": 100, "total": 1000, "info": "Fetching...",
+                    "done": False, "cancelled": False,
+                    "cancel_requested": False, "error": None,
+                    "summary": None, "started_at": None,
+                    "fetch_started_at": None,
+                }
+
+            @property
+            def state(self):
+                return dict(self._state)
+
+            @property
+            def running(self):
+                return self._state["running"]
+
+            def start(self, *args, **kwargs):
+                return True
+
+            def cancel(self):
+                self._state["cancel_requested"] = True
+
+        dataset_fake = FakePuller()
+        skeleton_fake = FakePuller()
+        monkeypatch.setattr(
+            dataset_pull_module, "DatasetPuller", lambda: dataset_fake
+        )
+        monkeypatch.setattr(
+            skeleton_pull_module, "SkeletonPuller", lambda: skeleton_fake
+        )
+
+        client = Client(page("/settings-cancel-hint"))
+        with client:
+            settings_module.create_settings_tab()
+
+        timers = [
+            el for el in client.elements.values()
+            if type(el).__name__ == "Timer" and getattr(el, "callback", None)
+        ]
+        assert timers, "refresh timers missing"
+
+        def drive_refresh():
+            for timer in timers:
+                timer.callback()
+
+        def label_texts():
+            return [
+                el.text for el in client.elements.values()
+                if isinstance(getattr(el, "text", None), str)
+            ]
+
+        # Dataset pull winding down after cancel.
+        dataset_fake._state["running"] = True
+        dataset_fake._state["cancel_requested"] = True
+        drive_refresh()
+        texts = label_texts()
+        assert any(
+            "Cancelling full dataset pull" in text and "male-cns:v1.0" in text
+            for text in texts
+        ), texts
+        assert any(
+            "stopping after the current batch" in text for text in texts
+        ), texts
+
+        # Skeleton pull winding down after cancel.
+        dataset_fake._state["running"] = False
+        skeleton_fake._state["running"] = True
+        skeleton_fake._state["cancel_requested"] = True
+        drive_refresh()
+        texts = label_texts()
+        assert any(
+            "Cancelling skeleton pull" in text and "male-cns:v1.0" in text
+            for text in texts
+        ), texts
+
+        # Wind-down finished: the normal result/status rendering resumes.
+        skeleton_fake._state["running"] = False
+        skeleton_fake._state["done"] = True
+        skeleton_fake._state["cancelled"] = True
+        skeleton_fake._state["summary"] = {
+            "total": 10, "fetched": 4, "skipped_existing": 0,
+            "cancelled": True, "errors": 6,
+        }
+        drive_refresh()
+        texts = label_texts()
+        assert any("⏹ Cancelled" in text for text in texts), texts
+
     def test_settings_shows_availability_timestamp_and_shared_mapping_panel(
         self, tmp_path, monkeypatch
     ):

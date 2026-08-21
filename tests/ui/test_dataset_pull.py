@@ -169,6 +169,23 @@ class TestDatasetPuller:
         # the cancel event was handed to the builder (resume checkpoint)
         assert build.cancel_event is not None and build.cancel_event.is_set()
 
+    def test_cancel_marks_cancel_requested_for_ui_hint(self, fake_fnc):
+        """cancel() exposes the request in the state so the Settings tab can
+        show a persistent 'Cancelling...' hint during the wind-down (in-flight
+        batch + consolidation) instead of the frozen progress text."""
+        fake_fnc["build"] = _FakeBuild(neurons=100, delay=0.05)
+        puller = DatasetPuller()
+        puller.start("hemibrain:v1.2.1", batch_size=10)
+        assert _wait_until(lambda: puller.state["total"] == 100)
+        assert puller.state["cancel_requested"] is False
+        puller.cancel()
+        assert puller.state["cancel_requested"] is True
+        assert _wait_until(lambda: puller.state["done"])
+        # a fresh pull resets the flag
+        assert puller.start("hemibrain:v1.2.1", batch_size=10) is True
+        assert puller.state["cancel_requested"] is False
+        assert _wait_until(lambda: puller.state["done"])
+
     def test_error_is_captured(self, fake_fnc):
         fake_fnc["build"] = _FakeBuild(fail=True)
         puller = DatasetPuller()

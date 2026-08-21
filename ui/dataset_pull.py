@@ -40,6 +40,7 @@ class DatasetPuller:
             "info": "",
             "done": False,
             "cancelled": False,
+            "cancel_requested": False,
             "error": None,
             "summary": None,
             "started_at": None,
@@ -85,6 +86,7 @@ class DatasetPuller:
                 "info": "Connecting to dataset...",
                 "done": False,
                 "cancelled": False,
+                "cancel_requested": False,
                 "error": None,
                 "summary": None,
                 "started_at": time.time(),
@@ -103,6 +105,11 @@ class DatasetPuller:
     def cancel(self) -> None:
         """Request a stop after the current batch (resume-safe)."""
         self._cancel_event.set()
+        # The wind-down (in-flight batch, batch consolidation) can take a
+        # while; expose the request so the UI can show a persistent
+        # 'Cancelling...' hint until ``running`` flips to False.
+        with self._lock:
+            self._state["cancel_requested"] = True
 
     def _progress(self, current: int, total: int, info: str) -> None:
         with self._lock:

@@ -168,6 +168,18 @@ def create_settings_tab():
                         if st.get("operation") == "connections"
                         else "full dataset"
                     )
+                    if st.get("cancel_requested"):
+                        # Wind-down after Cancel: the in-flight batch and the
+                        # batch consolidation can take a while — show a
+                        # persistent hint and an indeterminate bar instead of
+                        # the frozen progress text.
+                        progress.props(add="indeterminate")
+                        status_label.text = (
+                            f"Cancelling {operation_label} pull for "
+                            f"{st['dataset']} — stopping after the current "
+                            f"batch and consolidating fetched data..."
+                        )
+                        return
                     if st["total"] and st["total"] > 0:
                         # Fetch phase: neuron totals are known, show a
                         # determinate bar.
@@ -280,6 +292,18 @@ def create_settings_tab():
                 ds_select.set_enabled(not running and not puller.running)
                 if running:
                     skeleton_done_synced["value"] = False
+                    if st.get("cancel_requested"):
+                        # Wind-down after Cancel: the in-flight navis batch
+                        # and the persist phase can take a while — show a
+                        # persistent hint and an indeterminate bar instead of
+                        # the frozen progress text.
+                        skeleton_progress.props(add="indeterminate")
+                        skeleton_status.text = (
+                            f"Cancelling skeleton pull for {st['dataset']} — "
+                            f"finishing the current batch and persisting "
+                            f"fetched skeletons..."
+                        )
+                        return
                     total = st["total"] or 1
                     frac = min(st["current"] / total, 1.0)
                     skeleton_progress.set_value(frac)
@@ -292,6 +316,7 @@ def create_settings_tab():
                 if not st["done"]:
                     return
                 if not skeleton_done_synced["value"]:
+                    skeleton_progress.props(remove="indeterminate")
                     refresh_dataset_selector_statuses()
                     skeleton_done_synced["value"] = True
                 if st["error"]:
