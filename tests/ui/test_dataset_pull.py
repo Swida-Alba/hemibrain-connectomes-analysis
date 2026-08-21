@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 """
-Tests for the "Pull Full Dataset" operation:
+Tests for the Settings-tab pull operations:
 
 - ``ui.dataset_pull.DatasetPuller``: background thread lifecycle, progress
-  reporting, cancellation, error handling, and single-pull-at-a-time guard.
+  reporting, cancellation, error handling, and single-pull-at-a-time guard;
+  the ``full_dataset`` operation pulls metadata only while
+  ``connections`` builds the connection cache.
 - ``coana.FindNeuronConnection.build_connection_cache``: cooperative
   ``cancel_event`` stops after the current batch and consolidates fetched
   batches (resume-safe), and quiet mode still consolidates batch files.
@@ -102,7 +104,7 @@ class TestDatasetPuller:
     def test_full_pull_reports_progress_and_summary(self, fake_fnc):
         fake_fnc["build"] = _FakeBuild(neurons=50)
         puller = DatasetPuller()
-        assert puller.start("hemibrain:v1.2.1", batch_size=10) is True
+        assert puller.start("hemibrain:v1.2.1", batch_size=10, operation="connections") is True
         assert _wait_until(lambda: puller.state["done"])
         st = puller.state
         assert st["running"] is False
@@ -120,14 +122,15 @@ class TestDatasetPuller:
     def test_force_rebuild_passed_through(self, fake_fnc):
         fake_fnc["build"] = _FakeBuild()
         puller = DatasetPuller()
-        puller.start("male-cns:v0.9", force_rebuild=True, batch_size=25)
+        puller.start("male-cns:v0.9", force_rebuild=True, batch_size=25, operation="connections")
         assert _wait_until(lambda: puller.state["done"])
         assert fake_fnc["build"].called_with["force_rebuild"] is True
         assert fake_fnc["build"].called_with["batch_size"] == 25
 
-    def test_complete_connection_operation_uses_shared_builder(self, fake_fnc):
-        """The explicit connection action uses the same cache builder as the
-        full-dataset action, with only the UI operation label changed."""
+    def test_complete_connection_operation_pulls_connections(self, fake_fnc):
+        """The explicit connection action runs the connection-cache builder;
+        the dataset-metadata action must NOT touch it (see
+        test_dataset_operation_pulls_metadata_only)."""
         fake_fnc["build"] = _FakeBuild()
         puller = DatasetPuller()
         assert puller.start("hemibrain:v1.2.1", operation="connections") is True
@@ -136,17 +139,56 @@ class TestDatasetPuller:
         assert fake_fnc["build"].called_with["quiet"] is True
         assert fake_fnc["build"].called_with["batch_size"] == 100
 
+    def test_dataset_operation_pulls_metadata_only(self, monkeypatch):
+        """'Pull Dataset Metadata' must only ensure the neuron table, ROI
+        table, and materialized index - never build the connection cache."""
+        import coana
+
+        calls = {"metadata": 0, "index": 0, "build": 0}
+
+        class MetadataOnlyFNC:
+            def __init__(self, *args, **kwargs):
+                self.kwargs = kwargs
+
+            def _ensure_complete_dataset(self):
+                calls["metadata"] += 1
+
+            def _ensure_neuron_index_from_metadata(self):
+                calls["index"] += 1
+
+            def _get_all_dataset_bodyids(self):
+                return [str(x) for x in range(1000, 2000)]
+
+            def _load_neuron_index(self):
+                import pandas as pd
+                return pd.DataFrame({"bodyId": [str(x) for x in range(1000, 2000)]})
+
+            def build_connection_cache(self, **kwargs):
+                calls["build"] += 1
+                raise AssertionError("metadata pull must not build connections")
+
+        monkeypatch.setattr(coana, "FindNeuronConnection", MetadataOnlyFNC)
+        puller = DatasetPuller()
+        assert puller.start("male-cns:v1.0", operation="full_dataset") is True
+        assert _wait_until(lambda: puller.state["done"])
+        st = puller.state
+        assert st["error"] is None
+        assert st["operation"] == "full_dataset"
+        assert calls == {"metadata": 1, "index": 1, "build": 0}
+        assert st["summary"]["neuron_count"] == 1000
+        assert st["summary"]["index_rows"] == 1000
+
     def test_max_workers_passed_through(self, fake_fnc):
         fake_fnc["build"] = _FakeBuild()
         puller = DatasetPuller()
-        puller.start("manc:v1.2.1", batch_size=10, max_workers=6)
+        puller.start("manc:v1.2.1", batch_size=10, max_workers=6, operation="connections")
         assert _wait_until(lambda: puller.state["done"])
         assert fake_fnc["build"].called_with["max_workers"] == 6
 
     def test_eta_timestamps_recorded(self, fake_fnc):
         fake_fnc["build"] = _FakeBuild(neurons=50, delay=0.02)
         puller = DatasetPuller()
-        puller.start("hemibrain:v1.2.1", batch_size=10)
+        puller.start("hemibrain:v1.2.1", batch_size=10, operation="connections")
         # while running: fetch_started_at is set after the first progress tick
         assert _wait_until(lambda: puller.state.get("fetch_started_at") is not None)
         st = puller.state
@@ -159,7 +201,7 @@ class TestDatasetPuller:
         fake_fnc["build"] = _FakeBuild(neurons=100, delay=0.05)
         build = fake_fnc["build"]
         puller = DatasetPuller()
-        puller.start("optic-lobe:v1.1", batch_size=10)
+        puller.start("optic-lobe:v1.1", batch_size=10, operation="connections")
         assert _wait_until(lambda: puller.state["total"] == 100)
         puller.cancel()
         assert _wait_until(lambda: puller.state["done"])
@@ -175,21 +217,21 @@ class TestDatasetPuller:
         batch + consolidation) instead of the frozen progress text."""
         fake_fnc["build"] = _FakeBuild(neurons=100, delay=0.05)
         puller = DatasetPuller()
-        puller.start("hemibrain:v1.2.1", batch_size=10)
+        puller.start("hemibrain:v1.2.1", batch_size=10, operation="connections")
         assert _wait_until(lambda: puller.state["total"] == 100)
         assert puller.state["cancel_requested"] is False
         puller.cancel()
         assert puller.state["cancel_requested"] is True
         assert _wait_until(lambda: puller.state["done"])
         # a fresh pull resets the flag
-        assert puller.start("hemibrain:v1.2.1", batch_size=10) is True
+        assert puller.start("hemibrain:v1.2.1", batch_size=10, operation="connections") is True
         assert puller.state["cancel_requested"] is False
         assert _wait_until(lambda: puller.state["done"])
 
     def test_error_is_captured(self, fake_fnc):
         fake_fnc["build"] = _FakeBuild(fail=True)
         puller = DatasetPuller()
-        puller.start("banc:v888")
+        puller.start("banc:v888", operation="connections")
         assert _wait_until(lambda: puller.state["done"])
         st = puller.state
         assert st["running"] is False
@@ -198,11 +240,11 @@ class TestDatasetPuller:
     def test_second_start_while_running_is_rejected(self, fake_fnc):
         fake_fnc["build"] = _FakeBuild(neurons=200, delay=0.02)
         puller = DatasetPuller()
-        assert puller.start("hemibrain:v1.2.1") is True
-        assert puller.start("manc:v1.2.1") is False  # already running
+        assert puller.start("hemibrain:v1.2.1", operation="connections") is True
+        assert puller.start("manc:v1.2.1", operation="connections") is False  # already running
         assert _wait_until(lambda: puller.state["done"])
         # after completion a new pull is allowed again
-        assert puller.start("manc:v1.2.1") is True
+        assert puller.start("manc:v1.2.1", operation="connections") is True
         assert _wait_until(lambda: puller.state["done"])
         assert puller.state["dataset"] == "manc:v1.2.1"
 
@@ -242,7 +284,7 @@ class TestDatasetPullerPhases:
 
         monkeypatch.setattr(coana, "FindNeuronConnection", TrackingFNC)
         puller = DatasetPuller()
-        assert puller.start("hemibrain:v1.2.1") is True
+        assert puller.start("hemibrain:v1.2.1", operation="connections") is True
         # while the client/init phase runs, the state says what it is doing
         assert _wait_until(lambda: puller.state["phase"] == "prepare")
         assert "preparing local data" in puller.state["info"].lower()
@@ -278,7 +320,7 @@ class TestDatasetPullerPhases:
 
         monkeypatch.setattr(coana, "FindNeuronConnection", BlockingInitFNC)
         puller = DatasetPuller()
-        assert puller.start("hemibrain:v1.2.1") is True
+        assert puller.start("hemibrain:v1.2.1", operation="connections") is True
         assert _wait_until(lambda: puller.state["phase"] == "prepare")
         puller.cancel()
         release_init.set()
@@ -776,10 +818,14 @@ class TestNeuronIndexStateThrottling:
         assert state_path.stat().st_mtime_ns == mtime_before
         # ...but the dict already reflects the batch (incremental update).
         # (Values come from numpy arrays, so compare with ==, not ``is``.)
-        assert fc._neuron_index_dict["1"]["downstream_complete"] == True
+        # The completion flag is only the zero-outdegree marker: rows in the
+        # cache prove completeness for neurons with connections, so only the
+        # count-0 neuron keeps the flag.
+        assert fc._neuron_index_dict["1"]["downstream_complete"] == False
         assert fc._neuron_index_dict["1"]["connection_count"] == 5
         assert fc._neuron_index_dict["2"]["downstream_complete"] == True
         assert fc._neuron_index_dict["3"]["connection_count"] == 1
+        assert fc._neuron_index_dict["3"]["downstream_complete"] == False
         assert fc._neuron_index_dict["3"]["row_idx"] == 2  # current frame row
 
         # A forced write (completion/cancel) flushes the checkpoint.
@@ -801,5 +847,8 @@ class TestNeuronIndexStateThrottling:
         fc._save_neuron_index_state(fc._neuron_index_cache, force=True)
         assert fc._materialize_neuron_index(remove_state=True) is True
         reloaded = fc._load_neuron_index(force_reload=True)
-        assert reloaded.loc[reloaded["bodyId"] == "1", "downstream_complete"].iloc[0] == True
+        # Rows prove completeness for neuron "1" (count 5); the flag is only
+        # the zero-outdegree marker, kept for neuron "2" (count 0).
+        assert reloaded.loc[reloaded["bodyId"] == "1", "downstream_complete"].iloc[0] == False
+        assert reloaded.loc[reloaded["bodyId"] == "2", "downstream_complete"].iloc[0] == True
         assert reloaded.loc[reloaded["bodyId"] == "2", "connection_count"].iloc[0] == 0

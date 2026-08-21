@@ -111,12 +111,14 @@ def _render_missing_cache(content, dataset: str, path: Path) -> None:
         ui.label(
             "To make the index available, either run the selected analysis once "
             "(where the workflow supports first-run cache creation), or pull the "
-            "full dataset from the Settings tab."
+            "dataset metadata and connections from the Settings tab."
         ).classes("text-body2")
         ui.label("Recommended UI flow").classes("font-bold text-primary mt-2")
         ui.label(
             "Open Settings → Dataset Cache, choose "
-            f"{dataset}, then click Pull Full Dataset. The pull is resumable."
+            f"{dataset}, then click Pull Dataset Metadata, followed by "
+            "Pull Complete Connections for the connection cache. "
+            "The connection pull is resumable."
         ).classes("text-body2")
         ui.link(
             "Open dataset-cache instructions",

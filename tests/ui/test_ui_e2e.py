@@ -2383,7 +2383,7 @@ class TestDatasetService:
         assert "Cache Simplification" in labels  # skeleton pull level selector
         assert "Skeleton Batch Size" in labels  # skeleton pull batch control
         assert any(
-            getattr(el, "text", None) == "Pull Full Dataset"
+            getattr(el, "text", None) == "Pull Dataset Metadata"
             for el in client.elements.values()
         )
         assert any(
@@ -2483,7 +2483,7 @@ class TestDatasetService:
             def __init__(self):
                 self._state = {
                     "running": False, "dataset": "male-cns:v1.0",
-                    "operation": "full_dataset", "phase": "fetch",
+                    "operation": "connections", "phase": "fetch",
                     "current": 100, "total": 1000, "info": "Fetching...",
                     "done": False, "cancelled": False,
                     "cancel_requested": False, "error": None,
@@ -2540,7 +2540,7 @@ class TestDatasetService:
         drive_refresh()
         texts = label_texts()
         assert any(
-            "Cancelling full dataset pull" in text and "male-cns:v1.0" in text
+            "Cancelling complete connections pull" in text and "male-cns:v1.0" in text
             for text in texts
         ), texts
         assert any(

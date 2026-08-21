@@ -2146,7 +2146,6 @@ class FindNeuronConnection:
         # thread, so a cached frame must be reloaded when the signature moves.
         self._conn_cache_signature = None
         self._neuron_index_signature_value = None
-        self._cache_incomplete_notice_emitted = False
         
         self._vprint('Initializing...', level='full')
         
@@ -3444,7 +3443,9 @@ class FindNeuronConnection:
         The neuron index is a progress sidecar and can outlive, or briefly
         get ahead of, ``connections.parquet``. Cache-resume decisions must
         therefore consult the actual connection files as well as the
-        ``downstream_complete`` flag. This helper reads only the
+        ``downstream_complete`` flag (which only marks the zero-outdegree
+        case; rows in the cache prove completeness for neurons with
+        connections). This helper reads only the
         ``bodyId_pre`` column when a fresh disk check is requested, avoiding a
         full connection-table load during Settings-tab cache pulls.
         """
@@ -4081,7 +4082,6 @@ class FindNeuronConnection:
         cached_upstream = []
         uncached_upstream = []
         partially_cached = []
-        incomplete_with_rows = []
         
         for bodyId in upstream_bodyIds:
             bodyId = str(bodyId)
@@ -4091,44 +4091,23 @@ class FindNeuronConnection:
             
             if neuron_data is not None:
                 is_complete = neuron_data.get('downstream_complete', False)
-                
-                # A completion flag describes the connection cache as it
-                # existed when the neuron was fetched. It is not sufficient
-                # by itself after a cache rebuild/replacement. Validate it
-                # against the current connection table, while preserving the
-                # legitimate zero-outdegree case via connection_count == 0.
                 conn_count = neuron_data.get('connection_count', -1)
-                
-                if is_complete:
-                    has_connections = bodyId in neurons_with_connections
-                    has_zero_connections = conn_count == 0
+                has_connections = bodyId in neurons_with_connections
 
-                    # A positive historical count with no current rows is a
-                    # stale completion flag and must be refetched.
-                    if has_connections or has_zero_connections:
-                        cached_upstream.append(bodyId)
-                    else:
-                        # Marked complete but absent from the current cache.
-                        uncached_upstream.append(bodyId)
+                # Rows in the connection cache are complete downstream sets:
+                # every writer stores unbounded weight>=1 fetches (verified
+                # against the server: per-neuron partner counts in the cache
+                # match the server exactly).  Rows therefore prove the
+                # neuron's downstream is cached, and the completion flag is
+                # only the zero-outdegree marker for neurons with no rows
+                # (connection_count == 0).  A flag with a positive historical
+                # count and no current rows is stale and must be refetched.
+                if has_connections or (is_complete and conn_count == 0):
+                    cached_upstream.append(bodyId)
                 else:
-                    if bodyId in neurons_with_connections:
-                        incomplete_with_rows.append(bodyId)
                     uncached_upstream.append(bodyId)
             else:
                 uncached_upstream.append(bodyId)
-
-        if incomplete_with_rows and not getattr(
-            self, '_cache_incomplete_notice_emitted', False
-        ):
-            self._vprint(
-                f'  ⚠️ Cache rows exist for {len(incomplete_with_rows):,} '
-                'requested neurons, but their downstream-complete flags are '
-                'false. Treating those rows as partial and fetching the '
-                'missing connections; finish or rerun the Settings pull to '
-                'make them reusable.',
-                level='both',
-            )
-            self._cache_incomplete_notice_emitted = True
         
         # Retrieve cached connections using O(1) dict index
         all_cached = cached_upstream + partially_cached  # partially_cached will be empty (no recovery)
@@ -4246,7 +4225,10 @@ class FindNeuronConnection:
         connections : pd.DataFrame
             Successfully fetched and enriched connections (may be empty for neurons with 0 connections)
         downstream_bodyIds : list or None
-            If None, marks neurons as downstream_complete. If list, doesn't mark as complete.
+            If None, neurons with zero downstream connections are marked with
+            the completion flag (rows in the cache prove completeness for
+            neurons with connections). If list, no completion flags are set
+            because the fetch was bounded.
         '''
         # Do not create or mutate cache state when caching is explicitly
         # disabled. This method is called after API data has been enriched,
@@ -4358,76 +4340,135 @@ class FindNeuronConnection:
         
         # Only mark as downstream_complete if we fetched ALL downstream
         mark_complete = (downstream_bodyIds is None)
-        
-        for bodyId in tqdm(upstream_bodyIds, desc='  ⏳ Updating neuron index', leave=False):
-            # Ensure bodyId is string for comparison
-            bodyId = str(bodyId)
-            
-            neuron_row = neuron_info[neuron_info['bodyId'] == bodyId]
-            if not neuron_row.empty:
-                neuron_type = neuron_row.iloc[0]['type'] if 'type' in neuron_row.columns else ''
-                neuron_instance = neuron_row.iloc[0]['instance'] if 'instance' in neuron_row.columns else ''
-                neuron_post = neuron_row.iloc[0]['post'] if 'post' in neuron_row.columns else 0
-            else:
-                neuron_type = ''
-                neuron_instance = ''
-                neuron_post = 0
-            
-            conn_count = conn_counts[conn_counts['bodyId_pre'] == bodyId]['connection_count'].iloc[0] if bodyId in conn_counts['bodyId_pre'].values else 0
-            
-            # Check if bodyId exists in index (ensure string comparison)
-            if bodyId in neuron_index['bodyId'].values:
-                # Update existing entry
-                if mark_complete:
-                    neuron_index.loc[neuron_index['bodyId'] == bodyId, 'downstream_complete'] = True
-                neuron_index.loc[neuron_index['bodyId'] == bodyId, 'last_fetched'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                neuron_index.loc[neuron_index['bodyId'] == bodyId, 'connection_count'] = conn_count
-                # A pulled metadata table can legitimately leave labels
-                # blank.  Do not erase a non-empty label already present in
-                # the index when a later fetch returns an empty value.
-                if str(neuron_type or '').strip():
-                    neuron_index.loc[neuron_index['bodyId'] == bodyId, 'type'] = neuron_type
-                if str(neuron_instance or '').strip():
-                    neuron_index.loc[neuron_index['bodyId'] == bodyId, 'instance'] = neuron_instance
-                if neuron_post is not None and not pd.isna(neuron_post):
-                    neuron_index.loc[neuron_index['bodyId'] == bodyId, 'post'] = neuron_post
-            else:
-                # Add new entry
-                new_entry = pd.DataFrame([{
-                    'bodyId': bodyId,
-                    'type': neuron_type,
-                    'instance': neuron_instance,
-                    'post': neuron_post,
-                    'downstream_complete': bool(mark_complete),  # Explicit bool for consistent dtype
-                    'last_fetched': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    'connection_count': conn_count
-                }])
-                neuron_index = pd.concat([neuron_index, new_entry], ignore_index=True)
-                # Ensure consistent bool dtype after concat to avoid FutureWarning
-                neuron_index['downstream_complete'] = neuron_index['downstream_complete'].astype(bool)
-        
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        bodyids_str = (
+            normalize_flywire_body_ids(upstream_bodyIds)
+            if is_flywire_dataset(self.dataset)
+            else [str(body_id) for body_id in upstream_bodyIds]
+        )
+        bodyids_set = set(bodyids_str)
+
+        # Vectorized single-pass update.  The previous per-bodyId loop ran
+        # full-index scans (astype(str) + == + .loc) several times per
+        # neuron, ~55 s per 2k neurons on a 176k-row index: a path finding
+        # layer of tens of thousands of neurons never finished marking, so
+        # its cached rows stayed unmarked and every later run (pull or
+        # path finding) re-fetched them.
+        count_map = {}
+        if not conn_counts.empty:
+            count_map = dict(zip(
+                conn_counts['bodyId_pre'].astype(str),
+                conn_counts['connection_count'],
+            ))
+        info_dict = {}
+        if not neuron_info.empty and 'bodyId' in neuron_info.columns:
+            bodyid_col = neuron_info['bodyId'].astype(str).values
+            type_col = neuron_info['type'].values if 'type' in neuron_info.columns else [''] * len(neuron_info)
+            instance_col = neuron_info['instance'].values if 'instance' in neuron_info.columns else [''] * len(neuron_info)
+            post_col = neuron_info['post'].values if 'post' in neuron_info.columns else [0] * len(neuron_info)
+            info_dict = {
+                bid: {
+                    'type': ty if ty is not None else '',
+                    'instance': inst if inst is not None else '',
+                    'post': post if post is not None else 0,
+                }
+                for bid, ty, inst, post in zip(
+                    bodyid_col, type_col, instance_col, post_col,
+                )
+            }
+
+        index_str = (
+            neuron_index['bodyId'].astype(str)
+            if not neuron_index.empty else None
+        )
+        existing_set = set(index_str.values) if index_str is not None else set()
+
+        # Update existing entries in one pass.
+        existing_bids = [bid for bid in bodyids_str if bid in existing_set]
+        hit_mask = None
+        if existing_bids and not neuron_index.empty and index_str is not None:
+            hit_mask = index_str.isin(set(existing_bids))
+            neuron_index.loc[hit_mask, 'last_fetched'] = now
+            neuron_index.loc[hit_mask, 'connection_count'] = (
+                index_str[hit_mask].map(count_map).fillna(0)
+            )
+            if mark_complete:
+                # The completion flag is only the zero-outdegree marker:
+                # rows in the cache prove completeness for neurons with
+                # connections (verified against the server), so only neurons
+                # verified to have zero downstream connections keep the flag.
+                neuron_index.loc[hit_mask, 'downstream_complete'] = (
+                    neuron_index.loc[hit_mask, 'connection_count'] == 0
+                )
+            # Refresh type/instance/post from the fetched metadata, but
+            # never erase a label already present when the fetch returned
+            # an empty one.
+            if info_dict:
+                rows_ids = index_str[hit_mask]
+                for column in ('type', 'instance', 'post'):
+                    new_values = [
+                        info_dict.get(bid, {}).get(column, '')
+                        for bid in rows_ids
+                    ]
+                    series = pd.Series(new_values, index=rows_ids.index)
+                    if column == 'post':
+                        keep = series.notna().values
+                    else:
+                        keep = (series.astype(str).str.strip() != '').values
+                    if keep.any():
+                        current = neuron_index.loc[hit_mask, column].copy()
+                        current.iloc[np.where(keep)[0]] = series.iloc[np.where(keep)[0]].values
+                        neuron_index.loc[hit_mask, column] = current
+
+        # Append rows for neurons missing from the index.
+        new_entries = []
+        for bid in bodyids_str:
+            if bid in existing_set:
+                continue
+            info = info_dict.get(bid, {})
+            new_entries.append({
+                'bodyId': bid,
+                'type': info.get('type', ''),
+                'instance': info.get('instance', ''),
+                'post': info.get('post', 0),
+                'downstream_complete': bool(
+                    mark_complete and count_map.get(bid, 0) == 0
+                ),
+                'last_fetched': now,
+                'connection_count': count_map.get(bid, 0),
+            })
+
+        if new_entries:
+            new_df = pd.DataFrame(new_entries)
+            neuron_index = pd.concat([neuron_index, new_df], ignore_index=True)
+            # Ensure consistent bool dtype after concat to avoid FutureWarning
+            neuron_index['downstream_complete'] = neuron_index['downstream_complete'].astype(bool)
+
         self._vprint(f'  ⏳ Saving neuron index state ({len(neuron_index):,} total neurons)...', level='full')
-        self._save_neuron_index_state(neuron_index)
-        
+        self._save_neuron_index_state(neuron_index, touched_bodyids=bodyids_str)
+
         if mark_complete:
-            # Explicitly cast to bool to avoid FutureWarning about object-dtype columns
-            downstream_complete = neuron_index['downstream_complete'].astype(bool)
-            completed_count = len([b for b in upstream_bodyIds if b in neuron_index[downstream_complete]['bodyId'].values])
+            completed_count = len([b for b in bodyids_str if b in existing_set])
             self._vprint(f'  📝 Updated neuron index: {completed_count} neurons marked as complete', level='full')
     
     def _update_neuron_index_batch(self, bodyids, connection_counts=None):
         '''
         Efficiently update neuron index for a batch of neurons.
-        Marks them as downstream_complete=True.
+        Marks neurons with zero downstream connections as complete; cache
+        rows prove completeness for neurons with connections (verified
+        against the server), so ``downstream_complete`` is only the
+        zero-outdegree marker.
         Used by build_connection_cache after consolidation.
         
         Parameters:
         -----------
         bodyids : list
-            List of bodyIds to mark as complete
+            List of bodyIds to update
         connection_counts : dict, optional
             Dict mapping bodyId (str) -> connection count. If provided, updates
-            connection_count for each neuron. If None, sets connection_count=0.
+            connection_count for each neuron. If None, sets connection_count=0
+            and marks all neurons complete (the empty-fetch case: every
+            neuron was fetched and has zero connections).
         '''
         neuron_index = self._load_neuron_index()
         # The string bodyId column is reused several times below; casting it
@@ -4526,11 +4567,26 @@ class FindNeuronConnection:
         existing_bids = [bid for bid in bodyids_str if bid in existing_set]
         if existing_bids and not neuron_index.empty and index_str is not None:
             hit_mask = index_str.isin(set(existing_bids))
-            neuron_index.loc[hit_mask, 'downstream_complete'] = True
             neuron_index.loc[hit_mask, 'last_fetched'] = now
             if connection_counts is not None:
                 count_map = {bid: connection_counts.get(bid, 0) for bid in existing_bids}
                 neuron_index.loc[hit_mask, 'connection_count'] = index_str[hit_mask].map(count_map)
+                # The completion flag is only the zero-outdegree marker:
+                # rows in the cache prove completeness for neurons with
+                # connections (verified against the server), so the flag is
+                # set solely for neurons verified to have 0 downstream rows.
+                neuron_index.loc[hit_mask, 'downstream_complete'] = (
+                    index_str[hit_mask].map(count_map) == 0
+                )
+            else:
+                # No counts: the batch produced no rows at all, i.e. every
+                # neuron has zero downstream connections (empty-fetch case).
+                # connection_count is reset to 0 as well: a stale positive
+                # count would otherwise keep the neuron in the refetch set
+                # on every later run (rows are the completeness proof, so a
+                # positive count without rows reads as stale).
+                neuron_index.loc[hit_mask, 'connection_count'] = 0
+                neuron_index.loc[hit_mask, 'downstream_complete'] = True
         
         # Add new entries in bulk
         new_entries = []
@@ -4545,7 +4601,7 @@ class FindNeuronConnection:
                 'type': info['type'],
                 'instance': info['instance'],
                 'post': info['post'],
-                'downstream_complete': True,
+                'downstream_complete': bool(count == 0),
                 'last_fetched': now,
                 'connection_count': count
             })
@@ -5705,18 +5761,52 @@ class FindNeuronConnection:
         from neuprint import fetch_adjacencies
 
         target_ints = [int(value) for value in downstream_bodyIds]
-        adjacency_kwargs = dict(getattr(self, 'kwargs_fetch', {}) or {})
-        adjacency_kwargs.pop('batch_size', None)
-        adjacency_kwargs['batch_size'] = max(1, len(target_ints))
-        _neuron_df, roi_conn_df = fetch_adjacencies(
-            sources=None,
-            targets=target_ints,
-            min_total_weight=1,
-            **adjacency_kwargs,
-        )
-        if roi_conn_df is None or roi_conn_df.empty:
+        api_call_with_retry, APITimeoutError, APIRetryExhaustedError, APICancelError = _get_api_retry_utils()
+
+        # Split the target frontier into chunks that the NeuPrint server can
+        # answer within the per-attempt timeout.  One unbounded incoming
+        # query for a large frontier (thousands of target neurons) used to
+        # run without any timeout/retry wrapper and could hang the whole
+        # backward discovery indefinitely.
+        frames = []
+        for start in range(0, len(target_ints), 200):
+            chunk = target_ints[start:start + 200]
+            adjacency_kwargs = dict(getattr(self, 'kwargs_fetch', {}) or {})
+            adjacency_kwargs.pop('batch_size', None)
+            adjacency_kwargs['batch_size'] = max(1, len(chunk))
+
+            def _retry_notice(attempt, exc):
+                self._vprint(
+                    f'     ⚠️ Server not responding (incoming lookup of '
+                    f'{len(chunk)} target neurons) — reconnecting, '
+                    f'attempt {attempt}/5...',
+                    level='always',
+                )
+
+            try:
+                roi_conn_df = api_call_with_retry(
+                    lambda: fetch_adjacencies(
+                        sources=None,
+                        targets=chunk,
+                        min_total_weight=1,
+                        **adjacency_kwargs,
+                    )[1],
+                    timeout=120.0,  # 2 minutes per chunk
+                    max_retries=5,
+                    retry_delay=5.0,
+                    description=f'Incoming lookup ({len(chunk)} target neurons)',
+                    on_retry=_retry_notice,
+                    verbose=True,
+                )
+            except (APITimeoutError, APIRetryExhaustedError) as e:
+                raise RuntimeError(
+                    f'NeuPrint incoming lookup failed after retries: {e}'
+                ) from e
+            if roi_conn_df is not None and not roi_conn_df.empty:
+                frames.append(roi_conn_df)
+        if not frames:
             return self._empty_path_connection_frame()
-        return roi_conn_df
+        return pd.concat(frames, ignore_index=True)
 
     def _fetch_path_connections_backward(self, downstream_bodyIds,
                                          source_bodyIds=None):
@@ -6046,12 +6136,22 @@ class FindNeuronConnection:
                                             desc='Pulling connections',
                                             unit='neuron', leave=False)
                             failed_batches = []
+                            # A single unbounded "all downstream" query for a
+                            # whole batch can run for minutes on dense datasets
+                            # (e.g. male-cns:v1.0) and exceed the per-attempt
+                            # timeout - the same failure the Settings pull
+                            # had. Split each batch into 10-neuron sub-batches
+                            # so every query completes within the timeout; a
+                            # failed sub-batch is recorded and the remaining
+                            # ones still proceed (path finding continues with
+                            # partial data, as it always did for failures).
+                            sub_batch_size = 10
                             for batch_idx, batch in enumerate(batches):
-                                def fetch_batch(b=batch):
+                                def fetch_sub_batch(sub):
                                     """Inner function for timeout wrapping."""
                                     if self.simple_fetch:
                                         from neuprint import fetch_simple_connections
-                                        upstream_criteria = NeuronCriteria(bodyId=b)
+                                        upstream_criteria = NeuronCriteria(bodyId=sub)
                                         downstream_criteria = NeuronCriteria(bodyId=neuprint_downstream) if neuprint_downstream is not None else None
                                         with _suppress_nested_fetch_progress():
                                             return fetch_simple_connections(
@@ -6072,10 +6172,10 @@ class FindNeuronConnection:
                                         # bars from the output stream.
                                         adjacency_kwargs = dict(self.kwargs_fetch)
                                         adjacency_kwargs.pop('batch_size', None)
-                                        adjacency_kwargs['batch_size'] = max(1, len(b))
+                                        adjacency_kwargs['batch_size'] = max(1, len(sub))
                                         with _suppress_nested_fetch_progress():
                                             neuron_df, roi_conn_df = fetch_adjacencies(
-                                                sources=b,
+                                                sources=sub,
                                                 targets=neuprint_downstream,
                                                 min_total_weight=1,
                                                 **adjacency_kwargs
@@ -6085,37 +6185,51 @@ class FindNeuronConnection:
 
                                 def _retry_notice(attempt, exc):
                                     self._vprint(
-                                        f'     ⚠️ Server not responding (batch {batch_idx+1}/{len(batches)}) '
+                                        f'     ⚠️ Server not responding (sub-batch of {len(current_sub)} '
+                                        f'neurons, batch {batch_idx+1}/{len(batches)}) '
                                         f'— reconnecting, attempt {attempt}/5...',
                                         level='always',
                                     )
 
-                                try:
-                                    # Use timeout and retry for each batch
-                                    batch_conn = api_call_with_retry(
-                                        fetch_batch,
-                                        timeout=120.0,  # 2 minutes per batch
-                                        max_retries=5,
-                                        retry_delay=5.0,
-                                        description=f"Batch {batch_idx+1}/{len(batches)}",
-                                        on_retry=_retry_notice,
-                                        verbose=True
-                                    )
-                                    if batch_conn is not None and not batch_conn.empty:
-                                        all_api_conn.append(batch_conn)
-                                except (APITimeoutError, APIRetryExhaustedError) as e:
-                                    self._vprint(f"     ⚠️ Batch {batch_idx+1} failed after retries: {e}", level='always')
-                                    failed_batches.append(batch_idx + 1)
-                                except Exception as e:
-                                    self._vprint(f"     ⚠️ Error fetching batch {batch_idx+1}: {e}", level='full')
-                                    failed_batches.append(batch_idx + 1)
-                                finally:
-                                    progress.update(len(batch))
-                                    if hasattr(progress, 'set_postfix_str'):
-                                        progress.set_postfix_str(
-                                            f'batch {batch_idx + 1}/{len(batches)}',
-                                            refresh=True,
+                                sub_frames = []
+                                sub_failed = 0
+                                for sub_start in range(0, len(batch), sub_batch_size):
+                                    current_sub = batch[sub_start:sub_start + sub_batch_size]
+                                    try:
+                                        # Use timeout and retry for each sub-batch
+                                        sub_conn = api_call_with_retry(
+                                            lambda s=current_sub: fetch_sub_batch(s),
+                                            timeout=120.0,  # 2 minutes per sub-batch
+                                            max_retries=5,
+                                            retry_delay=5.0,
+                                            description=f"Batch {batch_idx+1}/{len(batches)} ({len(current_sub)} neurons)",
+                                            on_retry=_retry_notice,
+                                            verbose=True
                                         )
+                                        if sub_conn is not None and not sub_conn.empty:
+                                            sub_frames.append(sub_conn)
+                                    except (APITimeoutError, APIRetryExhaustedError) as e:
+                                        self._vprint(f"     ⚠️ Sub-batch of {len(current_sub)} neurons failed after retries: {e}", level='always')
+                                        sub_failed += 1
+                                    except Exception as e:
+                                        self._vprint(f"     ⚠️ Error fetching sub-batch: {e}", level='full')
+                                        sub_failed += 1
+                                if sub_frames:
+                                    batch_conn = pd.concat(sub_frames, ignore_index=True)
+                                else:
+                                    batch_conn = pd.DataFrame()
+                                if sub_failed:
+                                    failed_batches.append(batch_idx + 1)
+                                    n_sub = (len(batch) + sub_batch_size - 1) // sub_batch_size
+                                    self._vprint(f"     ⚠️ {sub_failed}/{n_sub} sub-batches failed in batch {batch_idx+1}", level='full')
+                                if batch_conn is not None and not batch_conn.empty:
+                                    all_api_conn.append(batch_conn)
+                                progress.update(len(batch))
+                                if hasattr(progress, 'set_postfix_str'):
+                                    progress.set_postfix_str(
+                                        f'batch {batch_idx + 1}/{len(batches)}',
+                                        refresh=True,
+                                    )
                         finally:
                             if progress is not None:
                                 progress.close()
@@ -7298,12 +7412,19 @@ class FindNeuronConnection:
             # Use O(1) dict lookup
             for bodyId in target_bodyIds:
                 bodyId_str = str(bodyId)
-                if bodyId_str in self._neuron_index_dict:
-                    neuron_data = self._neuron_index_dict[bodyId_str]
+                neuron_data = self._neuron_index_dict.get(bodyId_str)
+                if neuron_data is not None:
                     is_complete = neuron_data.get('downstream_complete', False)
                     connection_count = neuron_data.get('connection_count', -1)
                     has_cached_rows = bodyId_str in cached_upstream_bodyids
-                    if is_complete and (has_cached_rows or connection_count == 0):
+                    # Rows in the connection cache are complete downstream
+                    # sets: every writer (the pull and path finding's
+                    # unbounded weight>=1 fetch) stores full downstream
+                    # rows, so rows alone prove the neuron is already
+                    # cached. The completion flag is only required for the
+                    # legitimate zero-outdegree case (no rows but
+                    # connection_count == 0).
+                    if has_cached_rows or (is_complete and connection_count == 0):
                         already_cached_set.add(bodyId_str)
                     elif is_complete:
                         stale_complete.append(bodyId_str)
@@ -7348,8 +7469,13 @@ class FindNeuronConnection:
         # immediately show the real target (0/N) instead of an empty 0/0
         # while the first batch is still in flight (in parallel mode the
         # per-batch callback would otherwise wait for a completed batch).
+        # The already-cached count gives the UI the full context of a
+        # resumable pull (X remaining of a dataset that is mostly cached).
         if progress_callback:
-            progress_callback(0, total, f"Batch 1/{total_batches}")
+            progress_callback(
+                0, total,
+                f"Batch 1/{total_batches} · {already_cached_count:,} already cached",
+            )
         
         _print(f"\nFetching connections for {total:,} neurons...")
         _print(f"  Strategy: Fetch each batch's downstream, append to cache immediately")
@@ -7502,7 +7628,11 @@ class FindNeuronConnection:
                             if not quiet and hasattr(batch_iter, 'update'):
                                 batch_iter.update(1)
                             if progress_callback:
-                                progress_callback(i, total, f"Batch {i // batch_size + 1}/{total_batches}")
+                                progress_callback(
+                                    i, total,
+                                    f"Batch {i // batch_size + 1}/{total_batches} · "
+                                    f"{already_cached_count:,} already cached",
+                                )
                             next_i = next(batch_indices, None)
                             if next_i is not None:
                                 pending[executor.submit(
@@ -7527,7 +7657,11 @@ class FindNeuronConnection:
                         finish_cancelled()
                         break
                     if progress_callback:
-                        progress_callback(i, total, f"Batch {i // batch_size + 1}/{total_batches}")
+                        progress_callback(
+                            i, total,
+                            f"Batch {i // batch_size + 1}/{total_batches} · "
+                            f"{already_cached_count:,} already cached",
+                        )
                     try:
                         process_batch(i)
                     except _FetchCancelled:
@@ -7692,7 +7826,7 @@ class FindNeuronConnection:
         try:
             self._ensure_neuprint_client()
             
-            from neuprint import fetch_adjacencies, NeuronCriteria
+            from neuprint import fetch_adjacencies, NeuronCriteria, default_client
             import statvis as sv
             
             # Ensure bodyIds are integers
@@ -7701,58 +7835,113 @@ class FindNeuronConnection:
 
             api_call_with_retry, APITimeoutError, APIRetryExhaustedError, APICancelError = _get_api_retry_utils()
 
-            def fetch_batch():
-                if cancel_event is not None and cancel_event.is_set():
-                    raise _FetchCancelled('cancelled before bulk fetch')
-                if self.simple_fetch:
-                    from neuprint import fetch_simple_connections
-                    upstream_criteria = NeuronCriteria(bodyId=upstream_ints)
-                    downstream_criteria = NeuronCriteria(bodyId=downstream_ints) if downstream_ints else None
-                    return fetch_simple_connections(
-                        upstream_criteria=upstream_criteria,
-                        downstream_criteria=downstream_criteria,
-                        min_weight=1,
-                        **self.kwargs_fetch
-                    )
-                else:
-                    adjacency_kwargs = dict(self.kwargs_fetch)
-                    adjacency_kwargs.pop('batch_size', None)
-                    adjacency_kwargs['batch_size'] = max(1, len(upstream_ints))
-                    neuron_df, roi_conn_df = fetch_adjacencies(
-                        sources=upstream_ints,
-                        targets=downstream_ints,
-                        min_total_weight=1,
-                        **adjacency_kwargs
-                    )
-                    # roi_conn_df already has bodyId_pre, bodyId_post, roi, weight
-                    return roi_conn_df
-
-            def _retry_notice(attempt, exc):
-                if cancel_event is not None and cancel_event.is_set():
-                    raise _FetchCancelled('cancelled during retry')
-                _status(f'⚠️ Server not responding (batch of {len(upstream_ints)} neurons) '
-                        f'— reconnecting, attempt {attempt}/5...')
-
+            # Cheap count-first pass: neurons with zero downstream partners
+            # (verified sink/isolated neurons dominate the tail of a
+            # nearly-complete cache) are detected with one lightweight count
+            # query per batch and skipped entirely.  A full downstream query
+            # costs ~10 s per 10-neuron sub-batch even when the result is
+            # empty (server-side planning dominates), so skipping the zeros
+            # turns the completion of the last few thousand neurons from
+            # minutes into seconds.  The batch-level caller marks the
+            # skipped neurons complete with connection_count=0.
+            zero_ids = set()
             try:
-                result = api_call_with_retry(
-                    fetch_batch,
-                    timeout=120.0,  # 2 minutes per batch
-                    max_retries=5,
-                    retry_delay=5.0,
-                    description=f'Bulk fetch ({len(upstream_ints)} neurons)',
-                    on_retry=_retry_notice,
-                    verbose=True,
+                counts_df = api_call_with_retry(
+                    lambda: default_client().fetch_custom(
+                        'MATCH (n:Neuron)-[e:ConnectsTo]->(m:Neuron) '
+                        f'WHERE n.bodyId IN {upstream_ints} '
+                        'RETURN n.bodyId AS id, '
+                        'count(DISTINCT m.bodyId) AS partners'
+                    ),
+                    timeout=60.0,
+                    max_retries=2,
+                    retry_delay=3.0,
+                    description='Downstream partner count',
+                    verbose=False,
                     cancel_event=cancel_event,
                 )
-            except APICancelError as e:
-                # The Settings-tab cancel aborts the in-flight wait within
-                # ~0.5 s instead of waiting out the batch timeout.
-                raise _FetchCancelled('cancelled during bulk fetch') from e
-            except (APITimeoutError, APIRetryExhaustedError) as e:
-                _status(f'⚠️ Server not responding — batch failed after retries: {e}')
-                raise RuntimeError(f'NeuPrint bulk fetch failed after retries: {e}') from e
-            
-            return result if result is not None else pd.DataFrame()
+                if counts_df is not None and not counts_df.empty:
+                    zero_ids = {
+                        str(r['id'])
+                        for r in counts_df.to_dict('records')
+                        if int(r['partners']) == 0
+                    }
+            except APICancelError:
+                raise
+            except Exception:
+                # Count shortcut unavailable: fetch everything (previous
+                # behavior).  A count-query failure must never block the pull.
+                zero_ids = set()
+            fetch_ints = [i for i in upstream_ints if str(i) not in zero_ids]
+
+            # Split the batch into sub-batches small enough for the NeuPrint
+            # server to answer within the per-attempt timeout.  One unbounded
+            # "all downstream" query for 100 neurons can run for minutes on
+            # dense datasets (e.g. male-cns:v1.0), which made every pull
+            # batch time out and fail with "Server not responding" while the
+            # pull stayed at 0% - path finding only worked because its
+            # queries cover far fewer neurons.  10-neuron queries complete in
+            # well under the 120 s timeout even for the densest neurons and
+            # under server load.
+            sub_batch_size = 10
+            frames = []
+            for i in range(0, len(fetch_ints), sub_batch_size):
+                sub_ints = fetch_ints[i:i + sub_batch_size]
+
+                def fetch_batch(sub=sub_ints):
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise _FetchCancelled('cancelled before bulk fetch')
+                    if self.simple_fetch:
+                        from neuprint import fetch_simple_connections
+                        upstream_criteria = NeuronCriteria(bodyId=sub)
+                        downstream_criteria = NeuronCriteria(bodyId=downstream_ints) if downstream_ints else None
+                        return fetch_simple_connections(
+                            upstream_criteria=upstream_criteria,
+                            downstream_criteria=downstream_criteria,
+                            min_weight=1,
+                            **self.kwargs_fetch
+                        )
+                    else:
+                        adjacency_kwargs = dict(self.kwargs_fetch)
+                        adjacency_kwargs.pop('batch_size', None)
+                        adjacency_kwargs['batch_size'] = max(1, len(sub))
+                        neuron_df, roi_conn_df = fetch_adjacencies(
+                            sources=sub,
+                            targets=downstream_ints,
+                            min_total_weight=1,
+                            **adjacency_kwargs
+                        )
+                        # roi_conn_df already has bodyId_pre, bodyId_post, roi, weight
+                        return roi_conn_df
+
+                def _retry_notice(attempt, exc):
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise _FetchCancelled('cancelled during retry')
+                    _status(f'⚠️ Server not responding (batch of {len(sub_ints)} neurons) '
+                            f'— reconnecting, attempt {attempt}/5...')
+
+                try:
+                    result = api_call_with_retry(
+                        fetch_batch,
+                        timeout=120.0,  # 2 minutes per sub-batch
+                        max_retries=5,
+                        retry_delay=5.0,
+                        description=f'Bulk fetch ({len(sub_ints)} neurons)',
+                        on_retry=_retry_notice,
+                        verbose=True,
+                        cancel_event=cancel_event,
+                    )
+                except APICancelError as e:
+                    # The Settings-tab cancel aborts the in-flight wait within
+                    # ~0.5 s instead of waiting out the batch timeout.
+                    raise _FetchCancelled('cancelled during bulk fetch') from e
+                except (APITimeoutError, APIRetryExhaustedError) as e:
+                    _status(f'⚠️ Server not responding — batch failed after retries: {e}')
+                    raise RuntimeError(f'NeuPrint bulk fetch failed after retries: {e}') from e
+                if result is not None and not result.empty:
+                    frames.append(result)
+
+            return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
             
         except _FetchCancelled:
             raise

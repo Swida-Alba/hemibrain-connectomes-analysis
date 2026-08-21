@@ -168,7 +168,21 @@ def show_stats(dataset: str) -> None:
             print(f"  File size: {index_file.stat().st_size / (1024*1024):.2f} MB")
             print(f"  Total neurons indexed: {len(index_df):,}")
             if 'downstream_complete' in index_df.columns:
-                complete = index_df['downstream_complete'].sum()
+                # Rows in the cache prove completeness for neurons with
+                # connections (verified against the server); the flag only
+                # marks the zero-outdegree case.
+                rows_pre = set()
+                try:
+                    rows_pre = set(conn_df['bodyId_pre'].astype(str))
+                except (NameError, KeyError):
+                    pass
+                flagged_zero = set(
+                    index_df.loc[
+                        index_df['downstream_complete'] & (index_df['connection_count'] == 0),
+                        'bodyId',
+                    ].astype(str)
+                )
+                complete = len(rows_pre | flagged_zero)
                 print(f"  Fully cached neurons: {complete:,} ({100*complete/len(index_df):.1f}%)")
         except Exception as e:
             print(f"[WARNING] Could not read neuron index: {e}")

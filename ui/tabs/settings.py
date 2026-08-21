@@ -73,13 +73,14 @@ def create_settings_tab():
         with ui.card().classes("w-full drocat-card"):
             section_header("Dataset Cache", "download")
             ui.label(
-                "Pull a full dataset to local and build the indexed connection cache "
-                "(cache/<dataset>/connections.parquet + neuron_indexes/<dataset>/"
-                "neuron_index.parquet). Re-running "
-                "resumes interrupted builds from their checkpoint; 'Force rebuild' clears "
-                "a broken cache first and rebuilds it completely. 'Pull Complete Connections' "
-                "is an explicit connection-cache action for the selected dataset; it uses "
-                "the same resumable, batched builder and shared connections.parquet cache."
+                "'Pull Dataset Metadata' downloads/verifies only the neuron table, "
+                "ROI table, and the materialized neuron index "
+                "(datasets/<dataset>/ + neuron_indexes/<dataset>/neuron_index.parquet) — "
+                "no connections are fetched. 'Pull Complete Connections' fetches "
+                "the full resumable connection cache "
+                "(cache/<dataset>/connections.parquet) and skips already-cached "
+                "neurons; 'Force rebuild' clears a broken cache first and rebuilds "
+                "it completely."
             ).classes("text-caption drocat-muted")
 
             def _format_eta(st) -> str:
@@ -124,10 +125,20 @@ def create_settings_tab():
                 )
 
             with ui.row().classes("items-center gap-2").style("flex-wrap: wrap"):
-                run_btn = ui.button("Pull Full Dataset", icon="download", color="primary")
+                run_btn = ui.button(
+                    "Pull Dataset Metadata", icon="download", color="primary"
+                ).tooltip(
+                    "Downloads/verifies only the dataset neuron table, ROI table, "
+                    "and the materialized neuron index — no connections are "
+                    "fetched. Already-present files are never re-downloaded."
+                )
                 connection_run_btn = ui.button(
                     "Pull Complete Connections", icon="hub", color="secondary"
-                ).props("outline")
+                ).props("outline").tooltip(
+                    "Fetches the complete resumable connection cache "
+                    "(cache/<dataset>/connections.parquet) for every neuron of "
+                    "the dataset; already-cached neurons are skipped."
+                )
                 cancel_btn = ui.button("Cancel", icon="stop", color="negative").props("outline")
                 cancel_btn.set_enabled(False)
 
@@ -173,7 +184,7 @@ def create_settings_tab():
                     operation_label = (
                         "complete connections"
                         if st.get("operation") == "connections"
-                        else "full dataset"
+                        else "dataset metadata"
                     )
                     if st.get("cancel_requested"):
                         # Wind-down after Cancel: the in-flight batch and the
@@ -198,7 +209,7 @@ def create_settings_tab():
                         progress_label.text = f"{frac * 100:.2f}%"
                         status_label.text = (
                             f"Pulling {operation_label} for {st['dataset']}: {st['info']} "
-                            f"({st['current']:,}/{st['total']:,} neurons, "
+                            f"({st['current']:,}/{st['total']:,} neurons remaining, "
                             f"{frac * 100:.2f}%) | {_format_eta(st)}"
                         )
                     else:
@@ -227,31 +238,44 @@ def create_settings_tab():
                     result_label.text = f"❌ {st['error']}"
                 else:
                     s = st["summary"] or {}
-                    operation_label = (
-                        "Complete connection pull"
-                        if st.get("operation") == "connections"
-                        else "Full dataset pull"
-                    )
-                    if st["cancelled"]:
-                        # Leave the bar where the pull stopped; the result
-                        # line says it can be resumed.
-                        progress_label.text = ""
+                    if st.get("operation") == "full_dataset":
+                        # Metadata-only pull: no connection totals exist.
+                        head = (
+                            "⏹ Cancelled during metadata preparation."
+                            if st["cancelled"]
+                            else "✅ Dataset metadata ready."
+                        )
+                        result_label.text = (
+                            f"{head} Neuron table: {s.get('neuron_count', 0):,} "
+                            f"neurons | index rows: {s.get('index_rows', 0):,} | "
+                            f"{s.get('elapsed_time', 0):.1f}s"
+                        )
                     else:
-                        progress.set_value(1.0)
-                        progress_label.text = "100%"
-                    head = (
-                        "⏹ Cancelled - fetched batches consolidated; re-run to resume."
-                        if st["cancelled"]
-                        else f"✅ {operation_label} complete."
-                    )
-                    result_label.text = (
-                        f"{head} Target: {s.get('total_neurons', 0):,} | "
-                        f"newly cached: {s.get('newly_cached', 0):,} | "
-                        f"already cached: {s.get('already_cached', 0):,} | "
-                        f"failed: {len(s.get('failed_neurons', [])):,} | "
-                        f"connections: {s.get('total_connections', 0):,} | "
-                        f"{s.get('elapsed_time', 0):.1f}s"
-                    )
+                        operation_label = (
+                            "Complete connection pull"
+                            if st.get("operation") == "connections"
+                            else "Dataset metadata pull"
+                        )
+                        if st["cancelled"]:
+                            # Leave the bar where the pull stopped; the result
+                            # line says it can be resumed.
+                            progress_label.text = ""
+                        else:
+                            progress.set_value(1.0)
+                            progress_label.text = "100%"
+                        head = (
+                            "⏹ Cancelled - fetched batches consolidated; re-run to resume."
+                            if st["cancelled"]
+                            else f"✅ {operation_label} complete."
+                        )
+                        result_label.text = (
+                            f"{head} Target: {s.get('total_neurons', 0):,} | "
+                            f"newly cached: {s.get('newly_cached', 0):,} | "
+                            f"already cached: {s.get('already_cached', 0):,} | "
+                            f"failed: {len(s.get('failed_neurons', [])):,} | "
+                            f"connections: {s.get('total_connections', 0):,} | "
+                            f"{s.get('elapsed_time', 0):.1f}s"
+                        )
                     status_label.text = "Idle"
 
             def _start_pull(operation: str):
@@ -405,7 +429,7 @@ def create_settings_tab():
 
             def start_skeleton_pull():
                 if puller.running:
-                    ui.notify("Finish the full dataset pull before downloading skeletons", type="warning")
+                    ui.notify("Finish the active dataset/connection pull before downloading skeletons", type="warning")
                     return
                 dataset = str(ds_select.value)
                 # Bulk skeleton downloads are disabled for FlyWire datasets:

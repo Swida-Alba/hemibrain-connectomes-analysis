@@ -52,9 +52,14 @@
 
   <h2>Dataset and connection cache</h2>
   <p>In <b>Dataset Cache</b>, choose a dataset and set the batch size and
-    parallel worker count. <b>Pull Full Dataset</b> builds the local neuron
-    index and the resumable connection cache. <b>Pull Complete Connections</b>
-    provides an explicit connection-cache pull for the selected dataset.
+    parallel worker count. <b>Pull Dataset Metadata</b> downloads/verifies only
+    the neuron table, ROI table, and the materialized neuron index
+    (<code>datasets/&lt;dataset&gt;/</code> + <code>neuron_indexes/&lt;dataset&gt;/neuron_index.parquet</code>);
+    no connections are fetched, and already-present files are never
+    re-downloaded. <b>Pull Complete Connections</b> fetches the full resumable
+    connection cache
+    (<code>cache/&lt;dataset&gt;/connections.parquet</code>), skipping neurons that
+    are already cached (rows or verified zero-outdegree).
     <b>Download All Skeletons</b> sits below the dataset pull controls,
     right above its own progress bar, together with the
     <b>Cache Simplification</b>
@@ -65,8 +70,9 @@
     affect progress granularity; larger batches only reduce the repeated
     per-batch metadata queries. The <b>Parallel workers</b> field above sets how
     many skeleton fetches run concurrently - raising it is the main speed
-    lever (up to what the server tolerates). The connection actions use the same batched builder and shared
-    <code>cache/&lt;dataset&gt;/connections.parquet</code> cache, so either action
+    lever (up to what the server tolerates). The connection pull uses the
+    batched builder and shared
+    <code>cache/&lt;dataset&gt;/connections.parquet</code> cache, so it
     can resume an interrupted pull. Enable <b>Force rebuild</b> only when the
     existing connection cache needs to be replaced.</p>
 

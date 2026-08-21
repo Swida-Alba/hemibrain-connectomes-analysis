@@ -1,13 +1,15 @@
-"""Background worker for pulling a full dataset into the local cache.
+"""Background worker for pulling dataset metadata and connections.
 
-Runs ``FindNeuronConnection.build_connection_cache()`` in a worker thread so
-the UI stays responsive; the Settings tab polls :attr:`DatasetPuller.state`
-with a ``ui.timer`` and renders progress.
+Runs in a worker thread so the UI stays responsive; the Settings tab polls
+:attr:`DatasetPuller.state` with a ``ui.timer`` and renders progress.
 
 Supported workflows:
-- **Full pull** - fetches every neuron's downstream connections and builds
-  ``cache/<dataset>/connections.parquet`` +
-  ``neuron_indexes/<dataset>/neuron_index.parquet``.
+- **Dataset metadata** (``operation='full_dataset'``) - downloads/verifies the
+  full neuron table and ROI table (``datasets/<ds>/<ds>_allneurons_neuron_df.csv``
+  + ``_roi_count_df.parquet``) and builds the materialized neuron index
+  (``neuron_indexes/<ds>/neuron_index.parquet``).  No connections are fetched.
+- **Connections** (``operation='connections'``) - fetches every neuron's
+  downstream connections and builds ``cache/<ds>/connections.parquet``.
 - **Resume / finish** - already-cached neurons are skipped and interrupted
   runs (crashes, network errors, manual cancel) are consolidated from their
   checkpoint batch files, so re-running simply continues where it stopped.
@@ -68,9 +70,10 @@ class DatasetPuller:
     ) -> bool:
         """Start a background pull.
 
-        ``operation`` is a UI label (``full_dataset`` or ``connections``);
-        both operations intentionally use the same resumable connection-cache
-        builder so they share the same parquet cache and batching behavior.
+        ``operation`` selects what is pulled:
+        - ``full_dataset``: dataset metadata only (neuron table + ROI table +
+          materialized neuron index; no connections are fetched).
+        - ``connections``: the complete resumable connection cache.
         Returns False when one is already running.
         """
         with self._lock:
@@ -137,6 +140,81 @@ class DatasetPuller:
             self._state["info"] = msg
 
     def _run(
+        self,
+        dataset: str,
+        force_rebuild: bool,
+        batch_size: int,
+        max_workers: Optional[int],
+    ) -> None:
+        operation = self._state.get("operation", "full_dataset")
+        if operation == "connections":
+            self._run_connections(dataset, force_rebuild, batch_size, max_workers)
+        else:
+            self._run_metadata(dataset)
+
+    def _run_metadata(self, dataset: str) -> None:
+        """Pull only the dataset metadata: neuron table, ROI table, index.
+
+        ``FindNeuronConnection`` already ensures the metadata during init;
+        the explicit calls below keep the button meaningful on its own and
+        idempotent (already-present files are never re-downloaded).  No
+        connection data is fetched or modified.
+        """
+        try:
+            from coana import FindNeuronConnection
+
+            self._phase(
+                "prepare",
+                "Checking local dataset files (a first pull downloads the "
+                "full neuron table and ROI table if missing)...",
+            )
+            fc = FindNeuronConnection(
+                dataset=dataset,
+                use_cache=True,
+                cache_only=False,
+                verbose=False,
+            )
+            fc._ensure_complete_dataset()
+            fc._ensure_neuron_index_from_metadata()
+            if self._cancel_event.is_set():
+                with self._lock:
+                    self._state["summary"] = {
+                        "operation": "full_dataset",
+                        "cancelled": True,
+                    }
+                    self._state["cancelled"] = True
+                    self._state["info"] = "Cancelled during metadata preparation."
+                    self._state["done"] = True
+                return
+            neuron_count = 0
+            index_rows = 0
+            try:
+                neuron_count = len(fc._get_all_dataset_bodyids() or [])
+            except Exception:
+                pass
+            try:
+                index_rows = len(fc._load_neuron_index())
+            except Exception:
+                pass
+            with self._lock:
+                self._state["summary"] = {
+                    "operation": "full_dataset",
+                    "neuron_count": neuron_count,
+                    "index_rows": index_rows,
+                    "elapsed_time": time.time() - self._state.get("started_at", time.time()),
+                }
+                self._state["info"] = "Finished."
+                self._state["done"] = True
+        except Exception as exc:  # network errors, token problems, ...
+            with self._lock:
+                self._state["error"] = f"{type(exc).__name__}: {exc}"
+                self._state["info"] = "Failed."
+                self._state["done"] = True
+        finally:
+            with self._lock:
+                self._state["running"] = False
+
+    def _run_connections(
         self,
         dataset: str,
         force_rebuild: bool,
