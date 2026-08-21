@@ -37,6 +37,43 @@ def dataset_folder(dataset: object) -> str:
     return str(dataset or "").replace(":", "_").replace(".", "_")
 
 
+def flywire_manual_skeleton_instruction(
+    dataset: object, dataset_dir: str | Path | None = None,
+) -> str:
+    """Explicit manual-download instruction for FlyWire skeleton bundles.
+
+    Bulk skeleton downloads are disabled for FlyWire datasets: their skeleton
+    bundles (e.g. ``sk_lod1_783_healed.zip`` for FAFB) are large one-time
+    downloads that must be fetched manually from the FlyWire Codex and placed
+    by the converter.  This is the single source of truth for that message,
+    used by the ``download_all_skeletons`` guard and the Settings tab.
+    """
+
+    dataset_name = str(dataset or "")
+    key = "banc" if is_banc_dataset(dataset_name) else "fafb"
+    converter = "BANC_file_converter" if key == "banc" else "FAFB_file_converter"
+    folder = dataset_folder(dataset_name)
+    if dataset_dir is None:
+        root = Path(__file__).resolve().parents[2]
+        dataset_dir = root / "datasets" / folder
+    download_dir = Path(dataset_dir) / "downloads"
+    bundle = (
+        "the BANC download from"
+        if key == "banc"
+        else "the FAFB skeleton bundle (sk_lod1_783_healed.zip) from"
+    )
+    return (
+        f"Download All Skeletons is disabled for FlyWire datasets "
+        f"('{dataset_name}'); skeletons must be downloaded manually:\n"
+        f"  1. Download {bundle} https://codex.flywire.ai/api/download?dataset={key}\n"
+        f"  2. Save the download into {download_dir}\n"
+        f"  3. Run the one-time converter: python src/{converter}.py\n"
+        "The converter moves the bundle into the dataset folder and builds "
+        "the local tables; on-demand CAVE fetches for individual missing "
+        "skeletons still work during visualization."
+    )
+
+
 def print_download_instructions(
     dataset: object,
     dataset_dir: str | Path | None = None,

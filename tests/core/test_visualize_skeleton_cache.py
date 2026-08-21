@@ -1,9 +1,10 @@
-"""Raw NeuPrint skeleton cache and render-time simplification.
+"""NeuPrint skeleton cache and render-time simplification.
 
 Covers `VisualizeSkeleton._save_cached_neurons` / `_load_cached_neurons` /
 `_skeleton_cache_is_simplified`:
-- NeuPrint caches hold the raw skeleton in the shared compressed-SWC namespace
-- every visualization simplification level reuses that raw source
+- NeuPrint caches hold the simplified skeleton (90% default) in the shared
+  compressed-SWC namespace (.swc.zst, level recorded in the header)
+- every visualization simplification level reuses that cached source
 - no visualization fetch writes a `.pkl` skeleton or `.level` marker
 """
 
@@ -67,7 +68,7 @@ def build_vs(tmp_path, dataset="hemibrain:v1.2.1", cache_neurons=True):
 
 
 class TestNeuPrintSimplifiedCache:
-    def test_save_writes_raw_swc_without_marker(self, tmp_path):
+    def test_save_writes_simplified_swc_without_marker(self, tmp_path):
         vs = build_vs(tmp_path)
         neuron = make_neuron(120)
         neuron.id = 101
@@ -76,7 +77,7 @@ class TestNeuPrintSimplifiedCache:
 
         cache_dir = (Path(tmp_path) / "cache" / "hemibrain_v1_2_1"
                      / "skeletons")
-        raw_path = cache_dir / "raw_skeletons" / "101.swc.gz"
+        raw_path = cache_dir / "raw_skeletons" / "101.swc.zst"
         assert raw_path.exists()
         assert not (cache_dir / "101.pkl").exists()
         assert not (cache_dir / ".level").exists()
@@ -85,7 +86,9 @@ class TestNeuPrintSimplifiedCache:
             pd.DataFrame({"bodyId": [101]}))
         assert missing == []
         assert cached is not None and len(cached) == 1
-        assert len(cached[0].nodes) == len(neuron.nodes)
+        # shared pipeline default: 90% simplified, level recorded in header
+        assert cached[0]._drocat_simplification == 90
+        assert len(cached[0].nodes) < len(neuron.nodes)
 
     def test_save_is_independent_of_render_simplification(self, tmp_path):
         vs = build_vs(tmp_path)
@@ -96,11 +99,11 @@ class TestNeuPrintSimplifiedCache:
         vs._save_cached_neurons(pd.DataFrame({"bodyId": [101]}), [neuron])
 
         raw_path = (Path(tmp_path) / "cache" / "hemibrain_v1_2_1"
-                    / "skeletons" / "raw_skeletons" / "101.swc.gz")
+                    / "skeletons" / "raw_skeletons" / "101.swc.zst")
         assert raw_path.exists()
         assert not raw_path.with_name("101.pkl").exists()
 
-    def test_load_reads_raw_cache(self, tmp_path):
+    def test_load_reads_cached_level(self, tmp_path):
         vs = build_vs(tmp_path)
         neuron = make_neuron(120)
         neuron.id = 101
@@ -108,7 +111,8 @@ class TestNeuPrintSimplifiedCache:
         neurons, missing = vs._load_cached_neurons(pd.DataFrame({"bodyId": [101, 202]}))
         assert missing == [202]
         assert neurons is not None and len(neurons) == 1
-        assert len(neurons[0].nodes) == len(neuron.nodes)
+        assert neurons[0]._drocat_simplification == 90
+        assert len(neurons[0].nodes) < len(neuron.nodes)
         assert vs._skeleton_cache_is_simplified() is False
 
     def test_ignore_cache_reports_all_missing(self, tmp_path):

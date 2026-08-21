@@ -95,7 +95,7 @@ def _vs(tmp_path, simplification=0.9):
 
 
 class TestSimplifiedCacheE2E:
-    def test_fetch_writes_raw_swc_cache_only(self, tmp_path, probe_neurons):
+    def test_fetch_writes_simplified_swc_cache_only(self, tmp_path, probe_neurons):
         vs = _vs(tmp_path)
         cache_dir = Path(tmp_path) / "cache" / FOLDER / "skeletons"
         neuron_df = pd.DataFrame({"bodyId": PROBE_IDS})
@@ -104,10 +104,12 @@ class TestSimplifiedCacheE2E:
 
         raw_dir = cache_dir / "raw_skeletons"
         for i, bid in enumerate(PROBE_IDS):
-            assert (raw_dir / f"{bid}.swc.gz").exists()
+            assert (raw_dir / f"{bid}.swc.zst").exists()
             cached = morph._load_cached_skeleton_file(
-                raw_dir / f"{bid}.swc.gz")
-            assert len(cached.nodes) == len(probe_neurons[i].nodes)
+                raw_dir / f"{bid}.swc.zst")
+            # shared pipeline default: 90% simplified, level in the header
+            assert cached._drocat_simplification == 90
+            assert len(cached.nodes) < len(probe_neurons[i].nodes)
         assert not (cache_dir / ".level").exists()
         assert not list(cache_dir.glob("*.pkl"))
 

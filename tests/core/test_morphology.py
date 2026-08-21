@@ -332,7 +332,7 @@ class TestSkeletonVectorCache:
         )
         assert cache.find_skeleton_file(101).parent.name == "raw_skeletons"
         assert type(cache.load_skeleton(101)).__name__ == "TreeNeuron"
-        assert (cache.skeleton_dir / "101.swc.gz").exists()
+        assert (cache.skeleton_dir / "101.swc.zst").exists()
 
     def test_raw_batch_persists_raw_skeleton_but_vector_only_is_independent(
             self, tmp_path, monkeypatch):
@@ -466,7 +466,7 @@ class TestFetchOnDemand:
         assert 101 in first
         skeleton_dir = (tmp_path / "cache" / morph._dataset_folder("np:v1")
                         / "skeletons")
-        assert (skeleton_dir / "raw_skeletons" / "101.swc.gz").exists()
+        assert (skeleton_dir / "raw_skeletons" / "101.swc.zst").exists()
         assert not (skeleton_dir / "101.pkl").exists()
         assert not (skeleton_dir / ".level").exists()
 
@@ -497,7 +497,7 @@ class TestFetchOnDemand:
         )
         assert nrn_raw is not None
         raw_path = (tmp_path / "cache" / morph._dataset_folder("test:v1")
-                    / "skeletons" / "raw_skeletons" / "101.swc.gz")
+                    / "skeletons" / "raw_skeletons" / "101.swc.zst")
         assert raw_path.exists()
 
         # A RAW request reuses the shared compressed cache.
@@ -530,7 +530,7 @@ class TestFetchOnDemand:
             "np:v1", 43, project_root=str(tmp_path)
         )
         assert neuron2 is not None
-        assert (skel_dir / "raw_skeletons" / "43.swc.gz").exists()
+        assert (skel_dir / "raw_skeletons" / "43.swc.zst").exists()
 
     def test_cave_fetch_used_for_flywire(self, monkeypatch, tmp_path):
         used = {}
@@ -1173,6 +1173,373 @@ class TestLevelGuards:
 
 
 # ---------------------------------------------------------------------------
+# Shared simplify + compress pipeline (`.swc.zst`, recorded level)
+# ---------------------------------------------------------------------------
+
+class TestSimplificationPipeline:
+    """The shared simplify + compress cache pipeline: level validation,
+    header recording, re-leveling on load, vector-before-simplify order."""
+
+    def _raw_cache(self, tmp_path, dataset="np:v1", raw_format="swc.zst"):
+        return morph.SkeletonVectorCache(
+            dataset, project_root=str(tmp_path), verbose=False,
+            raw_only=True, raw_format=raw_format)
+
+    def test_level_validation(self):
+        assert morph._simplification_factor(90) == 10
+        assert morph._simplification_factor(50) == 2
+        assert morph._simplification_factor(0) == 1
+        for bad in (91, 100, -1, "50x", None):
+            with pytest.raises(ValueError):
+                morph._simplification_factor(bad)
+
+    def test_header_roundtrip_and_stored_level(self, tmp_path):
+        """simplification=50 writes a .swc.zst with a recorded header and
+        roughly half the raw nodes."""
+        nrn = line_neuron(length=200)
+        raw = len(nrn.nodes)
+        cache = self._raw_cache(tmp_path)
+        assert cache.persist_skeletons({101: nrn}, simplification=50) == 1
+        path = cache.skeleton_dir / "101.swc.zst"
+        assert path.exists()
+        import zstandard as zstd
+        with open(path, "rb") as handle:
+            with zstd.ZstdDecompressor().stream_reader(handle) as reader:
+                content = reader.read()
+        assert b"# DROCAT simpl: 50" in content
+        loaded = morph._load_cached_skeleton_file(path)
+        assert loaded._drocat_simplification == 50
+        assert 0.3 * raw <= len(loaded.nodes) <= 0.7 * raw
+
+    def test_default_simplification_is_90(self, tmp_path):
+        nrn = line_neuron(length=200)
+        cache = self._raw_cache(tmp_path)
+        cache.persist_skeletons({101: nrn})  # default 90
+        loaded = morph._load_cached_skeleton_file(
+            cache.skeleton_dir / "101.swc.zst")
+        assert loaded._drocat_simplification == 90
+        assert len(loaded.nodes) < 0.2 * len(nrn.nodes)
+
+    def test_raw_level_zero_records_header(self, tmp_path):
+        nrn = line_neuron(length=200)
+        cache = self._raw_cache(tmp_path)
+        cache.persist_skeletons({101: nrn}, simplification=0)
+        loaded = morph._load_cached_skeleton_file(
+            cache.skeleton_dir / "101.swc.zst")
+        assert loaded._drocat_simplification == 0
+        assert len(loaded.nodes) == len(nrn.nodes)
+
+    def test_relevel_stored50_to_target90(self, tmp_path):
+        """Stored 50% -> target 90% re-simplifies by factor 5 (keeps 20% of
+        the remaining nodes = "simplify by 80%")."""
+        nrn = line_neuron(length=200)
+        raw_nodes = len(nrn.nodes)
+        cache = self._raw_cache(tmp_path)
+        cache.persist_skeletons({101: nrn}, simplification=50)
+        path = cache.skeleton_dir / "101.swc.zst"
+        stored = morph._load_cached_skeleton_file(path)
+        assert 0.25 * raw_nodes <= len(stored.nodes) <= 0.75 * raw_nodes
+        releveled = morph._load_cached_skeleton_file(
+            path, target_simplification=90)
+        assert releveled._drocat_simplification == 50  # source level kept
+        # factor (100-50)/(100-90) = 5: ~20% of the stored nodes remain
+        assert len(releveled.nodes) < len(stored.nodes)
+        assert len(releveled.nodes) == pytest.approx(
+            len(stored.nodes) / 5, rel=0.5)
+
+    def test_relevel_never_upsamples(self, tmp_path):
+        """Target <= stored: detail cannot be restored -> file used as-is."""
+        nrn = line_neuron(length=200)
+        cache = self._raw_cache(tmp_path)
+        cache.persist_skeletons({101: nrn}, simplification=90)
+        path = cache.skeleton_dir / "101.swc.zst"
+        stored = morph._load_cached_skeleton_file(path)
+        reloaded = morph._load_cached_skeleton_file(
+            path, target_simplification=50)
+        assert len(reloaded.nodes) == len(stored.nodes)
+
+    def test_legacy_headerless_swc_gz_reads_as_raw(self, tmp_path):
+        cache = self._raw_cache(tmp_path)
+        path = cache.skeleton_dir / "202.swc.gz"
+        morph._write_compressed_swc(path, line_neuron(length=100))
+        loaded = morph._load_cached_skeleton_file(path)
+        assert loaded._drocat_simplification == 0
+
+    def test_vectors_before_simplification_order(self, tmp_path, monkeypatch):
+        """fetch_skeleton_on_demand vectorizes the RAW neuron before the
+        simplified file is written; the vector cache is standalone."""
+        events = []
+        nrn = line_neuron(length=200)
+        nrn.id = 101
+        monkeypatch.setattr(morph, "_fetch_neuprint_skeleton",
+                            lambda d, b: nrn)
+
+        real_vectorize = morph.cache_fetched_skeleton_vectors
+
+        def recording_vectorize(dataset, neurons, **kwargs):
+            events.append(("vectorize", int(next(iter(neurons)))))
+            return real_vectorize(dataset, neurons, **kwargs)
+
+        monkeypatch.setattr(morph, "cache_fetched_skeleton_vectors",
+                            recording_vectorize)
+
+        real_downsample = morph._downsample_for_cache
+
+        def recording_downsample(neuron, downsampling_factor=10):
+            events.append(("simplify", int(downsampling_factor)))
+            return real_downsample(neuron, downsampling_factor)
+
+        monkeypatch.setattr(morph, "_downsample_for_cache",
+                            recording_downsample)
+
+        out = morph.fetch_skeleton_on_demand(
+            "np:v1", 101, project_root=str(tmp_path), persist=True)
+        assert out is not None
+        kinds = [e[0] for e in events]
+        assert kinds.index("vectorize") < kinds.index("simplify")
+        # standalone vector cache holds the raw-basis row
+        cache = morph.find_similar_raw_cache(
+            "np:v1", project_root=str(tmp_path), verbose=False)
+        data = cache.load()
+        assert data is not None
+        assert 101 in set(data["bodyIds"].tolist())
+
+    def test_simplified_files_never_vectorized_into_raw_basis(self, tmp_path):
+        """A simplified on-disk file must not feed the raw-basis vector
+        cache (vectors come from fetch-time raw vectorization only)."""
+        nrn = line_neuron(length=200)
+        cache = self._raw_cache(tmp_path, dataset="np:v1")
+        cache.persist_skeletons({101: nrn}, simplification=90)
+        X, mask, reps = cache.vectors_for([101], compute_missing=True)
+        assert mask.tolist() == [False]
+        assert np.isnan(X[0]).all()
+        assert reps[0] == ""
+
+    def test_fetch_rejects_none_simplification(self, tmp_path, monkeypatch):
+        """None is never accepted on the fetch entry points: 0 = raw is the
+        explicit escape (persist_skeletons keeps None as migration mode)."""
+        monkeypatch.setattr(morph, "_fetch_neuprint_skeleton",
+                            lambda d, b: line_neuron())
+        with pytest.raises(ValueError):
+            morph.fetch_skeleton_on_demand(
+                "np:v1", 101, project_root=str(tmp_path),
+                simplification=None)
+        with pytest.raises(ValueError):
+            morph.fetch_skeletons_on_demand_batch(
+                "np:v1", [101], project_root=str(tmp_path),
+                simplification=None)
+
+    def test_download_all_simplification_levels(self, tmp_path, monkeypatch):
+        """Download All writes one recorded level per run and reports it."""
+        write_neuron_index(tmp_path, "np:v1", [
+            (101, "T", "T_1"), (201, "T", "T_2"),
+        ])
+        cache_dir = tmp_path / "cache" / "np_v1"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "connections.parquet").touch()
+        fetched = []
+
+        def fake_fetch(dataset, bid, project_root=None, persist=True, **kwargs):
+            fetched.append(bid)
+            neuron = line_neuron(length=200)
+            neuron.id = int(bid)
+            return neuron
+
+        monkeypatch.setattr(morph, "fetch_skeleton_on_demand", fake_fetch)
+        summary = morph.download_all_skeletons(
+            "np:v1", project_root=str(tmp_path), max_workers=2,
+            simplification=50, verbose=False)
+        assert summary["fetched"] == 2
+        assert summary["simplification"] == 50
+        raw_dir = cache_dir / "skeletons" / "raw_skeletons"
+        for bid in (101, 201):
+            loaded = morph._load_cached_skeleton_file(
+                raw_dir / f"{bid}.swc.zst")
+            assert loaded._drocat_simplification == 50
+
+        # a second run at a different level never re-fetches cached ids
+        summary0 = morph.download_all_skeletons(
+            "np:v1", project_root=str(tmp_path), max_workers=2,
+            simplification=0, verbose=False)
+        assert summary0["fetched"] == 0
+        assert summary0["skipped_existing"] == 2
+        assert summary0["simplification"] == 0
+
+        # extend the population; a fresh raw-level run writes level-0 files
+        # with every node
+        write_neuron_index(tmp_path, "np:v1", [
+            (101, "T", "T_1"), (201, "T", "T_2"), (301, "Z", "Z_1"),
+        ])
+        summary1 = morph.download_all_skeletons(
+            "np:v1", project_root=str(tmp_path), max_workers=2,
+            simplification=0, verbose=False)
+        assert summary1["fetched"] == 1 and 301 in fetched
+        raw301 = morph._load_cached_skeleton_file(raw_dir / "301.swc.zst")
+        assert raw301._drocat_simplification == 0
+        assert len(raw301.nodes) == len(line_neuron(length=200).nodes)
+
+    def test_download_all_rejects_invalid_level(self, tmp_path, monkeypatch):
+        write_neuron_index(tmp_path, "np:v1", [(101, "T", "T_1")])
+        cache_dir = tmp_path / "cache" / "np_v1"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "connections.parquet").touch()
+        with pytest.raises(ValueError):
+            morph.download_all_skeletons(
+                "np:v1", project_root=str(tmp_path), simplification=95,
+                verbose=False)
+
+    def test_mixed_cache_resume_counts_both_suffixes(self, tmp_path):
+        """Raw .swc.gz, simp50 .swc.zst and simp90 .swc.zst all load and all
+        count as cached for resume."""
+        cache = self._raw_cache(tmp_path, dataset="np:v1")
+        cache.persist_skeletons({101: line_neuron(length=200)},
+                                simplification=90)
+        cache.persist_skeletons({201: line_neuron(length=200)},
+                                simplification=50)
+        morph._write_compressed_swc(cache.skeleton_dir / "301.swc.gz",
+                                    line_neuron(length=200))
+        files = cache._discover_skeleton_files()
+        assert {morph._skeleton_body_id(p) for p in files} == {101, 201, 301}
+        for bid in (101, 201, 301):
+            assert cache.load_skeleton(bid) is not None
+
+    def test_lazy_migration_preserves_stored_level(self, tmp_path):
+        """A legacy .swc.gz loaded with a target level migrates the AS-STORED
+        content (level 0) to .swc.zst; only the returned neuron is re-leveled
+        to the target."""
+        cache = self._raw_cache(tmp_path, dataset="np:v1")
+        nrn = line_neuron(length=200)
+        legacy_dir = (tmp_path / "cache" / "np_v1" / "find_similar"
+                      / "raw_skeletons")
+        legacy_dir.mkdir(parents=True)
+        morph._write_compressed_swc(legacy_dir / "101.swc.gz", nrn)
+        loaded = cache.load_skeleton(101, simplification=90)
+        assert loaded is not None
+        assert len(loaded.nodes) < 0.2 * len(nrn.nodes)  # target level
+        migrated = cache.skeleton_dir / "101.swc.zst"
+        assert migrated.exists()
+        migrated_neuron = morph._load_cached_skeleton_file(migrated)
+        # the migrated file holds the RAW content tagged level 0
+        assert migrated_neuron._drocat_simplification == 0
+        assert len(migrated_neuron.nodes) == len(nrn.nodes)
+
+
+# ---------------------------------------------------------------------------
+# FlyWire isolation: the simplification pipeline is NeuPrint-only
+# ---------------------------------------------------------------------------
+
+class TestFlywireIsolation:
+    """The shared simplify + compress pipeline must never leak into the
+    FlyWire/FAFB/BANC workflow: no re-leveling of meshes, no simplified raw
+    skeletons, no .swc.zst skeleton artifacts from FlyWire fetches."""
+
+    def test_relevel_never_touches_meshes(self, tmp_path, monkeypatch):
+        mesh = cube_mesh()
+        # identity: _relevel_for_target returns the mesh untouched
+        assert morph._relevel_for_target(mesh, 0, 90) is mesh
+        assert morph._relevel_for_target(mesh, 50, 90) is mesh
+
+        # load_skeleton must not even attempt a downsample on a mesh
+        def forbidden_downsample(neuron, downsampling_factor=10):
+            raise AssertionError("mesh must never be downsampled")
+
+        monkeypatch.setattr(morph, "_downsample_for_cache",
+                            forbidden_downsample)
+        cache = morph.SkeletonVectorCache(
+            "x:v1", project_root=str(tmp_path), verbose=False)
+        path = cache.skeleton_dir / "101.pkl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "wb") as f:
+            pickle.dump(mesh, f)
+        loaded = cache.load_skeleton(101, simplification=90)
+        import navis
+        assert isinstance(loaded, navis.MeshNeuron)
+        assert len(loaded.vertices) == len(mesh.vertices)
+
+    def test_flywire_fetch_never_writes_raw_skeleton_files(
+            self, tmp_path, monkeypatch):
+        """A FlyWire fetch returns a MeshNeuron and persists nothing into
+        the NeuPrint raw-skeleton namespace (.swc.zst / .swc.gz)."""
+        monkeypatch.setattr(morph, "_fetch_cave_mesh",
+                            lambda d, b, project_root=None, use_cache=True,
+                            soma_pos=None: cube_mesh())
+        nrn = morph.fetch_skeleton_on_demand(
+            "flywire_FAFB_v783", 42, project_root=str(tmp_path),
+            persist=True)
+        import navis
+        assert isinstance(nrn, navis.MeshNeuron)
+        raw_dir = (tmp_path / "cache" / "flywire_FAFB_v783"
+                   / "skeletons" / "raw_skeletons")
+        if raw_dir.exists():
+            assert not list(raw_dir.rglob("*.swc.zst"))
+            assert not list(raw_dir.rglob("*.swc.gz"))
+
+    def test_flywire_batch_loads_mesh_with_simplification_zero(
+            self, tmp_path, monkeypatch):
+        """The batch forces simplification=0 on FlyWire: cached meshes are
+        requested raw and never re-leveled."""
+        class FakeMeshCache:
+            mesh_only = True
+
+            def __init__(self):
+                self.calls = []
+
+            def load_skeleton(self, bid, simplification=None):
+                self.calls.append((bid, simplification))
+                mesh = cube_mesh()
+                mesh.id = int(bid)
+                return mesh
+
+        fake = FakeMeshCache()
+        monkeypatch.setattr(morph, "fetch_skeleton_on_demand",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                AssertionError("cache hit must not fetch")))
+        out = morph.fetch_skeletons_on_demand_batch(
+            "flywire_FAFB_v783", [101], project_root=str(tmp_path),
+            persist=True, raw_cache=fake, vector_cache=fake,
+        )
+        # FlyWire canonical ids are strings; the load request is raw (0)
+        assert "101" in out
+        assert fake.calls == [("101", 0)]
+
+    def test_flywire_download_all_disabled_with_instruction(
+            self, tmp_path, monkeypatch):
+        """download_all_skeletons on FlyWire raises the explicit manual
+        Codex instruction; nothing is fetched or persisted."""
+        TestFafbBundleLocalSources()._write_bundle(tmp_path, [2, 3])
+        write_neuron_index(tmp_path, "flywire_FAFB_v783", [
+            (1, "T", "T_1"), (2, "T", "T_2"), (3, "T", "T_3"),
+        ])
+        cache_dir = tmp_path / "cache" / "flywire_FAFB_v783"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "connections.parquet").touch()
+        monkeypatch.setattr(
+            morph, "fetch_skeleton_on_demand",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("FlyWire bulk download must not fetch")))
+        with pytest.raises(morph.FlyWireSkeletonAccessError) as excinfo:
+            morph.download_all_skeletons(
+                "flywire_FAFB_v783", project_root=str(tmp_path),
+                max_workers=2, verbose=False, simplification=50)
+        message = str(excinfo.value)
+        assert "disabled for FlyWire" in message
+        assert "https://codex.flywire.ai/api/download?dataset=fafb" in message
+        assert "sk_lod1_783_healed.zip" in message
+        assert "FAFB_file_converter" in message
+        assert not (cache_dir / "meshes").exists()
+        assert not (cache_dir / "skeletons" / "raw_skeletons").exists()
+
+        # BANC is disabled the same way, with its own converter URL
+        with pytest.raises(morph.FlyWireSkeletonAccessError) as banc_exc:
+            morph.download_all_skeletons(
+                "flywire_BANC_v888", project_root=str(tmp_path),
+                max_workers=2, verbose=False)
+        banc_message = str(banc_exc.value)
+        assert "https://codex.flywire.ai/api/download?dataset=banc" in banc_message
+        assert "BANC_file_converter" in banc_message
+
+
+# ---------------------------------------------------------------------------
 # Candidate source & profile-first search
 # ---------------------------------------------------------------------------
 
@@ -1658,10 +2025,11 @@ class TestFafbBundleLocalSources:
                 z.writestr(f"{bid}.swc", self._swc())
         return zip_path
 
-    def test_download_all_skeletons_skips_bundle_entries(self, tmp_path,
-                                                         monkeypatch):
-        """Download All Skeletons on FAFB counts healed-bundle entries as
-        locally available and fetches only the genuinely missing ids."""
+    def test_download_all_skeletons_disabled_for_fafb(self, tmp_path,
+                                                      monkeypatch):
+        """Download All Skeletons is disabled for FlyWire datasets: the
+        call raises the explicit manual-download instruction (mirroring the
+        file converter) instead of fetching meshes."""
         self._write_bundle(tmp_path, [2, 3])
         write_neuron_index(tmp_path, "flywire_FAFB_v783", [
             (1, "T", "T_1"), (2, "T", "T_2"), (3, "T", "T_3"),
@@ -1669,24 +2037,24 @@ class TestFafbBundleLocalSources:
         cache_dir = tmp_path / "cache" / "flywire_FAFB_v783"
         cache_dir.mkdir(parents=True)
         (cache_dir / "connections.parquet").touch()
-        fetched = []
 
-        def fake_fetch(dataset, bid, project_root=None, persist=True, **kwargs):
-            assert persist is True
-            fetched.append(bid)
-            return cube_mesh()
+        def forbidden_fetch(dataset, bid, project_root=None, persist=True,
+                            **kwargs):
+            raise AssertionError("FlyWire bulk download must not fetch")
 
-        monkeypatch.setattr(morph, "fetch_skeleton_on_demand", fake_fetch)
-        summary = morph.download_all_skeletons(
-            "flywire_FAFB_v783", project_root=str(tmp_path),
-            max_workers=2, verbose=False,
-        )
-        assert summary["fetched"] == 1 and fetched == ["1"]
-        assert summary["skipped_existing"] == 2  # healed-bundle entries
-        assert summary["errors"] == 0
-        assert summary["representation"] == "mesh"
-        assert (cache_dir / "meshes" / "FLYWIRE_simp95_soma80_r20"
-                / "1.pkl.zst").exists()
+        monkeypatch.setattr(morph, "fetch_skeleton_on_demand", forbidden_fetch)
+        with pytest.raises(morph.FlyWireSkeletonAccessError) as excinfo:
+            morph.download_all_skeletons(
+                "flywire_FAFB_v783", project_root=str(tmp_path),
+                max_workers=2, verbose=False,
+            )
+        message = str(excinfo.value)
+        assert "disabled for FlyWire" in message
+        assert "sk_lod1_783_healed.zip" in message
+        assert "https://codex.flywire.ai/api/download?dataset=fafb" in message
+        assert "FAFB_file_converter" in message
+        # nothing was fetched or persisted
+        assert not (cache_dir / "meshes").exists()
 
     def test_build_uses_healed_bundle_for_fafb(self, tmp_path):
         """Full vector-cache build on FAFB vectorizes the healed bundle
@@ -1791,7 +2159,7 @@ class TestProfileFirst:
         assert fetched == [204]
         raw_dir = (tmp_path / "cache" / morph._dataset_folder("np:v1")
                    / "skeletons" / "raw_skeletons")
-        assert (raw_dir / "204.swc.gz").exists()
+        assert (raw_dir / "204.swc.zst").exists()
         # query neuron excluded from its own results
         assert 101 not in res["target_bodyId"].tolist()
         # identical morphology ranks first; all pool members are ranked
@@ -2142,8 +2510,8 @@ class TestProfileFirst:
         assert set(fetched) == {101, 201}  # deterministic first two of the index
         assert fetch_levels == [morph.VECTOR_BASIS_RAW] * 2
         raw_dir = cache_dir / "skeletons" / "raw_skeletons"
-        assert sorted(path.name for path in raw_dir.glob("*.swc.gz")) == [
-            "101.swc.gz", "201.swc.gz",
+        assert sorted(path.name for path in raw_dir.glob("*.swc.zst")) == [
+            "101.swc.zst", "201.swc.zst",
         ]
         assert not list((cache_dir / "skeletons").glob("*.pkl"))
         assert not (cache_dir / "skeletons" / ".level").exists()
@@ -2184,7 +2552,7 @@ class TestProfileFirst:
         assert summary["fetched"] == 1
         assert fetched == [101]
         assert summary["mode"] == "raw"
-        assert (skeleton_dir / "raw_skeletons" / "101.swc.gz").exists()
+        assert (skeleton_dir / "raw_skeletons" / "101.swc.zst").exists()
         assert not (skeleton_dir / ".level").exists()
         # The ambiguous legacy file is left recoverable but is never used as
         # the new raw pull artifact.

@@ -56,7 +56,7 @@ def create_settings_tab():
                     ).classes("drocat-doc-link")
                 ui.label("Configure API tokens, view dataset status, and manage preferences.").classes("drocat-page-sub")
 
-        # Skeleton downloads always populate the shared raw .swc.gz cache.
+        # Skeleton downloads always populate the shared raw .swc.zst cache.
         from ..dataset_pull import DatasetPuller
         from ..skeleton_pull import SkeletonPuller
 
@@ -129,8 +129,11 @@ def create_settings_tab():
                 skeleton_run_btn = ui.button(
                     "Download All Skeletons", icon="download", color="secondary"
                 ).props("outline").tooltip(
-                    "Download missing raw skeletons as reusable .swc.gz files "
-                    "using the Dataset and Parallel workers selected above."
+                    "Download missing raw skeletons as reusable .swc.zst files "
+                    "(90% simplified) using the Dataset and Parallel workers "
+                    "selected above. FlyWire datasets require a manual "
+                    "download from the FlyWire Codex (see the converter "
+                    "instructions)."
                 )
                 cancel_btn = ui.button("Cancel", icon="stop", color="negative").props("outline")
                 cancel_btn.set_enabled(False)
@@ -308,8 +311,28 @@ def create_settings_tab():
                 if puller.running:
                     ui.notify("Finish the full dataset pull before downloading skeletons", type="warning")
                     return
+                dataset = str(ds_select.value)
+                # Bulk skeleton downloads are disabled for FlyWire datasets:
+                # print the explicit manual-download instruction (mirrors the
+                # file converter) instead of starting a pull.
+                try:
+                    from src.utils.flywire_readiness import (
+                        flywire_manual_skeleton_instruction,
+                        is_flywire_dataset,
+                    )
+                except ImportError:
+                    from utils.flywire_readiness import (
+                        flywire_manual_skeleton_instruction,
+                        is_flywire_dataset,
+                    )
+                if is_flywire_dataset(dataset):
+                    message = flywire_manual_skeleton_instruction(dataset)
+                    skeleton_status.text = "Manual download required (FlyWire)"
+                    skeleton_result.text = f"❌ {message}"
+                    ui.notify(message, type="warning")
+                    return
                 ok = skeleton_puller.start(
-                    str(ds_select.value),
+                    dataset,
                     max_workers=int(parallel_input.value or 1),
                     mode="raw",
                 )

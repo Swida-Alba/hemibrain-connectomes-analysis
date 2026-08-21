@@ -58,6 +58,9 @@ Thumbs.db
 *.swp
 *.swo
 
+# Local planning docs (next-version plans, not committed)
+_plan/
+
 # Temporary files
 *.tmp
 *.bak

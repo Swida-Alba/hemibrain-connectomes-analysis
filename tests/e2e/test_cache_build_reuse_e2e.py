@@ -132,7 +132,7 @@ def built_cache(tmp_path_factory, neuprint_client):
     vs.plot_neurons()
     cache_dir = Path(work) / "cache" / FOLDER / "skeletons"
     for bid in PROBE_IDS:
-        assert (cache_dir / "raw_skeletons" / f"{bid}.swc.gz").exists()
+        assert (cache_dir / "raw_skeletons" / f"{bid}.swc.zst").exists()
     assert not (cache_dir / ".level").exists()
     assert not list(cache_dir.glob("*.pkl"))
     return work
@@ -143,26 +143,27 @@ def built_cache(tmp_path_factory, neuprint_client):
 # ---------------------------------------------------------------------------
 
 class TestVisualizationCacheBuildReuse:
-    def test_first_render_builds_shared_raw_cache(
+    def test_first_render_builds_shared_simplified_cache(
             self, built_cache, neuprint_client):
-        """The BUILD render persists raw SWC only."""
+        """The BUILD render persists simplified (90%) SWC only."""
         work = built_cache
         cache_dir = Path(work) / "cache" / FOLDER / "skeletons"
         raw_dir = cache_dir / "raw_skeletons"
         for bid in PROBE_IDS:
-            assert (raw_dir / f"{bid}.swc.gz").exists()
+            assert (raw_dir / f"{bid}.swc.zst").exists()
 
         html = Path(work) / "plot-3d_HEMI_e2e_probe" / "e2e_probe.html"
         assert html.exists() and html.stat().st_size > 100_000
 
-        # Every cached file holds the raw skeleton; fast simplification is
-        # applied to the transient render mesh instead.
+        # Every cached file holds the simplified skeleton (level recorded in
+        # the header); the render decimates from that source.
         for bid in PROBE_IDS:
             cached = morph._load_cached_skeleton_file(
-                raw_dir / f"{bid}.swc.gz")
+                raw_dir / f"{bid}.swc.zst")
+            assert cached._drocat_simplification == 90
             raw = neuprint_client.fetch_skeleton(bid)
             raw_n = len(navis.TreeNeuron(raw).nodes)
-            assert len(cached.nodes) == raw_n
+            assert len(cached.nodes) < raw_n
 
     def test_second_render_reuses_cache_without_fetching(self, built_cache,
                                                          neuprint_client,
@@ -199,10 +200,10 @@ class TestVisualizationCacheBuildReuse:
         vs = _make_vs(work, neuprint_client, simplification=0.5)
         vs.plot_neurons()
 
-        # The raw files remain the source and are not rewritten as simplified
-        # skeleton pickles.
+        # The cached simplified files remain the source and are not rewritten
+        # as simplified skeleton pickles.
         for bid in PROBE_IDS:
-            assert (cache_dir / "raw_skeletons" / f"{bid}.swc.gz").exists()
+            assert (cache_dir / "raw_skeletons" / f"{bid}.swc.zst").exists()
         assert not (cache_dir / ".level").exists()
         assert not list(cache_dir.glob("*.pkl"))
 
@@ -345,12 +346,13 @@ class TestSimilarFindingCacheBuildReuse:
         assert nrn is not None
         cache_file = (
             sandbox / "cache" / FOLDER / "skeletons" / "raw_skeletons"
-            / f"{bid}.swc.gz"
+            / f"{bid}.swc.zst"
         )
         assert cache_file.exists()
         assert morph._skeleton_folder_level(DATASET, str(sandbox)) == "raw"
         with open(cache_file, "rb") as f:
-            assert f.read(2) == b"\x1f\x8b"
+            # zstd frame magic
+            assert f.read(4) == b"\x28\xb5\x2f\xfd"
         data = morph.find_similar_raw_cache(
             DATASET, project_root=str(PROJECT_ROOT), verbose=False).load()
         assert int(bid) in set(int(b) for b in data["bodyIds"]), \

@@ -9,9 +9,10 @@ Two comparison backends are provided:
   (``cache/{dataset}/find_similar/morphology/skeleton_vectors.parquet``) and
   queried with cosine / Pearson similarity. Raw skeleton files live in the
   shared dataset skeleton cache at
-  ``cache/{dataset}/skeletons/raw_skeletons/`` as portable ``.swc.gz``
-  files. The former ``find_similar/raw_skeletons`` directory remains a
-  read-only migration fallback.
+  ``cache/{dataset}/skeletons/raw_skeletons/`` as portable ``.swc.zst``
+  files (zstd-19, simplification level recorded in the header; legacy
+  ``.swc.gz`` remains readable). The former ``find_similar/raw_skeletons``
+  directory remains a read-only migration fallback.
 - **NBLAST** (navis implementation of Costa et al. 2016): the canonical
   pairwise morphology score. It uses the same raw skeleton/vector cache for
   prefiltering, while dotprops are rebuilt on demand for the vector-
@@ -59,9 +60,19 @@ except ImportError:
     )
 
 try:
-    from .utils.flywire_readiness import is_fafb_dataset, require_flywire_skeleton_access
+    from .utils.flywire_readiness import (
+        FlyWireSkeletonAccessError,
+        flywire_manual_skeleton_instruction,
+        is_fafb_dataset,
+        require_flywire_skeleton_access,
+    )
 except ImportError:
-    from utils.flywire_readiness import is_fafb_dataset, require_flywire_skeleton_access
+    from utils.flywire_readiness import (
+        FlyWireSkeletonAccessError,
+        flywire_manual_skeleton_instruction,
+        is_fafb_dataset,
+        require_flywire_skeleton_access,
+    )
 
 try:
     from .flywire_ids import (
@@ -150,6 +161,15 @@ VECTOR_BASIS_RAW = "raw"
 VECTOR_BASIS_SIMP90 = "simp90"
 SKELETON_CACHE_LEVEL = VECTOR_BASIS_SIMP90   # legacy compatibility label
 SKELETON_DOWNSAMPLE_FACTOR = 10             # legacy compatibility constant
+
+# On-disk NeuPrint skeleton simplification: percent of nodes removed, 0-90.
+# 90 = the canonical "simp90" cache (keep ~10% of nodes); 0 = raw. Every
+# compressed-SWC cache file records its level in a ``# DROCAT simpl: N``
+# header line so later loads can re-simplify to a different target level
+# (only ever coarser; detail cannot be restored).
+SIMPLIFICATION_HEADER = "DROCAT simpl:"
+DEFAULT_SIMPLIFICATION = 90
+MAX_SIMPLIFICATION = 90
 
 # Keep the online NeuPrint fetch policy shared by visualization and similarity
 # workflows.  The request is batched at the application boundary, while
@@ -257,12 +277,14 @@ def _has_local_dataset_presence(dataset: str, root: Path) -> bool:
         return True
     skeletons = cache_dir / "skeletons"
     if skeletons.is_dir() and any(
-            p.suffix == ".pkl" or str(p).endswith((".pkl.zst", ".swc.gz"))
+            p.suffix == ".pkl"
+            or str(p).endswith((".pkl.zst", ".swc.gz", ".swc.zst"))
             for p in skeletons.rglob("*")):
         return True
     raw_skeletons = cache_dir / "skeletons" / "raw_skeletons"
     if raw_skeletons.is_dir() and any(
-            p.suffix == ".pkl" or str(p).endswith((".pkl.zst", ".swc.gz"))
+            p.suffix == ".pkl"
+            or str(p).endswith((".pkl.zst", ".swc.gz", ".swc.zst"))
             for p in raw_skeletons.rglob("*")):
         return True
     meshes = cache_dir / "meshes"
@@ -272,7 +294,8 @@ def _has_local_dataset_presence(dataset: str, root: Path) -> bool:
         return True
     legacy_raw_skeletons = cache_dir / "find_similar" / "raw_skeletons"
     if legacy_raw_skeletons.is_dir() and any(
-            p.suffix == ".pkl" or str(p).endswith((".pkl.zst", ".swc.gz"))
+            p.suffix == ".pkl"
+            or str(p).endswith((".pkl.zst", ".swc.gz", ".swc.zst"))
             for p in legacy_raw_skeletons.rglob("*")):
         return True
     return False
@@ -553,13 +576,15 @@ def _skeleton_body_id(path) -> int:
     """Extract a bodyId from a cached skeleton filename.
 
     The cache accepts historical ``.pkl`` files, compressed mesh pickles
-    (``{bodyId}.pkl.zst``), and the portable compressed-SWC form
-    (``{bodyId}.swc.gz``). Keeping this parser in one place prevents
-    ``Path.stem`` from turning ``123.swc.gz`` or ``123.pkl.zst`` into an
-    invalid bodyId during parallel cache builds.
+    (``{bodyId}.pkl.zst``), and the portable compressed-SWC forms
+    (``{bodyId}.swc.zst`` / ``{bodyId}.swc.gz``). Keeping this parser in one
+    place prevents ``Path.stem`` from turning ``123.swc.gz`` or
+    ``123.pkl.zst`` into an invalid bodyId during parallel cache builds.
     """
     name = Path(path).name
-    if name.endswith(".swc.gz"):
+    if name.endswith(".swc.zst"):
+        name = name[:-len(".swc.zst")]
+    elif name.endswith(".swc.gz"):
         name = name[:-len(".swc.gz")]
     elif name.endswith(".pkl.zst"):
         name = name[:-len(".pkl.zst")]
@@ -568,12 +593,30 @@ def _skeleton_body_id(path) -> int:
     return int(name)
 
 
-def _load_cached_skeleton_file(path):
-    """Load a legacy pickle, compressed mesh pickle, or compressed SWC."""
+def _load_cached_skeleton_file(path, target_simplification: Optional[int] = None):
+    """Load a legacy pickle, compressed mesh pickle, or compressed SWC.
+
+    Compressed-SWC files record their simplification level
+    (``# DROCAT simpl: N``); when ``target_simplification`` is given and is
+    coarser than the stored level, the neuron is re-simplified to that
+    target on load.  The stored level is attached as
+    ``neuron._drocat_simplification`` (headerless legacy files read as raw,
+    level 0).
+    """
+    import io
+
     path = Path(path)
-    if str(path).endswith(".swc.gz"):
-        with gzip.open(path, "rt", encoding="utf-8") as handle:
-            neuron = navis.read_swc(handle)
+    stored = 0
+    if str(path).endswith(".swc.zst"):
+        if zstd is None:
+            raise ImportError(
+                "zstandard is required to read .swc.zst caches")
+        with path.open("rb") as handle:
+            with zstd.ZstdDecompressor().stream_reader(handle) as reader:
+                content = reader.read()
+        stored = _read_stored_simplification(content)
+        neuron = navis.read_swc(io.StringIO(
+            content.decode("utf-8", "replace")))
         try:
             neuron.id = _skeleton_body_id(path)
         except Exception:
@@ -584,36 +627,165 @@ def _load_cached_skeleton_file(path):
             neuron.units = "nm"
         except Exception:
             pass
-        return neuron
-    if str(path).endswith(".pkl.zst"):
+    elif str(path).endswith(".swc.gz"):
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            content = handle.read()
+        stored = _read_stored_simplification(content)
+        neuron = navis.read_swc(io.StringIO(content))
+        try:
+            neuron.id = _skeleton_body_id(path)
+        except Exception:
+            pass
+        try:
+            neuron.units = "nm"
+        except Exception:
+            pass
+    elif str(path).endswith(".pkl.zst"):
         if zstd is None:
             raise ImportError(
                 "zstandard is required to read FlyWire .pkl.zst caches")
         with path.open("rb") as handle:
             with zstd.ZstdDecompressor().stream_reader(handle) as reader:
                 return pickle.load(reader)
-    with open(path, "rb") as handle:
-        return pickle.load(handle)
+    else:
+        with open(path, "rb") as handle:
+            return pickle.load(handle)
+    if target_simplification is not None:
+        neuron = _relevel_for_target(neuron, stored, target_simplification)
+    try:
+        neuron._drocat_simplification = stored
+    except Exception:
+        pass
+    return neuron
 
 
-def _write_compressed_swc(path: Path, neuron) -> None:
-    """Atomically write one TreeNeuron as reusable ``.swc.gz``."""
+def _simplification_factor(simplification: int) -> int:
+    """Downsample factor for a simplification level (percent removed, 0-90).
+
+    90 -> factor 10 (keep ~10% of nodes), 50 -> 2, 0 -> 1 (raw).  Values
+    outside 0..90 raise ``ValueError``; the factor is floored to an int
+    (the canonical downsample helper floors too).
+    """
+    try:
+        simplification = int(simplification)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"simplification must be an integer in 0..{MAX_SIMPLIFICATION} "
+            f"(percent of nodes removed); got {simplification!r}")
+    if not 0 <= simplification <= MAX_SIMPLIFICATION:
+        raise ValueError(
+            f"simplification must be an integer in 0..{MAX_SIMPLIFICATION} "
+            f"(percent of nodes removed); got {simplification!r}")
+    if simplification == 0:
+        return 1
+    return max(1, 100 // (100 - simplification))
+
+
+def _read_stored_simplification(text) -> int:
+    """Parse the simplification level recorded in a compressed-SWC header.
+
+    Header line format: ``# DROCAT simpl: 50``. Headerless files (legacy
+    gzip cache, pickles) default to raw (level 0).
+    """
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
+    for line in text.splitlines()[:8]:
+        line = line.strip()
+        if line.startswith("#"):
+            line = line[1:].strip()
+        if line.startswith(SIMPLIFICATION_HEADER):
+            try:
+                return int(line[len(SIMPLIFICATION_HEADER):].strip())
+            except ValueError:
+                return 0
+    return 0
+
+
+def _relevel_for_target(neuron, stored: int, target: int):
+    """Re-simplify a cached neuron from its stored level to a coarser target.
+
+    Only ever simplifies further (``target > stored``); requesting more
+    detail than the file holds returns the neuron unchanged (the caller may
+    fetch raw online instead).  Factor = (100-stored)/(100-target): a 50%
+    file re-leveled to 90% keeps 20% of its remaining nodes ("simplify by
+    80%").  Never mutates the input.
+    """
+    stored = max(0, int(stored))
+    _simplification_factor(target)  # validate 0..90
+    target = int(target)
+    # MeshNeurons and anything without a node table are never re-leveled:
+    # the simplification pipeline is NeuPrint/TreeNeuron-only.
+    if not hasattr(neuron, "nodes"):
+        return neuron
+    if target <= stored or target <= 0 or stored >= MAX_SIMPLIFICATION:
+        return neuron
+    factor = (100 - stored) / (100 - target)
+    if factor <= 1:
+        return neuron
+    return _downsample_for_cache(neuron, factor)
+
+
+def _write_compressed_skeleton(path, neuron,
+                               simplification: Optional[int] = DEFAULT_SIMPLIFICATION,
+                               codec: str = "zst") -> None:
+    """Shared simplify + compress pipeline for the on-disk skeleton cache.
+
+    Every raw-SWC cache write routes through this function so the recorded
+    simplification level and the compression format stay consistent.
+
+    - ``simplification`` int 0-90: deterministically simplifies the neuron
+      to that level (percent removed) before writing; ``0`` = raw.
+    - ``simplification=None``: writes the neuron as-is and records the level
+      already attached to it (``neuron._drocat_simplification``; absent = 0)
+      - used by lazy migrations that must not re-simplify.
+
+    The level is recorded as the first SWC header line
+    (``# DROCAT simpl: N``) and the payload is atomically written as
+    ``.swc.zst`` (zstd-19) or the legacy ``.swc.gz`` (gzip-6) form.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if simplification is None:
+        stored = getattr(neuron, "_drocat_simplification", 0) or 0
+        neuron_out = neuron
+    else:
+        factor = _simplification_factor(simplification)
+        stored = int(simplification)
+        neuron_out = (_downsample_for_cache(neuron, factor)
+                      if simplification > 0 else neuron)
     temp_swc = None
-    temp_gz = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temp_out = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         with tempfile.NamedTemporaryFile(
                 suffix=".swc", dir=str(path.parent), delete=False) as handle:
             temp_swc = Path(handle.name)
-        navis.write_swc(neuron, temp_swc, write_meta=True)
+        navis.write_swc(neuron_out, temp_swc, write_meta=True)
         payload = temp_swc.read_bytes()
-        temp_gz.write_bytes(gzip.compress(payload, compresslevel=6, mtime=0))
-        os.replace(temp_gz, path)
+        # Record the level in the header so later loads can re-level.
+        payload = b"# DROCAT simpl: %d\n" % int(stored) + payload
+        if codec == "zst":
+            if zstd is None:
+                raise ImportError(
+                    "zstandard is required to write .swc.zst caches")
+            blob = zstd.ZstdCompressor(
+                level=19, write_content_size=True).compress(payload)
+        else:
+            blob = gzip.compress(payload, compresslevel=6, mtime=0)
+        temp_out.write_bytes(blob)
+        os.replace(temp_out, path)
     finally:
         if temp_swc is not None:
             temp_swc.unlink(missing_ok=True)
-        temp_gz.unlink(missing_ok=True)
+        temp_out.unlink(missing_ok=True)
+
+
+def _write_compressed_swc(path, neuron) -> None:
+    """Legacy raw gzip SWC writer (level 0, gzip-6).
+
+    Retained for older callers/tests; new writes go through
+    :func:`_write_compressed_skeleton` (``.swc.zst``, recorded level).
+    """
+    _write_compressed_skeleton(path, neuron, simplification=0, codec="gz")
 
 
 def _vectorize_one_file(path: str) -> Optional[Tuple[int, List[float], List[float], str]]:
@@ -624,6 +796,11 @@ def _vectorize_one_file(path: str) -> Optional[Tuple[int, List[float], List[floa
     the neuron representation ('skeleton' | 'mesh')."""
     try:
         neuron = _load_cached_skeleton_file(path)
+        # Per-file level guard: only raw (level 0) on-disk skeletons are
+        # vectorized into the raw-basis cache; simplified files are skipped
+        # (their vectors come from the vector cache / raw fetches instead).
+        if getattr(neuron, "_drocat_simplification", 0) != 0:
+            return None
         morph, vector = vectorize_neuron(neuron)
         rep = _neuron_rep(neuron)
     except Exception:
@@ -753,7 +930,8 @@ def _find_skeleton_file(dataset: str, body_id: int,
     cache_dir = root / "cache" / _dataset_folder(dataset) / "skeletons"
     if not cache_dir.exists():
         return None
-    for name in (f"{body_id}.pkl.zst", f"{body_id}.pkl", f"{body_id}.swc.gz"):
+    for name in (f"{body_id}.swc.zst", f"{body_id}.pkl.zst",
+                 f"{body_id}.pkl", f"{body_id}.swc.gz"):
         direct = cache_dir / name
         if direct.exists():
             return direct
@@ -765,6 +943,12 @@ def _find_skeleton_file(dataset: str, body_id: int,
         return nested[0]
     nested = sorted(
         path for path in cache_dir.rglob(f"{body_id}.pkl")
+        if "raw_skeletons" not in path.parts
+    )
+    if nested:
+        return nested[0]
+    nested = sorted(
+        path for path in cache_dir.rglob(f"{body_id}.swc.zst")
         if "raw_skeletons" not in path.parts
     )
     if nested:
@@ -990,7 +1174,7 @@ class SkeletonVectorCache:
 
     def __init__(self, dataset: str, project_root: Optional[str] = None,
                  n_workers: int = 8, verbose: bool = True,
-                 raw_only: bool = False, raw_format: str = "swc.gz",
+                 raw_only: bool = False, raw_format: str = "swc.zst",
                  representation: Optional[str] = None):
         self.dataset = dataset
         self.project_root = Path(project_root) if project_root else Path(__file__).parent.parent
@@ -1007,9 +1191,10 @@ class SkeletonVectorCache:
         # Raw skeleton caches are portable compressed SWC by default.  The
         # legacy non-raw cache may still be explicitly opened as pickle for
         # migration/mesh compatibility, but new raw callers converge here.
-        raw_format = str(raw_format or "swc.gz").strip().lower()
-        if raw_format not in {"pkl", "swc.gz"}:
-            raise ValueError("raw_format must be 'pkl' or 'swc.gz'")
+        raw_format = str(raw_format or "swc.zst").strip().lower()
+        if raw_format not in {"pkl", "swc.gz", "swc.zst"}:
+            raise ValueError(
+                "raw_format must be 'pkl', 'swc.gz', or 'swc.zst'")
         self.raw_format = raw_format
         folder = _dataset_folder(dataset)
         if self.mesh_only:
@@ -1064,6 +1249,7 @@ class SkeletonVectorCache:
         for directory in directories:
             files.extend(directory.rglob("*.pkl.zst"))
             files.extend(directory.rglob("*.pkl"))
+            files.extend(directory.rglob("*.swc.zst"))
             files.extend(directory.rglob("*.swc.gz"))
         if not self.raw_only:
             files = [path for path in files
@@ -1077,24 +1263,28 @@ class SkeletonVectorCache:
             current = preferred.get(body_id)
             # Prefer the new shared path over the legacy Find Similar path,
             # then prefer the canonical compressed representation for the
-            # cache type (SWC for raw skeletons, Zstandard for meshes).
-            if str(path).endswith(".swc.gz"):
+            # cache type (zstd SWC for raw skeletons, Zstandard for meshes).
+            if str(path).endswith(".swc.zst"):
                 format_rank = 0
-            elif str(path).endswith(".pkl.zst"):
+            elif str(path).endswith(".swc.gz"):
                 format_rank = 1
-            else:
+            elif str(path).endswith(".pkl.zst"):
                 format_rank = 2
+            else:
+                format_rank = 3
             path_rank = (
                 0 if self.skeleton_dir in path.parents else 1,
                 format_rank,
             )
             current_path = Path(current) if current is not None else None
-            if current_path is not None and str(current_path).endswith(".swc.gz"):
+            if current_path is not None and str(current_path).endswith(".swc.zst"):
                 current_format_rank = 0
-            elif current_path is not None and str(current_path).endswith(".pkl.zst"):
+            elif current_path is not None and str(current_path).endswith(".swc.gz"):
                 current_format_rank = 1
-            else:
+            elif current_path is not None and str(current_path).endswith(".pkl.zst"):
                 current_format_rank = 2
+            else:
+                current_format_rank = 3
             current_rank = (
                 0 if self.skeleton_dir in current_path.parents else 1,
                 current_format_rank,
@@ -1117,7 +1307,7 @@ class SkeletonVectorCache:
             if self.legacy_skeleton_dir is not None:
                 directories.append(self.legacy_skeleton_dir)
             # Prefer the new shared path. Within a mesh cache prefer the
-            # canonical compressed pickle; within a raw cache prefer SWC.
+            # canonical compressed pickle; within a raw cache prefer zstd SWC.
             if self.mesh_only:
                 names = (
                     f"{body_id}.pkl.zst",
@@ -1125,6 +1315,7 @@ class SkeletonVectorCache:
                 )
             else:
                 names = (
+                    f"{body_id}.swc.zst",
                     f"{body_id}.swc.gz",
                     f"{body_id}.pkl",
                     f"{body_id}.pkl.zst",
@@ -1144,12 +1335,23 @@ class SkeletonVectorCache:
             self.dataset, body_id, project_root=str(self.project_root)
         )
 
-    def load_skeleton(self, body_id: int):
-        """Load one valid cached neuron from this cache namespace."""
+    def load_skeleton(self, body_id: int,
+                      simplification: Optional[int] = None):
+        """Load one valid cached neuron from this cache namespace.
+
+        ``simplification`` optionally requests a target level (percent of
+        nodes removed); when it is coarser than the stored level a
+        TreeNeuron is re-simplified on load.  ``None`` (default) returns the
+        neuron at its stored level.  MeshNeurons are never re-leveled (the
+        simplification pipeline is NeuPrint/TreeNeuron-only).
+        """
         path = self.find_skeleton_file(body_id)
         if path is None:
             return None
         try:
+            # Load at the STORED level first: a lazy migration below must
+            # persist the as-stored neuron (with its recorded level), never a
+            # re-leveled copy that would mismatch its header.
             neuron = _load_cached_skeleton_file(path)
             if self.mesh_only:
                 allowed = ("MeshNeuron",)
@@ -1163,26 +1365,39 @@ class SkeletonVectorCache:
                     and (self.skeleton_dir not in path.parents
                          or str(path).endswith(".pkl"))):
                 self.persist_skeletons({self._canonical_body_id(body_id): neuron})
-            if (self.raw_only and self.raw_format == "swc.gz"
+            if (self.raw_only and self.raw_format in ("swc.gz", "swc.zst")
                     and (self.skeleton_dir not in path.parents
-                         or not str(path).endswith(".swc.gz"))):
+                         or not str(path).endswith(f".{self.raw_format}"))):
                 # Migrate legacy Find Similar files, and any temporary raw
-                # pickle, to the canonical shared compressed-SWC namespace on
-                # first successful load. The old file is intentionally kept
-                # recoverable as a non-destructive fallback.
-                self.persist_skeletons({self._canonical_body_id(body_id): neuron})
+                # file, to the canonical compressed-SWC namespace on first
+                # successful load. The old file is intentionally kept
+                # recoverable as a non-destructive fallback, and the stored
+                # simplification level is preserved (never re-simplified).
+                self.persist_skeletons(
+                    {self._canonical_body_id(body_id): neuron},
+                    simplification=None)
+            if simplification is not None \
+                    and type(neuron).__name__ == "TreeNeuron":
+                stored_level = getattr(neuron, "_drocat_simplification", 0)
+                neuron = _relevel_for_target(
+                    neuron, stored_level, simplification)
             return neuron
         except Exception:
             return None
 
-    def persist_skeletons(self, neurons: Dict[Union[int, str], object]) -> int:
+    def persist_skeletons(self, neurons: Dict[Union[int, str], object],
+                          simplification: Optional[int] = DEFAULT_SIMPLIFICATION
+                          ) -> int:
         """Persist neurons in this cache's skeleton namespace.
 
-        Shared raw caches store the fetched TreeNeuron unchanged as portable
-        ``.swc.gz`` files by default; legacy pickle files remain readable and
-        selectable with ``raw_format='pkl'``. The legacy visualization cache
-        continues to use its explicit downsampling path and does not call
-        this helper.
+        Shared raw caches store the fetched TreeNeuron through the shared
+        simplify + compress pipeline: the requested ``simplification`` level
+        (percent of nodes removed, 0-90; default 90) is applied and recorded
+        in each ``.swc.zst`` file header.  ``simplification=None`` writes the
+        neuron as-is, recording the level already attached to it (used by
+        lazy migrations).  Legacy pickle files remain readable and selectable
+        with ``raw_format='pkl'``. The legacy visualization cache continues
+        to use its explicit downsampling path and does not call this helper.
         """
         if not neurons:
             return 0
@@ -1206,6 +1421,11 @@ class SkeletonVectorCache:
                     continue
                 if self.mesh_only:
                     written += mesh_cache.save({body_id: neuron})
+                elif self.raw_only and self.raw_format == "swc.zst":
+                    _write_compressed_skeleton(
+                        self.skeleton_dir / f"{body_id}.swc.zst", neuron,
+                        simplification=simplification)
+                    written += 1
                 elif self.raw_only and self.raw_format == "swc.gz":
                     _write_compressed_swc(
                         self.skeleton_dir / f"{body_id}.swc.gz", neuron)
@@ -1800,6 +2020,11 @@ class SkeletonVectorCache:
                 if pkl is not None:
                     try:
                         neuron = _load_cached_skeleton_file(pkl)
+                        # Per-file level guard: simplified on-disk skeletons
+                        # are never vectorized into the raw-basis cache (their
+                        # vectors come from the vector cache / raw fetches).
+                        if getattr(neuron, "_drocat_simplification", 0) != 0:
+                            continue
                         row_rep = _neuron_rep(neuron)
                         if self.raw_only and row_rep != "skeleton":
                             continue
@@ -1825,14 +2050,14 @@ def find_similar_raw_cache(dataset: str,
                            project_root: Optional[str] = None,
                            n_workers: int = 8,
                            verbose: bool = True,
-                           raw_format: str = "swc.gz") -> SkeletonVectorCache:
+                           raw_format: str = "swc.zst") -> SkeletonVectorCache:
     """Return the shared raw-skeleton/vector cache for a dataset.
 
     The historical function name is retained for compatibility with callers,
     but raw skeletons now live outside the Find Similar directory at
     ``cache/{dataset}/skeletons/raw_skeletons/``. New persisted raw skeletons
-    use compressed SWC by default; pass ``raw_format='pkl'`` only for legacy
-    compatibility.
+    use zstd-compressed SWC by default; pass ``raw_format='pkl'`` or
+    ``raw_format='swc.gz'`` only for legacy compatibility.
     """
     return SkeletonVectorCache(
         dataset,
@@ -2249,14 +2474,21 @@ def fetch_skeleton_on_demand(dataset: str, body_id: int,
                              level: str = VECTOR_BASIS_RAW,
                              raw_cache: Optional[SkeletonVectorCache] = None,
                              vector_cache: Optional[SkeletonVectorCache] = None,
-                             soma_pos=None
+                             soma_pos=None,
+                             simplification: int = DEFAULT_SIMPLIFICATION
                              ) -> Optional[object]:
     """Fetch one dataset-native neuron if missing.
 
     NeuPrint datasets use ``neuprint.fetch_skeleton`` and persist raw
-    ``TreeNeuron`` objects as compressed SWC. FlyWire/FAFB datasets use the
-    CAVE mesh path and persist prepared ``MeshNeuron`` objects in the
-    representation-specific mesh cache. The two paths never share a file.
+    ``TreeNeuron`` objects through the shared simplify + compress pipeline
+    (``simplification`` percent removed, default 90, recorded in the
+    ``.swc.zst`` header). FlyWire/FAFB datasets use the CAVE mesh path and
+    persist prepared ``MeshNeuron`` objects in the representation-specific
+    mesh cache. The two paths never share a file.
+
+    Vectorization always runs on the RAW fetched neuron and is persisted to
+    the standalone vector cache BEFORE the simplified on-disk file is
+    written, so the on-disk simplification level never affects vectors.
 
     ``persist=False`` is an online-only compatibility escape hatch for the
     selected representation; it does not read or write local morphology data.
@@ -2269,6 +2501,12 @@ def fetch_skeleton_on_demand(dataset: str, body_id: int,
     level = str(level).lower()
     if level not in (VECTOR_BASIS_RAW, VECTOR_BASIS_SIMP90):
         raise ValueError(f"Invalid level: {level} (raw|simp90)")
+    # None is never accepted here: 0 (raw) is the explicit escape.
+    _simplification_factor(simplification)
+    # The simplification pipeline is NeuPrint-only: FlyWire/FAFB/BANC always
+    # fetch mesh representations and must never be re-leveled or simplified.
+    if is_flywire_dataset(dataset):
+        simplification = 0
     root = Path(project_root) if project_root else Path(__file__).parent.parent
 
     if is_flywire_dataset(dataset):
@@ -2300,7 +2538,7 @@ def fetch_skeleton_on_demand(dataset: str, body_id: int,
             raw_cache = None
 
     if raw_cache is not None:
-        cached = raw_cache.load_skeleton(body_id)
+        cached = raw_cache.load_skeleton(body_id, simplification=simplification)
         if cached is not None:
             # A raw-file hit should also populate the raw vector cache when
             # a previous interrupted run left only the skeleton behind.
@@ -2332,14 +2570,15 @@ def fetch_skeleton_on_demand(dataset: str, body_id: int,
         return None
 
     # Vectorize the RAW skeleton at fetch time and persist the vector before
-    # returning. Raw SWC persistence is handled separately below.
+    # any simplification: the vector cache is standalone and always raw-basis.
     cache_fetched_skeleton_vectors(
         dataset, {body_id: neuron}, project_root=str(root),
         vector_cache=vector_cache or raw_cache, verbose=False,
     )
 
     if persist and raw_cache is not None:
-        raw_cache.persist_skeletons({body_id: neuron})
+        raw_cache.persist_skeletons({body_id: neuron},
+                                    simplification=simplification)
     return neuron
 
 
@@ -2356,13 +2595,21 @@ def fetch_skeletons_on_demand_batch(
         max_threads: int = NEUPRINT_FETCH_MAX_THREADS,
         progress_callback=None, client=None,
         raw_cache: Optional[SkeletonVectorCache] = None,
-        vector_cache: Optional[SkeletonVectorCache] = None) -> Dict[int, object]:
+        vector_cache: Optional[SkeletonVectorCache] = None,
+        simplification: int = DEFAULT_SIMPLIFICATION) -> Dict[int, object]:
     """Fetch a set of skeletons through one cache-aware online phase.
 
     NeuPrint and FlyWire use separate cache transactions. NeuPrint loads and
-    writes raw ``TreeNeuron`` SWC; FlyWire loads and writes prepared
+    writes raw ``TreeNeuron`` SWC through the shared simplify + compress
+    pipeline (``simplification`` percent removed, default 90, recorded in
+    the ``.swc.zst`` header); FlyWire loads and writes prepared
     ``MeshNeuron`` pickles at the fixed visualization mesh level. Neither
     path converts the other representation.
+
+    Vectorization always runs on the RAW fetched neurons and is persisted to
+    the standalone vector cache BEFORE the simplified on-disk files are
+    written. Cached files are loaded with the requested target level, so a
+    file stored at a lower level is re-simplified on read.
 
     ``progress_callback(done, total, message)`` is optional and is called at
     batch boundaries.  The returned mapping is keyed by integer body ID and
@@ -2383,6 +2630,12 @@ def fetch_skeletons_on_demand_batch(
     level = str(level).lower()
     if level not in (VECTOR_BASIS_RAW, VECTOR_BASIS_SIMP90):
         raise ValueError(f"Invalid level: {level} (raw|simp90)")
+    # None is never accepted here: 0 (raw) is the explicit escape.
+    _simplification_factor(simplification)
+    # The simplification pipeline is NeuPrint-only: FlyWire/FAFB/BANC always
+    # fetch mesh representations and must never be re-leveled or simplified.
+    if is_flywire_dataset(dataset):
+        simplification = 0
     if not requested:
         return {}
 
@@ -2423,7 +2676,8 @@ def fetch_skeletons_on_demand_batch(
 
     if raw_lookup_cache is not None:
         for bid in requested:
-            neuron = raw_lookup_cache.load_skeleton(bid)
+            neuron = raw_lookup_cache.load_skeleton(
+                bid, simplification=simplification)
             if neuron is None:
                 missing.append(bid)
             else:
@@ -2615,7 +2869,8 @@ def fetch_skeletons_on_demand_batch(
                 )
 
         if persist and fetched_by_id and raw_cache is not None:
-            raw_cache.persist_skeletons(fetched_by_id)
+            raw_cache.persist_skeletons(fetched_by_id,
+                                        simplification=simplification)
 
         loaded.update(fetched_by_id)
 
@@ -2631,26 +2886,49 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
                            progress_callback=None, cancel_event=None,
                            verbose: bool = True,
                            raw: bool = True, mode: Optional[str] = None,
-                           raw_format: str = "swc.gz") -> Dict[str, object]:
+                           raw_format: str = "swc.zst",
+                           simplification: int = DEFAULT_SIMPLIFICATION
+                           ) -> Dict[str, object]:
     """Download every missing skeleton of a dataset to the local cache.
 
-    Mirrors the Settings-panel full dataset pull. NeuPrint pulls persist raw
-    ``TreeNeuron`` objects in ``skeletons/raw_skeletons/{bodyId}.swc.gz``.
-    FlyWire/FAFB pulls persist prepared ``MeshNeuron`` objects in the
-    dedicated ``meshes/FLYWIRE_simp95_soma80_r20/{bodyId}.pkl.zst`` namespace.
+    Mirrors the Settings-panel full dataset pull. NeuPrint pulls persist
+    ``TreeNeuron`` objects through the shared simplify + compress pipeline
+    in ``skeletons/raw_skeletons/{bodyId}.swc.zst``: one simplification level
+    per run (``simplification``, percent of nodes removed, 0-90, default 90)
+    recorded in each file header.
+
+    FlyWire/FAFB/BANC datasets are NOT supported: bulk skeleton downloads
+    are disabled for them (their skeleton bundles are large one-time
+    downloads), and a ``FlyWireSkeletonAccessError`` with the manual Codex
+    download instructions is raised instead.
     Visualization ``fast`` is not a pull mode for either representation.
+
+    Vectorization always runs on the RAW fetched neurons first and is
+    persisted to the standalone vector cache, so the downloaded on-disk
+    simplification level never affects analysis vectors.
 
     ``mode`` and ``raw`` remain compatibility parameters for older callers;
     any accepted mode is normalized to ``"raw"``. NeuPrint requests use
-    bounded online batches; the FlyWire/CAVE branch remains mesh-native.
-    ``raw_format`` is retained for NeuPrint compatibility and does not alter
-    the FlyWire mesh cache.
+    bounded online batches.
+    ``raw_format`` and ``simplification`` are retained for NeuPrint
+    compatibility and do not alter FlyWire caches.
     ``progress_callback(current, total, info)`` and
     ``cancel_event`` (threading.Event) drive the UI; ``limit`` bounds the
     download (tests / smoke runs). Returns a summary dict.
     """
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    _simplification_factor(simplification)  # validate 0..90 up front
+
+    # Bulk skeleton downloads are disabled for FlyWire datasets: the bundles
+    # (e.g. sk_lod1_783_healed.zip for FAFB) are large one-time downloads
+    # that must be fetched manually from the FlyWire Codex and placed by the
+    # converter. On-demand CAVE fetches for individual missing skeletons
+    # still work during visualization.
+    if is_flywire_dataset(dataset):
+        raise FlyWireSkeletonAccessError(
+            flywire_manual_skeleton_instruction(dataset))
 
     require_flywire_skeleton_access(
         dataset,
@@ -2672,6 +2950,10 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
     mode = "raw"
     flywire = is_flywire_dataset(dataset)
     if flywire:
+        # The simplification pipeline is NeuPrint-only; FlyWire pulls persist
+        # prepared meshes and must never be re-leveled or simplified.
+        simplification = 0
+    if flywire:
         raw_cache = find_similar_flywire_mesh_cache(
             dataset, project_root=str(root), n_workers=max_workers,
             verbose=verbose,
@@ -2679,7 +2961,7 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
     else:
         raw_cache = find_similar_raw_cache(
             dataset, project_root=str(root), n_workers=max_workers,
-            verbose=verbose, raw_format="swc.gz"
+            verbose=verbose, raw_format=raw_format
         )
     skeleton_dir = raw_cache.skeleton_dir
     skeleton_dir.mkdir(parents=True, exist_ok=True)
@@ -2776,7 +3058,8 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
                   f"healed bundle); nothing to fetch.")
         return {"total": 0, "fetched": 0, "skipped_existing": skipped_existing,
                 "cancelled": False, "errors": 0, "mode": mode,
-                "representation": "mesh" if flywire else "skeleton"}
+                "representation": "mesh" if flywire else "skeleton",
+                "simplification": int(simplification)}
 
     if verbose:
         print(f"[morphology] download_all_skeletons: fetching {total} "
@@ -2814,6 +3097,7 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
                     progress_callback=_batch_progress,
                     raw_cache=raw_cache,
                     vector_cache=raw_cache,
+                    simplification=simplification,
                 )
                 fetched = len(fetched_map)
                 errors = total - fetched
@@ -2836,10 +3120,12 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
             "errors": errors,
             "mode": mode,
             "representation": "skeleton",
+            "simplification": int(simplification),
         }
         if verbose:
             print(f"[morphology] download_all_skeletons: {fetched}/{total} "
-                  f"fetched, {errors} errors, cancelled={cancelled}")
+                  f"fetched, {errors} errors, cancelled={cancelled}, "
+                  f"simplification={simplification}")
         return summary
 
     def _fetch_one(bid: Union[int, str]) -> bool:
@@ -2913,6 +3199,7 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
         "errors": errors,
         "mode": mode,
         "representation": "mesh" if flywire else "skeleton",
+        "simplification": int(simplification),
     }
     if verbose:
         print(f"[morphology] download_all_skeletons: {fetched}/{total} fetched, "

@@ -53,8 +53,9 @@ class SkeletonPuller:
 
         ``raw`` and ``mode`` are retained for callers from the earlier Find
         Similar UI. Pulls always use the shared raw compressed-SWC
-        representation; visualization ``fast`` is a render-time
-        simplification mode, not a pull mode.
+        representation (``.swc.zst``, 90% simplified by default);
+        visualization ``fast`` is a render-time simplification mode, not a
+        pull mode.
         """
         selected_mode = "raw"
         with self._lock:

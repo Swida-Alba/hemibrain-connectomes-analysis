@@ -208,7 +208,7 @@ class TestNeuprintPipeline:
         assert progress.descriptions[-1] == "Vector cache complete"
         assert progress.closed is True
 
-    def test_fast_first_render_simplifies_raw_swc_in_memory(
+    def test_fast_first_render_persists_simplified_cache_and_decimates_in_memory(
             self, tmp_path, monkeypatch):
         vs = build_vs(tmp_path, pipeline="fast")
         vs.skeleton_mode = "tube"
@@ -235,14 +235,16 @@ class TestNeuprintPipeline:
 
         cache_file = (
             Path(tmp_path) / "cache" / "hemibrain_v1_2_1" / "skeletons"
-            / "raw_skeletons" / "12211.swc.gz"
+            / "raw_skeletons" / "12211.swc.zst"
         )
         assert cache_file.exists()
         cached = morph_mod._load_cached_skeleton_file(cache_file)
-        assert len(cached.nodes) == len(raw.nodes)
+        # shared pipeline default: 90% simplified, level recorded in header
+        assert cached._drocat_simplification == 90
+        assert len(cached.nodes) < len(raw.nodes)
         assert 12211 in prepared
-        # Fast is a render-time simplification mode: the raw SWC remains
-        # untouched while direct mesh decimation runs in memory.
+        # Fast is a render-time simplification mode: the cached skeleton is
+        # reused while direct mesh decimation runs in memory.
         assert decimation_calls == [True]
 
     def test_render_preprocessing_aggregates_layers_before_fetch(

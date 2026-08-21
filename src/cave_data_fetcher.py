@@ -26,6 +26,7 @@ Usage:
 import os
 import pickle
 import gzip
+import io
 import logging
 import re
 import tempfile
@@ -35,6 +36,11 @@ from dataclasses import dataclass, field
 import warnings
 
 import pandas as pd
+
+try:
+    import zstandard as zstd
+except ImportError:  # pragma: no cover - installation is covered by requirements
+    zstd = None
 
 try:
     from .flywire_ids import (
@@ -248,7 +254,7 @@ class CAVEDataFetcher:
         cache_dataset = self._cache_dataset_name()
         return os.path.join(
             self.project_root, 'cache', cache_dataset, 'skeletons',
-            'raw_skeletons', f'{body_id}.swc.gz'
+            'raw_skeletons', f'{body_id}.swc.zst'
         )
 
     def _get_legacy_skeleton_cache_path(self, body_id: int) -> str:
@@ -269,14 +275,16 @@ class CAVEDataFetcher:
         """Load object from cache if exists."""
         if self.cache_enabled and os.path.exists(cache_path):
             try:
-                if str(cache_path).endswith('.swc.gz'):
-                    with gzip.open(cache_path, 'rt', encoding='utf-8') as handle:
-                        obj = navis.read_swc(handle)
+                if str(cache_path).endswith(('.swc.gz', '.swc.zst')):
+                    content = _load_swc_text(cache_path)
+                    obj = navis.read_swc(io.StringIO(content))
                     if not isinstance(obj, navis.TreeNeuron):
                         return None
                     try:
-                        obj.id = int(Path(cache_path).name[:-len('.swc.gz')])
+                        obj.id = int(_swc_stem(Path(cache_path).name))
                         obj.units = 'nm'
+                        obj._drocat_simplification = \
+                            _read_stored_simplification(content)
                     except Exception:
                         pass
                     return obj
@@ -291,7 +299,7 @@ class CAVEDataFetcher:
         if self.cache_enabled:
             try:
                 os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                if str(cache_path).endswith('.swc.gz'):
+                if str(cache_path).endswith(('.swc.gz', '.swc.zst')):
                     if not isinstance(obj, navis.TreeNeuron):
                         raise TypeError(
                             "compressed SWC cache accepts TreeNeuron only")
@@ -300,17 +308,25 @@ class CAVEDataFetcher:
                             suffix='.swc', dir=str(cache_path_obj.parent),
                             delete=False) as handle:
                         temp_swc = Path(handle.name)
-                    temp_gz = cache_path_obj.with_name(
-                        f'.{cache_path_obj.name}.{os.getpid()}.tmp')
                     try:
                         navis.write_swc(obj, temp_swc, write_meta=True)
-                        temp_gz.write_bytes(
-                            gzip.compress(temp_swc.read_bytes(),
-                                          compresslevel=6, mtime=0))
-                        os.replace(temp_gz, cache_path_obj)
+                        payload = temp_swc.read_bytes()
+                        if str(cache_path).endswith('.swc.zst'):
+                            # Canonical form: zstd-19 with a recorded level
+                            # (FlyWire raw skeletons are stored raw, 0).
+                            _write_compressed_swc_zst(
+                                cache_path_obj, payload, simplification=0)
+                        else:
+                            temp_gz = cache_path_obj.with_name(
+                                f'.{cache_path_obj.name}.{os.getpid()}.tmp')
+                            try:
+                                temp_gz.write_bytes(gzip.compress(
+                                    payload, compresslevel=6, mtime=0))
+                                os.replace(temp_gz, cache_path_obj)
+                            finally:
+                                temp_gz.unlink(missing_ok=True)
                     finally:
                         temp_swc.unlink(missing_ok=True)
-                        temp_gz.unlink(missing_ok=True)
                     return
                 with open(cache_path, 'wb') as f:
                     pickle.dump(obj, f)
@@ -540,7 +556,8 @@ class CAVEDataFetcher:
         # Try cache first
         if cache_allowed:
             cached = self._load_from_cache(cache_path)
-            if cached is None and str(cache_path).endswith('.swc.gz'):
+            if cached is None and str(cache_path).endswith(
+                    ('.swc.gz', '.swc.zst')):
                 # Read the former API-cache pickle once for a non-destructive
                 # migration, then converge on canonical raw SWC. The legacy
                 # file is intentionally retained for recoverability.
@@ -1054,7 +1071,8 @@ class CAVEDataFetcher:
              if path.is_file()
              and (path.name.endswith('.pkl')
                   or path.name.endswith('.pkl.zst')
-                  or path.name.endswith('.swc.gz'))]
+                  or path.name.endswith('.swc.gz')
+                  or path.name.endswith('.swc.zst'))]
             if skel_dir.exists() else []
         )
         mesh_files = []
@@ -1082,6 +1100,72 @@ class CAVEDataFetcher:
             'mesh_size_mb': round(mesh_size / 1024 / 1024, 2),
             'total_size_mb': round((skel_size + mesh_size) / 1024 / 1024, 2),
         }
+
+
+# Header line recording the on-disk simplification level of a compressed
+# SWC cache file (percent of nodes removed; absent/legacy files are raw).
+_SIMPLIFICATION_HEADER = "DROCAT simpl:"
+
+
+def _read_stored_simplification(text) -> int:
+    """Parse ``# DROCAT simpl: N`` from a compressed-SWC header (0 = raw)."""
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
+    for line in text.splitlines()[:8]:
+        line = line.strip()
+        if line.startswith("#"):
+            line = line[1:].strip()
+        if line.startswith(_SIMPLIFICATION_HEADER):
+            try:
+                return int(line[len(_SIMPLIFICATION_HEADER):].strip())
+            except ValueError:
+                return 0
+    return 0
+
+
+def _swc_stem(name: str) -> str:
+    """BodyId stem of a ``.swc.zst`` / ``.swc.gz`` cache filename."""
+    for suffix in (".swc.zst", ".swc.gz"):
+        if name.endswith(suffix):
+            return name[:-len(suffix)]
+    return Path(name).stem
+
+
+def _load_swc_text(path: str) -> str:
+    """Read a compressed-SWC cache file (.swc.zst or .swc.gz) as text."""
+    if str(path).endswith(".swc.zst"):
+        if zstd is None:
+            raise ImportError("zstandard is required to read .swc.zst caches")
+        with open(path, "rb") as handle:
+            with zstd.ZstdDecompressor().stream_reader(handle) as reader:
+                content = reader.read()
+        return content.decode("utf-8", "replace")
+    with gzip.open(path, "rt", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _write_compressed_swc_zst(path: str, text: bytes, simplification: int = 0
+                              ) -> None:
+    """Atomically write compressed SWC as zstd-19 with a recorded level.
+
+    Mirrors the shared simplify + compress pipeline in morphology: the level
+    (percent of nodes removed; FlyWire raw skeletons are stored raw, 0) is
+    recorded in the first SWC header line so later loads can re-level.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_out = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        payload = b"# DROCAT simpl: %d\n" % int(simplification) + text
+        if zstd is None:
+            raise ImportError(
+                "zstandard is required to write .swc.zst caches")
+        blob = zstd.ZstdCompressor(
+            level=19, write_content_size=True).compress(payload)
+        temp_out.write_bytes(blob)
+        os.replace(temp_out, path)
+    finally:
+        temp_out.unlink(missing_ok=True)
 
 
 def test_fafb_access():

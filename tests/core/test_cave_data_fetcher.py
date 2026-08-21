@@ -97,7 +97,7 @@ def test_banc_cache_namespace_keeps_requested_release(tmp_path):
     )
     assert fetcher._get_skeleton_cache_path("72057594037927937").endswith(
         "cache/flywire_BANC_v888/skeletons/raw_skeletons/"
-        "72057594037927937.swc.gz"
+        "72057594037927937.swc.zst"
     )
 
 
@@ -155,7 +155,7 @@ def test_skeleton_cache_roundtrip_is_written_only_for_cache_enabled_call(
         42, use_cache=True, simplify_mesh=0.0, denoise_twigs=None
     )
     cache_path = tmp_path / "cache" / "flywire_FAFB_v783" \
-        / "skeletons" / "raw_skeletons" / "42.swc.gz"
+        / "skeletons" / "raw_skeletons" / "42.swc.zst"
     assert first is not None and cache_path.exists()
 
     monkeypatch.setattr(

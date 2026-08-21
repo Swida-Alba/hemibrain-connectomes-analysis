@@ -360,6 +360,45 @@ class TestCachePrimitives:
         assert isinstance(loaded, navis.TreeNeuron)
         assert len(loaded.nodes) == 6
 
+    def test_save_load_swc_zst_roundtrip(self, tmp_path):
+        """The canonical raw-SWC cache form is .swc.zst with a recorded
+        level header (FlyWire raw skeletons are stored at level 0)."""
+        f = make_fetcher(tmp_path)
+        path = tmp_path / 'sub' / '12.swc.zst'
+        f._save_to_cache(chain_neuron(), str(path))
+        assert path.exists()
+        import zstandard as zstd
+        with open(path, 'rb') as handle:
+            with zstd.ZstdDecompressor().stream_reader(handle) as reader:
+                content = reader.read()
+        assert b'# DROCAT simpl: 0' in content
+        loaded = f._load_from_cache(str(path))
+        assert isinstance(loaded, navis.TreeNeuron)
+        assert len(loaded.nodes) == 6
+        assert loaded.id == 12
+        assert loaded._drocat_simplification == 0
+
+    def test_load_legacy_swc_gz_without_header_still_works(self, tmp_path):
+        f = make_fetcher(tmp_path)
+        path = tmp_path / '77.swc.gz'
+        path.write_bytes(gzip.compress(chain_swc().encode('utf-8')))
+        loaded = f._load_from_cache(str(path))
+        assert isinstance(loaded, navis.TreeNeuron)
+        assert loaded._drocat_simplification == 0
+
+    def test_canonical_skeleton_cache_path_is_swc_zst(self, tmp_path):
+        f = make_fetcher(tmp_path)
+        assert f._get_skeleton_cache_path(42).endswith('42.swc.zst')
+
+    def test_get_cache_stats_counts_swc_zst(self, tmp_path):
+        f = make_fetcher(tmp_path)
+        api_skel = Path(f.get_cache_path('skeletons'))
+        api_skel.mkdir(parents=True, exist_ok=True)
+        (api_skel / '1.swc.zst').write_bytes(b'x')
+        (api_skel / '2.swc.gz').write_bytes(b'x')
+        stats = f.get_cache_stats()
+        assert stats['skeleton_count'] == 2
+
     def test_save_pickle(self, tmp_path):
         f = make_fetcher(tmp_path)
         path = tmp_path / 'deep' / 'obj.pkl'

@@ -200,8 +200,9 @@ def create_find_similar_tab():
 
                 ui.label(
                     "Raw skeletons fetched by Find Similar, visualization, and "
-                    "dataset pulls are always stored as reusable .swc.gz files "
-                    "under cache/<dataset>/skeletons/raw_skeletons/. Use "
+                    "dataset pulls are always stored as reusable .swc.zst files "
+                    "under cache/<dataset>/skeletons/raw_skeletons/ (legacy "
+                    ".swc.gz remains readable). Use "
                     "Settings → Dataset Cache → Download All Skeletons "
                     "to prefetch "
                     "the shared population."
@@ -245,12 +246,15 @@ def create_find_similar_tab():
                     # folders by a dataset-specific source.
                     raw_dir = dataset_folder / "skeletons" / "raw_skeletons"
                     raw_files = (list(raw_dir.rglob("*.pkl"))
-                                 + list(raw_dir.rglob("*.swc.gz")))
+                                 + list(raw_dir.rglob("*.swc.gz"))
+                                 + list(raw_dir.rglob("*.swc.zst")))
                     legacy_raw_dir = vector_folder / "raw_skeletons"
                     raw_files += (list(legacy_raw_dir.rglob("*.pkl"))
-                                  + list(legacy_raw_dir.rglob("*.swc.gz")))
+                                  + list(legacy_raw_dir.rglob("*.swc.gz"))
+                                  + list(legacy_raw_dir.rglob("*.swc.zst")))
                     n_skel = len({
-                        p.name.removesuffix(".swc.gz").removesuffix(".pkl")
+                        p.name.removesuffix(".swc.zst").removesuffix(".swc.gz")
+                        .removesuffix(".pkl")
                         for p in raw_files
                     })
                     # FAFB v783: the healed bundle is the real skeleton source

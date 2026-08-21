@@ -2350,8 +2350,9 @@ class VisualizeSkeleton:
     - ``'fine'``: smooth and resample raw NeuPrint skeletons,
       synthesize a FAFB-style radius profile, then build and simplify a tube
       mesh transiently at the 0.95 fine-render target using the accelerated
-      implementation. The raw source is cached as ``.swc.gz``.
-    - ``'artistic'``: the same raw-source contract as ``fine``, using Open3D
+      implementation. The cached source is the shared simplified ``.swc.zst``
+      (90% default).
+    - ``'artistic'``: the same cached-source contract as ``fine``, using Open3D
       vertex clustering for accelerated transient mesh decimation. It is
       retained as an explicit method name while all NeuPrint methods use the
       shared batched, parallel online skeleton prefetch.
@@ -5566,7 +5567,7 @@ class VisualizeSkeleton:
         datasets/{dataset}/*_synapse_table.parquet - synapse table
         
         Example:
-        - cache/hemibrain_v1_2_1/skeletons/raw_skeletons/{bodyId}.swc.gz
+        - cache/hemibrain_v1_2_1/skeletons/raw_skeletons/{bodyId}.swc.zst
         - datasets/flywire_FAFB_v783/flywire_FAFB_v783_synapse_table.parquet
         """
         dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
@@ -5919,11 +5920,13 @@ class VisualizeSkeleton:
 
     def _load_cached_neurons(self, neuron_df, transformed_target=None,
                              ignore_cache=False):
-        """Load raw NeuPrint skeletons from the shared SWC cache.
+        """Load NeuPrint skeletons from the shared SWC cache.
 
-        The raw cache is the single source for every visualization
-        simplification mode. Legacy ``skeletons/{bodyId}.pkl`` files are not
-        read because their representation level is ambiguous.
+        The shared cache is the single source for every visualization
+        simplification mode; files are stored at the pipeline's
+        simplification level (90% default, recorded in the header). Legacy
+        ``skeletons/{bodyId}.pkl`` files are not read because their
+        representation level is ambiguous.
         """
         body_ids = [int(bid) for bid in neuron_df['bodyId'].tolist()]
         if ignore_cache:
@@ -5967,12 +5970,14 @@ class VisualizeSkeleton:
         return None, body_ids
     
     def _save_cached_neurons(self, neuron_df, neuron_vols):
-        """Persist raw NeuPrint skeletons in the shared SWC cache.
+        """Persist NeuPrint skeletons in the shared SWC cache.
 
         The method name is retained for compatibility with older callers,
         but it no longer writes visualization pickles or a simplification
-        marker. Render-time ``fast``/``fine`` decimation always starts from
-        these raw skeletons.
+        marker. Persistence goes through the shared simplify + compress
+        pipeline (90% simplified ``.swc.zst`` by default); render-time
+        ``fast``/``fine`` decimation always starts from these cached
+        skeletons.
         """
         is_neuprint = not (self.client_type == 'flywire'
                            or 'flywire' in self.dataset.lower()
@@ -6000,7 +6005,8 @@ class VisualizeSkeleton:
             )
             saved_count = raw_cache.persist_skeletons(raw_items)
             self._vprint(
-                f'  💾 Saved {saved_count}/{len(raw_items)} raw .swc.gz skeletons',
+                f'  💾 Saved {saved_count}/{len(raw_items)} '
+                f'.swc.zst skeletons (90% simplified)',
                 level='full',
             )
         except Exception as exc:
@@ -6463,7 +6469,7 @@ class VisualizeSkeleton:
                 written = raw_cache.persist_skeletons(raw_items)
                 self._vprint(
                     f'  ✓ Raw skeleton cache complete: {written}/'
-                    f'{len(raw_items)} .swc.gz files',
+                    f'{len(raw_items)} .swc.zst files (90% simplified)',
                     level='simple',
                     use_tqdm=True,
                 )
@@ -7161,21 +7167,23 @@ class VisualizeSkeleton:
         """Ignore historical NeuPrint fine-mesh directories.
 
         This compatibility seam intentionally returns no mesh hits. Fine and
-        artistic rendering must load the raw standalone ``.swc.gz`` source
-        and rebuild the tube mesh for the current visualization settings.
+        artistic rendering must load the standalone simplified ``.swc.zst``
+        source (90% default) and rebuild the tube mesh for the current
+        visualization settings.
         """
         return {}, list(body_ids)
 
     def _save_cached_neuprint_meshes(self, mesh_neurons_dict):
         """Ignore historical NeuPrint fine-mesh save requests.
 
-        Raw ``.swc.gz`` persistence is handled by the batched fetch phase;
-        mesh objects are render-time products and must not become a second
-        cache representation.
+        Simplified ``.swc.zst`` persistence is handled by the batched fetch
+        phase; mesh objects are render-time products and must not become a
+        second cache representation.
         """
         if mesh_neurons_dict:
             self._vprint(
-                '  ℹ️ NeuPrint fine mesh caching is disabled; using raw .swc.gz',
+                '  ℹ️ NeuPrint fine mesh caching is disabled; using the '
+                'simplified .swc.zst source',
                 level='full',
             )
         return 0
@@ -8550,9 +8558,10 @@ class VisualizeSkeleton:
 
         
         # NeuPrint fine/artistic rendering never loads or writes a transformed
-        # mesh cache.  It always starts from the raw standalone ``.swc.gz``
-        # cache and applies the FAFB transform, tube conversion, and requested
-        # simplification in the aggregate preprocessing phase below.
+        # mesh cache.  It always starts from the standalone simplified
+        # ``.swc.zst`` cache (90% default) and applies the FAFB transform, tube
+        # conversion, and requested simplification in the aggregate
+        # preprocessing phase below.
         neuprint_mesh_cache = {}
         use_neuprint_mesh_cache = False
 
