@@ -2710,9 +2710,88 @@ class TestDatasetService:
     def test_settings_token_status_is_non_sensitive(self):
         from ui.tabs.settings import _token_status
 
-        assert _token_status("secret-token") == "configured (kept hidden)"
-        assert "secret-token" not in _token_status("secret-token")
+        assert _token_status("secret-token", "config.json") == "configured (config.json)"
+        assert "secret-token" not in _token_status("secret-token", "config.json")
+        assert _token_status("secret-token", "env var NEUPRINT_APPLICATION_CREDENTIALS") == (
+            "configured (env var NEUPRINT_APPLICATION_CREDENTIALS)"
+        )
         assert _token_status("") == "not configured"
+
+    def test_token_sources_env_var_recognition(self, tmp_path, monkeypatch):
+        """NEUPRINT_APPLICATION_CREDENTIALS / NEUPRINT_TOKEN / CAVE_TOKEN
+        count as configured with an explicit env-var source; config files
+        still win per key and empty entries fall back to the env."""
+        from ui.tabs import settings as settings_module
+
+        monkeypatch.setattr(settings_module, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setenv("NEUPRINT_APPLICATION_CREDENTIALS", "env-app-creds")
+        monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
+        monkeypatch.delenv("CAVE_TOKEN", raising=False)
+
+        # env only -> configured with the env-var source
+        sources = settings_module._token_sources()
+        assert sources["neuprint"] == (
+            "env-app-creds",
+            "env var NEUPRINT_APPLICATION_CREDENTIALS",
+        )
+        assert sources["cave"] == ("", "")
+
+        # config.json wins over the env var
+        (tmp_path / "config.json").write_text(
+            '{"tokens": {"neuprint": "cfg-np", "cave": "cfg-cave"}}\n', encoding="utf-8"
+        )
+        sources = settings_module._token_sources()
+        assert sources["neuprint"] == ("cfg-np", "config.json")
+        assert sources["cave"] == ("cfg-cave", "config.json")
+
+        # an empty config.json entry falls back to the env var
+        (tmp_path / "config.json").write_text(
+            '{"tokens": {"neuprint": "", "cave": "cfg-cave"}}\n', encoding="utf-8"
+        )
+        sources = settings_module._token_sources()
+        assert sources["neuprint"] == (
+            "env-app-creds",
+            "env var NEUPRINT_APPLICATION_CREDENTIALS",
+        )
+
+        # NEUPRINT_TOKEN is the fallback env var when the application
+        # credentials variable is absent
+        monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS")
+        monkeypatch.setenv("NEUPRINT_TOKEN", "env-np-token")
+        monkeypatch.setenv("CAVE_TOKEN", "env-cave-token")
+        (tmp_path / "config.json").write_text(
+            '{"tokens": {"neuprint": "", "cave": ""}}\n', encoding="utf-8"
+        )
+        sources = settings_module._token_sources()
+        assert sources["neuprint"] == ("env-np-token", "env var NEUPRINT_TOKEN")
+        assert sources["cave"] == ("env-cave-token", "env var CAVE_TOKEN")
+
+    def test_settings_token_status_shows_source(self, tmp_path, monkeypatch):
+        """The Settings tab labels each token with its source: config.json
+        or the environment variable."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs import settings as settings_module
+
+        monkeypatch.setattr(settings_module, "PROJECT_ROOT", tmp_path)
+        (tmp_path / "config.json").write_text(
+            '{"tokens": {"neuprint": "cfg-np", "cave": ""}}\n', encoding="utf-8"
+        )
+        monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS", raising=False)
+        monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
+        monkeypatch.setenv("CAVE_TOKEN", "env-cave-token")
+
+        client = Client(page("/settings-token-source"))
+        with client:
+            settings_module.create_settings_tab()
+
+        statuses = [
+            el.text for el in client.elements.values()
+            if getattr(el, "text", "") and el.text.startswith("configured (")
+        ]
+        assert "configured (config.json)" in statuses
+        assert "configured (env var CAVE_TOKEN)" in statuses
+        assert not any("kept hidden" in s for s in statuses)
 
     def test_custom_grouping_instruction_link_present(self):
         """Every custom-grouping UI surface links to the LabelMapper guide:
@@ -2762,6 +2841,9 @@ class TestDatasetService:
         built = []
 
         def build(neuprint: str, cave: str):
+            monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS", raising=False)
+            monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
+            monkeypatch.delenv("CAVE_TOKEN", raising=False)
             (tmp_path / "config.json").write_text(
                 '{"tokens": {"neuprint": "' + neuprint + '", "cave": "' + cave + '"}}\n',
                 encoding="utf-8",
@@ -3064,6 +3146,9 @@ class TestTabs:
             '{"tokens": {"neuprint": "", "cave": ""}}\n', encoding="utf-8"
         )
         monkeypatch.setattr(settings_module, "PROJECT_ROOT", tmp_path)
+        monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS", raising=False)
+        monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
+        monkeypatch.delenv("CAVE_TOKEN", raising=False)
 
         client = Client(page("/token-warning-missing"))
         with client:
@@ -3109,8 +3194,41 @@ class TestTabs:
             '{"tokens": {"neuprint": "real-token", "cave": ""}}\n', encoding="utf-8"
         )
         monkeypatch.setattr(settings_module, "PROJECT_ROOT", tmp_path)
+        monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS", raising=False)
+        monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
+        monkeypatch.delenv("CAVE_TOKEN", raising=False)
 
         client = Client(page("/token-warning-configured"))
+        with client:
+            app_module.main_page()
+
+        assert app_module._neuprint_token_configured() is True
+        dialog = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("id") == "drocat-token-warning"
+        )
+        timer = next(
+            el for el in client.elements.values()
+            if isinstance(el, ui.timer)
+            and el.callback.__name__ == "_maybe_open_token_warning"
+        )
+        timer.callback()
+        assert dialog.value is False
+
+    def test_token_warning_dialog_stays_closed_when_env_var_configured(self, tmp_path, monkeypatch):
+        """NEUPRINT_APPLICATION_CREDENTIALS counts as configured: the
+        startup warning never opens."""
+        from nicegui import Client, ui
+        from nicegui.page import page
+        import ui.app as app_module
+        from ui.tabs import settings as settings_module
+
+        monkeypatch.setattr(settings_module, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setenv("NEUPRINT_APPLICATION_CREDENTIALS", "env-app-creds")
+        monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
+        monkeypatch.delenv("CAVE_TOKEN", raising=False)
+
+        client = Client(page("/token-warning-env"))
         with client:
             app_module.main_page()
 

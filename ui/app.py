@@ -1628,14 +1628,16 @@ html, body {
 """
 
 def _neuprint_token_configured() -> bool:
-    """Whether a NeuPrint token is configured in the project configs.
+    """Whether a NeuPrint token is configured.
 
-    Mirrors the Settings tab reminder: config.json wins per key, the
-    gitignored config_local.json fills empty entries. The CAVE token is
-    optional and does not gate the warning.
+    Mirrors the Settings tab: config.json wins per key, the gitignored
+    config_local.json fills empty entries, then the
+    NEUPRINT_APPLICATION_CREDENTIALS or NEUPRINT_TOKEN environment
+    variables. The CAVE token is optional and does not gate the warning.
     """
-    from ui.tabs.settings import _load_tokens as _load_configured_tokens
-    return bool((_load_configured_tokens() or {}).get("neuprint"))
+    from ui.tabs.settings import _token_sources
+    token, _source = _token_sources().get("neuprint", ("", ""))
+    return bool(token)
 
 
 @ui.page("/")

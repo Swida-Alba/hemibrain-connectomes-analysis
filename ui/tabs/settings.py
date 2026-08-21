@@ -1,6 +1,7 @@
 """Settings Tab - Token configuration, dataset status, and app settings."""
 
 import json
+import os
 
 from nicegui import run, ui
 
@@ -354,10 +355,13 @@ def create_settings_tab():
         with ui.card().classes("w-full drocat-card"):
             section_header("API Tokens", "key")
 
-            existing_tokens = _load_tokens()
+            # Full detection chain (config files then env vars) so env-var
+            # tokens are recognized as configured; the source is shown in
+            # the status labels next to each field.
+            token_sources = _token_sources()
             token_state = {
-                "neuprint": existing_tokens.get("neuprint", ""),
-                "cave": existing_tokens.get("cave", ""),
+                "neuprint": token_sources["neuprint"][0],
+                "cave": token_sources["cave"][0],
             }
 
             # Reminder when tokens are missing: the NeuPrint token is
@@ -403,7 +407,7 @@ def create_settings_tab():
             with ui.column().classes("w-full gap-1"):
                 with ui.row().classes("items-center gap-2"):
                     ui.label("NeuPrint Token (Required for all NeuPrint datasets)").classes("text-caption font-bold")
-                    neuprint_status = ui.label(_token_status(token_state["neuprint"])).classes("text-caption drocat-muted")
+                    neuprint_status = ui.label(_token_status(token_state["neuprint"], token_sources["neuprint"][1])).classes("text-caption drocat-muted")
                 ui.html("Get it from <a href='https://neuprint.janelia.org/account' target='_blank' style='color:var(--drocat-cobalt)'>neuprint.janelia.org/account</a>").classes("text-caption drocat-muted")
 
             neuprint_token = ui.input(
@@ -419,7 +423,7 @@ def create_settings_tab():
             with ui.column().classes("w-full gap-1"):
                 with ui.row().classes("items-center gap-2"):
                     ui.label("CAVE Token (for FlyWire CAVE API features)").classes("text-caption font-bold drocat-warn")
-                    cave_status = ui.label(_token_status(token_state["cave"])).classes("text-caption drocat-muted")
+                    cave_status = ui.label(_token_status(token_state["cave"], token_sources["cave"][1])).classes("text-caption drocat-muted")
                 ui.html("Get it from <a href='https://codex.flywire.ai/auth_token' target='_blank' style='color:var(--drocat-cobalt)'>codex.flywire.ai/auth_token</a>").classes("text-caption drocat-muted")
                 ui.label("Local converted FlyWire tables work without this token. A CAVE token is needed only when a workflow fetches data or skeletons through the CAVE API; it never replaces the required local files.").classes("text-caption drocat-warn")
 
@@ -829,8 +833,8 @@ python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter impor
                 ui.link("Docs", APP_DOCS_URL, new_tab=True).classes("text-primary")
 
     def _update_token_status():
-        neuprint_status.text = _token_status(token_state["neuprint"])
-        cave_status.text = _token_status(token_state["cave"])
+        neuprint_status.text = _token_status(token_state["neuprint"], token_sources["neuprint"][1])
+        cave_status.text = _token_status(token_state["cave"], token_sources["cave"][1])
         _refresh_token_reminder()
 
     def save_tokens():
@@ -839,7 +843,9 @@ python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter impor
         config_path = PROJECT_ROOT / "config_local.json"
         entered_neuprint = (neuprint_token.value or "").strip()
         entered_cave = (cave_token.value or "").strip()
-        saved_tokens = dict(token_state)
+        # Base the save on the config-file tokens only: an env-var token
+        # must never be copied into config_local.json by clicking Save.
+        saved_tokens = _load_tokens()
 
         if entered_neuprint:
             saved_tokens["neuprint"] = entered_neuprint
@@ -867,8 +873,11 @@ python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter impor
         try:
             config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
             config_path.chmod(0o600)
+            # Re-resolve from files + env so the status labels keep showing
+            # the actual source after the save.
+            token_sources.update(_token_sources())
             token_state.clear()
-            token_state.update(saved_tokens)
+            token_state.update({key: value for key, (value, _source) in token_sources.items()})
             # Clear the client-side fields after saving so a browser DOM
             # snapshot can never retain a secret value.
             neuprint_token.value = ""
@@ -950,6 +959,53 @@ def _load_tokens() -> dict:
     return tokens
 
 
-def _token_status(token: str) -> str:
-    """Return a non-sensitive status label for a configured token."""
-    return "configured (kept hidden)" if token else "not configured"
+def _token_sources() -> dict:
+    """Return {key: (token, source)} for neuprint/cave with the full chain.
+
+    Priority per key: config.json (wins per key), then the gitignored
+    config_local.json (empty-entry fallback), then the environment:
+    NEUPRINT_APPLICATION_CREDENTIALS (the variable neuprint-python itself
+    reads) or NEUPRINT_TOKEN for NeuPrint, CAVE_TOKEN for CAVE. A
+    ``YOUR_*`` placeholder is treated as unconfigured. The source string is
+    shown in the Settings tab so users see where each token comes from.
+    """
+    sources = {}
+    for key, env_names in (
+        ("neuprint", ("NEUPRINT_APPLICATION_CREDENTIALS", "NEUPRINT_TOKEN")),
+        ("cave", ("CAVE_TOKEN",)),
+    ):
+        token, source = "", ""
+        for filename in ("config.json", "config_local.json"):
+            config_path = PROJECT_ROOT / filename
+            if not config_path.exists():
+                continue
+            try:
+                cfg = json.loads(config_path.read_text(encoding="utf-8-sig"))
+            except Exception:
+                cfg = None
+            cfg_tokens = (cfg or {}).get("tokens") if isinstance(cfg, dict) else None
+            if isinstance(cfg_tokens, dict):
+                value = cfg_tokens.get(key)
+                if isinstance(value, str) and value.strip() and not value.startswith("YOUR_"):
+                    token, source = value.strip(), filename
+                    break
+        if not token:
+            for env_name in env_names:
+                env_value = os.environ.get(env_name, "").strip()
+                if env_value and not env_value.startswith("YOUR_"):
+                    token, source = env_value, f"env var {env_name}"
+                    break
+        sources[key] = (token, source)
+    return sources
+
+
+def _token_status(token: str, source: str = "") -> str:
+    """Return a non-sensitive status label naming the token's source.
+
+    ``source`` is "config.json", "config_local.json" or "env var <NAME>"
+    as resolved by :func:`_token_sources`; the token value itself is never
+    shown.
+    """
+    if not token:
+        return "not configured"
+    return f"configured ({source or 'config files'})"
