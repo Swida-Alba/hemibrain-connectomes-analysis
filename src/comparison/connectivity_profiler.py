@@ -2511,8 +2511,13 @@ class ConnectivityProfiler:
         try:
             from neuprint import Client
             
-            # Use provided token or fall back to environment variable
-            token = self.token or os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS', '')
+            # Use provided token or fall back to the env/config chain
+            try:
+                from utils.token_manager import token_manager
+                resolved = token_manager.get_neuprint_token()
+            except ImportError:
+                resolved = os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS', '')
+            token = self.token or resolved or ''
             if not token:
                 self._log(f"Warning: No NeuPrint token found for {dataset}")
             

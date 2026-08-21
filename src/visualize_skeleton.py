@@ -4843,8 +4843,9 @@ class VisualizeSkeleton:
                     try:
                         from utils.token_manager import token_manager
                         self.token = token_manager.get_token('NEUPRINT_TOKEN', self.token)
+                        env_token = token_manager.get_neuprint_token()
                     except ImportError:
-                        pass
+                        env_token = os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS')
 
                     if self.token:
                         self.client = Client(self.server, dataset=self.dataset, token=self.token)
@@ -4852,13 +4853,13 @@ class VisualizeSkeleton:
                         # Set as default to avoid "multiple clients" error
                         neuprint.set_default_client(self.client)
                         self._vprint(f'Client initialized for {self.dataset} (set as default)', level='full')
-                    elif os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS'):
-                        # Auto-detect from env
+                    elif env_token:
+                        # Auto-detect from env/config files
                         self.client = Client(self.server, dataset=self.dataset)
                         self.client.fetch_version()
                         # Set as default to avoid "multiple clients" error
                         neuprint.set_default_client(self.client)
-                        self._vprint(f'Client initialized from env for {self.dataset} (set as default)', level='full')
+                        self._vprint(f'Client initialized from env/config for {self.dataset} (set as default)', level='full')
                     else:
                         # Only warn if we are not using local cache/files exclusively
                         # But we don't know that yet.
@@ -11328,8 +11329,9 @@ class VisualizeSkeleton:
                 client = self.client
                 
                 if client is None:
-                    # Try to get token from environment variable first
-                    token = os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS')
+                    # Try to get token from env/config files first
+                    from utils.token_manager import token_manager
+                    token = token_manager.get_neuprint_token()
                     
                     if token:
                         # Determine server URL based on dataset
@@ -12266,8 +12268,9 @@ class VisualizeSkeleton:
                     try:
                         import navis.interfaces.neuprint as neu
                         from neuprint import Client
+                        from utils.token_manager import token_manager
                         
-                        token = os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS') or self.token
+                        token = token_manager.get_neuprint_token() or self.token
                         if token:
                             try:
                                 self._vprint(f'   Checking male-cns:v0.9...', level='full')
@@ -12319,11 +12322,12 @@ class VisualizeSkeleton:
                     try:
                         import navis.interfaces.neuprint as neu
                         from neuprint import Client
+                        from utils.token_manager import token_manager
                         
                         client = self.client
                         
                         if client is None:
-                            token = os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS') or self.token
+                            token = token_manager.get_neuprint_token() or self.token
                             
                             if token:
                                 if 'optic' in self.dataset.lower():

@@ -104,10 +104,24 @@ class TokenManager:
             
         # 3. Environment variable (fallback)
         env_token = os.environ.get(token_name)
+        if not env_token and token_name == 'NEUPRINT_TOKEN':
+            # The canonical variable neuprint-python itself reads; the
+            # legacy NEUPRINT_TOKEN name is still accepted as an alias.
+            env_token = os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS')
         if env_token:
             return env_token
             
         return None
+
+    def get_neuprint_token(self):
+        """NeuPrint token with the full DROCAT fallback chain.
+
+        Delegates to :meth:`get_token`, which reads the canonical
+        ``NEUPRINT_APPLICATION_CREDENTIALS`` variable as an alias of
+        ``NEUPRINT_TOKEN``: config.json per key, then the gitignored
+        config_local.json, then the environment variables.
+        """
+        return self.get_token('NEUPRINT_TOKEN')
     
     def detect_token_type(self, token):
         """

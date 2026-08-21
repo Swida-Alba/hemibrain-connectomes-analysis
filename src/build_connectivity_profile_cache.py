@@ -84,11 +84,18 @@ def build_cache(
     """
     from coana import FindNeuronConnection
     
-    # Get token from environment if not provided
+    # Get token through the standard chain: config.json wins per key, then
+    # the gitignored config_local.json, then the environment (canonical
+    # NEUPRINT_APPLICATION_CREDENTIALS; NEUPRINT_TOKEN as a legacy alias).
     if token is None:
-        token = os.environ.get('NEUPRINT_TOKEN')
+        try:
+            from utils.token_manager import token_manager
+            token = token_manager.get_neuprint_token()
+        except ImportError:
+            token = os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS') \
+                or os.environ.get('NEUPRINT_TOKEN')
         if token:
-            print("[INFO] Using token from NEUPRINT_TOKEN environment variable")
+            print("[INFO] Using NeuPrint token from the config/env chain")
     
     print("=" * 60)
     print("Building Connectivity Profile Cache")

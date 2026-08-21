@@ -2473,7 +2473,7 @@ def _fetch_neuprint_skeleton(dataset: str, body_id: int):
     from neuprint import Client, fetch_skeleton, set_default_client
     try:
         from utils.token_manager import token_manager
-        token = token_manager.get_token("NEUPRINT_TOKEN")
+        token = token_manager.get_neuprint_token()
     except Exception:
         token = ""
     client = Client("neuprint.janelia.org", dataset=dataset, token=token)
@@ -2854,7 +2854,7 @@ def fetch_skeletons_on_demand_batch(
             if client is None:
                 try:
                     from utils.token_manager import token_manager
-                    token = token_manager.get_token("NEUPRINT_TOKEN")
+                    token = token_manager.get_neuprint_token()
                 except Exception:
                     token = ""
                 client = Client(

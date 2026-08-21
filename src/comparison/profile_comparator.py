@@ -4177,9 +4177,14 @@ class HomologFinder:
             
             self._log(f"Building connection cache for {dataset}...")
             
-            # Get token from environment (needed for NeuPrint datasets)
-            import os
-            token = os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS') or os.environ.get('NEUPRINT_TOKEN')
+            # Get token via the env/config chain (needed for NeuPrint datasets)
+            try:
+                from utils.token_manager import token_manager
+                token = token_manager.get_neuprint_token()
+            except ImportError:
+                import os
+                token = os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS') \
+                    or os.environ.get('NEUPRINT_TOKEN')
             
             # Initialize FindNeuronConnection with cache enabled
             fnc = FindNeuronConnection(

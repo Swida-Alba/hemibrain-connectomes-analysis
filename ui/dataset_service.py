@@ -4,6 +4,7 @@ Fetches available datasets from NeuPrint server dynamically.
 """
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -303,14 +304,23 @@ class DatasetService:
             self._cave_token = loaded.get("cave")
 
     def get_token(self) -> Optional[str]:
-        """Get NeuPrint token."""
+        """Get NeuPrint token (config.json -> config_local.json -> env).
+
+        Config wins per the standard chain, so a config update overrides a
+        shell-exported NEUPRINT_APPLICATION_CREDENTIALS/NEUPRINT_TOKEN.
+        """
         self._load_tokens()
-        return self._token
+        if self._token:
+            return self._token
+        return (os.environ.get("NEUPRINT_APPLICATION_CREDENTIALS")
+                or os.environ.get("NEUPRINT_TOKEN"))
 
     def get_cave_token(self) -> Optional[str]:
-        """Get CAVE token."""
+        """Get CAVE token (config.json -> config_local.json -> env)."""
         self._load_tokens()
-        return self._cave_token
+        if self._cave_token:
+            return self._cave_token
+        return os.environ.get("CAVE_TOKEN")
 
     def fetch_neuprint_datasets(self) -> List[str]:
         """

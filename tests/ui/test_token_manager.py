@@ -30,6 +30,7 @@ class TestTokenManager:
         manager = TokenManager()
         manager.tokens = {"NEUPRINT_TOKEN": "YOUR_NEUPRINT_TOKEN_HERE"}
         monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
+        monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS", raising=False)
         assert manager.get_token("NEUPRINT_TOKEN") is None
 
     def test_env_fallback(self, monkeypatch):
@@ -38,6 +39,20 @@ class TestTokenManager:
         monkeypatch.setenv("NEUPRINT_TOKEN", "env-tok")
         assert manager.get_token("NEUPRINT_TOKEN") == "env-tok"
         monkeypatch.delenv("NEUPRINT_TOKEN")
+
+    def test_env_fallback_reads_canonical_application_credentials(
+            self, monkeypatch):
+        """NEUPRINT_APPLICATION_CREDENTIALS (the variable neuprint-python
+        itself reads) is honored even when NEUPRINT_TOKEN is unset."""
+        manager = TokenManager()
+        manager.tokens = {}
+        monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
+        monkeypatch.setenv("NEUPRINT_APPLICATION_CREDENTIALS", "canonical-tok")
+        try:
+            assert manager.get_token("NEUPRINT_TOKEN") == "canonical-tok"
+            assert manager.get_neuprint_token() == "canonical-tok"
+        finally:
+            monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS")
 
     def test_config_json_wins_over_config_local(self, tmp_path, monkeypatch):
         """config.json wins per key; config_local.json only fills empties."""
@@ -102,6 +117,7 @@ class TestTokenManager:
         manager = TokenManager()
         manager.tokens = {}
         monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
+        monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS", raising=False)
         monkeypatch.delenv("CAVE_TOKEN", raising=False)
         with pytest.raises(ValueError, match="NEUPRINT_TOKEN"):
             manager.require_both_tokens()
@@ -110,6 +126,7 @@ class TestTokenManager:
         """A long JWT-like direct input detects as neuprint; CAVE may be absent."""
         manager = TokenManager()
         monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
+        monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS", raising=False)
         monkeypatch.delenv("CAVE_TOKEN", raising=False)
         result = manager.get_auto_token(direct_input="x" * 150 + ".y" * 10)
         assert result["neuprint"]

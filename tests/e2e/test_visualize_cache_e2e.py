@@ -9,8 +9,9 @@ network is unavailable) and verifies the Mission-1 contract:
     returns every neuron.
   * Every render simplification level reuses the raw cache; ``fast`` only
     controls in-memory mesh decimation.
-  * ``morphology.fetch_skeleton_on_demand`` always returns raw data, even
-    when the compatibility ``level="simp90"`` argument is supplied.
+  * ``morphology.fetch_skeleton_on_demand`` serves the shared simplified
+    cache (no network), even when the compatibility ``level="simp90"``
+    argument is supplied.
   * The FlyWire path keeps its own cache (no marker written).
 """
 
@@ -154,11 +155,13 @@ class TestSimplifiedCacheE2E:
         vs = _vs(tmp_path)
         vs._save_cached_neurons(pd.DataFrame({"bodyId": PROBE_IDS}), probe_neurons)
 
-        # The compatibility level still serves the shared raw SWC (no network).
+        # The compatibility level still serves the shared cache (no
+        # network): the stored file is 90% simplified, so the served neuron
+        # has fewer nodes than the raw fetch.
         nrn = morph.fetch_skeleton_on_demand(
             DATASET, PROBE_IDS[0], project_root=str(tmp_path), level="simp90")
         assert nrn is not None
-        assert len(nrn.nodes) == len(probe_neurons[0].nodes)
+        assert 0 < len(nrn.nodes) < len(probe_neurons[0].nodes)
 
         # Raw requests use the same source and therefore also hit the raw
         # cache, even when persistence is disabled for this call.

@@ -4020,7 +4020,7 @@ class NeuronBridgeFinder:
                         except ImportError:
                             # Fallback to env vars if TokenManager missing
                             if not token:
-                                token = os.environ.get('NEUPRINT_TOKEN', os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS', ''))
+                                token = os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS', os.environ.get('NEUPRINT_TOKEN', ''))
                     
                     if not token:
                         self._vprint(f"")

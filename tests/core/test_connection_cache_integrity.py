@@ -91,7 +91,9 @@ def test_use_cache_false_does_not_write_connection_or_state_files(
     monkeypatch.setattr(
         coana,
         "_get_api_retry_utils",
-        lambda: (retry, RuntimeError, RuntimeError),
+        # 4-tuple: api_call_with_retry, APITimeoutError,
+        # APIRetryExhaustedError, APICancelError
+        lambda: (retry, RuntimeError, RuntimeError, RuntimeError),
     )
 
     def fake_fetch_adjacencies(**kwargs):

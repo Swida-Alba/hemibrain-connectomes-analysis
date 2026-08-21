@@ -163,6 +163,8 @@ class TestTokenConfigJson:
             monkeypatch, tmp_path,
             '{"tokens": {"neuprint": "", "cave": "cfg-cave"}}\n',
         )
+        monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS", raising=False)
+        monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
         assert svc.get_token() is None
         assert svc.get_cave_token() == "cfg-cave"
 
@@ -171,6 +173,8 @@ class TestTokenConfigJson:
             monkeypatch, tmp_path,
             '{"tokens": {"neuprint": "YOUR_NEUPRINT_TOKEN_HERE"}}\n',
         )
+        monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS", raising=False)
+        monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
         assert svc.get_token() is None
 
     def test_legacy_token_files_ignored(self, monkeypatch, tmp_path):
@@ -178,6 +182,8 @@ class TestTokenConfigJson:
             "NEUPRINT_TOKEN='legacy-tok'\n", encoding="utf-8"
         )
         svc = self._svc(monkeypatch, tmp_path, None)
+        monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS", raising=False)
+        monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
         assert svc.get_token() is None
 
     def test_config_json_wins_over_config_local(self, monkeypatch, tmp_path):
@@ -206,5 +212,32 @@ class TestTokenConfigJson:
 
     def test_no_config_returns_none(self, monkeypatch, tmp_path):
         svc = self._svc(monkeypatch, tmp_path, None)
+        monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS", raising=False)
+        monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
+        monkeypatch.delenv("CAVE_TOKEN", raising=False)
         assert svc.get_token() is None
         assert svc.get_cave_token() is None
+
+    def test_env_fallback_when_no_config(self, monkeypatch, tmp_path):
+        """No config files: the environment is the last chain link."""
+        svc = self._svc(monkeypatch, tmp_path, None)
+        monkeypatch.setenv("NEUPRINT_APPLICATION_CREDENTIALS", "env-np")
+        monkeypatch.setenv("CAVE_TOKEN", "env-cave")
+        try:
+            assert svc.get_token() == "env-np"
+            assert svc.get_cave_token() == "env-cave"
+        finally:
+            monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS")
+            monkeypatch.delenv("CAVE_TOKEN")
+
+    def test_config_update_overrides_env(self, monkeypatch, tmp_path):
+        """A config token wins over a shell-exported env var."""
+        svc = self._svc(
+            monkeypatch, tmp_path,
+            '{"tokens": {"neuprint": "cfg-np"}}\n',
+        )
+        monkeypatch.setenv("NEUPRINT_APPLICATION_CREDENTIALS", "env-np")
+        try:
+            assert svc.get_token() == "cfg-np"
+        finally:
+            monkeypatch.delenv("NEUPRINT_APPLICATION_CREDENTIALS")
