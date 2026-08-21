@@ -336,17 +336,16 @@ class TestSkeletonVectorCache:
 
     def test_raw_batch_persists_raw_skeleton_but_vector_only_is_independent(
             self, tmp_path, monkeypatch):
-        import navis.interfaces.neuprint as neu
-
-        def fake_fetch(batch, **kwargs):
+        def fake_fetch(batch_ids, **kwargs):
             out = []
-            for body_id in batch["bodyId"].tolist():
+            for body_id in batch_ids:
                 neuron = line_neuron(length=12)
                 neuron.id = int(body_id)
                 out.append(neuron)
             return out
 
-        monkeypatch.setattr(neu, "fetch_skeletons", fake_fetch)
+        monkeypatch.setattr(
+            morph, "_fetch_neuprint_batch_with_progress", fake_fetch)
         raw_cache = morph.find_similar_raw_cache(
             "np:v1", project_root=str(tmp_path), verbose=False
         )
@@ -410,20 +409,21 @@ class TestSkeletonVectorCache:
 class TestFetchOnDemand:
     def test_batch_fetch_uses_bounded_requests_and_one_cache_phase(
             self, tmp_path, monkeypatch):
-        import navis.interfaces.neuprint as neu
-
         calls = []
 
-        def fake_fetch(batch, **kwargs):
-            calls.append((batch["bodyId"].tolist(), kwargs))
+        def fake_fetch(batch_ids, **kwargs):
+            calls.append((list(batch_ids), kwargs.get("max_threads")))
             out = []
-            for body_id in batch["bodyId"].tolist():
+            for body_id in batch_ids:
                 neuron = line_neuron(length=8)
                 neuron.id = int(body_id)
                 out.append(neuron)
             return out
 
-        monkeypatch.setattr(neu, "fetch_skeletons", fake_fetch)
+        # The NeuPrint batch seam is the vendored per-neuron progress
+        # fetcher; parallelism lives inside it (verified separately).
+        monkeypatch.setattr(
+            morph, "_fetch_neuprint_batch_with_progress", fake_fetch)
         result = morph.fetch_skeletons_on_demand_batch(
             "test:v1", [101, 102, 101, 103],
             project_root=str(tmp_path), persist=False,
@@ -433,28 +433,89 @@ class TestFetchOnDemand:
 
         assert list(result) == [101, 102, 103]
         assert [ids for ids, _ in calls] == [[101, 102], [103]]
-        assert [kwargs["max_threads"] for _, kwargs in calls] == [2, 1]
-        assert all(kwargs["parallel"] is True for _, kwargs in calls)
+        assert [threads for _, threads in calls] == [2, 1]
         assert not list((tmp_path / "cache" / "test_v1" / "skeletons")
                         .glob("*.pkl"))
+
+    def test_vendored_batch_reports_per_neuron_progress_and_parallelism(
+            self, tmp_path, monkeypatch):
+        """The vendored NeuPrint batch loop fetches with ``max_threads``
+        concurrent SWC requests (not serially) and calls ``on_neuron`` for
+        every completed skeleton - the per-neuron cadence that drives the
+        Settings pull UI."""
+        import threading
+        import time
+        import navis.interfaces.neuprint as neu
+
+        monkeypatch.setattr(neu, "NeuronCriteria", lambda **kwargs: None)
+        meta = pd.DataFrame({
+            "bodyId": list(range(1, 13)),
+            "instance": [None] * 12,
+            "size": [1000] * 12,
+            "status": ["Traced"] * 12,
+            "somaLocation": [None] * 12,
+            "somaRadius": [None] * 12,
+        })
+        monkeypatch.setattr(
+            neu, "fetch_neurons",
+            lambda *a, **k: (meta.copy(), pd.DataFrame()),
+        )
+
+        class FakeClient:
+            meta = {"voxelSize": [8, 8, 8], "voxelUnits": "nm"}
+
+            def __init__(self):
+                self.lock = threading.Lock()
+                self.active = 0
+                self.max_active = 0
+
+            def fetch_skeleton(self, bodyid, format="pandas", heal=False):
+                with self.lock:
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                time.sleep(0.02)
+                with self.lock:
+                    self.active -= 1
+                return pd.DataFrame({
+                    "node_id": [1, 2, 3], "parent_id": [-1, 1, 2],
+                    "x": [0.0, 1.0, 2.0], "y": [0.0, 0.0, 0.0],
+                    "z": [0.0, 0.0, 0.0], "radius": [1.0, 1.0, 1.0],
+                })
+
+        client = FakeClient()
+        per_neuron = []
+        started = time.perf_counter()
+        neurons = morph._fetch_neuprint_batch_with_progress(
+            list(range(1, 13)), client=client, max_threads=6,
+            on_neuron=lambda done, total: per_neuron.append((done, total)),
+        )
+        elapsed = time.perf_counter() - started
+
+        assert len(neurons) == 12
+        # One callback per completed skeleton, in completion order.
+        assert len(per_neuron) == 12
+        assert per_neuron[-1] == (12, 12)
+        # All six workers were in flight at once: the batch is parallel.
+        assert client.max_active == 6, client.max_active
+        # Parallel wall time << serial (12 x 0.02 s = 0.24 s).
+        assert elapsed < 0.24 * 0.9, elapsed
 
     def test_legacy_simp90_request_writes_and_reads_raw_swc(
             self, tmp_path, monkeypatch):
         """The compatibility level does not change the raw cache contract."""
-        import navis.interfaces.neuprint as neu
-
         calls = []
 
-        def fake_fetch(batch, **kwargs):
-            calls.append(batch["bodyId"].tolist())
+        def fake_fetch(batch_ids, **kwargs):
+            calls.append(list(batch_ids))
             out = []
-            for body_id in batch["bodyId"].tolist():
+            for body_id in batch_ids:
                 neuron = line_neuron(length=12)
                 neuron.id = int(body_id)
                 out.append(neuron)
             return out
 
-        monkeypatch.setattr(neu, "fetch_skeletons", fake_fetch)
+        monkeypatch.setattr(
+            morph, "_fetch_neuprint_batch_with_progress", fake_fetch)
         raw_cache = morph.find_similar_raw_cache(
             "np:v1", project_root=str(tmp_path), verbose=False
         )
@@ -471,7 +532,7 @@ class TestFetchOnDemand:
         assert not (skeleton_dir / ".level").exists()
 
         monkeypatch.setattr(
-            neu, "fetch_skeletons",
+            morph, "_fetch_neuprint_batch_with_progress",
             lambda *args, **kwargs: (_ for _ in ()).throw(
                 AssertionError("raw SWC cache was not reused")
             ),

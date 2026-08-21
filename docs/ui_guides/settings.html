@@ -55,9 +55,17 @@
     parallel worker count. <b>Pull Full Dataset</b> builds the local neuron
     index and the resumable connection cache. <b>Pull Complete Connections</b>
     provides an explicit connection-cache pull for the selected dataset.
-    <b>Download All Skeletons</b> sits beside it, before <b>Cancel</b>, and
-    fetches missing raw skeletons into the shared
-    <code>{bodyId}.swc.gz</code> cache. The connection actions use the same batched builder and shared
+    <b>Download All Skeletons</b> sits below the dataset pull controls,
+    right above its own progress bar, together with the
+    <b>Cache Simplification</b>
+    selector that chooses the percent of skeleton nodes
+    removed when writing those cache files (90% by default = keep ~10% of
+    nodes; 0 = raw), and a <b>Skeleton Batch Size</b> input (64 default).
+    Progress is reported per completed skeleton, so the batch size does not
+    affect progress granularity; larger batches only reduce the repeated
+    per-batch metadata queries. The <b>Parallel workers</b> field above sets how
+    many skeleton fetches run concurrently - raising it is the main speed
+    lever (up to what the server tolerates). The connection actions use the same batched builder and shared
     <code>cache/&lt;dataset&gt;/connections.parquet</code> cache, so either action
     can resume an interrupted pull. Enable <b>Force rebuild</b> only when the
     existing connection cache needs to be replaced.</p>

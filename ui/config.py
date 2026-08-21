@@ -449,6 +449,11 @@ CANDIDATE_SOURCE_OPTIONS = ["auto", "roi", "combined", "profile", "cache"]
 # Simplification pipelines (NeuPrint tube rendering)
 SIMPLIFICATION_METHODS = ["fast", "fine", "artistic"]
 
+# On-disk skeleton cache simplification levels (percent of nodes removed,
+# 0-90; mirrors morphology.DEFAULT_SIMPLIFICATION). 90 = the canonical
+# "simp90" cache that keeps ~10% of nodes; 0 = raw.
+CACHE_SIMPLIFICATION_OPTIONS = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90]
+
 # User-configurable defaults rendered in the Settings tab. Each spec drives
 # the Default Settings card and validates overrides saved to
 # local_config.json under ``user_defaults``; the built-in fallback always

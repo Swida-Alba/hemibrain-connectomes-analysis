@@ -2380,6 +2380,8 @@ class TestDatasetService:
         assert labels["Dataset"]._props.get("outlined") is True
         assert "Batch size" in labels
         assert "Parallel workers" in labels
+        assert "Cache Simplification" in labels  # skeleton pull level selector
+        assert "Skeleton Batch Size" in labels  # skeleton pull batch control
         assert any(
             getattr(el, "text", None) == "Pull Full Dataset"
             for el in client.elements.values()
@@ -2414,7 +2416,11 @@ class TestDatasetService:
             el for el in elements if getattr(el, "text", None) == "Cancel"
         )
         assert elements.index(dataset_cache_title) < elements.index(download_button)
-        assert elements.index(download_button) < elements.index(cancel_button)
+        # The skeleton pull controls (simplification selector + button) sit
+        # below the dataset-pull buttons and progress, grouped with the
+        # skeleton progress bar - so Cancel (a dataset-row button) precedes
+        # the skeleton download button in the element order.
+        assert elements.index(cancel_button) < elements.index(download_button)
 
     def test_settings_skeleton_pull_blocks_flywire_with_manual_instruction(self):
         """Clicking 'Download All Skeletons' on a FlyWire dataset must not

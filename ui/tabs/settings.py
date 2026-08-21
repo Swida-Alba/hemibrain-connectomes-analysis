@@ -6,6 +6,7 @@ import os
 from nicegui import run, ui
 
 from ..config import (
+    CACHE_SIMPLIFICATION_OPTIONS,
     DATASETS,
     DEFAULT_OUTPUT_DIR,
     APP_DOCS_BRANCH,
@@ -127,19 +128,19 @@ def create_settings_tab():
                 connection_run_btn = ui.button(
                     "Pull Complete Connections", icon="hub", color="secondary"
                 ).props("outline")
-                skeleton_run_btn = ui.button(
-                    "Download All Skeletons", icon="download", color="secondary"
-                ).props("outline").tooltip(
-                    "Download missing raw skeletons as reusable .swc.zst files "
-                    "(90% simplified) using the Dataset and Parallel workers "
-                    "selected above. FlyWire datasets require a manual "
-                    "download from the FlyWire Codex (see the converter "
-                    "instructions)."
-                )
                 cancel_btn = ui.button("Cancel", icon="stop", color="negative").props("outline")
                 cancel_btn.set_enabled(False)
 
-            progress = ui.linear_progress(value=0).props("instant-feedback").classes("w-full")
+            # The bar shows a live percent label; nicegui's default would
+            # render the raw 0-1 fraction on the bar instead.  ``show_value``
+            # off also thins the bar, so pin the height back to 20px.
+            progress = ui.linear_progress(
+                value=0, show_value=False, size="20px"
+            ).props("instant-feedback").classes("w-full")
+            with progress:
+                progress_label = ui.label("0%").classes(
+                    "absolute-center text-white"
+                ).style("font-size: 0.875rem")
             status_label = ui.label("Idle").classes("text-caption drocat-muted")
             result_label = ui.label("").classes("text-caption")
             pull_done_synced = {"value": False}
@@ -161,6 +162,12 @@ def create_settings_tab():
                 force_rebuild.set_enabled(not st["running"] and not skeleton_running)
                 batch_input.set_enabled(not st["running"] and not skeleton_running)
                 parallel_input.set_enabled(not st["running"] and not skeleton_running)
+                skeleton_simplification.set_enabled(
+                    not st["running"] and not skeleton_running
+                )
+                skeleton_batch_size.set_enabled(
+                    not st["running"] and not skeleton_running
+                )
                 if st["running"]:
                     pull_done_synced["value"] = False
                     operation_label = (
@@ -174,6 +181,7 @@ def create_settings_tab():
                         # persistent hint and an indeterminate bar instead of
                         # the frozen progress text.
                         progress.props(add="indeterminate")
+                        progress_label.text = ""
                         status_label.text = (
                             f"Cancelling {operation_label} pull for "
                             f"{st['dataset']} — stopping after the current "
@@ -182,11 +190,12 @@ def create_settings_tab():
                         return
                     if st["total"] and st["total"] > 0:
                         # Fetch phase: neuron totals are known, show a
-                        # determinate bar.
+                        # determinate bar with the live percent.
                         progress.props(remove="indeterminate")
                         total = st["total"] or 1
                         frac = min(st["current"] / total, 1.0)
                         progress.set_value(frac)
+                        progress_label.text = f"{frac * 100:.2f}%"
                         status_label.text = (
                             f"Pulling {operation_label} for {st['dataset']}: {st['info']} "
                             f"({st['current']:,}/{st['total']:,} neurons, "
@@ -198,6 +207,7 @@ def create_settings_tab():
                         # plus the phase message keeps the pull from looking
                         # frozen at 0/0.
                         progress.props(add="indeterminate")
+                        progress_label.text = ""
                         status_label.text = (
                             f"Preparing {operation_label} pull for "
                             f"{st['dataset']}: {st['info']}"
@@ -222,6 +232,13 @@ def create_settings_tab():
                         if st.get("operation") == "connections"
                         else "Full dataset pull"
                     )
+                    if st["cancelled"]:
+                        # Leave the bar where the pull stopped; the result
+                        # line says it can be resumed.
+                        progress_label.text = ""
+                    else:
+                        progress.set_value(1.0)
+                        progress_label.text = "100%"
                     head = (
                         "⏹ Cancelled - fetched batches consolidated; re-run to resume."
                         if st["cancelled"]
@@ -252,6 +269,7 @@ def create_settings_tab():
                     cancel_btn.set_enabled(True)
                     result_label.text = ""
                     progress.set_value(0)
+                    progress_label.text = "0%"
                     pull_done_synced["value"] = False
                 else:
                     ui.notify("A dataset pull is already running", type="warning")
@@ -275,9 +293,48 @@ def create_settings_tab():
             cancel_btn.on_click(stop_pull)
             ui.timer(0.5, refresh_pull_state)
 
-            skeleton_progress = ui.linear_progress(value=0).props(
-                "instant-feedback"
-            ).classes("w-full")
+            # Skeleton downloads sit between the dataset-pull progress and
+            # the skeleton-pull progress so each pull's controls are grouped
+            # with its own bar.
+            with ui.row().classes("items-center gap-2").style("flex-wrap: wrap"):
+                skeleton_simplification = ui.select(
+                    options=CACHE_SIMPLIFICATION_OPTIONS,
+                    value=90,
+                    label="Cache Simplification",
+                ).props("outlined").classes("drocat-select").style("min-width: 190px").tooltip(
+                    "Percent of skeleton nodes REMOVED when 'Download All "
+                    "Skeletons' writes the shared .swc.zst cache: 90 = keep "
+                    "~10% of nodes (default), 0 = raw. Every file records "
+                    "its level in the header."
+                )
+                skeleton_batch_size = ui.number(
+                    label="Skeleton Batch Size", value=64, min=10, max=500,
+                    step=10,
+                ).classes("drocat-input").style("width: 160px").tooltip(
+                    "Neurons requested per navis call (64 default). Progress "
+                    "is reported per completed skeleton regardless of this "
+                    "value; larger batches only reduce the repeated per-batch "
+                    "metadata queries. Concurrent fetches are set by "
+                    "Parallel workers."
+                )
+                skeleton_run_btn = ui.button(
+                    "Download All Skeletons", icon="download", color="secondary"
+                ).props("outline").tooltip(
+                    "Download missing raw skeletons as reusable .swc.zst files "
+                    "at the Cache Simplification level selected beside this "
+                    "button, using the Dataset and Parallel workers "
+                    "selected above. FlyWire datasets require a manual "
+                    "download from the FlyWire Codex (see the converter "
+                    "instructions)."
+                )
+
+            skeleton_progress = ui.linear_progress(
+                value=0, show_value=False, size="20px"
+            ).props("instant-feedback").classes("w-full")
+            with skeleton_progress:
+                skeleton_progress_label = ui.label("0%").classes(
+                    "absolute-center text-white"
+                ).style("font-size: 0.875rem")
             skeleton_status = ui.label("Idle").classes("text-caption drocat-muted")
             skeleton_result = ui.label("").classes("text-caption")
             skeleton_done_synced = {"value": False}
@@ -290,6 +347,12 @@ def create_settings_tab():
                 cancel_btn.set_enabled(running or dataset_running)
                 # The dataset selector is shared with both dataset-cache pulls.
                 ds_select.set_enabled(not running and not puller.running)
+                skeleton_simplification.set_enabled(
+                    not running and not puller.running
+                )
+                skeleton_batch_size.set_enabled(
+                    not running and not puller.running
+                )
                 if running:
                     skeleton_done_synced["value"] = False
                     if st.get("cancel_requested"):
@@ -298,6 +361,7 @@ def create_settings_tab():
                         # persistent hint and an indeterminate bar instead of
                         # the frozen progress text.
                         skeleton_progress.props(add="indeterminate")
+                        skeleton_progress_label.text = ""
                         skeleton_status.text = (
                             f"Cancelling skeleton pull for {st['dataset']} — "
                             f"finishing the current batch and persisting "
@@ -307,6 +371,7 @@ def create_settings_tab():
                     total = st["total"] or 1
                     frac = min(st["current"] / total, 1.0)
                     skeleton_progress.set_value(frac)
+                    skeleton_progress_label.text = f"{frac * 100:.2f}%"
                     skeleton_status.text = (
                         f"Pulling {st['dataset']}: "
                         f"{st['info']} ({st['current']:,}/{st['total']:,}) | "
@@ -324,6 +389,11 @@ def create_settings_tab():
                     skeleton_result.text = f"❌ {st['error']}"
                 else:
                     summary = st.get("summary") or {}
+                    if st["cancelled"]:
+                        skeleton_progress_label.text = ""
+                    else:
+                        skeleton_progress.set_value(1.0)
+                        skeleton_progress_label.text = "100%"
                     head = "⏹ Cancelled." if st["cancelled"] else "✅ Skeleton pull complete."
                     skeleton_result.text = (
                         f"{head} "
@@ -363,6 +433,8 @@ def create_settings_tab():
                     dataset,
                     max_workers=int(parallel_input.value or 1),
                     mode="raw",
+                    simplification=int(skeleton_simplification.value),
+                    batch_size=int(skeleton_batch_size.value or 64),
                 )
                 if ok:
                     run_btn.set_enabled(False)
@@ -371,6 +443,7 @@ def create_settings_tab():
                     cancel_btn.set_enabled(True)
                     skeleton_result.text = ""
                     skeleton_progress.set_value(0)
+                    skeleton_progress_label.text = "0%"
                     skeleton_done_synced["value"] = False
                 else:
                     ui.notify("A skeleton pull is already running", type="warning")

@@ -48,17 +48,28 @@ class SkeletonPuller:
             return self._state["running"]
 
     def start(self, dataset: str, max_workers: Optional[int] = None,
-              raw: bool = True, mode: Optional[str] = None) -> bool:
+              raw: bool = True, mode: Optional[str] = None,
+              simplification: Optional[int] = None,
+              batch_size: Optional[int] = None) -> bool:
         """Start a background skeleton download. Returns False when one is
         already running.
 
         ``raw`` and ``mode`` are retained for callers from the earlier Find
         Similar UI. Pulls always use the shared raw compressed-SWC
-        representation (``.swc.zst``, 90% simplified by default);
-        visualization ``fast`` is a render-time simplification mode, not a
+        representation (``.swc.zst``); ``simplification`` selects the percent
+        of nodes removed when writing the cache (0-90; ``None`` keeps the
+        backend default of 90). ``batch_size`` bounds the per-call NeuPrint
+        request size (``None`` keeps the backend default of 64).  Progress is
+        reported per completed skeleton regardless of the batch size; larger
+        batches only reduce the repeated per-batch metadata queries.
+        Visualization ``fast`` is a render-time simplification mode, not a
         pull mode.
         """
         selected_mode = "raw"
+        if simplification is not None:
+            simplification = int(simplification)
+        if batch_size is not None:
+            batch_size = int(batch_size)
         with self._lock:
             if self._state["running"]:
                 return False
@@ -66,6 +77,8 @@ class SkeletonPuller:
                 "running": True,
                 "dataset": dataset,
                 "mode": selected_mode,
+                "simplification": simplification,
+                "batch_size": batch_size,
                 "current": 0,
                 "total": 0,
                 "info": "Reading the neuron index...",
@@ -80,7 +93,8 @@ class SkeletonPuller:
             self._cancel_event.clear()
         self._thread = threading.Thread(
             target=self._run,
-            args=(dataset, max_workers, selected_mode),
+            args=(dataset, max_workers, selected_mode, simplification,
+                  batch_size),
             daemon=True,
             name=f"skeleton-pull-{dataset}",
         )
@@ -106,7 +120,8 @@ class SkeletonPuller:
             if self._state["fetch_started_at"] is None and total > 0:
                 self._state["fetch_started_at"] = time.time()
 
-    def _run(self, dataset: str, max_workers: Optional[int], mode: str) -> None:
+    def _run(self, dataset: str, max_workers: Optional[int], mode: str,
+             simplification: Optional[int], batch_size: Optional[int]) -> None:
         try:
             import sys
             sys.path.insert(0, str(
@@ -114,14 +129,18 @@ class SkeletonPuller:
             ))
             from morphology import download_all_skeletons
 
-            summary = download_all_skeletons(
-                dataset,
+            pull_kwargs = dict(
                 max_workers=max_workers or 8,
                 progress_callback=self._progress,
                 cancel_event=self._cancel_event,
                 verbose=False,
                 mode=mode,
             )
+            if simplification is not None:
+                pull_kwargs["simplification"] = int(simplification)
+            if batch_size is not None:
+                pull_kwargs["batch_size"] = int(batch_size)
+            summary = download_all_skeletons(dataset, **pull_kwargs)
             with self._lock:
                 self._state["summary"] = summary
                 self._state["cancelled"] = bool(summary.get("cancelled"))

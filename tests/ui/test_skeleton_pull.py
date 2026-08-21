@@ -173,12 +173,13 @@ def test_batch_fetch_cache_membership_uses_one_scan_not_per_id_lookups(
 
     fetch_batches = []
 
-    def fake_fetch_skeletons(batch_df, **kwargs):
-        fetch_batches.append(batch_df["bodyId"].tolist())
+    def fake_batch_fetch(batch_ids, **kwargs):
+        fetch_batches.append(list(batch_ids))
         return []
 
+    # The NeuPrint batch seam is the vendored per-neuron progress fetcher.
     monkeypatch.setattr(
-        "navis.interfaces.neuprint.fetch_skeletons", fake_fetch_skeletons
+        morphology, "_fetch_neuprint_batch_with_progress", fake_batch_fetch
     )
 
     result = morphology.fetch_skeletons_on_demand_batch(
@@ -254,6 +255,26 @@ class TestSkeletonPuller:
         assert fake_download["impl"].called_with["cancel_event"] is not None
         assert fake_download["impl"].called_with["max_workers"] == 8
         assert fake_download["impl"].called_with["mode"] == "raw"
+
+    def test_simplification_forwarded_to_download(self, fake_download):
+        """The pull forwards the Settings 'Cache Simplification' selector and
+        the skeleton batch size to download_all_skeletons; omitting them
+        keeps the backend defaults."""
+        puller = SkeletonPuller()
+        assert puller.start("np:v1", simplification=50, batch_size=10)
+        assert _wait_until(lambda: puller.state["done"])
+        assert fake_download["impl"].called_with["simplification"] == 50
+        assert fake_download["impl"].called_with["batch_size"] == 10
+        assert puller.state["simplification"] == 50
+        assert puller.state["batch_size"] == 10
+
+        puller = SkeletonPuller()
+        assert puller.start("np:v1")
+        assert _wait_until(lambda: puller.state["done"])
+        assert "simplification" not in fake_download["impl"].called_with
+        assert "batch_size" not in fake_download["impl"].called_with
+        assert puller.state["simplification"] is None
+        assert puller.state["batch_size"] is None
 
     def test_cancel(self, fake_download):
         fake_download["impl"].delay = 0.05

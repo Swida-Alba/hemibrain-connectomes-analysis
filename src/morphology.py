@@ -2687,6 +2687,63 @@ def fetch_skeleton_on_demand(dataset: str, body_id: int,
 _SINGLE_FETCH_IMPLEMENTATION = fetch_skeleton_on_demand
 
 
+def _fetch_neuprint_batch_with_progress(
+        batch_ids, *, client, max_threads, on_neuron=None,
+        missing_swc: str = "warn") -> list:
+    """Fetch one batch of NeuPrint SWCs with a per-neuron completion hook.
+
+    Vendored from ``navis.interfaces.neuprint.fetch_skeletons`` (navis 1.5.0)
+    so every completed skeleton can be reported: the upstream wrapper only
+    updates its own hidden tqdm counter, which never reaches the UI.  The
+    behavior is intentionally identical to navis: one ``fetch_neurons``
+    metadata query per batch (soma/instance/status), then a
+    ``ThreadPoolExecutor`` with ``max_threads`` workers fetching the
+    individual SWCs concurrently, ``missing_swc`` warn/skip handling, and
+    the same TreeNeuron construction (``__fetch_skeleton``).
+
+    ``on_neuron(done, batch_total)`` is called from the caller's thread for
+    every completed future (successful or failed) - exactly the per-neuron
+    cadence of navis' internal bar.  Returns the fetched TreeNeurons.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from navis.interfaces import neuprint as neu
+    from navis.interfaces.neuprint import __fetch_skeleton
+
+    meta, _roi_info = neu.fetch_neurons(
+        neu.NeuronCriteria(bodyId=list(batch_ids)), client=client)
+    if meta is None or meta.empty:
+        return []
+    # Make sure there is a somaLocation and somaRadius column (navis does
+    # the same before the row iteration below).
+    if "somaLocation" not in meta.columns:
+        meta["somaLocation"] = None
+    if "somaRadius" not in meta.columns:
+        meta["somaRadius"] = None
+
+    neurons = []
+    done = 0
+    batch_total = len(meta)
+    with ThreadPoolExecutor(max_workers=max(1, int(max_threads))) as executor:
+        futures = {}
+        for row in meta.itertuples():
+            future = executor.submit(
+                __fetch_skeleton, row, client=client,
+                with_synapses=False, missing_swc=missing_swc, heal=False)
+            futures[future] = row.bodyId
+        for future in as_completed(futures):
+            done += 1
+            try:
+                neuron = future.result()
+            except Exception as exc:  # navis prints and continues
+                print(f"{futures[future]} generated an exception: {exc}")
+                neuron = None
+            if neuron is not None:
+                neurons.append(neuron)
+            if on_neuron is not None:
+                on_neuron(done, batch_total)
+    return neurons
+
+
 def fetch_skeletons_on_demand_batch(
         dataset: str, body_ids, project_root: Optional[str] = None,
         persist: bool = True, level: str = VECTOR_BASIS_RAW,
@@ -2711,8 +2768,10 @@ def fetch_skeletons_on_demand_batch(
     written. Cached files are loaded with the requested target level, so a
     file stored at a lower level is re-simplified on read.
 
-    ``progress_callback(done, total, message)`` is optional and is called at
-    batch boundaries.  ``cancel_event`` (threading.Event) is optional: when
+    ``progress_callback(done, total, message)`` is optional and is called
+    at batch boundaries and, during the online NeuPrint fetch, once per
+    completed skeleton (the per-neuron cadence of the terminal bar).
+    ``cancel_event`` (threading.Event) is optional: when
     set, no new fetch batch is started and the already-fetched skeletons are
     still vectorized/persisted (resume-safe).  The returned mapping is keyed
     by integer body ID and contains only skeletons that were available or
@@ -2932,22 +2991,66 @@ def fetch_skeletons_on_demand_batch(
             effective_batch_size = max(1, int(batch_size))
             effective_threads = max(1, int(max_threads))
             total_missing = len(missing)
-            for start in range(0, total_missing, effective_batch_size):
+            total_batches = (
+                (total_missing + effective_batch_size - 1)
+                // effective_batch_size
+            )
+            for batch_index, start in enumerate(
+                    range(0, total_missing, effective_batch_size), start=1):
                 # Cooperative cancel: stop submitting new batches; the
                 # in-flight one finishes and its results are persisted below
                 # (resume-safe).
                 if cancel_event is not None and cancel_event.is_set():
                     break
                 batch_ids = missing[start:start + effective_batch_size]
-                batch_df = pd.DataFrame({"bodyId": batch_ids})
-                result = neu.fetch_skeletons(
-                    batch_df,
-                    parallel=True,
-                    max_threads=max(1, min(effective_threads, len(batch_ids))),
-                    missing_swc="warn",
-                    client=client,
-                )
-                for index, neuron in enumerate(list(result or [])):
+                # Report the batch BEFORE the network call: the first batch
+                # can take a minute or more, and the UI used to sit frozen
+                # on the "Neuron cache (0/N)" message the whole time.  The
+                # batch counter keeps the pull visibly alive between the
+                # after-batch updates.
+                done_so_far = min(len(requested), len(loaded) + start)
+                if progress_callback:
+                    progress_callback(
+                        done_so_far, len(requested),
+                        f"Fetching skeletons - batch {batch_index}/"
+                        f"{total_batches} ({done_so_far}/{len(requested)})")
+
+                # Per-neuron progress: the vendored loop mirrors navis' own
+                # parallel fetch (ThreadPoolExecutor over the batch) but
+                # reports every completed skeleton, so the UI ticks like the
+                # terminal bar instead of waiting for the batch boundary.
+                def _neuron_progress(done, _batch_total):
+                    if progress_callback:
+                        current = min(
+                            len(requested), len(loaded) + start + done)
+                        progress_callback(
+                            current, len(requested),
+                            f"Fetching skeletons - batch {batch_index}/"
+                            f"{total_batches} ({current}/{len(requested)})")
+
+                try:
+                    batch_neurons = _fetch_neuprint_batch_with_progress(
+                        batch_ids,
+                        client=client,
+                        max_threads=max(
+                            1, min(effective_threads, len(batch_ids))),
+                        on_neuron=_neuron_progress,
+                    )
+                except Exception:
+                    # Fall back to the upstream wrapper if a future navis
+                    # release changes the vendored internals; only the
+                    # per-batch progress granularity is lost.
+                    batch_df = pd.DataFrame({"bodyId": batch_ids})
+                    result = neu.fetch_skeletons(
+                        batch_df,
+                        parallel=True,
+                        max_threads=max(
+                            1, min(effective_threads, len(batch_ids))),
+                        missing_swc="warn",
+                        client=client,
+                    )
+                    batch_neurons = list(result or [])
+                for index, neuron in enumerate(batch_neurons):
                     neuron_id = getattr(neuron, "id", None)
                     if neuron_id is None and index < len(batch_ids):
                         neuron_id = batch_ids[index]
@@ -2958,8 +3061,8 @@ def fetch_skeletons_on_demand_batch(
                     except (TypeError, ValueError):
                         continue
                 if progress_callback:
-                    done = min(len(requested), len(loaded) + start
-                               + len(batch_ids))
+                    done = min(len(requested), len(loaded)
+                               + len(fetched_by_id))
                     progress_callback(
                         done, len(requested),
                         f"Fetching skeletons ({done}/{len(requested)})")
@@ -3026,7 +3129,8 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
                            verbose: bool = True,
                            raw: bool = True, mode: Optional[str] = None,
                            raw_format: str = "swc.zst",
-                           simplification: int = DEFAULT_SIMPLIFICATION
+                           simplification: int = DEFAULT_SIMPLIFICATION,
+                           batch_size: int = NEUPRINT_FETCH_BATCH_SIZE
                            ) -> Dict[str, object]:
     """Download every missing skeleton of a dataset to the local cache.
 
@@ -3051,6 +3155,10 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
     bounded online batches.
     ``raw_format`` and ``simplification`` are retained for NeuPrint
     compatibility and do not alter FlyWire caches.
+    ``batch_size`` bounds the per-call NeuPrint request size: every call
+    repeats a metadata query first, so larger batches amortize it (the
+    default 64).  Progress is reported per completed skeleton, so the batch
+    size no longer affects progress granularity.
     ``progress_callback(current, total, info)`` and
     ``cancel_event`` (threading.Event) drive the UI; ``limit`` bounds the
     download (tests / smoke runs). Returns a summary dict.
@@ -3247,7 +3355,7 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
                     project_root=str(root),
                     persist=True,
                     level=VECTOR_BASIS_RAW,
-                    batch_size=NEUPRINT_FETCH_BATCH_SIZE,
+                    batch_size=int(batch_size),
                     max_threads=max_workers,
                     progress_callback=_batch_progress,
                     raw_cache=raw_cache,
