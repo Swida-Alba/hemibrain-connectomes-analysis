@@ -817,29 +817,37 @@ def _vectorize_one_file(path: str) -> Optional[Tuple[int, List[float], List[floa
 # ---------------------------------------------------------------------------
 # The FAFB healed bundle ({bodyId}.swc entries) is the full skeleton source
 # for FAFB v783: the local pickle cache holds meshes, which is the wrong
-# representation for the vector cache. Workers open the ZIP once per process
-# (the central directory read is the expensive part; per-entry reads are
-# cheap).
+# representation for the vector cache. Workers open the bundle (.zst first,
+# ZIP fallback) once per process; the index read is the expensive part, per-
+# id reads are cheap, and ZIP-served ids are lazily converted into the .zst.
 
-_FAFB_WORKER_ZIP = None
+_FAFB_WORKER_BUNDLE = None
 
 
-def _init_fafb_zip_worker(zip_path: str):
-    """Per-worker initializer: open the healed bundle once per process."""
-    global _FAFB_WORKER_ZIP
-    import zipfile
+def _init_fafb_zip_worker(source_path: str, zip_path: Optional[str] = None):
+    """Per-worker initializer: open the healed bundle once per process.
 
-    _FAFB_WORKER_ZIP = zipfile.ZipFile(zip_path, "r")
+    ``source_path`` is the .zst bundle (created lazily when absent);
+    ``zip_path`` is the legacy healed ZIP used as the fallback source with
+    lazy per-skeleton conversion.
+    """
+    global _FAFB_WORKER_BUNDLE
+    from fafb_bundle import FAFBSkeletonBundle
+
+    _FAFB_WORKER_BUNDLE = FAFBSkeletonBundle(
+        source_path, zip_path=zip_path, lazy_convert=True)
 
 
 def _vectorize_one_swc(body_id: int
                        ) -> Optional[Tuple[int, List[float], List[float], str]]:
     """Module-level worker: vectorize one healed-bundle skeleton."""
-    global _FAFB_WORKER_ZIP
+    global _FAFB_WORKER_BUNDLE
     import io
 
     try:
-        content = _FAFB_WORKER_ZIP.read(f"{int(body_id)}.swc").decode("utf-8")
+        content = _FAFB_WORKER_BUNDLE.get(int(body_id))
+        if content is None:
+            return None
         neuron = navis.read_swc(io.StringIO(content))
         neuron.units = "nm"
         morph, vector = vectorize_neuron(neuron)
@@ -847,6 +855,35 @@ def _vectorize_one_swc(body_id: int
         return None
     return (int(body_id), [morph[f] for f in MORPHOMETRIC_FEATURES],
             vector[len(MORPHOMETRIC_FEATURES):].tolist(), "skeleton")
+
+
+def _fafb_bundle(dataset: str,
+                 project_root: Optional[str] = None):
+    """Healed-bundle reader for FAFB v783: .zst first, ZIP fallback (lazy).
+
+    Returns a :class:`fafb_bundle.FAFBSkeletonBundle` when either file
+    exists, else None.  The ZIP fallback path lazily converts every served
+    skeleton into the .zst container.
+    """
+    from fafb_bundle import open_bundle as _open_fafb_bundle
+
+    root = Path(project_root) if project_root else Path(__file__).parent.parent
+    folder = _dataset_folder(dataset)
+    return _open_fafb_bundle(root / "datasets" / folder, lazy_convert=True)
+
+
+def _bundle_tree_neuron(bundle, body_id: int):
+    """TreeNeuron for a healed-bundle body id (.zst-first, lazy ZIP convert)."""
+    import io
+
+    text = bundle.get(int(body_id))
+    if text is None:
+        return None
+    nrn = navis.read_swc(io.StringIO(text))
+    nrn.units = "nm"
+    nrn.id = int(body_id)
+    nrn.name = str(int(body_id))
+    return nrn
 
 
 def _import_visualizer():
@@ -1483,23 +1520,25 @@ class SkeletonVectorCache:
         self.morph_dir.mkdir(parents=True, exist_ok=True)
         self.skeleton_dir.mkdir(parents=True, exist_ok=True)
 
-        # FAFB v783: the healed bundle is the full skeleton source.
+        # FAFB v783: the healed bundle is the full skeleton source (.zst
+        # first; ZIP fallback with lazy conversion).
         use_bundle = False
-        bundle_zip: Optional[str] = None
+        bundle_source = None
         bundle_ids: List[Union[int, str]] = []
         if not self.mesh_only and is_fafb_dataset(self.dataset):
-            bundle_zip = _fafb_skeleton_zip_path(
-                self.dataset, str(self.project_root))
-            if bundle_zip is not None:
-                import zipfile
-                with zipfile.ZipFile(bundle_zip, "r") as z:
-                    bundle_ids = sorted(
-                        {
-                            normalize_flywire_body_id(n[:-4])
-                            if self._flywire_ids else int(n[:-4])
-                            for n in z.namelist() if n.endswith(".swc")
-                        }
-                    )
+            try:
+                bundle_source = _fafb_bundle(
+                    self.dataset, str(self.project_root))
+            except Exception:
+                bundle_source = None
+            if bundle_source is not None:
+                bundle_ids = sorted(
+                    {
+                        normalize_flywire_body_id(b)
+                        if self._flywire_ids else int(b)
+                        for b in bundle_source.ids()
+                    }
+                )
                 use_bundle = True
 
         existing: Dict[int, dict] = {}
@@ -1634,13 +1673,19 @@ class SkeletonVectorCache:
                 f"({self.dataset})..."
             )
             if use_bundle:
+                source_path = str(bundle_source.bundle_path)
+                zip_path = (str(bundle_source.zip_path)
+                            if bundle_source.zip_path else None)
                 if self.n_workers > 1:
                     try:
-                        rows = self._vectorize_parallel_swc(bundle_zip, pending)
+                        rows = self._vectorize_parallel_swc(
+                            source_path, zip_path, pending)
                     except Exception:
-                        rows = self._vectorize_swc_serial(bundle_zip, pending)
+                        rows = self._vectorize_swc_serial(
+                            source_path, zip_path, pending)
                 else:
-                    rows = self._vectorize_swc_serial(bundle_zip, pending)
+                    rows = self._vectorize_swc_serial(
+                        source_path, zip_path, pending)
             elif self.n_workers > 1:
                 try:
                     rows = self._vectorize_parallel(pending)
@@ -1731,6 +1776,11 @@ class SkeletonVectorCache:
             f"[SkeletonVectorCache] Cache ready: {len(df)} rows "
             f"({len(rows)} new, {fetched_new} fetched) -> {self.parquet_path}"
         )
+        if bundle_source is not None:
+            try:
+                bundle_source.close()
+            except Exception:
+                pass
         return {"rows": len(df), "new": len(rows), "fetched": fetched_new}
 
     def _vectorize_parallel(self, files: List[str]) -> List[Tuple[int, List[float], List[float]]]:
@@ -1738,27 +1788,29 @@ class SkeletonVectorCache:
         with ProcessPoolExecutor(max_workers=self.n_workers, mp_context=ctx) as ex:
             return list(ex.map(_vectorize_one_file, files, chunksize=16))
 
-    def _vectorize_parallel_swc(self, zip_path: str, bids: List[int]
+    def _vectorize_parallel_swc(self, source_path: str,
+                                zip_path: Optional[str], bids: List[int]
                                 ) -> List[Tuple[int, List[float], List[float]]]:
         """Vectorize healed-bundle skeletons in a worker pool; each worker
-        opens the ZIP once via the initializer."""
+        opens the bundle (.zst first, ZIP fallback) via the initializer."""
         ctx = mp.get_context("fork") if hasattr(mp, "get_context") and "fork" in mp.get_all_start_methods() else mp.get_context()
         with ProcessPoolExecutor(max_workers=self.n_workers, mp_context=ctx,
                                  initializer=_init_fafb_zip_worker,
-                                 initargs=(zip_path,)) as ex:
+                                 initargs=(source_path, zip_path)) as ex:
             return list(ex.map(_vectorize_one_swc, bids, chunksize=16))
 
-    def _vectorize_swc_serial(self, zip_path: str, bids: List[int]
+    def _vectorize_swc_serial(self, source_path: str,
+                              zip_path: Optional[str], bids: List[int]
                               ) -> List[Tuple[int, List[float], List[float]]]:
         """Serial healed-bundle vectorization (single-worker or fallback)."""
-        global _FAFB_WORKER_ZIP
-        _init_fafb_zip_worker(zip_path)
+        global _FAFB_WORKER_BUNDLE
+        _init_fafb_zip_worker(source_path, zip_path)
         try:
             return [_vectorize_one_swc(b) for b in bids]
         finally:
-            if _FAFB_WORKER_ZIP is not None:
-                _FAFB_WORKER_ZIP.close()
-                _FAFB_WORKER_ZIP = None
+            if _FAFB_WORKER_BUNDLE is not None:
+                _FAFB_WORKER_BUNDLE.close()
+                _FAFB_WORKER_BUNDLE = None
 
     # ------------------------------------------------------------ load
     @staticmethod
@@ -1825,16 +1877,26 @@ class SkeletonVectorCache:
         """
         n_skeletons = len(self._discover_skeleton_files())
         if is_fafb_dataset(self.dataset):
-            zip_path = _fafb_skeleton_zip_path(
-                self.dataset, str(self.project_root))
-            if zip_path is not None:
+            try:
+                bundle = _fafb_bundle(self.dataset, str(self.project_root))
+            except Exception:
+                bundle = None
+            if bundle is not None:
                 try:
-                    import zipfile
-                    with zipfile.ZipFile(zip_path, "r") as z:
-                        n_skeletons = sum(
-                            1 for n in z.namelist() if n.endswith(".swc"))
-                except Exception:
-                    pass
+                    n_skeletons = bundle.count()
+                finally:
+                    bundle.close()
+            else:
+                zip_path = _fafb_skeleton_zip_path(
+                    self.dataset, str(self.project_root))
+                if zip_path is not None:
+                    try:
+                        import zipfile
+                        with zipfile.ZipFile(zip_path, "r") as z:
+                            n_skeletons = sum(
+                                1 for n in z.namelist() if n.endswith(".swc"))
+                    except Exception:
+                        pass
         n_vectors = 0
         if self.parquet_path.exists():
             try:
@@ -3035,22 +3097,38 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
         except (TypeError, ValueError):
             continue
 
-    # FAFB v783 only: the healed bundle already provides most skeletons
-    # locally — count its entries as available instead of re-fetching them
-    # through the CAVE API. Only the genuinely missing ids are downloaded.
+    # FAFB v783 only: the healed bundle (.zst first; ZIP fallback) already
+    # provides most skeletons locally — count its entries as available
+    # instead of re-fetching them through the CAVE API. Only the genuinely
+    # missing ids are downloaded.
     local_bundle_ids: set = set()
     if is_fafb_dataset(dataset):
-        zip_path = _fafb_skeleton_zip_path(dataset, str(root))
-        if zip_path is not None:
+        try:
+            bundle = _fafb_bundle(dataset, str(root))
+        except Exception:
+            bundle = None
+        if bundle is not None:
             try:
-                import zipfile
-                with zipfile.ZipFile(zip_path, "r") as z:
-                    local_bundle_ids = {
-                        _canonical_dataset_body_id(dataset, n[:-4])
-                        for n in z.namelist() if n.endswith(".swc")
-                    }
+                local_bundle_ids = {
+                    _canonical_dataset_body_id(dataset, b)
+                    for b in bundle.ids()
+                }
             except Exception:
                 local_bundle_ids = set()
+            finally:
+                bundle.close()
+        else:
+            zip_path = _fafb_skeleton_zip_path(dataset, str(root))
+            if zip_path is not None:
+                try:
+                    import zipfile
+                    with zipfile.ZipFile(zip_path, "r") as z:
+                        local_bundle_ids = {
+                            _canonical_dataset_body_id(dataset, n[:-4])
+                            for n in z.namelist() if n.endswith(".swc")
+                        }
+                except Exception:
+                    local_bundle_ids = set()
 
     missing = [
         _canonical_dataset_body_id(dataset, b)
@@ -4990,16 +5068,30 @@ class MorphologyComparer:
             else:
                 zip_ids.append(bid)
 
-        # 2. The healed skeleton bundle.
+        # 2. The healed skeleton bundle (.zst first; ZIP fallback with lazy
+        #    per-skeleton conversion).
         if zip_ids:
-            zip_path = _fafb_skeleton_zip_path(self.dataset, str(root))
-            if zip_path is not None:
-                import zipfile
-                with zipfile.ZipFile(zip_path, "r") as z:
+            try:
+                bundle = _fafb_bundle(self.dataset, str(root))
+            except Exception:
+                bundle = None
+            if bundle is not None:
+                try:
                     for bid in zip_ids:
-                        nrn = _read_fafb_zip_skeleton(z, bid)
+                        nrn = _bundle_tree_neuron(bundle, bid)
                         if nrn is not None:
                             loaded[bid] = nrn
+                finally:
+                    bundle.close()
+            else:
+                zip_path = _fafb_skeleton_zip_path(self.dataset, str(root))
+                if zip_path is not None:
+                    import zipfile
+                    with zipfile.ZipFile(zip_path, "r") as z:
+                        for bid in zip_ids:
+                            nrn = _read_fafb_zip_skeleton(z, bid)
+                            if nrn is not None:
+                                loaded[bid] = nrn
 
         # 3. Extrusion test on the bundle-sourced skeletons (cached per
         #    neuron; unchecked ids are analyzed in a parallel batch).

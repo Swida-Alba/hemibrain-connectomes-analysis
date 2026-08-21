@@ -6736,36 +6736,67 @@ def Vis3S(data_df,**kwargs):
                 resolved_dir = resolve_flywire_dataset_dir(project_root, op.dataset)
                 op.data_folder = str(resolved_dir) if resolved_dir is not None else None
 
-            zip_path = (
-                fafb_utils.get_fafb_skeleton_zip(op.data_folder)
+            # The healed bundle reads .zst first and falls back to the ZIP
+            # with lazy per-skeleton conversion.
+            bundle = (
+                fafb_utils.get_fafb_skeleton_bundle(op.data_folder)
                 if op.data_folder is not None else None
             )
-            if zip_path:
-                print(f"Loading skeletons from {zip_path}...")
+            if bundle is not None:
+                print("Loading skeletons from the healed bundle...")
                 try:
-                    with zipfile.ZipFile(zip_path, 'r') as z:
-                        all_files = set(z.namelist())
-                        for ind in summary_df.index:
-                            bodyid = str(summary_df.at[ind,'bodyId'])
-                            filename = f"{bodyid}.swc"
-                            if filename in all_files:
-                                with z.open(filename) as f:
-                                    content = f.read()
-                                    try:
-                                        n = navis.read_swc(io.BytesIO(content))
-                                        n.name = bodyid
-                                        # Assign color based on class
-                                        cls = summary_df.at[ind, op.classby]
-                                        cls_idx = classes.index(cls)
-                                        n.color = colors[cls_idx]
-                                        skeletons.append(n)
-                                    except Exception as e:
-                                        print(f"Error reading SWC for {bodyid}: {e}")
-                            else:
-                                # print(f"Skeleton for {bodyid} not found in zip.")
-                                pass
+                    for ind in summary_df.index:
+                        bodyid = str(summary_df.at[ind, 'bodyId'])
+                        content = bundle.get(int(bodyid))
+                        if content is None:
+                            continue
+                        try:
+                            n = navis.read_swc(io.StringIO(content))
+                            n.name = bodyid
+                            cls = summary_df.at[ind, op.classby]
+                            cls_idx = classes.index(cls)
+                            n.color = colors[cls_idx]
+                            skeletons.append(n)
+                        except Exception as e:
+                            print(f"Error reading SWC for {bodyid}: {e}")
                 except Exception as e:
-                    print(f"Error opening zip file: {e}")
+                    print(f"Error opening healed bundle: {e}")
+                finally:
+                    try:
+                        bundle.close()
+                    except Exception:
+                        pass
+            else:
+                zip_path = (
+                    fafb_utils.get_fafb_skeleton_zip(op.data_folder)
+                    if op.data_folder is not None else None
+                )
+                if zip_path:
+                    print(f"Loading skeletons from {zip_path}...")
+                    try:
+                        with zipfile.ZipFile(zip_path, 'r') as z:
+                            all_files = set(z.namelist())
+                            for ind in summary_df.index:
+                                bodyid = str(summary_df.at[ind,'bodyId'])
+                                filename = f"{bodyid}.swc"
+                                if filename in all_files:
+                                    with z.open(filename) as f:
+                                        content = f.read()
+                                        try:
+                                            n = navis.read_swc(io.BytesIO(content))
+                                            n.name = bodyid
+                                            # Assign color based on class
+                                            cls = summary_df.at[ind, op.classby]
+                                            cls_idx = classes.index(cls)
+                                            n.color = colors[cls_idx]
+                                            skeletons.append(n)
+                                        except Exception as e:
+                                            print(f"Error reading SWC for {bodyid}: {e}")
+                                else:
+                                    # print(f"Skeleton for {bodyid} not found in zip.")
+                                    pass
+                    except Exception as e:
+                        print(f"Error opening zip file: {e}")
         else:
             # NeuPrint fetch: use the shared cache-aware batched path so this
             # legacy 2D view follows the same online-fetch policy as 3D

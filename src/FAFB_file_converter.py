@@ -1,5 +1,7 @@
 import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -9,6 +11,72 @@ import pyarrow.parquet as pq
 from tqdm import tqdm
 import concurrent.futures
 import multiprocessing
+
+
+RECOMPRESSION_SCRIPT = (
+    Path(__file__).resolve().parents[1]
+    / "scripts" / "flywire_fafb_v783_skeleton_recompression.py"
+)
+
+
+def _recompress_config(project_root: Path) -> str:
+    """recompress_healed_bundle = ask | now | lazy.
+
+    The environment variable DROCAT_RECOMPRESS wins; otherwise config.json
+    at the project root; the default is "ask" (interactive first run).
+    """
+    value = os.environ.get("DROCAT_RECOMPRESS", "").strip().lower()
+    if value in ("ask", "now", "lazy"):
+        return value
+    try:
+        import json
+        config = json.loads((Path(project_root) / "config.json").read_text())
+        value = str(config.get("recompress_healed_bundle", "ask")).strip().lower()
+    except Exception:
+        value = "ask"
+    return value if value in ("now", "lazy") else "ask"
+
+
+def _run_recompression_script(dataset_dir, *extra_args) -> int:
+    """Invoke the standalone recompression executor (pack or prompt)."""
+    cmd = [sys.executable, str(RECOMPRESSION_SCRIPT),
+           "--dataset-dir", str(dataset_dir)] + list(extra_args)
+    return subprocess.call(cmd)
+
+
+def _maybe_recompress_healed_bundle(dataset_dir, moved_zip: bool) -> None:
+    """Optional .zst recompression, AFTER conversion + preparation.
+
+    - config/lazy: log and leave conversion to the lazy reader path.
+    - config/now: run the bulk pack immediately.
+    - config/ask: prompt only on the run that actually moved the ZIP into
+      place (first run), and only on an interactive terminal; non-TTY runs
+      default to lazy conversion with a notice.
+    """
+    dataset_dir = Path(dataset_dir)
+    zip_path = dataset_dir / "sk_lod1_783_healed.zip"
+    bundle_path = dataset_dir / "sk_lod1_783_healed.zst"
+    if not zip_path.exists() or bundle_path.exists():
+        return
+    mode = _recompress_config(dataset_dir)
+    if mode == "now":
+        print("  ⏳ Recompressing the healed skeleton bundle (config "
+              "recompress_healed_bundle=now; ~1 h single-threaded)...")
+        _run_recompression_script(dataset_dir, "pack")
+        return
+    if mode == "lazy" or not moved_zip:
+        print("  ℹ️  Lazy skeleton recompression enabled: every ZIP-loaded "
+              "skeleton converts to .zst on first read (config "
+              "recompress_healed_bundle=" + mode + ").")
+        return
+    if not sys.stdin.isatty():
+        print("  ℹ️  Skipping the recompression prompt (non-interactive); "
+              "lazy per-skeleton conversion is enabled.")
+        return
+    print("  ℹ️  Optional recompression of the healed skeleton bundle "
+          "(~5 GB storage saving, ~1 h extra work) or lazy per-skeleton "
+          "conversion.")
+    _run_recompression_script(dataset_dir, "prompt")
 
 try:
     from .flywire_ids import normalize_flywire_id_columns
@@ -714,6 +782,7 @@ def ensure_flywire_data(dataset_name, dataset_dir):
             print("  ℹ️  Synapse table source not found (optional).")
 
     # --- 4. Skeletons (Optional) ---
+    moved_zip = False
     if os.path.exists(sk_zip_dst):
         print(f"  ✓ Found existing skeletons: {os.path.basename(sk_zip_dst)}")
     else:
@@ -727,8 +796,17 @@ def ensure_flywire_data(dataset_name, dataset_dir):
         if sk_raw and os.path.exists(sk_raw):
             print(f"  Moving {os.path.basename(sk_raw)} -> {os.path.basename(sk_zip_dst)}...")
             shutil.move(sk_raw, sk_zip_dst)
+            moved_zip = True
         else:
             print("  ℹ️  Skeletons zip not found (optional).")
+
+    # Optional recompression of the healed skeleton bundle, AFTER the
+    # one-time conversion and preparation above: ask the user on first run
+    # (or honor config recompress_healed_bundle = ask|now|lazy).
+    try:
+        _maybe_recompress_healed_bundle(dataset_dir, moved_zip)
+    except Exception as exc:
+        print(f"  ⚠️  Optional skeleton recompression skipped: {exc}")
 
     # --- Post Counts Update ---
     if os.path.exists(neuron_pq) and os.path.exists(conn_pq):

@@ -257,18 +257,26 @@ def create_find_similar_tab():
                         .removesuffix(".pkl")
                         for p in raw_files
                     })
-                    # FAFB v783: the healed bundle is the real skeleton source
-                    # (the pickle cache holds meshes).
-                    bundle = (Path(PROJECT_ROOT) / "datasets"
-                              / dataset.value.replace(":", "_").replace(".", "_")
-                              / "sk_lod1_783_healed.zip")
-                    if bundle.exists():
-                        import zipfile
+                    # FAFB v783: the healed bundle is the real skeleton
+                    # source (.zst first; ZIP fallback with lazy conversion;
+                    # the pickle cache holds meshes).
+                    dataset_folder_name = dataset.value.replace(":", "_").replace(".", "_")
+                    dataset_dir = Path(PROJECT_ROOT) / "datasets" / dataset_folder_name
+                    bundle_path = dataset_dir / "sk_lod1_783_healed.zst"
+                    zip_path = dataset_dir / "sk_lod1_783_healed.zip"
+                    if bundle_path.exists() or zip_path.exists():
                         try:
-                            with zipfile.ZipFile(bundle, "r") as z:
-                                n_skel = sum(
-                                    1 for n in z.namelist()
-                                    if n.endswith(".swc"))
+                            import sys as _sys
+                            if str(SRC_DIR) not in _sys.path:
+                                _sys.path.insert(0, str(SRC_DIR))
+                            from fafb_bundle import FAFBSkeletonBundle
+                            reader = FAFBSkeletonBundle(
+                                bundle_path, zip_path=zip_path if zip_path.exists() else None,
+                                lazy_convert=False)
+                            try:
+                                n_skel = reader.count()
+                            finally:
+                                reader.close()
                         except Exception:
                             pass
                     n_vec = 0

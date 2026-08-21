@@ -187,6 +187,26 @@ def get_fafb_skeleton_zip(data_dir):
     print(f"Warning: Skeleton zip not found in {data_dir} or downloads")
     return None
 
+
+def get_fafb_skeleton_bundle(data_dir):
+    """Get a healed-bundle reader for the FAFB skeleton source.
+
+    Resolves ``sk_lod1_783_healed.zst`` first, then falls back to the legacy
+    healed ZIP.  The returned :class:`fafb_bundle.FAFBSkeletonBundle`
+    performs lazy per-skeleton conversion on the ZIP fallback path (each
+    loaded skeleton is converted into the .zst container and its ZIP entry
+    is removed logically; physical removal happens by batched compaction).
+    Returns None when neither file exists.
+    """
+    data_path = Path(data_dir)
+    if is_banc_dataset(data_path.name):
+        return None
+    try:
+        from fafb_bundle import open_bundle
+        return open_bundle(data_path, lazy_convert=True)
+    except Exception:
+        return None
+
 def get_fafb_skeleton_parquet(data_dir):
     """Get path to skeleton parquet file."""
     data_path = Path(data_dir)

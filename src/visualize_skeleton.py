@@ -5777,6 +5777,44 @@ class VisualizeSkeleton:
             if data_dir is None:
                 return {}
 
+            # The healed bundle reads .zst first and falls back to the ZIP
+            # with lazy per-skeleton conversion on every ZIP-served id.
+            bundle = fafb_utils.get_fafb_skeleton_bundle(data_dir)
+            if bundle is not None:
+                import io
+
+                self._vprint(
+                    f'  📦 Loading {len(all_body_ids)} skeletons from '
+                    'the healed bundle...')
+                for bid in all_body_ids:
+                    try:
+                        content = bundle.get(int(bid))
+                        if content is None:
+                            continue
+                        n = navis.read_swc(io.StringIO(content))
+                        n.units = 'nm'
+                        n.id = (
+                            body_id_to_api_int(bid)
+                            if is_flywire_dataset(self.dataset)
+                            else int(bid)
+                        )
+                        n.name = str(bid)
+                        skeleton_cache[
+                            normalize_flywire_body_id(bid)
+                            if is_flywire_dataset(self.dataset)
+                            else int(bid)
+                        ] = n
+                    except Exception:
+                        pass  # Skip errors silently
+                try:
+                    bundle.close()
+                except Exception:
+                    pass
+                self._vprint(
+                    f'  ✓ Loaded {len(skeleton_cache)}/{len(all_body_ids)} '
+                    'skeletons from the healed bundle')
+                return skeleton_cache
+
             zip_path = fafb_utils.get_fafb_skeleton_zip(data_dir)
             
             if zip_path:
@@ -7990,11 +8028,46 @@ class VisualizeSkeleton:
         if verbose:
             print(f"🔍 Checking FAFB skeleton {body_id} for extrusions...")
         
-        # Find the skeleton ZIP file
+        # The healed bundle reads .zst first; the ZIP is the fallback
+        # with lazy per-skeleton conversion.
         dataset_clean = dataset.replace(':', '_').replace('.', '_')
+        skeleton = None
+        soma_pos = None
+        try:
+            import fafb_utils
+            _bundle = fafb_utils.get_fafb_skeleton_bundle(
+                Path('datasets') / dataset_clean)
+        except Exception:
+            _bundle = None
+        if _bundle is not None:
+            try:
+                _content = _bundle.get(body_id_int)
+            finally:
+                try:
+                    _bundle.close()
+                except Exception:
+                    pass
+            if _content is not None:
+                from io import StringIO
+                skeleton = navis.read_swc(StringIO(_content))
+                if isinstance(skeleton, navis.NeuronList):
+                    skeleton = skeleton[0]
+                skeleton.id = body_id_int
+                # Get soma position if available
+                if hasattr(skeleton, 'soma') and skeleton.soma is not None:
+                    soma_idx = skeleton.soma
+                    if isinstance(soma_idx, (list, np.ndarray)) and len(soma_idx) > 0:
+                        soma_idx = soma_idx[0]
+                    if soma_idx is not None:
+                        soma_node = skeleton.nodes[skeleton.nodes['node_id'] == soma_idx]
+                        if len(soma_node) > 0:
+                            soma_pos = soma_node[['x', 'y', 'z']].values[0]
+                if verbose:
+                    print(f"  ✓ Loaded skeleton with {len(skeleton.nodes):,} nodes")
+
         zip_path = Path('datasets') / dataset_clean / 'sk_lod1_783_healed.zip'
-        
-        if not zip_path.exists():
+
+        if not zip_path.exists() and skeleton is None:
             return {
                 'has_extrusions': False,
                 'severity': 'unknown',
@@ -8009,83 +8082,80 @@ class VisualizeSkeleton:
                 'auto_fixed': False,
                 'skeleton': None
             }
-        
-        # Find matching file in ZIP
-        skeleton = None
-        soma_pos = None
-        
-        try:
-            with zipfile.ZipFile(zip_path, 'r') as zf:
-                # Find file matching this body ID
-                pattern = re.compile(rf'^{body_id_str}\..*\.swc$', re.IGNORECASE)
-                matching_files = [f for f in zf.namelist() if pattern.match(f)]
+
+        # Find matching file in ZIP (fallback: bundle had no entry)
+        if skeleton is None:
+            try:
+                with zipfile.ZipFile(zip_path, 'r') as zf:
+                    # Find file matching this body ID
+                    pattern = re.compile(rf'^{body_id_str}\..*\.swc$', re.IGNORECASE)
+                    matching_files = [f for f in zf.namelist() if pattern.match(f)]
                 
-                if not matching_files:
-                    # Try without extension pattern
-                    matching_files = [f for f in zf.namelist() if f.startswith(f'{body_id_str}.')]
+                    if not matching_files:
+                        # Try without extension pattern
+                        matching_files = [f for f in zf.namelist() if f.startswith(f'{body_id_str}.')]
                 
-                if not matching_files:
-                    return {
-                        'has_extrusions': False,
-                        'severity': 'unknown',
-                        'extrusion_count': 0,
-                        'extrusion_vertices': np.array([]),
-                        'max_edge_length': 0,
-                        'median_edge_length': 0,
-                        'edge_length_ratio': 0,
-                        'soma_region_issues': False,
-                        'recommendation': f'Body ID {body_id} not found in ZIP',
-                        'body_id': body_id_int,
-                        'auto_fixed': False,
-                        'skeleton': None
-                    }
+                    if not matching_files:
+                        return {
+                            'has_extrusions': False,
+                            'severity': 'unknown',
+                            'extrusion_count': 0,
+                            'extrusion_vertices': np.array([]),
+                            'max_edge_length': 0,
+                            'median_edge_length': 0,
+                            'edge_length_ratio': 0,
+                            'soma_region_issues': False,
+                            'recommendation': f'Body ID {body_id} not found in ZIP',
+                            'body_id': body_id_int,
+                            'auto_fixed': False,
+                            'skeleton': None
+                        }
                 
-                swc_filename = matching_files[0]
+                    swc_filename = matching_files[0]
                 
-                # Read SWC content
-                with zf.open(swc_filename) as swc_file:
-                    swc_content = swc_file.read().decode('utf-8')
+                    # Read SWC content
+                    with zf.open(swc_filename) as swc_file:
+                        swc_content = swc_file.read().decode('utf-8')
                 
-                # Parse with navis
-                from io import StringIO
-                skeleton = navis.read_swc(StringIO(swc_content))
+                    # Parse with navis
+                    from io import StringIO
+                    skeleton = navis.read_swc(StringIO(swc_content))
                 
-                if isinstance(skeleton, navis.NeuronList):
-                    skeleton = skeleton[0]
+                    if isinstance(skeleton, navis.NeuronList):
+                        skeleton = skeleton[0]
                 
-                skeleton.id = body_id_int
+                    skeleton.id = body_id_int
                 
-                # Get soma position if available
-                if hasattr(skeleton, 'soma') and skeleton.soma is not None:
-                    soma_idx = skeleton.soma
-                    if isinstance(soma_idx, (list, np.ndarray)) and len(soma_idx) > 0:
-                        soma_idx = soma_idx[0]
-                    if soma_idx is not None:
-                        soma_node = skeleton.nodes[skeleton.nodes['node_id'] == soma_idx]
-                        if len(soma_node) > 0:
-                            soma_pos = soma_node[['x', 'y', 'z']].values[0]
+                    # Get soma position if available
+                    if hasattr(skeleton, 'soma') and skeleton.soma is not None:
+                        soma_idx = skeleton.soma
+                        if isinstance(soma_idx, (list, np.ndarray)) and len(soma_idx) > 0:
+                            soma_idx = soma_idx[0]
+                        if soma_idx is not None:
+                            soma_node = skeleton.nodes[skeleton.nodes['node_id'] == soma_idx]
+                            if len(soma_node) > 0:
+                                soma_pos = soma_node[['x', 'y', 'z']].values[0]
                 
-                if verbose:
-                    print(f"  ✓ Loaded skeleton with {len(skeleton.nodes):,} nodes")
-                    if soma_pos is not None:
-                        print(f"  ✓ Soma position: [{soma_pos[0]:.0f}, {soma_pos[1]:.0f}, {soma_pos[2]:.0f}]")
-        
-        except Exception as e:
-            return {
-                'has_extrusions': False,
-                'severity': 'unknown',
-                'extrusion_count': 0,
-                'extrusion_vertices': np.array([]),
-                'max_edge_length': 0,
-                'median_edge_length': 0,
-                'edge_length_ratio': 0,
-                'soma_region_issues': False,
-                'recommendation': f'Error loading skeleton: {e}',
-                'body_id': body_id_int,
-                'auto_fixed': False,
-                'skeleton': None
-            }
-        
+                    if verbose:
+                        print(f"  ✓ Loaded skeleton with {len(skeleton.nodes):,} nodes")
+                        if soma_pos is not None:
+                            print(f"  ✓ Soma position: [{soma_pos[0]:.0f}, {soma_pos[1]:.0f}, {soma_pos[2]:.0f}]")
+            except Exception as e:
+                return {
+                    'has_extrusions': False,
+                    'severity': 'unknown',
+                    'extrusion_count': 0,
+                    'extrusion_vertices': np.array([]),
+                    'max_edge_length': 0,
+                    'median_edge_length': 0,
+                    'edge_length_ratio': 0,
+                    'soma_region_issues': False,
+                    'recommendation': f'Error loading skeleton: {e}',
+                    'body_id': body_id_int,
+                    'auto_fixed': False,
+                    'skeleton': None
+                }
+
         # Convert to mesh with simplification
         if verbose:
             print(f"  ⚙️  Converting to mesh (simplification={simplification})...")
