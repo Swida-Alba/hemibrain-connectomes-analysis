@@ -303,10 +303,10 @@ printf '%s\n' 'Launch with: ./run_DROCAT.command'
 
 # --- Token configuration notice ---
 # Tokens are NOT collected in the terminal: they are set in the UI Settings
-# tab after launch, or by editing config_local.json at the repository root
-# (the gitignored override; config.json ships clean). The NeuPrint token is
-# required for NeuPrint datasets; the CAVE token is optional and only needed
-# for FlyWire FAFB online fetching.
+# tab after launch, or by editing config.json at the repository root (the
+# gitignored config_local.json is the optional developer fallback). The
+# NeuPrint token is required for NeuPrint datasets; the CAVE token is
+# optional and only needed for FlyWire FAFB online fetching.
 printf '\n%b[Token setup]%b\n' "$BLUE" "$NC"
 configure_tokens() {
     local neuprint_now="" cave_now=""
@@ -325,16 +325,18 @@ configure_tokens() {
         fi
     done
     if [[ -n "$neuprint_now" && "$neuprint_now" != "YOUR_NEUPRINT_TOKEN_HERE" ]]; then
-        printf '%s\n' "✓ NeuPrint token already configured in config_local.json or config.json."
+        printf '%s\n' "✓ NeuPrint token already configured in config.json or config_local.json."
     else
         printf '%s\n' "⚠ NeuPrint token not configured - required for NeuPrint datasets."
     fi
     if [[ -n "$cave_now" && "$cave_now" != "YOUR_CAVE_TOKEN_HERE" ]]; then
-        printf '%s\n' "✓ CAVE token already configured in config_local.json or config.json."
+        printf '%s\n' "✓ CAVE token already configured in config.json or config_local.json."
     else
         printf '%s\n' "ℹ CAVE token optional - only needed for FlyWire FAFB online fetching."
     fi
-    printf '%s\n' "Set tokens in the UI Settings tab after launching, or edit config_local.json"
+    printf '%s\n' "Set tokens in the UI Settings tab after launching, or edit config.json"
     printf '%s\n' "(repository root, format: tokens.neuprint / tokens.cave)."
+    printf '%s\n' "Get a NeuPrint token from: https://neuprint.janelia.org/account"
+    printf '%s\n' "Get a CAVE token from: https://codex.flywire.ai/auth_token"
 }
 configure_tokens

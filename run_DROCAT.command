@@ -256,7 +256,8 @@ main() {
 
     # --- Token hint -----------------------------------------------------
     # Remind users who skipped the installer prompt that tokens can be set
-    # later in the UI Settings tab or in config_local.json.
+    # later in the UI Settings tab or in config.json (config_local.json is
+    # the optional developer fallback).
     local neuprint_token=""
     for cfg in "$CONFIG_FILE" "$CONFIG_LOCAL"; do
         if [[ -f "$cfg" ]]; then
@@ -266,7 +267,9 @@ main() {
         fi
     done
     if [[ -z "$neuprint_token" || "$neuprint_token" == "YOUR_NEUPRINT_TOKEN_HERE" ]]; then
-        printf '%s\n' "Tip: the NeuPrint token is not configured yet - set it in the UI Settings tab or in config_local.json (the CAVE token is optional; only needed for FlyWire FAFB online fetching)."
+        printf '%s\n' "Tip: the NeuPrint token is not configured yet - set it in the UI Settings tab or in config.json (the CAVE token is optional; only needed for FlyWire FAFB online fetching)."
+        printf '%s\n' "     Get a NeuPrint token from: https://neuprint.janelia.org/account"
+        printf '%s\n' "     Get a CAVE token from: https://codex.flywire.ai/auth_token"
     fi
 
     # --- Port-conflict guard ---------------------------------------------

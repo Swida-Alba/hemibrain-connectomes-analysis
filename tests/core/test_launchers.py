@@ -21,6 +21,9 @@ class TestRunDrocatLaunchers:
         assert "config_local.json" in text
         assert "NeuPrint token is not configured yet" in text
         assert "CAVE token is optional" in text
+        # token acquisition links are part of the notice
+        assert "neuprint.janelia.org/account" in text
+        assert "codex.flywire.ai/auth_token" in text
         # version-specific custom env override: config.json wins per key
         assert "json_value envs" in text
         assert "ENV_OVERRIDE" in text
@@ -40,6 +43,9 @@ class TestRunDrocatLaunchers:
         assert "netstat -ano" in text
         assert "NeuPrint token is not configured yet" in text
         assert "CAVE token is optional" in text
+        # token acquisition links are part of the notice
+        assert "neuprint.janelia.org/account" in text
+        assert "codex.flywire.ai/auth_token" in text
         # version-specific custom env override: config.json wins per key;
         # the gitignored config_local.json is the fallback for empty entries
         assert "config.json" in text
@@ -106,6 +112,9 @@ class TestInstallers:
         assert "config_local.json" in text
         assert "required for NeuPrint datasets" in text
         assert "only needed for FlyWire FAFB online fetching" in text
+        # token acquisition links are part of the notice
+        assert "neuprint.janelia.org/account" in text
+        assert "codex.flywire.ai/auth_token" in text
         # no interactive paste prompt remains
         assert "read -r -p" not in text
         assert "Paste them here in the terminal" not in text
@@ -118,6 +127,9 @@ class TestInstallers:
         assert "UI Settings tab" in text
         assert "required for NeuPrint datasets" in text
         assert "only needed for FlyWire FAFB online fetching" in text
+        # token acquisition links are part of the notice
+        assert "neuprint.janelia.org/account" in text
+        assert "codex.flywire.ai/auth_token" in text
         assert "Read-Host" not in text
         assert "IsInputRedirected" not in text
         assert "Paste them here in the terminal" not in text

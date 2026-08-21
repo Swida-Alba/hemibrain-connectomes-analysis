@@ -327,7 +327,7 @@ result = VisualizeSkeleton.detect_mesh_extrusions(
 
 **Requirements:**
 - CAVE token for API fetching (obtain from https://codex.flywire.ai/auth_token)
-- Set token in `config_local.json` or as environment variable `CAVE_TOKEN`
+- Set token in `config.json` (or the gitignored `config_local.json` fallback) or as environment variable `CAVE_TOKEN`
 
 **Note:** BANC dataset does not support `force_API_fetching` due to API access restrictions (requires community membership at brain-and-nerve-cord.org).
 

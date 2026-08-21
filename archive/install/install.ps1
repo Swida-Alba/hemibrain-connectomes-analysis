@@ -300,10 +300,10 @@ Write-Host "Launch with: run_DROCAT.bat"
 
 # --- Token configuration notice ---
 # Tokens are NOT collected in the terminal: they are set in the UI Settings
-# tab after launch, or by editing config_local.json at the repository root
-# (the gitignored override; config.json ships clean). The NeuPrint token is
-# required for NeuPrint datasets; the CAVE token is optional and only needed
-# for FlyWire FAFB online fetching.
+# tab after launch, or by editing config.json at the repository root (the
+# gitignored config_local.json is the optional developer fallback). The
+# NeuPrint token is required for NeuPrint datasets; the CAVE token is
+# optional and only needed for FlyWire FAFB online fetching.
 Write-Host ""
 Write-Host "[Token setup]" -ForegroundColor Cyan
 $NeuprintNow = ""
@@ -315,14 +315,16 @@ foreach ($Cfg in @($Config, $ConfigLocalData)) {
     }
 }
 if ($NeuprintNow -and $NeuprintNow -ne "YOUR_NEUPRINT_TOKEN_HERE") {
-    Write-Host "NeuPrint token already configured in config_local.json or config.json."
+    Write-Host "NeuPrint token already configured in config.json or config_local.json."
 } else {
     Write-Host "NeuPrint token not configured - required for NeuPrint datasets."
 }
 if ($CaveNow -and $CaveNow -ne "YOUR_CAVE_TOKEN_HERE") {
-    Write-Host "CAVE token already configured in config_local.json or config.json."
+    Write-Host "CAVE token already configured in config.json or config_local.json."
 } else {
     Write-Host "CAVE token optional - only needed for FlyWire FAFB online fetching."
 }
-Write-Host "Set tokens in the UI Settings tab after launching, or edit config_local.json"
+Write-Host "Set tokens in the UI Settings tab after launching, or edit config.json"
 Write-Host "(repository root, format: tokens.neuprint / tokens.cave)."
+Write-Host "Get a NeuPrint token from: https://neuprint.janelia.org/account"
+Write-Host "Get a CAVE token from: https://codex.flywire.ai/auth_token"
