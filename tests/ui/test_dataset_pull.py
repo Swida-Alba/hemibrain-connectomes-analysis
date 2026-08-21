@@ -562,6 +562,76 @@ class TestBuildConnectionCacheCancel:
         assert events[0] == (0, 6), events
         assert len(events) >= 2, events
 
+    def test_parallel_cancel_returns_without_waiting_for_in_flight(self, tmp_path, monkeypatch):
+        """Regression: cancel in parallel mode used to wait for the in-flight
+        fetches (ThreadPoolExecutor shutdown(wait=True) on the with-block
+        exit), delaying the cancel by up to the per-batch API timeout."""
+        import coana
+        import neuprint
+        import threading
+        import pandas as pd
+
+        class FakeClient:
+            def __init__(self, *a, **k):
+                pass
+
+        monkeypatch.setattr(neuprint, "Client", FakeClient)
+
+        # Pre-create the dataset tables so __post_init__ skips the download.
+        dataset_dir = tmp_path / "datasets" / "fake_v9"
+        dataset_dir.mkdir(parents=True)
+        (dataset_dir / "fake_v9_allneurons_neuron_df.csv").write_text(
+            "bodyId,type\n1,T1\n", encoding="utf-8"
+        )
+        pd.DataFrame({"bodyId": ["1"], "roi": ["EB"]}).to_parquet(
+            dataset_dir / "fake_v9_allneurons_roi_count_df.parquet"
+        )
+
+        fc = coana.FindNeuronConnection(
+            dataset="fake:v9",
+            use_cache=True,
+            cache_only=False,
+            verbose=False,
+            script_path=str(tmp_path),
+            cache_folder=str(tmp_path / "cache" / "fake_v9"),
+        )
+
+        hang = threading.Event()
+        entered = threading.Event()
+
+        def fake_fetch(upstream_bodyIds, downstream_bodyIds=None,
+                          cancel_event=None, status_callback=None):
+            entered.set()
+            hang.wait(30)  # never released before the assertion
+            return pd.DataFrame({
+                "bodyId_pre": upstream_bodyIds,
+                "bodyId_post": [str(int(b) + 1000) for b in upstream_bodyIds],
+                "weight": [5] * len(upstream_bodyIds),
+                "roi": ["fake"] * len(upstream_bodyIds),
+            })
+
+        monkeypatch.setattr(fc, "_fetch_connections_bulk", fake_fetch)
+        cancel_event = threading.Event()
+        holder = {}
+
+        def run():
+            holder["summary"] = fc.build_connection_cache(
+                neuron_bodyIds=[str(i) for i in range(6)],
+                batch_size=2,
+                quiet=True,
+                cancel_event=cancel_event,
+                max_workers=3,
+            )
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        assert entered.wait(10), "fetch never started"
+        cancel_event.set()
+        thread.join(timeout=8)
+        hang.set()  # release the background fetches so the test can exit cleanly
+        assert not thread.is_alive(), "cancel waited for in-flight fetches"
+        assert holder["summary"]["cancelled"] is True
+
 
 class TestRepeatPullCacheStatus:
     def test_repeat_pull_reads_disk_truth_not_stale_module_cache(self, tmp_path, monkeypatch):

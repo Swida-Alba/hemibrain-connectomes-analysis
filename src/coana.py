@@ -104,7 +104,8 @@ class _FetchCancelled(Exception):
 
 
 def _get_api_retry_utils():
-    """Return (api_call_with_retry, APITimeoutError, APIRetryExhaustedError).
+    """Return (api_call_with_retry, APITimeoutError, APIRetryExhaustedError,
+    APICancelError).
 
     Prefers the shared src.utils.api_utils implementation (timeout via a
     one-worker executor, exponential backoff, on_retry callback) and falls
@@ -114,8 +115,10 @@ def _get_api_retry_utils():
     try:
         from src.utils.api_utils import (
             api_call_with_retry, APITimeoutError, APIRetryExhaustedError,
+            APICancelError,
         )
-        return api_call_with_retry, APITimeoutError, APIRetryExhaustedError
+        return (api_call_with_retry, APITimeoutError,
+                APIRetryExhaustedError, APICancelError)
     except ImportError:
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
@@ -125,35 +128,72 @@ def _get_api_retry_utils():
         class APIRetryExhaustedError(Exception):
             pass
 
+        class APICancelError(Exception):
+            pass
+
         def api_call_with_retry(func, timeout=60, max_retries=5, retry_delay=2.0,
-                                description="API call", on_retry=None, verbose=True):
+                                description="API call", on_retry=None, verbose=True,
+                                cancel_event=None):
             import time
             last_exc = None
+
+            def _interruptible_sleep(delay):
+                if cancel_event is None:
+                    time.sleep(delay)
+                    return
+                deadline = time.monotonic() + delay
+                while True:
+                    if cancel_event.is_set():
+                        raise APICancelError(f"{description} cancelled")
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return
+                    time.sleep(min(0.5, remaining))
+
             for attempt in range(1, max_retries + 1):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise APICancelError(f"{description} cancelled")
                 try:
                     # shutdown(wait=False): a hung API call must not block the
                     # retry loop (with-block would wait forever).
                     executor = ThreadPoolExecutor(max_workers=1)
                     try:
                         future = executor.submit(func)
-                        return future.result(timeout=timeout)
+                        deadline = time.monotonic() + timeout
+                        while True:
+                            if cancel_event is not None and cancel_event.is_set():
+                                future.cancel()
+                                raise APICancelError(f"{description} cancelled")
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                future.cancel()
+                                raise APITimeoutError(
+                                    f"{description} timed out after {timeout}s "
+                                    f"(attempt {attempt}/{max_retries})")
+                            try:
+                                return future.result(timeout=min(0.5, remaining))
+                            except FuturesTimeoutError:
+                                continue
                     finally:
                         executor.shutdown(wait=False)
+                except APICancelError:
+                    raise
                 except FuturesTimeoutError:
                     last_exc = APITimeoutError(f"{description} timed out after {timeout}s (attempt {attempt}/{max_retries})")
                     if on_retry is not None:
                         on_retry(attempt, last_exc)
                     if attempt < max_retries:
-                        time.sleep(retry_delay * (2 ** (attempt - 1)))
+                        _interruptible_sleep(retry_delay * (2 ** (attempt - 1)))
                 except Exception as e:
                     last_exc = e
                     if on_retry is not None:
                         on_retry(attempt, e)
                     if attempt < max_retries:
-                        time.sleep(retry_delay * (2 ** (attempt - 1)))
+                        _interruptible_sleep(retry_delay * (2 ** (attempt - 1)))
             raise last_exc or Exception("Unknown error")
 
-        return api_call_with_retry, APITimeoutError, APIRetryExhaustedError
+        return (api_call_with_retry, APITimeoutError,
+                APIRetryExhaustedError, APICancelError)
 
 
 @contextmanager
@@ -4775,7 +4815,7 @@ class FindNeuronConnection:
             return pd.DataFrame()
 
         from tqdm import tqdm
-        api_call_with_retry, APITimeoutError, APIRetryExhaustedError = _get_api_retry_utils()
+        api_call_with_retry, APITimeoutError, APIRetryExhaustedError, APICancelError = _get_api_retry_utils()
 
         def _status(msg):
             if status_callback is not None:
@@ -5990,7 +6030,7 @@ class FindNeuronConnection:
                         all_api_conn = []
                         
                         # Import API utilities for timeout/retry
-                        api_call_with_retry, APITimeoutError, APIRetryExhaustedError = _get_api_retry_utils()
+                        api_call_with_retry, APITimeoutError, APIRetryExhaustedError, APICancelError = _get_api_retry_utils()
                         
                         # Create batches
                         batches = [neuprint_upstream[i:i + batch_size] for i in range(0, len(neuprint_upstream), batch_size)]
@@ -7427,7 +7467,8 @@ class FindNeuronConnection:
                     ThreadPoolExecutor, wait, FIRST_COMPLETED,
                 )
                 batch_indices = iter(range(0, total, batch_size))
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                executor = ThreadPoolExecutor(max_workers=max_workers)
+                try:
                     pending = {}
                     for _ in range(max_workers):
                         i = next(batch_indices, None)
@@ -7470,6 +7511,13 @@ class FindNeuronConnection:
                                 )] = next_i
                         if cancelled_now:
                             break
+                finally:
+                    # On cancel the in-flight fetches finish in the background
+                    # and their results are discarded, so do NOT wait for them:
+                    # the with-block's shutdown(wait=True) used to delay the
+                    # cancel by up to the per-batch API timeout.  Normal
+                    # completion still joins the workers before returning.
+                    executor.shutdown(wait=not cancelled)
             else:
                 for i in batch_iter:
                     # Cooperative cancellation: stop after the current batch
@@ -7651,7 +7699,7 @@ class FindNeuronConnection:
             upstream_ints = [int(x) for x in upstream_bodyIds]
             downstream_ints = [int(x) for x in downstream_bodyIds] if downstream_bodyIds else None
 
-            api_call_with_retry, APITimeoutError, APIRetryExhaustedError = _get_api_retry_utils()
+            api_call_with_retry, APITimeoutError, APIRetryExhaustedError, APICancelError = _get_api_retry_utils()
 
             def fetch_batch():
                 if cancel_event is not None and cancel_event.is_set():
@@ -7694,7 +7742,12 @@ class FindNeuronConnection:
                     description=f'Bulk fetch ({len(upstream_ints)} neurons)',
                     on_retry=_retry_notice,
                     verbose=True,
+                    cancel_event=cancel_event,
                 )
+            except APICancelError as e:
+                # The Settings-tab cancel aborts the in-flight wait within
+                # ~0.5 s instead of waiting out the batch timeout.
+                raise _FetchCancelled('cancelled during bulk fetch') from e
             except (APITimeoutError, APIRetryExhaustedError) as e:
                 _status(f'⚠️ Server not responding — batch failed after retries: {e}')
                 raise RuntimeError(f'NeuPrint bulk fetch failed after retries: {e}') from e

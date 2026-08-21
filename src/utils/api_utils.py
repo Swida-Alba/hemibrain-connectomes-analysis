@@ -34,6 +34,16 @@ class APIRetryExhaustedError(Exception):
     pass
 
 
+class APICancelError(Exception):
+    """Raised when a cancel_event is set while an API call is in flight.
+
+    Callers that support cooperative cancellation (e.g. the Settings-tab
+    pulls) pass ``cancel_event``; the retry loop then aborts within ~0.5 s
+    instead of waiting out the current attempt's timeout or a backoff sleep.
+    """
+    pass
+
+
 def api_call_with_retry(
     func: Callable[[], T],
     timeout: float = 60.0,
@@ -41,7 +51,8 @@ def api_call_with_retry(
     retry_delay: float = 2.0,
     description: str = "API call",
     on_retry: Optional[Callable[[int, Exception], None]] = None,
-    verbose: bool = True
+    verbose: bool = True,
+    cancel_event: Optional[Any] = None
 ) -> T:
     """
     Execute an API call with timeout and retry logic.
@@ -89,8 +100,26 @@ def api_call_with_retry(
         ... )
     """
     last_exception = None
-    
+
+    def _interruptible_sleep(delay: float) -> None:
+        """Sleep in small slices so a set cancel_event aborts the backoff."""
+        if cancel_event is None:
+            time.sleep(delay)
+            return
+        deadline = time.monotonic() + delay
+        while True:
+            if cancel_event.is_set():
+                raise APICancelError(
+                    f"{description} cancelled during retry backoff"
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.5, remaining))
+
     for attempt in range(1, max_retries + 1):
+        if cancel_event is not None and cancel_event.is_set():
+            raise APICancelError(f"{description} cancelled")
         try:
             # Use ThreadPoolExecutor to enforce timeout. The executor must be
             # shut down with wait=False: a hung API call would otherwise make
@@ -99,18 +128,31 @@ def api_call_with_retry(
             executor = ThreadPoolExecutor(max_workers=1)
             try:
                 future = executor.submit(func)
-                try:
-                    result = future.result(timeout=timeout)
-                    return result
-                except FuturesTimeoutError:
-                    # Cancel the future if possible (the worker thread keeps
-                    # running until the hung call returns; it is not waited on).
-                    future.cancel()
-                    raise APITimeoutError(
-                        f"{description} timed out after {timeout}s (attempt {attempt}/{max_retries})"
-                    )
+                # Poll in small slices: a set cancel_event aborts the wait
+                # within ~0.5 s instead of waiting out the full timeout.
+                deadline = time.monotonic() + timeout
+                while True:
+                    if cancel_event is not None and cancel_event.is_set():
+                        future.cancel()
+                        raise APICancelError(
+                            f"{description} cancelled while waiting for the API"
+                        )
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        future.cancel()
+                        raise APITimeoutError(
+                            f"{description} timed out after {timeout}s "
+                            f"(attempt {attempt}/{max_retries})"
+                        )
+                    try:
+                        result = future.result(timeout=min(0.5, remaining))
+                        return result
+                    except FuturesTimeoutError:
+                        continue
             finally:
                 executor.shutdown(wait=False)
+        except APICancelError:
+            raise
         except APITimeoutError as e:
             last_exception = e
             if attempt < max_retries:
@@ -122,7 +164,7 @@ def api_call_with_retry(
                     )
                 if on_retry:
                     on_retry(attempt, e)
-                time.sleep(delay)
+                _interruptible_sleep(delay)
         except Exception as e:
             last_exception = e
             if attempt < max_retries:
@@ -134,7 +176,7 @@ def api_call_with_retry(
                     )
                 if on_retry:
                     on_retry(attempt, e)
-                time.sleep(delay)
+                _interruptible_sleep(delay)
     
     # All retries exhausted
     if isinstance(last_exception, APITimeoutError):

@@ -18,6 +18,7 @@ from utils import api_utils
 from utils.api_utils import (
     APITimeoutError,
     APIRetryExhaustedError,
+    APICancelError,
     api_call_with_retry,
     build_cypher_type_condition,
     escape_cypher_string,
@@ -107,6 +108,82 @@ def test_api_call_with_retry_exhausted(monkeypatch):
             api_call_with_retry(
                 always_fails, timeout=5, max_retries=2, retry_delay=0.001, verbose=True
             )
+
+
+def test_api_call_with_retry_cancel_before_start(monkeypatch):
+    """A pre-set cancel_event aborts before the call is even submitted."""
+    import threading
+
+    monkeypatch.setattr(api_utils.time, "sleep", lambda *_a, **_k: None)
+    cancel = threading.Event()
+    cancel.set()
+    calls = {"n": 0}
+
+    def never_called():
+        calls["n"] += 1
+        return 1
+
+    with pytest.raises(APICancelError):
+        api_call_with_retry(
+            never_called, timeout=5, max_retries=2, cancel_event=cancel
+        )
+    assert calls["n"] == 0
+
+
+def test_api_call_with_retry_cancel_aborts_in_flight_wait(monkeypatch):
+    """A cancel_event set while the call hangs aborts the wait within ~0.5 s
+    instead of waiting out the full timeout (Settings-tab cancel latency)."""
+    import threading
+    import time as time_module
+
+    monkeypatch.setattr(api_utils.time, "sleep", lambda *_a, **_k: None)
+    cancel = threading.Event()
+    release = threading.Event()
+
+    def hang():
+        release.wait(30)  # would hang until released if waited on
+        return 1
+
+    cancel_timer = threading.Timer(0.3, cancel.set)
+    cancel_timer.start()
+    t0 = time_module.perf_counter()
+    with pytest.raises(APICancelError):
+        api_call_with_retry(
+            hang, timeout=30, max_retries=2, cancel_event=cancel,
+            description="hung call",
+        )
+    elapsed = time_module.perf_counter() - t0
+    cancel_timer.cancel()
+    release.set()  # let the worker thread finish so the test can exit cleanly
+    assert elapsed < 5.0, f"cancel took {elapsed:.1f}s"
+
+
+def test_api_call_with_retry_cancel_aborts_backoff_sleep(monkeypatch):
+    """A cancel_event set during retry backoff aborts the sleep instead of
+    sleeping out the exponential delay."""
+    import threading
+    import time as time_module
+
+    monkeypatch.setattr(api_utils.time, "sleep", lambda *_a, **_k: None)
+    cancel = threading.Event()
+
+    def always_fails():
+        raise RuntimeError("boom")
+
+    cancel_timer = threading.Timer(0.2, cancel.set)
+    cancel_timer.start()
+    t0 = time_module.perf_counter()
+    with pytest.raises(APICancelError):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            api_call_with_retry(
+                always_fails, timeout=5, max_retries=5, retry_delay=10,
+                cancel_event=cancel, verbose=True,
+            )
+    elapsed = time_module.perf_counter() - t0
+    cancel_timer.cancel()
+    # The 10 s retry backoff was interrupted by the cancel.
+    assert elapsed < 3.0, f"backoff sleep was not interrupted ({elapsed:.1f}s)"
 
 
 def test_escape_cypher_string():

@@ -2596,7 +2596,8 @@ def fetch_skeletons_on_demand_batch(
         progress_callback=None, client=None,
         raw_cache: Optional[SkeletonVectorCache] = None,
         vector_cache: Optional[SkeletonVectorCache] = None,
-        simplification: int = DEFAULT_SIMPLIFICATION) -> Dict[int, object]:
+        simplification: int = DEFAULT_SIMPLIFICATION,
+        cancel_event=None) -> Dict[int, object]:
     """Fetch a set of skeletons through one cache-aware online phase.
 
     NeuPrint and FlyWire use separate cache transactions. NeuPrint loads and
@@ -2612,8 +2613,11 @@ def fetch_skeletons_on_demand_batch(
     file stored at a lower level is re-simplified on read.
 
     ``progress_callback(done, total, message)`` is optional and is called at
-    batch boundaries.  The returned mapping is keyed by integer body ID and
-    contains only skeletons that were available or successfully fetched.
+    batch boundaries.  ``cancel_event`` (threading.Event) is optional: when
+    set, no new fetch batch is started and the already-fetched skeletons are
+    still vectorized/persisted (resume-safe).  The returned mapping is keyed
+    by integer body ID and contains only skeletons that were available or
+    successfully fetched.
     """
     requested = []
     seen = set()
@@ -2700,6 +2704,8 @@ def fetch_skeletons_on_demand_batch(
             # monkeypatch the old public seam working while production uses
             # the batch API below.
             for bid in missing:
+                if cancel_event is not None and cancel_event.is_set():
+                    break
                 try:
                     neuron = fetch_skeleton_on_demand(
                         dataset, bid, project_root=str(root), persist=persist,
@@ -2752,30 +2758,31 @@ def fetch_skeletons_on_demand_batch(
         elif flywire:
             # CAVE returns meshes. Keep this branch separate from NeuPrint's
             # TreeNeuron/SWC batching and never call fetch_skeletons().
-            from cave_data_fetcher import CAVEDataFetcher
-            fetcher = CAVEDataFetcher(
-                dataset=_dataset_folder(dataset),
-                project_root=str(root),
-                verbose=False,
-            )
-            neurons = fetcher.fetch_fafb_meshes(
-                [body_id_to_api_int(bid) for bid in missing],
-                use_cache=bool(persist),
-                simplify_mesh=FLYWIRE_MESH_CACHE_SIMPLIFICATION,
-                soma_simplification=FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION,
-                soma_radius=FLYWIRE_MESH_CACHE_SOMA_RADIUS,
-                soma_positions=flywire_soma_positions,
-            )
-            for neuron in neurons or []:
-                neuron_id = getattr(neuron, "id", None)
-                if neuron_id is None:
-                    continue
-                try:
-                    fetched_by_id[
-                        _canonical_dataset_body_id(dataset, neuron_id)
-                    ] = neuron
-                except (TypeError, ValueError):
-                    continue
+            if cancel_event is None or not cancel_event.is_set():
+                from cave_data_fetcher import CAVEDataFetcher
+                fetcher = CAVEDataFetcher(
+                    dataset=_dataset_folder(dataset),
+                    project_root=str(root),
+                    verbose=False,
+                )
+                neurons = fetcher.fetch_fafb_meshes(
+                    [body_id_to_api_int(bid) for bid in missing],
+                    use_cache=bool(persist),
+                    simplify_mesh=FLYWIRE_MESH_CACHE_SIMPLIFICATION,
+                    soma_simplification=FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION,
+                    soma_radius=FLYWIRE_MESH_CACHE_SOMA_RADIUS,
+                    soma_positions=flywire_soma_positions,
+                )
+                for neuron in neurons or []:
+                    neuron_id = getattr(neuron, "id", None)
+                    if neuron_id is None:
+                        continue
+                    try:
+                        fetched_by_id[
+                            _canonical_dataset_body_id(dataset, neuron_id)
+                        ] = neuron
+                    except (TypeError, ValueError):
+                        continue
         else:
             # One NeuPrint client is shared by all bounded requests.  This is
             # the important distinction from the legacy per-neuron helper.
@@ -2799,6 +2806,11 @@ def fetch_skeletons_on_demand_batch(
             effective_threads = max(1, int(max_threads))
             total_missing = len(missing)
             for start in range(0, total_missing, effective_batch_size):
+                # Cooperative cancel: stop submitting new batches; the
+                # in-flight one finishes and its results are persisted below
+                # (resume-safe).
+                if cancel_event is not None and cancel_event.is_set():
+                    break
                 batch_ids = missing[start:start + effective_batch_size]
                 batch_df = pd.DataFrame({"bodyId": batch_ids})
                 result = neu.fetch_skeletons(
@@ -3098,6 +3110,7 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
                     raw_cache=raw_cache,
                     vector_cache=raw_cache,
                     simplification=simplification,
+                    cancel_event=cancel_event,
                 )
                 fetched = len(fetched_map)
                 errors = total - fetched
