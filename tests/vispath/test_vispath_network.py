@@ -355,6 +355,47 @@ class TestGeneratedHtmlStructure:
         assert "'source', 'target', 'weight', 'color', 'nt_type', 'nt_group'," in js
         assert "'source_group', 'target_group', 'custom_groups', 'ratio', 'probability'" in js
 
+    def test_global_style_adjustments_recorded_in_history(self, network_html):
+        """Every size/adjustment control must record a history entry: node
+        size, edge width, font size, arrow size, edge-width scaling method,
+        metric and reciprocal offset."""
+        js = _script_text(network_html)
+        for label in ("Adjust node size", "Adjust edge width", "Adjust font size",
+                      "Adjust arrow size", "Change edge width scale", "Change metric",
+                      "Adjust reciprocal offset"):
+            assert f"pushHistory('{label}')" in js, f"missing history entry: {label}"
+        # snapshots carry the global style state so undo/redo restores it
+        assert "globalStyles: {" in js
+        assert "restoreGlobalStyles(state.globalStyles)" in js
+        # restoring a snapshot must not create new history entries
+        assert "restoringHistoryState = true;" in js
+
+    def test_self_loop_curvature_adapts_to_size_and_width(self, network_html):
+        """Self-loop geometry must scale with the rendered node size.
+
+        Cytoscape renders every self-loop as a single cubic bezier (it
+        forces curve-style 'bezier' on loops) whose control points sit at
+        1.4 x control-point-step-size from the node center;
+        control-point-distances is ignored for self-loops. With the default
+        90deg sweep the endpoints land on the node circle exactly 90deg
+        apart (top -> left) with tangents through the node center; a
+        control-point distance of 3.0 x nodeRadius is the closest
+        single-cubic approximation of the ideal 3/4 circle with the same
+        radius as the node."""
+        js = _script_text(network_html)
+        # loop step size derives from the ACTUAL rendered node size
+        assert "const loopNodeSize = edge.source().numericStyle('width')" in js
+        assert "'control-point-step-size', (3.0 * loopNodeSize / 2) / 1.4" in js
+        # control-point-distances must NOT be used for self-loops (ignored)
+        assert "'control-point-distances', loopNodeSize" not in js
+        # explicit loop orientation: 90deg sweep, start top / end left
+        assert "'loop-direction', '-45deg'" in js
+        assert "'loop-sweep', '-90deg'" in js
+        # edge-width / node-size changes re-run refreshEdgeStyles so the
+        # loop (and arrows/anchors) stay in sync
+        assert "refreshEdgeStyles(false);" in js
+        assert js.count("refreshEdgeStyles(false);") >= 3
+
 
 # =============================================================================
 # Node-based logic tests (real functions extracted from the generated HTML)
@@ -378,6 +419,20 @@ class TestHistoryLogicNode:
             f"history harness failed:\n{res.stdout}\n{res.stderr}"
         )
         assert "ALL HISTORY TESTS PASSED" in res.stdout
+
+
+class TestGlobalStyleHistoryNode:
+    """Global style adjustments (size sliders + selects) recorded in the
+    operation history, undo/redo restores them, and self-loop curvature
+    follows the rendered node size / edge width."""
+
+    def test_all_global_style_scenarios(self, network_html, node_cache):
+        node = _ensure_node_with_cytoscape(node_cache)
+        res = _run_node_harness(node, "globals_history_harness.js", network_html, node_cache)
+        assert res.returncode == 0, (
+            f"global-style harness failed:\n{res.stdout}\n{res.stderr}"
+        )
+        assert "ALL GLOBAL-STYLE TESTS PASSED" in res.stdout
 
 
 class TestEdgeListExportNode:

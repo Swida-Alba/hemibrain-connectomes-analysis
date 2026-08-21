@@ -2337,23 +2337,49 @@ class VisualizePath:
         # e.g., if aMe12 is in path_sources, aMe12_L and aMe12_R should also be sources
         source_base_names = set(_get_base_name(s) for s in path_sources) if self.separate_hemispheres else set()
         target_base_names = set(_get_base_name(t) for t in path_targets) if self.separate_hemispheres else set()
-        
-        # Classify nodes: prioritize source/target identity
-        # When separate_hemispheres=True, match by base name as well
+
+        # Classify nodes with two strategies:
+        # - Multi-hop path data uses path POSITION: the first node of any
+        #   path is a source, the last node a target (mirrors the queried
+        #   source/target sets of the pathfinding tools).
+        # - Edge-list input (every row is a two-node path) carries no path
+        #   structure, so position-based classification would mark EVERY
+        #   node with any outgoing edge as a source. Use graph DEGREE
+        #   instead: nodes with ONLY outgoing edges are sources, nodes with
+        #   ONLY incoming edges are targets. Self-loop edges are excluded
+        #   from both counts — they neither emit nor receive connections.
         all_nodes = set(G.nodes())
         source_nodes = set()
         target_nodes = set()
-        
-        for node in all_nodes:
-            if node in path_sources:
-                source_nodes.add(node)
-            elif self.separate_hemispheres and _get_base_name(str(node)) in source_base_names:
-                source_nodes.add(node)
-            elif node in path_targets:
-                target_nodes.add(node)
-            elif self.separate_hemispheres and _get_base_name(str(node)) in target_base_names:
-                target_nodes.add(node)
-        
+
+        edge_list_input = bool(self.path_df is not None and len(self.path_df) > 0) and all(
+            len(self._parse_path_block(row['path_block'])) == 2
+            for _idx, row in self.path_df.iterrows()
+        )
+
+        if edge_list_input:
+            has_outgoing = set()
+            has_incoming = set()
+            for u, v in G.edges():
+                if u != v:  # self-loops never count as in/out
+                    has_outgoing.add(u)
+                    has_incoming.add(v)
+            source_nodes = has_outgoing - has_incoming
+            target_nodes = has_incoming - has_outgoing
+        else:
+            # Position-based classification: prioritize source/target
+            # identity. When separate_hemispheres=True, match by base name
+            # as well.
+            for node in all_nodes:
+                if node in path_sources:
+                    source_nodes.add(node)
+                elif self.separate_hemispheres and _get_base_name(str(node)) in source_base_names:
+                    source_nodes.add(node)
+                elif node in path_targets:
+                    target_nodes.add(node)
+                elif self.separate_hemispheres and _get_base_name(str(node)) in target_base_names:
+                    target_nodes.add(node)
+
         intermediate_nodes = all_nodes - source_nodes - target_nodes
         
         # Set node attributes
@@ -6258,26 +6284,32 @@ class VisualizePath:
                     toggleLabels();
                 }}
                 
-                // Restore control values
-                if (state.edgeWidth) {{
-                    document.getElementById('edgeWidthSlider').value = state.edgeWidth;
-                    updateEdgeWidth(state.edgeWidth);
-                }}
-                if (state.edgeWidthScale) {{
-                    document.getElementById('edgeWidthScale').value = state.edgeWidthScale;
-                    updateEdgeWidths();
-                }}
-                if (state.arrowSize) {{
-                    document.getElementById('arrowSizeSlider').value = state.arrowSize;
-                    updateArrowSize(state.arrowSize);
-                }}
-                if (state.fontSize) {{
-                    document.getElementById('fontSizeSlider').value = state.fontSize;
-                    updateFontSize(state.fontSize);
-                }}
-                if (state.nodeSize) {{
-                    document.getElementById('nodeSizeSlider').value = state.nodeSize;
-                    updateNodeSize(state.nodeSize);
+                // Restore control values (suppressed from history: loading
+                // a layout is one operation, not a series of slider edits)
+                restoringHistoryState = true;
+                try {{
+                    if (state.edgeWidth) {{
+                        document.getElementById('edgeWidthSlider').value = state.edgeWidth;
+                        updateEdgeWidth(state.edgeWidth);
+                    }}
+                    if (state.edgeWidthScale) {{
+                        document.getElementById('edgeWidthScale').value = state.edgeWidthScale;
+                        updateEdgeWidths();
+                    }}
+                    if (state.arrowSize) {{
+                        document.getElementById('arrowSizeSlider').value = state.arrowSize;
+                        updateArrowSize(state.arrowSize);
+                    }}
+                    if (state.fontSize) {{
+                        document.getElementById('fontSizeSlider').value = state.fontSize;
+                        updateFontSize(state.fontSize);
+                    }}
+                    if (state.nodeSize) {{
+                        document.getElementById('nodeSizeSlider').value = state.nodeSize;
+                        updateNodeSize(state.nodeSize);
+                    }}
+                }} finally {{
+                    restoringHistoryState = false;
                 }}
                 
                 showLayoutStatus('Layout loaded!');
@@ -6367,7 +6399,19 @@ class VisualizePath:
                 orphansHidden: orphansHidden,
                 deadEndsHidden: deadEndsHidden,
                 hemisphereMirrorEnabled: hemisphereMirrorEnabled,
-                labelPosition: labelPosition
+                labelPosition: labelPosition,
+                // Global style controls (node/edge size, font/arrow size,
+                // scaling method, metric, reciprocal offset) so undo/redo
+                // also reverts size and width adjustments exactly.
+                globalStyles: {{
+                    nodeSize: globalNodeSize,
+                    edgeWidth: globalEdgeWidth,
+                    fontSize: globalFontSize,
+                    arrowSize: globalArrowSize,
+                    edgeWidthScale: globalEdgeWidthScale,
+                    metric: currentMetric,
+                    reciprocalOffset: reciprocalOffset
+                }}
             }};
         }}
 
@@ -6414,8 +6458,53 @@ class VisualizePath:
             const showAll = document.getElementById('showAllBtn');
             if (showAll) showAll.style.display = cy.nodes('.hidden').length > 0 ? 'inline-block' : 'none';
 
+            // Restore the global style controls captured in the snapshot
+            // (runs before refreshEdgeStyles so self-loops re-curve with
+            // the restored node sizes / edge widths).
+            restoreGlobalStyles(state.globalStyles);
+
             refreshEdgeStyles(false);
             updateUndoRedoButtons();
+        }}
+
+        // Re-apply a captured set of global style controls (node size,
+        // edge width, font/arrow size, scaling method, metric, reciprocal
+        // offset) without recording new history entries.
+        function restoreGlobalStyles(gs) {{
+            if (!gs) return;
+            restoringHistoryState = true;
+            try {{
+                const applySlider = (id, value) => {{
+                    const el = document.getElementById(id);
+                    if (el && value !== undefined && value !== null) el.value = value;
+                }};
+                applySlider('nodeSizeSlider', gs.nodeSize);
+                applySlider('edgeWidthSlider', gs.edgeWidth);
+                applySlider('fontSizeSlider', gs.fontSize);
+                applySlider('arrowSizeSlider', gs.arrowSize);
+                const scaleSelect = document.getElementById('edgeWidthScale');
+                if (scaleSelect && gs.edgeWidthScale) scaleSelect.value = gs.edgeWidthScale;
+                const metricSelect = document.getElementById('metricSelect');
+                if (metricSelect && gs.metric) metricSelect.value = gs.metric;
+                if (gs.reciprocalOffset !== undefined) {{
+                    reciprocalOffset = gs.reciprocalOffset;
+                    const rSlider = document.getElementById('reciprocalOffsetSlider');
+                    if (rSlider) rSlider.value = gs.reciprocalOffset;
+                    const rLabel = document.getElementById('reciprocalOffsetValue');
+                    if (rLabel) rLabel.textContent = Math.round(gs.reciprocalOffset) + 'px';
+                }}
+                // Re-apply through the update functions (they read the DOM
+                // controls); the flag above stops them from pushing new
+                // history entries. updateMetric() re-derives currentMetric
+                // and re-applies the width mapping last.
+                if (gs.nodeSize !== undefined) updateNodeSize(gs.nodeSize);
+                if (gs.edgeWidth !== undefined) updateEdgeWidth(gs.edgeWidth);
+                if (gs.fontSize !== undefined) updateFontSize(gs.fontSize);
+                if (gs.arrowSize !== undefined) updateArrowSize(gs.arrowSize);
+                updateMetric();
+            }} finally {{
+                restoringHistoryState = false;
+            }}
         }}
 
         // Keep the three visibility-toggle buttons and the mirror button in
@@ -6632,10 +6721,27 @@ class VisualizePath:
                 const hasVisibleParallel = (visibleEdgeCounts.get(target + '→' + source) || 0) > 0;
 
                 if (source === target) {{
-                    // Keep loops curved for readability
+                    // Self-loop geometry: Cytoscape renders EVERY self-loop
+                    // as a single cubic bezier (it forces curve-style
+                    // 'bezier' on loops), with two control points at
+                    // 1.4 * control-point-step-size from the node center at
+                    // angles given by loop-direction/loop-sweep.
+                    // control-point-distances is IGNORED for self-loops.
+                    // With the default 90deg sweep the endpoints land on
+                    // the node circle exactly 90deg apart (top -> left) and
+                    // both end tangents pass through the node center. A
+                    // control-point distance of 3.0 * nodeRadius is the
+                    // closest single-cubic approximation of the ideal 3/4
+                    // circle with the same radius as the node (max
+                    // deviation ~29% of r); the step size scales with the
+                    // ACTUAL rendered node size (global slider or
+                    // per-element geometry edits).
+                    const loopNodeSize = edge.source().numericStyle('width') ||
+                        parseFloat(document.getElementById('nodeSizeSlider')?.value || 40);
                     edge.style('curve-style', 'bezier');
-                    edge.style('control-point-distances', 40);
-                    edge.style('control-point-weights', 0.5);
+                    edge.style('control-point-step-size', (3.0 * loopNodeSize / 2) / 1.4);
+                    edge.style('loop-direction', '-45deg');
+                    edge.style('loop-sweep', '-90deg');
                     return;
                 }}
 
@@ -6739,7 +6845,9 @@ class VisualizePath:
 
             if (!slider.dataset.bound) {{
                 slider.addEventListener('input', function(event) {{
-                    reciprocalOffset = parseFloat(event.target.value) || 0;
+                    const newOffset = parseFloat(event.target.value) || 0;
+                    if (!restoringHistoryState && newOffset !== reciprocalOffset) pushHistory('Adjust reciprocal offset');
+                    reciprocalOffset = newOffset;
                     valueLabel.textContent = `${{Math.round(reciprocalOffset)}}px`;
                     refreshEdgeStyles(false);
                 }});
@@ -6830,20 +6938,26 @@ class VisualizePath:
 {SHARED_JS}
 
         function updateFontSize(size) {{
-            document.getElementById('fontSizeValue').textContent = size + 'px';
+            const value = parseFloat(size);
+            document.getElementById('fontSizeValue').textContent = value + 'px';
+            if (!restoringHistoryState && value !== globalFontSize) pushHistory('Adjust font size');
+            globalFontSize = value;
             cy.style()
                 .selector('node')
-                .style('font-size', size + 'px')
+                .style('font-size', value + 'px')
                 .update();
         }}
 
         function updateNodeSize(size) {{
-            document.getElementById('nodeSizeValue').textContent = size + 'px';
+            const value = parseFloat(size);
+            document.getElementById('nodeSizeValue').textContent = value + 'px';
+            if (!restoringHistoryState && value !== globalNodeSize) pushHistory('Adjust node size');
+            globalNodeSize = value;
             cy.style()
                 .selector('node')
                 .style({{
-                    'width': size + 'px',
-                    'height': size + 'px'
+                    'width': value + 'px',
+                    'height': value + 'px'
                 }})
                 .update();
             
@@ -6853,6 +6967,9 @@ class VisualizePath:
 
         function updateEdgeWidth(width) {{
             document.getElementById('edgeWidthValue').textContent = width + 'px';
+            const value = parseFloat(width);
+            if (!restoringHistoryState && value !== globalEdgeWidth) pushHistory('Adjust edge width');
+            globalEdgeWidth = value;
             const edges = cy.edges();
             
             // Get current scaling method
@@ -6905,10 +7022,17 @@ class VisualizePath:
                     'width': `mapData(scaled_width, ${{minScaled}}, ${{maxScaled}}, ${{minWidth * 2}}, ${{maxWidth * 2}})`
                 }})
                 .update();
+
+            // Re-fit edge styles: self-loop curvature and arrow anchors
+            // follow the rendered edge width.
+            refreshEdgeStyles(false);
         }}
 
         function updateArrowSize(size) {{
-            document.getElementById('arrowSizeValue').textContent = size + 'px';
+            const value = parseFloat(size);
+            document.getElementById('arrowSizeValue').textContent = value + 'px';
+            if (!restoringHistoryState && value !== globalArrowSize) pushHistory('Adjust arrow size');
+            globalArrowSize = value;
             cy.style()
                 .selector('edge')
                 .style({{
@@ -6930,9 +7054,24 @@ class VisualizePath:
         // Recalculate and update all edge widths based on scaling method
         // Current metric being used for edge widths
         let currentMetric = 'weight';
+
+        // Global style state (size sliders and selects). These mirror the
+        // DOM controls so history snapshots capture the PRE-change value
+        // even though an 'input' event fires after the control already
+        // moved — the same role as lastFilterHistoryValue for the edge
+        // filter: the shadow holds the last value recorded in history.
+        // restoringHistoryState suppresses new entries while undo/redo or
+        // a layout/graph import re-applies a captured snapshot.
+        let globalNodeSize = 40;
+        let globalEdgeWidth = 3;
+        let globalFontSize = 12;
+        let globalArrowSize = 9;
+        let globalEdgeWidthScale = document.getElementById('edgeWidthScale')?.value || 'log_e';
+        let restoringHistoryState = false;
         
         function updateMetric() {{
             const metric = document.getElementById('metricSelect').value;
+            if (!restoringHistoryState && metric !== currentMetric) pushHistory('Change metric');
             currentMetric = metric;
             
             console.log(`\\n========== UPDATE METRIC ==========`);
@@ -6950,6 +7089,8 @@ class VisualizePath:
         
         function updateEdgeWidths() {{
             const method = document.getElementById('edgeWidthScale').value;
+            if (!restoringHistoryState && method !== globalEdgeWidthScale) pushHistory('Change edge width scale');
+            globalEdgeWidthScale = method;
             
             console.log(`\\n========== UPDATE EDGE WIDTHS ==========`);
             console.log(`Method selected: ${{method}}`);
@@ -7074,6 +7215,10 @@ class VisualizePath:
                     'width': `mapData(scaled_width, ${{minScaled}}, ${{maxScaled}}, ${{minEdgeWidth * 2}}, ${{maxEdgeWidth * 2}})`
                 }})
                 .update();
+            
+            // Re-fit edge styles: self-loop curvature follows the widths
+            // produced by the new scaling method / metric.
+            refreshEdgeStyles(false);
             
             console.log('Edge widths updated successfully');
         }}
@@ -9033,46 +9178,53 @@ class VisualizePath:
                             }}
                         }}
                         
-                        // Restore edge width scaling
-                        if (settings.edgeWidthScaling) {{
-                            const scalingSelect = document.getElementById('edgeWidthScale');
-                            if (scalingSelect && settings.edgeWidthScaling.method) {{
-                                scalingSelect.value = settings.edgeWidthScaling.method;
-                                updateEdgeWidths(); // Apply the scaling change
+                        // Restore style controls (suppressed from history:
+                        // 'Import graph' is the recorded operation)
+                        restoringHistoryState = true;
+                        try {{
+                            // Restore edge width scaling
+                            if (settings.edgeWidthScaling) {{
+                                const scalingSelect = document.getElementById('edgeWidthScale');
+                                if (scalingSelect && settings.edgeWidthScaling.method) {{
+                                    scalingSelect.value = settings.edgeWidthScaling.method;
+                                    updateEdgeWidths(); // Apply the scaling change
+                                }}
+                                
+                                const widthSlider = document.getElementById('edgeWidthSlider');
+                                if (widthSlider && settings.edgeWidthScaling.width !== undefined) {{
+                                    widthSlider.value = settings.edgeWidthScaling.width;
+                                    updateEdgeWidth(settings.edgeWidthScaling.width);
+                                }}
                             }}
                             
-                            const widthSlider = document.getElementById('edgeWidthSlider');
-                            if (widthSlider && settings.edgeWidthScaling.width !== undefined) {{
-                                widthSlider.value = settings.edgeWidthScaling.width;
-                                updateEdgeWidth(settings.edgeWidthScaling.width);
+                            // Restore arrow size
+                            if (settings.arrowSize !== undefined) {{
+                                const arrowSlider = document.getElementById('arrowSizeSlider');
+                                if (arrowSlider) {{
+                                    arrowSlider.value = settings.arrowSize;
+                                    updateArrowSize(settings.arrowSize);
+                                }}
                             }}
-                        }}
-                        
-                        // Restore arrow size
-                        if (settings.arrowSize !== undefined) {{
-                            const arrowSlider = document.getElementById('arrowSizeSlider');
-                            if (arrowSlider) {{
-                                arrowSlider.value = settings.arrowSize;
-                                updateArrowSize(settings.arrowSize);
+                            
+                            // Restore font size
+                            if (settings.fontSize !== undefined) {{
+                                const fontSlider = document.getElementById('fontSizeSlider');
+                                if (fontSlider) {{
+                                    fontSlider.value = settings.fontSize;
+                                    updateFontSize(settings.fontSize);
+                                }}
                             }}
-                        }}
-                        
-                        // Restore font size
-                        if (settings.fontSize !== undefined) {{
-                            const fontSlider = document.getElementById('fontSizeSlider');
-                            if (fontSlider) {{
-                                fontSlider.value = settings.fontSize;
-                                updateFontSize(settings.fontSize);
+                            
+                            // Restore node size
+                            if (settings.nodeSize !== undefined) {{
+                                const nodeSlider = document.getElementById('nodeSizeSlider');
+                                if (nodeSlider) {{
+                                    nodeSlider.value = settings.nodeSize;
+                                    updateNodeSize(settings.nodeSize);
+                                }}
                             }}
-                        }}
-                        
-                        // Restore node size
-                        if (settings.nodeSize !== undefined) {{
-                            const nodeSlider = document.getElementById('nodeSizeSlider');
-                            if (nodeSlider) {{
-                                nodeSlider.value = settings.nodeSize;
-                                updateNodeSize(settings.nodeSize);
-                            }}
+                        }} finally {{
+                            restoringHistoryState = false;
                         }}
                         
                         // Restore group defaults (NT groups, etc.)

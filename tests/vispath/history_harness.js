@@ -33,6 +33,8 @@ const FUNCTIONS = [
     'pushStateHistory', 'pushHistory', 'registerDragHistory',
     'undo', 'redo',
     'updateUndoRedoButtons', 'updateHistoryList', 'jumpToHistory',
+    'restoreGlobalStyles', 'updateNodeSize', 'updateEdgeWidth',
+    'updateFontSize', 'updateArrowSize', 'updateMetric', 'updateEdgeWidths',
     'syncSelectedGeometryInputs', 'updateAlignButtons', 'alignSelectedNodes',
     'parseEdgeFilterInput', 'updateIgnoredEdges',
     'parseEdgeFilterExpressions', 'parseEdgeSingleExpression',
@@ -59,6 +61,16 @@ function buildScope(cy) {
         let selfLoopsHidden = false;
         let orphansHidden = false;
         let deadEndsHidden = false;
+        // Global style controls mirrored by captureState/restoreState (the
+        // real page declares these at script top level, next to the DOM).
+        let currentMetric = 'weight';
+        let globalNodeSize = 40;
+        let globalEdgeWidth = 3;
+        let globalFontSize = 12;
+        let globalArrowSize = 9;
+        let globalEdgeWidthScale = 'log_e';
+        let reciprocalOffset = 5;
+        let restoringHistoryState = false;
         let ignoredEdges = new Set();
         let ignoredEdgeExpressions = [];
         let edgeFilterGroups = [];
