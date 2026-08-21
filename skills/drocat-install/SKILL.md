@@ -62,7 +62,7 @@ git checkout v4.5.0
 - **macOS alternative:** `run_DROCAT.command` (double-click) creates/activates the env and launches the UI.
 - The launchers are self-healing: `run_DROCAT.command` / `run_DROCAT.bat` invoke the one-click installer when the environment is missing or inconsistent.
 - **Environment naming:** DROCAT uses a versioned env name read from `ui/config.py` (`drocat-4.5.0`). If that name already exists with Python 3.11, the installers reuse it and update dependencies in place (this is the env the launchers prefer, so re-runs actually update the env in use). If it exists with a different Python, never modify or delete it - warn the user and create the next free name instead (`drocat-4.5.0-2`, `drocat-4.5.0-3`, ...). The launchers resolve the same way (first usable env wins). Legacy unversioned `drocat` envs are left untouched.
-- **Custom env name (config files):** a custom conda env name can be pinned per release in the project configs (gitignored `config_local.json` first, committed `config.json` as fallback; both are created automatically from `config.example.json` by the installers when missing):
+- **Custom env name (config files):** a custom conda env name can be pinned per release in `config.json` (`envs` section) - config.json wins per key (it is the file a GitHub-pulled copy edits directly); the gitignored `config_local.json` is the developer-specific fallback (never auto-created - developers copy `config.json` to `config_local.json` manually when local overrides are needed):
 
   ```json
   { "tokens": { "neuprint": "", "cave": "" }, "envs": { "4.5.0": "my-custom-env" } }
@@ -75,8 +75,8 @@ git checkout v4.5.0
 
 ### 4. Configure tokens
 
-- Tokens live in the gitignored `config_local.json` override (wins per key) with the committed `config.json` as the fallback - `token_info.txt` / `token_info_local.txt` were removed and are never read. The installers create both config files from `config.example.json` when missing.
-- Copy `config.example.json` to `config_local.json` if it does not exist (the local file is gitignored).
+- Tokens live in `config.json` (wins per key - the file a GitHub-pulled copy edits directly); the gitignored `config_local.json` only fills entries left empty there - `token_info.txt` / `token_info_local.txt` were removed and are never read. `config_local.json` is never auto-generated; developers create it manually when needed.
+- Copy `config.json` to `config_local.json` if it does not exist (the local file is gitignored).
 - Ask the user for their tokens; never invent or reuse tokens without permission:
   - `NEUPRINT_TOKEN` from <https://neuprint.janelia.org/account>
   - `CAVE_TOKEN` (FlyWire only) from <https://codex.flywire.ai/auth_token>

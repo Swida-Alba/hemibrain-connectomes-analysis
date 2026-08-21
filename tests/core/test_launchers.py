@@ -75,9 +75,10 @@ class TestInstallers:
         assert 'verify_install.py --project "$PROJECT_ROOT"' in text
         assert 'cd "$PROJECT_ROOT"' in text
         assert "run_DROCAT.command" in text
-        # config.json: created from the committed template, versioned env
-        # override consulted before the default drocat-<version> auto-find
-        assert "config.example.json" in text
+        # config_local.json is never auto-created (developer-managed); the
+        # versioned env override is consulted before the default auto-find
+        assert 'cp "$CONFIG_FILE" "$CONFIG_LOCAL"' not in text
+        assert "config_local.json" in text
         assert 'json_value envs "$DROCAT_VERSION"' in text
         assert "ENV_OVERRIDE" in text
         assert "CONFIG_LOCAL" in text
@@ -125,9 +126,9 @@ class TestInstallers:
 
     def test_install_ps1_config_json_env_override(self):
         text = (ROOT / "archive/install/install.ps1").read_text(encoding="utf-8")
-        # config.json ships clean; the gitignored config_local.json override
-        # is consulted first for the versioned env and the tokens
-        assert "config.example.json" in text
+        # config.json ships clean and wins per key; the gitignored
+        # config_local.json fallback is developer-managed (never generated)
+        assert 'Copy-Item $ConfigFile $ConfigLocal' not in text
         assert "$ConfigLocal" in text
         assert "$ConfigLocalData" in text
         assert "$EnvOverride" in text

@@ -26,6 +26,8 @@ ENV_BASE="drocat-${DROCAT_VERSION}"
 # config.json ships clean on GitHub (committed defaults) and wins per key -
 # it is the file a GitHub-pulled copy edits directly; the gitignored
 # config_local.json is the developer-specific fallback for empty entries.
+# It is NEVER created automatically: developers add it manually
+# (cp config.json config_local.json) when local overrides are needed.
 CONFIG_FILE="$PROJECT_ROOT/config.json"
 CONFIG_LOCAL="$PROJECT_ROOT/config_local.json"
 
@@ -85,20 +87,6 @@ update_config_env() {
     ' "$3" > "$tmp" && mv "$tmp" "$3"
     chmod 600 "$3"
 }
-
-# Create the local override config from the committed template on first
-# run so the versioned env override and token slots exist before anything
-# reads them. config.json itself ships with the repository.
-if [[ ! -f "$CONFIG_LOCAL" && -f "$PROJECT_ROOT/config.example.json" ]]; then
-    cp "$PROJECT_ROOT/config.example.json" "$CONFIG_LOCAL"
-    chmod 600 "$CONFIG_LOCAL"
-    printf '%s\n' "Created config_local.json from config.example.json (edit it to set a custom env name or tokens)."
-fi
-if [[ ! -f "$CONFIG_FILE" && -f "$PROJECT_ROOT/config.example.json" ]]; then
-    cp "$PROJECT_ROOT/config.example.json" "$CONFIG_FILE"
-    chmod 600 "$CONFIG_FILE"
-    printf '%s\n' "Created config.json from config.example.json (missing in this checkout)."
-fi
 
 printf "%b\n" "$BLUE"
 printf '%s\n' '╔═══════════════════════════════════════════════════════════════╗'

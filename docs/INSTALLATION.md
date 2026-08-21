@@ -93,7 +93,7 @@ were removed and are never read. Two equivalent ways:
    it only applies to entries left empty in `config.json`:
 
 ```bash
-cp config.example.json config_local.json     # gitignored developer fallback
+cp config.json config_local.json     # gitignored developer fallback
 ```
 
 ```json
@@ -110,8 +110,10 @@ cp config.example.json config_local.json     # gitignored developer fallback
 
 An empty token value means "not configured"; the environment variables
 (`NEUPRINT_TOKEN`, `CAVE_TOKEN`) remain a fallback for script mode.
-`config_local.json` (and `config.json` if it is missing from a checkout) is
-created automatically from `config.example.json` by the one-click installers.
+`config_local.json` is NOT created automatically - it is an optional,
+developer-specific file. Create it manually when you need local overrides:
+`cp config.json config_local.json` (the file is gitignored). `config.json`
+itself always ships with the repository.
 
 - NeuPrint token: <https://neuprint.janelia.org/account>
 - CAVE token: <https://codex.flywire.ai/auth_token>

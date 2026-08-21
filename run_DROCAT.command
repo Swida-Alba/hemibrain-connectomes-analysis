@@ -31,7 +31,7 @@ main() {
     CONFIG_LOCAL="$SCRIPT_DIR/config_local.json"
 
     # Minimal JSON reader for config.json (string values only, one level of
-    # section objects; see config.example.json for the exact format). Commas
+    # section objects; see config.json for the exact format). Commas
     # are normalized to newlines first so pretty-printed and single-line
     # JSON both work.
     json_value() {

@@ -5,5 +5,6 @@
   },
   "envs": {
     "4.5.0": ""
-  }
+  },
+  "recompress_healed_bundle": "ask"
 }

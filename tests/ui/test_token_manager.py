@@ -74,7 +74,7 @@ class TestTokenManager:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("CAVE_TOKEN", "env-cave")
         try:
-            manager = TokenManager()
+            manager = TokenManager(project_root=str(tmp_path))
             assert manager.tokens.get("NEUPRINT_TOKEN") is None
             assert manager.get_token("CAVE_TOKEN") == "env-cave"
         finally:
@@ -86,7 +86,7 @@ class TestTokenManager:
             "NEUPRINT_TOKEN='legacy-np'\nCAVE_TOKEN='legacy-cave'\n", encoding="utf-8"
         )
         monkeypatch.chdir(tmp_path)
-        manager = TokenManager()
+        manager = TokenManager(project_root=str(tmp_path))
         assert manager.tokens.get("NEUPRINT_TOKEN") is None
         assert manager.tokens.get("CAVE_TOKEN") is None
 

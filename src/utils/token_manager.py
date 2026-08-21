@@ -21,17 +21,21 @@ class TokenManager:
     NEUPRINT_TOKEN_MIN_LENGTH = 100  # JWT tokens are long
     CAVE_TOKEN_MAX_LENGTH = 64       # CAVE tokens are short hex strings
     
-    def __init__(self):
+    def __init__(self, project_root=None):
+        """project_root overrides auto-detection (used by tests to isolate
+        the config files actually read; defaults to the repository root)."""
+        self._project_root = project_root
         self.tokens = self._load_tokens_from_files()
         
     def _load_tokens_from_files(self):
         """Load tokens from config.json first, then config_local.json."""
         tokens = {}
         
-        # Check current directory and project root
-        # Assuming this file is in src/utils/
-        # Project root is ../../ relative to this file
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        # Check current directory and project root; default to the repository
+        # root (this file is in src/utils/).
+        project_root = self._project_root
+        if project_root is None:
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
         # config.json wins per key (the file a GitHub-pulled copy edits);
         # the gitignored config_local.json only fills empty entries.

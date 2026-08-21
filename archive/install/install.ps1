@@ -24,23 +24,11 @@ $DrocatVersion = "4.5.0"
 $VersionLine = Select-String -Path "$ProjectRoot\ui\config.py" -Pattern '^APP_VERSION = "([^"]+)"' -ErrorAction SilentlyContinue
 if ($VersionLine) { $DrocatVersion = $VersionLine.Matches[0].Groups[1].Value }
 $EnvBase = "drocat-$DrocatVersion"
-# config.json ships clean on GitHub (committed defaults); the gitignored
-# config_local.json is the per-user override and wins per key.
+# config.json ships clean on GitHub (committed defaults) and wins per key;
+# the gitignored config_local.json is the developer-specific fallback (never
+# created automatically - developers add it manually when needed).
 $ConfigFile = Join-Path $ProjectRoot "config.json"
 $ConfigLocal = Join-Path $ProjectRoot "config_local.json"
-$ConfigExample = Join-Path $ProjectRoot "config.example.json"
-
-# Create the local override config from the committed template on first run
-# so the versioned env override and token slots exist before anything reads
-# them. config.json itself ships with the repository.
-if (-not (Test-Path $ConfigLocal) -and (Test-Path $ConfigExample)) {
-    Copy-Item $ConfigExample $ConfigLocal
-    Write-Host "Created config_local.json from config.example.json (edit it to set a custom env name or tokens)." -ForegroundColor Yellow
-}
-if (-not (Test-Path $ConfigFile) -and (Test-Path $ConfigExample)) {
-    Copy-Item $ConfigExample $ConfigFile
-    Write-Host "Created config.json from config.example.json (missing in this checkout)." -ForegroundColor Yellow
-}
 
 # Version-specific custom env (envs.<version>) and tokens: config.json wins
 # per key (the file a GitHub-pulled copy edits directly); the gitignored
