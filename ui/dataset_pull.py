@@ -152,6 +152,17 @@ class DatasetPuller:
         else:
             self._run_metadata(dataset)
 
+    @staticmethod
+    def _ensure_metadata(fc) -> None:
+        """Ensure the dataset metadata: neuron table, ROI table, index.
+
+        Idempotent: already-present files are never re-downloaded.  Both the
+        connections pull and the skeleton pull run this before their network
+        phase, because each reads the local neuron table / index first.
+        """
+        fc._ensure_complete_dataset()
+        fc._ensure_neuron_index_from_metadata()
+
     def _run_metadata(self, dataset: str) -> None:
         """Pull only the dataset metadata: neuron table, ROI table, index.
 
@@ -174,8 +185,7 @@ class DatasetPuller:
                 cache_only=False,
                 verbose=False,
             )
-            fc._ensure_complete_dataset()
-            fc._ensure_neuron_index_from_metadata()
+            self._ensure_metadata(fc)
             if self._cancel_event.is_set():
                 with self._lock:
                     self._state["summary"] = {
@@ -224,14 +234,17 @@ class DatasetPuller:
         try:
             from coana import FindNeuronConnection
 
-            # Phase 1/2 — client init + local data preparation.  A first pull
-            # may download the full neuron table here (statvis.pull_dataset),
-            # which can take several minutes with no neuron totals yet.
+            # Phase 1/2 — dataset metadata + client init.  The connection
+            # fetch reads the local neuron table / index, so the metadata is
+            # ensured first (idempotent; a first pull may download the full
+            # neuron table here, which can take several minutes with no
+            # neuron totals yet).
             self._phase(
                 "prepare",
-                "Connecting to the dataset server and preparing local data "
-                "(a first pull may download the full neuron table — this can "
-                "take several minutes; press Cancel to stop after it).",
+                "Ensuring dataset metadata and preparing local data "
+                "(neuron table, ROI table, index) before fetching "
+                "connections — a first pull may download the full neuron "
+                "table; press Cancel to stop after it.",
             )
             fc = FindNeuronConnection(
                 dataset=dataset,
@@ -239,6 +252,7 @@ class DatasetPuller:
                 cache_only=False,
                 verbose=False,
             )
+            self._ensure_metadata(fc)
             if self._cancel_event.is_set():
                 # Cancelled during preparation (e.g. while the full neuron
                 # table was being downloaded): stop before the fetch loop.

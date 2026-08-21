@@ -83,6 +83,12 @@ def fake_fnc(monkeypatch):
         def __init__(self, *args, **kwargs):
             self.kwargs = kwargs
 
+        def _ensure_complete_dataset(self):
+            pass
+
+        def _ensure_neuron_index_from_metadata(self):
+            pass
+
         def build_connection_cache(self, **kwargs):
             assert holder["build"] is not None
             return holder["build"](**kwargs)
@@ -185,6 +191,37 @@ class TestDatasetPuller:
         assert _wait_until(lambda: puller.state["done"])
         assert fake_fnc["build"].called_with["max_workers"] == 6
 
+    def test_connections_pull_ensures_metadata_first(self, monkeypatch):
+        """The connections pull must ensure the dataset metadata (neuron
+        table, ROI table, index) before building the connection cache."""
+        import coana
+
+        order = []
+
+        class TrackingFNC:
+            def __init__(self, *args, **kwargs):
+                order.append("init")
+
+            def _ensure_complete_dataset(self):
+                order.append("metadata")
+
+            def _ensure_neuron_index_from_metadata(self):
+                order.append("index")
+
+            def build_connection_cache(self, **kwargs):
+                order.append("build")
+                return {
+                    "total_neurons": 0, "already_cached": 0, "newly_cached": 0,
+                    "failed_neurons": [], "total_connections": 0,
+                    "elapsed_time": 0.0, "cancelled": False,
+                }
+
+        monkeypatch.setattr(coana, "FindNeuronConnection", TrackingFNC)
+        puller = DatasetPuller()
+        assert puller.start("hemibrain:v1.2.1", operation="connections") is True
+        assert _wait_until(lambda: puller.state["done"])
+        assert order == ["init", "metadata", "index", "build"]
+
     def test_eta_timestamps_recorded(self, fake_fnc):
         fake_fnc["build"] = _FakeBuild(neurons=50, delay=0.02)
         puller = DatasetPuller()
@@ -270,6 +307,12 @@ class TestDatasetPullerPhases:
                 events.append("init")
                 init_done.wait(5)  # hold the prepare phase observable
 
+            def _ensure_complete_dataset(self):
+                pass
+
+            def _ensure_neuron_index_from_metadata(self):
+                pass
+
             def build_connection_cache(self, **kwargs):
                 events.append("build")
                 build_started.set()
@@ -309,6 +352,12 @@ class TestDatasetPullerPhases:
         class BlockingInitFNC:
             def __init__(self, *args, **kwargs):
                 release_init.wait(5)
+
+            def _ensure_complete_dataset(self):
+                pass
+
+            def _ensure_neuron_index_from_metadata(self):
+                pass
 
             def build_connection_cache(self, **kwargs):
                 built["called"] = True

@@ -437,6 +437,190 @@ class TestFetchOnDemand:
         assert not list((tmp_path / "cache" / "test_v1" / "skeletons")
                         .glob("*.pkl"))
 
+    def test_persist_worker_runs_concurrently_with_fetch(
+            self, tmp_path, monkeypatch):
+        """Simplification + cache writing run on a standalone thread: the
+        fetch loop submits the next batch without waiting for the previous
+        batch's persist to finish (benchmark: fetch ~0.53s/skeleton vs
+        simplify+write ~0.04s and vectorize ~0.11s, so the CPU tail must
+        overlap the network phase instead of blocking it)."""
+        import threading
+
+        persist_started = threading.Event()
+        release_persist = threading.Event()
+        fetch_calls = {"n": 0}
+
+        def fake_fetch(batch_ids, **kwargs):
+            fetch_calls["n"] += 1
+            if fetch_calls["n"] == 2:
+                # Batch 2 must be fetched while batch 1's persist is still
+                # running: the persist runs on the standalone worker thread.
+                assert persist_started.wait(5), (
+                    "persist did not start while batch 2 was fetching")
+                release_persist.set()
+            out = []
+            for body_id in batch_ids:
+                neuron = line_neuron(length=8)
+                neuron.id = int(body_id)
+                out.append(neuron)
+            return out
+
+        monkeypatch.setattr(
+            morph, "_fetch_neuprint_batch_with_progress", fake_fetch)
+        raw_cache = morph.find_similar_raw_cache(
+            "np:v1", project_root=str(tmp_path), verbose=False
+        )
+        real_persist = raw_cache.persist_skeletons
+
+        def slow_persist(neurons, **kwargs):
+            persist_started.set()
+            release_persist.wait(5)
+            return real_persist(neurons, **kwargs)
+
+        raw_cache.persist_skeletons = slow_persist
+
+        result = morph.fetch_skeletons_on_demand_batch(
+            "np:v1", [101, 102, 103, 104], project_root=str(tmp_path),
+            persist=True, batch_size=2, max_threads=2,
+            raw_cache=raw_cache, vector_cache=raw_cache, client=object(),
+        )
+        assert list(result) == [101, 102, 103, 104]
+        # the worker joined before returning: every fetched skeleton is on
+        # disk (simplified .swc.zst) and the vector cache has all rows
+        assert fetch_calls["n"] == 2
+        assert all(
+            raw_cache.find_skeleton_file(bid) is not None for bid in (101, 102, 103, 104)
+        )
+        assert set(raw_cache.load()["bodyIds"].tolist()) == {101, 102, 103, 104}
+
+    def test_pipeline_stages_temp_skeletons_and_cleans_after_persist(
+            self, tmp_path, monkeypatch):
+        """Fetched raw skeletons land in ``skeletons/_temp_cache`` (crash-
+        resume) and the staging entries are removed once the simplified
+        files are persisted."""
+        raw_cache = morph.find_similar_raw_cache(
+            "np:v1", project_root=str(tmp_path), verbose=False
+        )
+        temp_dir = raw_cache.temp_cache_dir()
+
+        def fake_fetch(batch_ids, **kwargs):
+            out = []
+            for body_id in batch_ids:
+                neuron = line_neuron(length=8)
+                neuron.id = int(body_id)
+                out.append(neuron)
+            return out
+
+        monkeypatch.setattr(
+            morph, "_fetch_neuprint_batch_with_progress", fake_fetch)
+        result = morph.fetch_skeletons_on_demand_batch(
+            "np:v1", [101, 102], project_root=str(tmp_path), persist=True,
+            batch_size=1, max_threads=2,
+            raw_cache=raw_cache, vector_cache=raw_cache, client=object(),
+        )
+        assert list(result) == [101, 102]
+        # staging cleaned after persist; final simplified files exist
+        assert not temp_dir.exists() or not list(temp_dir.glob("*.swc.zst"))
+        assert raw_cache.find_skeleton_file(101) is not None
+        assert raw_cache.find_skeleton_file(102) is not None
+
+    def test_crash_resume_reprocesses_temp_without_refetch(
+            self, tmp_path, monkeypatch):
+        """A leftover _temp_cache entry from a crashed run is loaded from
+        disk (never re-fetched), vectorized, persisted, and cleaned up."""
+        raw_cache = morph.find_similar_raw_cache(
+            "np:v1", project_root=str(tmp_path), verbose=False
+        )
+        neuron = line_neuron(length=10)
+        neuron.id = 101
+        raw_cache.write_temp_skeleton(101, neuron)
+
+        fetch_calls = {"n": 0}
+
+        def fake_fetch(batch_ids, **kwargs):
+            fetch_calls["n"] += 1
+            return []
+
+        monkeypatch.setattr(
+            morph, "_fetch_neuprint_batch_with_progress", fake_fetch)
+        result = morph.fetch_skeletons_on_demand_batch(
+            "np:v1", [101], project_root=str(tmp_path), persist=True,
+            raw_cache=raw_cache, vector_cache=raw_cache, client=object(),
+        )
+        assert list(result) == [101]
+        assert fetch_calls["n"] == 0  # served from temp, no network fetch
+        assert raw_cache.find_skeleton_file(101) is not None  # final persisted
+        assert not (raw_cache.temp_cache_dir() / "101.swc.zst").exists()
+        assert 101 in set(raw_cache.load()["bodyIds"].tolist())
+
+    def test_crash_duplicate_vector_rows_dedupe_at_read_and_merge(
+            self, tmp_path, monkeypatch):
+        """Crash between 'vector appended' and 'skeleton persisted' (the
+        accepted duplicate window): the resume pass re-appends the same
+        neuron's vector; first-wins dedupe keeps exactly one row - at
+        load() AND after the merge checkpoint."""
+        raw_cache = morph.find_similar_raw_cache(
+            "np:v1", project_root=str(tmp_path), verbose=False
+        )
+        neuron = line_neuron(length=12)
+        neuron.id = 101
+        # crash state: vector row already appended, temp file present,
+        # final skeleton absent
+        _, vec = morph.vectorize_neuron(neuron)
+        raw_cache.append_vectors([(101, vec, "skeleton")])
+        raw_cache.write_temp_skeleton(101, neuron)
+
+        monkeypatch.setattr(
+            morph, "_fetch_neuprint_batch_with_progress",
+            lambda *a, **k: [],
+        )
+        result = morph.fetch_skeletons_on_demand_batch(
+            "np:v1", [101], project_root=str(tmp_path), persist=True,
+            raw_cache=raw_cache, vector_cache=raw_cache, client=object(),
+        )
+        assert list(result) == [101]
+        data = raw_cache.load()
+        assert data is not None
+        assert sum(1 for b in data["bodyIds"].tolist() if b == 101) == 1
+        # after the merge checkpoint the main file is deduped too
+        raw_cache._merge_pending()
+        data2 = raw_cache.load()
+        assert sum(1 for b in data2["bodyIds"].tolist() if b == 101) == 1
+        assert not raw_cache.pending_path.exists()
+
+    def test_cancel_drains_workers_and_cleans_temp(
+            self, tmp_path, monkeypatch):
+        """Cancel stops new batches; the fetched batch is still staged,
+        persisted, vectorized, and its temp entries removed (resume-safe)."""
+        import threading
+
+        raw_cache = morph.find_similar_raw_cache(
+            "np:v1", project_root=str(tmp_path), verbose=False
+        )
+        cancel = threading.Event()
+
+        def fake_fetch(batch_ids, **kwargs):
+            out = []
+            for body_id in batch_ids:
+                neuron = line_neuron(length=8)
+                neuron.id = int(body_id)
+                out.append(neuron)
+            cancel.set()  # cancel after the first batch
+            return out
+
+        monkeypatch.setattr(
+            morph, "_fetch_neuprint_batch_with_progress", fake_fetch)
+        result = morph.fetch_skeletons_on_demand_batch(
+            "np:v1", [101, 102, 103], project_root=str(tmp_path),
+            persist=True, batch_size=2, max_threads=2, cancel_event=cancel,
+            raw_cache=raw_cache, vector_cache=raw_cache, client=object(),
+        )
+        assert list(result) == [101, 102]  # batch 2 never submitted
+        assert raw_cache.find_skeleton_file(101) is not None
+        assert raw_cache.find_skeleton_file(102) is not None
+        assert not (raw_cache.temp_cache_dir() / "101.swc.zst").exists()
+        assert not (raw_cache.temp_cache_dir() / "102.swc.zst").exists()
+
     def test_vendored_batch_reports_per_neuron_progress_and_parallelism(
             self, tmp_path, monkeypatch):
         """The vendored NeuPrint batch loop fetches with ``max_threads``
@@ -1210,6 +1394,30 @@ class TestLevelGuards:
         n = cache.append_vectors([(999, vec, "skeleton")],
                                  vector_basis="raw")
         assert n == 1
+
+    def test_discover_ignores_temp_cache(self, tmp_path):
+        """Transient crash-resume staging files are never treated as cached
+        skeletons (the legacy cache's skeleton_dir contains _temp_cache)."""
+        cache = TestSkeletonVectorCache()._setup(tmp_path)
+        temp = cache.temp_cache_dir()
+        temp.mkdir(parents=True)
+        (temp / "999.swc.zst").write_bytes(b"x")
+        discovered = cache._discover_skeleton_files()
+        assert all("_temp_cache" not in p for p in discovered)
+        assert not any("999" in p for p in discovered)
+
+    def test_build_folds_pending_and_clears_it(self, tmp_path):
+        """A full rebuild folds appended-but-unmerged pending rows into the
+        new main parquet and clears the staging file."""
+        cache = TestSkeletonVectorCache()._setup(tmp_path)
+        cache.build()
+        _, vec = morph.vectorize_neuron(line_neuron())
+        cache.append_vectors([(999, vec, "skeleton")])
+        assert cache.pending_path.exists()
+        stats = cache.build()
+        assert stats["rows"] == 4  # 101, 102, 103 + folded 999
+        assert not cache.pending_path.exists()
+        assert 999 in set(cache.load()["bodyIds"].tolist())
 
     def test_population_stats_falls_back_to_cache_meta(self, tmp_path):
         """simp90 on-disk files -> population stats come from the raw vector
@@ -3189,6 +3397,9 @@ class TestVectorPersistence:
         assert fetched == []
 
     def test_append_ignores_duplicate_bodyids(self, tmp_path):
+        """Append-only pending rows dedupe at read time: re-appending a
+        cached bodyId must never surface a second row (the append returns the
+        appended count; the visible cache stays unchanged)."""
         write_skeleton(tmp_path, "np:v1", 101, line_neuron(length=20))
         cache = morph.SkeletonVectorCache(
             "np:v1", project_root=str(tmp_path), verbose=False
@@ -3197,8 +3408,13 @@ class TestVectorPersistence:
         before = len(cache.load()["bodyIds"])
         X, _, _ = cache.vectors_for([101], compute_missing=True)
         added = cache.append_vectors([(101, X[0], "skeleton")])
-        assert added == 0
+        assert added == 1  # appended to the pending staging file
+        # read-time first-wins dedupe: still exactly one visible row
         assert len(cache.load()["bodyIds"]) == before
+        # after the merge checkpoint the main file is deduped too
+        cache._merge_pending()
+        assert len(cache.load()["bodyIds"]) == before
+        assert not cache.pending_path.exists()
 
 
 def test_seed_index_alone_does_not_authorize_skeleton_downloads(tmp_path):

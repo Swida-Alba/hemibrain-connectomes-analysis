@@ -127,7 +127,38 @@ class SkeletonPuller:
             sys.path.insert(0, str(
                 __import__("pathlib").Path(__file__).resolve().parents[1] / "src"
             ))
+            from coana import FindNeuronConnection
             from morphology import download_all_skeletons
+
+            # The skeleton download reads the bodyId list from the local
+            # neuron table, so the dataset metadata must be present first.
+            # Ensure it (idempotent; a first pull downloads the neuron table
+            # + ROI table and builds the materialized index).
+            with self._lock:
+                self._state["info"] = (
+                    "Ensuring dataset metadata (neuron table, ROI table, "
+                    "index)..."
+                )
+            fc = FindNeuronConnection(
+                dataset=dataset,
+                use_cache=True,
+                cache_only=False,
+                verbose=False,
+            )
+            fc._ensure_complete_dataset()
+            fc._ensure_neuron_index_from_metadata()
+            if self._cancel_event.is_set():
+                # Cancelled while the metadata was being prepared: stop
+                # before any skeleton fetch.
+                with self._lock:
+                    self._state["summary"] = {
+                        "total": 0, "fetched": 0, "skipped_existing": 0,
+                        "errors": 0, "cancelled": True,
+                    }
+                    self._state["cancelled"] = True
+                    self._state["info"] = "Cancelled during metadata preparation."
+                    self._state["done"] = True
+                return
 
             pull_kwargs = dict(
                 max_workers=max_workers or 8,

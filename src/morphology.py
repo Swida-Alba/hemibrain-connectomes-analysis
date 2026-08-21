@@ -727,7 +727,8 @@ def _relevel_for_target(neuron, stored: int, target: int):
 
 def _write_compressed_skeleton(path, neuron,
                                simplification: Optional[int] = DEFAULT_SIMPLIFICATION,
-                               codec: str = "zst") -> None:
+                               codec: str = "zst",
+                               codec_level: int = 19) -> None:
     """Shared simplify + compress pipeline for the on-disk skeleton cache.
 
     Every raw-SWC cache write routes through this function so the recorded
@@ -738,6 +739,10 @@ def _write_compressed_skeleton(path, neuron,
     - ``simplification=None``: writes the neuron as-is and records the level
       already attached to it (``neuron._drocat_simplification``; absent = 0)
       - used by lazy migrations that must not re-simplify.
+    - ``codec_level``: zstd compression level (default 19).  The transient
+      ``_temp_cache`` staging writer uses level 3: measured ~2.8x faster than
+      level 19 (Step 0), which lets the staging stage keep up with the fetch
+      rate; the standard loader decompresses any level.
 
     The level is recorded as the first SWC header line
     (``# DROCAT simpl: N``) and the payload is atomically written as
@@ -768,7 +773,7 @@ def _write_compressed_skeleton(path, neuron,
                 raise ImportError(
                     "zstandard is required to write .swc.zst caches")
             blob = zstd.ZstdCompressor(
-                level=19, write_content_size=True).compress(payload)
+                level=codec_level, write_content_size=True).compress(payload)
         else:
             blob = gzip.compress(payload, compresslevel=6, mtime=0)
         temp_out.write_bytes(blob)
@@ -1199,6 +1204,14 @@ def _sorted_candidates(candidates: pd.DataFrame) -> pd.DataFrame:
 # Skeleton vector cache
 # =============================================================================
 
+# Amortized merge thresholds for the append-only vector cache (main +
+# pending): pending rows are folded into the main parquet once either
+# threshold is crossed, so appends stay O(batch) and the full-file
+# read-modify-write happens rarely.
+PENDING_MERGE_ROWS = 5000
+PENDING_MERGE_APPENDS = 8
+
+
 class SkeletonVectorCache:
     """Per-dataset cache of vectorized skeletons (parquet + meta.json).
 
@@ -1260,6 +1273,12 @@ class SkeletonVectorCache:
         meta_name = "mesh_meta.json" if self.mesh_only else "meta.json"
         self.parquet_path = self.morph_dir / vector_name
         self.meta_path = self.morph_dir / meta_name
+        # Append-only staging file: new rows land here (O(batch)) and are
+        # folded into ``parquet_path`` by the amortized merge checkpoint.
+        self.pending_path = self.morph_dir / (
+            "mesh_vectors_pending.parquet" if self.mesh_only
+            else "skeleton_vectors_pending.parquet"
+        )
 
     def _canonical_body_id(self, body_id):
         """Canonical cache key: exact strings for FlyWire, ints for NeuPrint."""
@@ -1270,7 +1289,161 @@ class SkeletonVectorCache:
 
     # ------------------------------------------------------------------ paths
     def cache_exists(self) -> bool:
-        return self.parquet_path.exists()
+        # A pending file counts as cache existence: rows appended but not yet
+        # merged are real data (a crash must never make them invisible or
+        # trigger a rebuild that would drop them).
+        return self.parquet_path.exists() or self.pending_path.exists()
+
+    # -------------------------------------------------- pending (append-only)
+    @staticmethod
+    def _atomic_parquet(frame, path) -> None:
+        """Atomic parquet write (temp + os.replace): a crash never leaves a
+        truncated main/pending file behind."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            frame.to_parquet(temporary, index=False)
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                try:
+                    temporary.unlink()
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _dedupe_frames(main_df: pd.DataFrame,
+                       pending_df: pd.DataFrame) -> pd.DataFrame:
+        """Concat main + pending and dedupe by bodyId, first occurrence wins
+        (main rows win over pending rows — matches the historical "existing
+        rows win" semantics)."""
+        if pending_df is None or pending_df.empty:
+            return (main_df.reset_index(drop=True)
+                    if main_df is not None and not main_df.empty else main_df)
+        if main_df is None or main_df.empty:
+            combined = pending_df
+        else:
+            combined = pd.concat([main_df, pending_df], ignore_index=True)
+        if combined.empty or "bodyId" not in combined.columns:
+            return combined
+        return combined.drop_duplicates(
+            subset=["bodyId"], keep="first").reset_index(drop=True)
+
+    def _clear_pending(self) -> None:
+        """Remove the pending file and reset its append counter."""
+        try:
+            if self.pending_path.exists():
+                self.pending_path.unlink()
+        except OSError:
+            pass
+        meta = self._load_meta() or {}
+        if meta.get("pending_appends"):
+            meta["pending_appends"] = 0
+            try:
+                self.meta_path.write_text(json.dumps(meta, indent=2))
+            except OSError:
+                pass
+
+    def _vector_row_count(self) -> int:
+        """Rows in main + pending (informational counts)."""
+        n = 0
+        for path in (self.parquet_path, self.pending_path):
+            if not path.exists():
+                continue
+            try:
+                n += len(pd.read_parquet(path))
+            except Exception:
+                pass
+        return n
+
+    def _merge_pending(self) -> int:
+        """Fold pending rows into the main parquet (deduped, first-wins) and
+        clear pending.  Called by ``append_vectors`` once a threshold is
+        crossed (amortized O(n)) and as the pull's final checkpoint.
+        Returns the number of rows written to main (0 = nothing to merge)."""
+        if not self.pending_path.exists():
+            return 0
+        try:
+            pending_df = pd.read_parquet(self.pending_path)
+        except Exception:
+            pending_df = pd.DataFrame()
+        if pending_df is None or pending_df.empty:
+            self._clear_pending()
+            return 0
+        main_df = pd.DataFrame()
+        if self.parquet_path.exists():
+            try:
+                main_df = pd.read_parquet(self.parquet_path)
+            except Exception:
+                main_df = pd.DataFrame()
+        merged = self._dedupe_frames(main_df, pending_df)
+        if merged.empty:
+            self._clear_pending()
+            return 0
+        # Align the schema to the main file's columns (legacy mains may lack
+        # newer columns), as the historical append did with keep_cols.
+        if main_df is not None and not main_df.empty:
+            keep = [c for c in main_df.columns]
+            merged = merged[[c for c in keep if c in merged.columns]]
+        merged = merged.sort_values("bodyId").reset_index(drop=True)
+        self._atomic_parquet(merged, self.parquet_path)
+        meta = self._load_meta() or {}
+        if not meta.get("mean") and not merged.empty:
+            mat = self._raw_matrix(merged)
+            mean = mat.mean(axis=0).tolist()
+            std = mat.std(axis=0).tolist()
+            std = [s if s > 0 else 1.0 for s in std]
+            meta["mean"] = mean
+            meta["std"] = std
+        meta["dataset"] = self.dataset
+        meta["n_rows"] = len(merged)
+        meta["pending_appends"] = 0
+        meta["built_at"] = datetime.now().isoformat(timespec="seconds")
+        if "rep" not in meta and "rep" in merged.columns and len(merged):
+            meta["rep"] = str(merged["rep"].iloc[0])
+        if "vector_basis" not in meta:
+            meta["vector_basis"] = VECTOR_BASIS_RAW
+        if self.raw_only and "raw_format" not in meta:
+            meta["raw_format"] = self.raw_format
+        self.meta_path.write_text(json.dumps(meta, indent=2))
+        self._clear_pending()
+        return len(merged)
+
+    # -------------------------------------------------- temp staging
+    def temp_cache_dir(self) -> Path:
+        """Transient raw-skeleton staging directory (crash-resume).
+
+        Files here are written as fetch batches arrive and deleted once each
+        batch is fully persisted; stale files from a crash are reprocessed
+        (never re-fetched) on the next run.  Lives OUTSIDE ``skeleton_dir``
+        (``skeletons/_temp_cache`` vs ``skeletons/raw_skeletons``) so the
+        cache discovery never treats staging files as cached skeletons.
+        """
+        return (self.project_root / "cache" / _dataset_folder(self.dataset)
+                / "skeletons" / "_temp_cache")
+
+    def write_temp_skeleton(self, body_id, neuron) -> Path:
+        """Write a raw (level-0) skeleton into the staging dir.
+
+        Uses the fast zstd-3 codec (measured ~2.8x faster than level 19 in
+        Step 0) so the staging stage keeps up with the fetch rate even for
+        the densest neurons; the standard loader decompresses any level.
+        Atomic per file - a crash never leaves a partial staging entry.
+        """
+        path = self.temp_cache_dir() / f"{body_id}.swc.zst"
+        _write_compressed_skeleton(path, neuron, simplification=0,
+                                   codec_level=3)
+        return path
+
+    def delete_temp_skeletons(self, body_ids) -> None:
+        """Remove staging entries for fully-persisted neurons (best-effort)."""
+        temp_dir = self.temp_cache_dir()
+        for body_id in body_ids:
+            try:
+                (temp_dir / f"{body_id}.swc.zst").unlink(missing_ok=True)
+            except OSError:
+                continue
 
     def _discover_skeleton_files(self) -> List[str]:
         """All cached skeleton/mesh files, including nested bulk folders."""
@@ -1291,6 +1464,8 @@ class SkeletonVectorCache:
         if not self.raw_only:
             files = [path for path in files
                      if "raw_skeletons" not in path.parts]
+        # Transient crash-resume staging files are never cached skeletons.
+        files = [path for path in files if "_temp_cache" not in path.parts]
         preferred = {}
         for path in files:
             try:
@@ -1601,6 +1776,17 @@ class SkeletonVectorCache:
                     }
             except Exception:
                 existing = {}
+        # Fold any pending (appended-but-unmerged) rows into the rebuild so
+        # they are never dropped; the pending file is cleared once the new
+        # main parquet is written below.
+        if self.pending_path.exists():
+            try:
+                pending_df = pd.read_parquet(self.pending_path)
+                for r in pending_df.to_dict("records"):
+                    existing.setdefault(
+                        self._canonical_body_id(r["bodyId"]), r)
+            except Exception:
+                pass
 
         # The cache holds ONE vectorization level (its "basis"). On-disk
         # skeletons are vectorized only when their simplification level
@@ -1799,7 +1985,7 @@ class SkeletonVectorCache:
             df["type"] = ""
             df["instance"] = ""
 
-        df.to_parquet(self.parquet_path, index=False)
+        self._atomic_parquet(df, self.parquet_path)
 
         # Z-score stats over the population.
         mat = self._raw_matrix(df)
@@ -1808,6 +1994,8 @@ class SkeletonVectorCache:
         std = [s if s > 0 else 1.0 for s in std]
         self._write_meta({"mean": mean, "std": std}, len(df), rep=rep,
                          vector_basis=basis)
+        # A full rebuild supersedes the append-only staging file.
+        self._clear_pending()
 
         self._log(
             f"[SkeletonVectorCache] Cache ready: {len(df)} rows "
@@ -1861,10 +2049,23 @@ class SkeletonVectorCache:
         ``rep`` carries each row's representation ('skeleton' | 'mesh');
         ``dataset_rep`` the cache's single representation (legacy caches
         without a ``rep`` column infer it from the first cached file).
+        Main + pending rows are merged with a first-wins dedupe by bodyId, so
+        crash-duplicate appends are never visible to consumers.
         """
-        if not self.parquet_path.exists():
+        if not self.parquet_path.exists() and not self.pending_path.exists():
             return None
-        df = pd.read_parquet(self.parquet_path)
+        df = pd.DataFrame()
+        if self.parquet_path.exists():
+            try:
+                df = pd.read_parquet(self.parquet_path)
+            except Exception:
+                df = pd.DataFrame()
+        if self.pending_path.exists():
+            try:
+                pending_df = pd.read_parquet(self.pending_path)
+                df = self._dedupe_frames(df, pending_df)
+            except Exception:
+                pass
         if df.empty:
             return None
         if self._flywire_ids:
@@ -1903,8 +2104,7 @@ class SkeletonVectorCache:
         if not self.cache_exists():
             self._log(f"[SkeletonVectorCache] Building vector cache for {self.dataset}...")
             return self.build(fetch_missing=fetch_missing)
-        return {"rows": len(pd.read_parquet(self.parquet_path)) if self.parquet_path.exists() else 0,
-                "new": 0, "fetched": 0}
+        return {"rows": self._vector_row_count(), "new": 0, "fetched": 0}
 
     def coverage(self) -> Dict[str, int]:
         """Skeleton and vector counts for the dataset.
@@ -1934,12 +2134,7 @@ class SkeletonVectorCache:
                                 1 for n in z.namelist() if n.endswith(".swc"))
                     except Exception:
                         pass
-        n_vectors = 0
-        if self.parquet_path.exists():
-            try:
-                n_vectors = len(pd.read_parquet(self.parquet_path))
-            except Exception:
-                n_vectors = 0
+        n_vectors = self._vector_row_count()
         return {"skeletons": n_skeletons, "vectors": n_vectors}
 
     # ------------------------------------------------------------ append
@@ -1951,18 +2146,24 @@ class SkeletonVectorCache:
         an online-fetched skeleton that was NOT persisted: the VECTOR is
         stored so later queries reuse it without re-fetching or
         re-vectorizing, even though the original skeleton stays uncached.
-        Rows are merged by bodyId (dedupe); the cache's standardization
-        statistics (meta mean/std) are left untouched, so the standardized
-        space stays consistent across appends. Rows of a representation
-        different from the cache's are rejected (a cache holds ONE level),
-        and rows whose ``vector_basis`` differs from the cache's basis are
-        rejected too (a cache holds ONE simplification level). Returns the
-        number of rows actually added.
+
+        Append-only: the rows are written to the small ``*_pending.parquet``
+        staging file (O(batch); atomic) and folded into the main parquet by
+        the amortized merge checkpoint once a threshold is crossed.  Dedupe
+        by bodyId is deferred to read/merge time (first occurrence wins), so
+        crash-duplicate appends are never visible to consumers.  The cache's
+        standardization statistics (meta mean/std) are left untouched, so the
+        standardized space stays consistent across appends.  Rows of a
+        representation different from the cache's are rejected (a cache
+        holds ONE level), and rows whose ``vector_basis`` differs from the
+        cache's basis are rejected too (a cache holds ONE simplification
+        level).  Returns the number of rows appended to pending (may
+        over-count by rows that dedupe against existing data at merge).
         """
         if not records:
             return 0
         # Cross-process safety: UI runs execute in separate subprocesses, so
-        # the read-modify-write is guarded with an advisory file lock
+        # the pending read-append-write is guarded with an advisory file lock
         # (POSIX; best-effort elsewhere).
         lock_fd = None
         lock_path = self.parquet_path.with_suffix(".parquet.lock")
@@ -1977,10 +2178,14 @@ class SkeletonVectorCache:
                 self.dataset, str(self.project_root)
             )
             rows_new = []
+            seen = set()
             for bid, vec, rep in records:
                 if self.raw_only and str(rep) != "skeleton":
                     continue
                 bid = self._canonical_body_id(bid)
+                if bid in seen:
+                    continue
+                seen.add(bid)
                 row = {"bodyId": bid, "rep": rep}
                 for i, name in enumerate(MORPHOMETRIC_FEATURES):
                     row[name] = float(vec[i])
@@ -1989,36 +2194,21 @@ class SkeletonVectorCache:
                 row["type"] = type_map.get(bid, "") if type_map else ""
                 row["instance"] = (instance_map or {}).get(bid, "") if instance_map else ""
                 rows_new.append(row)
+            if not rows_new:
+                return 0
             df_new = pd.DataFrame(rows_new)
 
-            existing = self.load()
-            if existing is not None:
-                cache_rep = existing.get("dataset_rep", "")
-                cache_basis = ((existing.get("meta") or {})
-                               .get("vector_basis") or VECTOR_BASIS_RAW)
-                if cache_basis != vector_basis:
-                    # Different simplification level: never mix (a cache
-                    # holds ONE basis).
-                    return 0
-                if cache_rep:
-                    df_new = df_new[df_new["rep"] == cache_rep]
-                if df_new.empty:
-                    return 0
-                old = existing["df"]
-                keep_cols = [c for c in old.columns]
-                df_new = df_new[[c for c in keep_cols if c in df_new.columns]]
-                if self._flywire_ids:
-                    normalize_flywire_id_columns(old, ["bodyId"])
-                    normalize_flywire_id_columns(df_new, ["bodyId"])
-                    known = set(old["bodyId"].tolist())
-                else:
-                    known = set(old["bodyId"].astype(np.int64))
-                df_new = df_new[
-                    ~df_new["bodyId"].isin(known)
-                ]
-                if df_new.empty:
-                    return 0
-                df = pd.concat([old, df_new], ignore_index=True)
+            # A cache holds ONE basis and ONE representation; the meta
+            # records them once they exist (build or first append).
+            meta = self._load_meta() or {}
+            cache_basis = meta.get("vector_basis") or VECTOR_BASIS_RAW
+            if meta.get("vector_basis") and cache_basis != vector_basis:
+                # Different simplification level: never mix (a cache
+                # holds ONE basis).
+                return 0
+            cache_rep = meta.get("rep") or ""
+            if cache_rep:
+                df_new = df_new[df_new["rep"] == cache_rep]
             else:
                 # Creating the cache: keep it homogeneous (majority
                 # representation of this batch) and record the basis.
@@ -2027,27 +2217,23 @@ class SkeletonVectorCache:
                              .most_common(1)[0][0] if len(df_new) else "")
                 if canonical:
                     df_new = df_new[df_new["rep"].astype(str) == canonical]
-                if df_new.empty:
-                    return 0
-                df = df_new
+            if df_new.empty:
+                return 0
 
-            self.morph_dir.mkdir(parents=True, exist_ok=True)
-            df.to_parquet(self.parquet_path, index=False)
+            # Append to the pending staging file (O(pending + batch), atomic).
+            pending_df = pd.DataFrame()
+            if self.pending_path.exists():
+                try:
+                    pending_df = pd.read_parquet(self.pending_path)
+                except Exception:
+                    pending_df = pd.DataFrame()
+            combined = self._dedupe_frames(pending_df, df_new)
+            self._atomic_parquet(combined, self.pending_path)
 
-            # The standardization stats (meta mean/std) stay untouched so the
-            # standardized space of existing rows is preserved; only the row
-            # count and bookkeeping are refreshed. A freshly-created cache
-            # gets its own stats (like a full build).
-            meta = self._load_meta() or {}
-            if not meta.get("mean"):
-                mat = self._raw_matrix(df)
-                mean = mat.mean(axis=0).tolist()
-                std = mat.std(axis=0).tolist()
-                std = [s if s > 0 else 1.0 for s in std]
-                meta["mean"] = mean
-                meta["std"] = std
             meta["dataset"] = self.dataset
-            meta["n_rows"] = len(df)
+            meta["n_rows"] = (self._vector_row_count()
+                               if self.parquet_path.exists() else len(combined))
+            meta["pending_appends"] = int(meta.get("pending_appends") or 0) + 1
             meta["built_at"] = datetime.now().isoformat(timespec="seconds")
             if "rep" not in meta and len(df_new) and "rep" in df_new.columns:
                 meta["rep"] = str(df_new["rep"].iloc[0])
@@ -2058,6 +2244,14 @@ class SkeletonVectorCache:
             if self.raw_only and "raw_format" not in meta:
                 meta["raw_format"] = self.raw_format
             self.meta_path.write_text(json.dumps(meta, indent=2))
+
+            # Amortized merge checkpoint: fold pending into main once either
+            # threshold is crossed (read-modify-write of the whole main file
+            # happens rarely, never per append).
+            if (len(combined) >= PENDING_MERGE_ROWS
+                    or int(meta.get("pending_appends") or 0)
+                    >= PENDING_MERGE_APPENDS):
+                self._merge_pending()
             return len(df_new)
         finally:
             if lock_fd is not None:
@@ -2744,6 +2938,36 @@ def _fetch_neuprint_batch_with_progress(
     return neurons
 
 
+def _normalize_fetched_neurons(dataset: str, neurons: Dict[Union[int, str], object],
+                               flywire: bool) -> Dict[Union[int, str], object]:
+    """Normalize fetched neurons at the dataset boundary.
+
+    FlyWire stays a MeshNeuron; only NeuPrint accepts DataFrame ->
+    TreeNeuron coercion.  Multi-node ``soma`` (navis' default soma detection
+    flags every radius >= 1 node, so a whole-neuron "soma" would freeze
+    downsampling) is cleared.  Returns the canonical-keyed mapping with the
+    surviving neurons.
+    """
+    out: Dict[Union[int, str], object] = {}
+    for fallback_id, neuron in neurons.items():
+        try:
+            if flywire:
+                if not isinstance(neuron, navis.MeshNeuron):
+                    continue
+                neuron.id = _canonical_dataset_body_id(dataset, fallback_id)
+            else:
+                if not isinstance(neuron, navis.TreeNeuron):
+                    neuron = navis.TreeNeuron(neuron)
+                neuron.id = _api_dataset_body_id(dataset, fallback_id)
+                soma = getattr(neuron, "soma", None)
+                if soma is not None and hasattr(soma, "__len__") and len(soma) > 1:
+                    neuron.soma = None
+            out[_canonical_dataset_body_id(dataset, fallback_id)] = neuron
+        except Exception:
+            continue
+    return out
+
+
 def fetch_skeletons_on_demand_batch(
         dataset: str, body_ids, project_root: Optional[str] = None,
         persist: bool = True, level: str = VECTOR_BASIS_RAW,
@@ -2810,6 +3034,9 @@ def fetch_skeletons_on_demand_batch(
     loaded: Dict[int, object] = {}
     missing = []
     raw_lookup_cache = raw_cache
+    # The pipelined NeuPrint path (fetch loop + standalone persist worker)
+    # is enabled only for the batched NeuPrint branch below.
+    pipeline = False
     if flywire:
         # A FlyWire caller must never inherit a NeuPrint raw-SWC cache object
         # supplied by an older integration.
@@ -2862,7 +3089,34 @@ def fetch_skeletons_on_demand_batch(
                 scan_ok = True
             except Exception:
                 cached_ids = set()
+        # Crash-resume staging: raw skeletons written by a previous
+        # interrupted pull live in ``skeletons/_temp_cache``.  They are loaded
+        # from disk (never re-fetched) and routed through the pipeline like
+        # freshly-fetched batches; their temp entries are removed once the
+        # final simplified files are persisted.
+        temp_pending: Dict[int, object] = {}
+        temp_dir_fn = getattr(raw_lookup_cache, "temp_cache_dir", None)
+        if callable(temp_dir_fn):
+            try:
+                temp_dir = temp_dir_fn()
+            except Exception:
+                temp_dir = None
+            if temp_dir is not None and temp_dir.is_dir():
+                try:
+                    for path in temp_dir.glob("*.swc.zst"):
+                        try:
+                            bid = _canonical_dataset_body_id(
+                                dataset, _skeleton_body_id(path))
+                        except (TypeError, ValueError):
+                            continue
+                        neuron = _load_cached_skeleton_file(str(path))
+                        if neuron is not None:
+                            temp_pending.setdefault(bid, neuron)
+                except Exception:
+                    temp_pending = {}
         for bid in requested:
+            if bid in temp_pending:
+                continue  # processed from temp by the pipeline below
             if scan_ok and bid not in cached_ids:
                 missing.append(bid)
                 continue
@@ -2876,14 +3130,23 @@ def fetch_skeletons_on_demand_batch(
         # If cache construction failed, still fetch online; persistence is
         # best-effort and the in-memory result remains usable.
         missing = list(requested)
+        temp_pending = {}
 
     if progress_callback:
         progress_callback(len(loaded), len(requested),
                           f"Neuron cache ({len(loaded)}/{len(requested)})")
 
-    if missing:
+    if missing or temp_pending:
         dataset_l = dataset.lower()
         fetched_by_id: Dict[int, object] = {}
+        # Normalize the temp-pending neurons once; they flow through the same
+        # pipeline as fetched batches (vectorize + persist + temp cleanup)
+        # without a network round-trip.
+        temp_normalized: Dict[int, object] = {}
+        if temp_pending:
+            temp_normalized = _normalize_fetched_neurons(
+                dataset, temp_pending, flywire=False)
+            fetched_by_id.update(temp_normalized)
         if fetch_skeleton_on_demand is not _SINGLE_FETCH_IMPLEMENTATION:
             # Preserve an explicit singular-fetch override. This is useful
             # for offline clients and keeps downstream integrations that
@@ -2995,124 +3258,295 @@ def fetch_skeletons_on_demand_batch(
                 (total_missing + effective_batch_size - 1)
                 // effective_batch_size
             )
-            for batch_index, start in enumerate(
-                    range(0, total_missing, effective_batch_size), start=1):
-                # Cooperative cancel: stop submitting new batches; the
-                # in-flight one finishes and its results are persisted below
-                # (resume-safe).
-                if cancel_event is not None and cancel_event.is_set():
-                    break
-                batch_ids = missing[start:start + effective_batch_size]
-                # Report the batch BEFORE the network call: the first batch
-                # can take a minute or more, and the UI used to sit frozen
-                # on the "Neuron cache (0/N)" message the whole time.  The
-                # batch counter keeps the pull visibly alive between the
-                # after-batch updates.
-                done_so_far = min(len(requested), len(loaded) + start)
-                if progress_callback:
-                    progress_callback(
-                        done_so_far, len(requested),
-                        f"Fetching skeletons - batch {batch_index}/"
-                        f"{total_batches} ({done_so_far}/{len(requested)})")
 
-                # Per-neuron progress: the vendored loop mirrors navis' own
-                # parallel fetch (ThreadPoolExecutor over the batch) but
-                # reports every completed skeleton, so the UI ticks like the
-                # terminal bar instead of waiting for the batch boundary.
-                def _neuron_progress(done, _batch_total):
-                    if progress_callback:
-                        current = min(
-                            len(requested), len(loaded) + start + done)
-                        progress_callback(
-                            current, len(requested),
-                            f"Fetching skeletons - batch {batch_index}/"
-                            f"{total_batches} ({current}/{len(requested)})")
+            # Pipeline: raw staging + simplification/cache writing run on
+            # standalone threads so the network fetch loop is never
+            # interrupted by CPU/disk work.  Every completed batch is first
+            # staged to ``skeletons/_temp_cache`` (raw level-0 .swc.zst, fast
+            # zstd-3 codec) by the staging worker - a crash then loses at
+            # most the in-flight batch, and the next run reprocesses the
+            # staging files instead of re-fetching.  The persist worker
+            # vectorizes the RAW neurons and appends their rows (O(batch) via
+            # the main + pending design), then writes the simplified
+            # .swc.zst files and removes the staging entries.  Unbounded
+            # queues keep the fetch loop from ever blocking (memory is
+            # bounded by ``fetched_by_id`` anyway; the staging worker is
+            # ~2.3x faster than the fetch rate, so its backlog stays ~0).
+            import queue as _queue
+            import threading
+            staging_queue: "_queue.Queue" = _queue.Queue()
+            persist_queue: "_queue.Queue" = _queue.Queue()
+            persist_failures = {"n": 0}
+            pipeline = True
 
-                try:
-                    batch_neurons = _fetch_neuprint_batch_with_progress(
-                        batch_ids,
-                        client=client,
-                        max_threads=max(
-                            1, min(effective_threads, len(batch_ids))),
-                        on_neuron=_neuron_progress,
-                    )
-                except Exception:
-                    # Fall back to the upstream wrapper if a future navis
-                    # release changes the vendored internals; only the
-                    # per-batch progress granularity is lost.
-                    batch_df = pd.DataFrame({"bodyId": batch_ids})
-                    result = neu.fetch_skeletons(
-                        batch_df,
-                        parallel=True,
-                        max_threads=max(
-                            1, min(effective_threads, len(batch_ids))),
-                        missing_swc="warn",
-                        client=client,
-                    )
-                    batch_neurons = list(result or [])
-                for index, neuron in enumerate(batch_neurons):
-                    neuron_id = getattr(neuron, "id", None)
-                    if neuron_id is None and index < len(batch_ids):
-                        neuron_id = batch_ids[index]
+            def _staging_worker() -> None:
+                """Stage raw skeletons to disk ASAP, then forward to persist.
+                Existing staging files (crash leftovers being reprocessed)
+                are skipped - they are already on disk."""
+                while True:
+                    item = staging_queue.get()
+                    if item is None:
+                        staging_queue.task_done()
+                        break
                     try:
-                        fetched_by_id[
-                            _canonical_dataset_body_id(dataset, neuron_id)
-                        ] = neuron
-                    except (TypeError, ValueError):
-                        continue
-                if progress_callback:
-                    done = min(len(requested), len(loaded)
-                               + len(fetched_by_id))
-                    progress_callback(
-                        done, len(requested),
-                        f"Fetching skeletons ({done}/{len(requested)})")
+                        if persist and raw_cache is not None:
+                            temp_dir = raw_cache.temp_cache_dir()
+                            for body_id, neuron in item.items():
+                                try:
+                                    target = temp_dir / f"{body_id}.swc.zst"
+                                    if not target.exists():
+                                        raw_cache.write_temp_skeleton(
+                                            body_id, neuron)
+                                except Exception:
+                                    continue
+                    except Exception:
+                        persist_failures["n"] += 1
+                    finally:
+                        persist_queue.put(item)
+                        staging_queue.task_done()
 
-        # Normalize the object at the dataset boundary.  FlyWire remains a
-        # MeshNeuron; only NeuPrint accepts DataFrame -> TreeNeuron coercion.
-        for fallback_id, neuron in fetched_by_id.items():
-            try:
-                if flywire:
-                    if not isinstance(neuron, navis.MeshNeuron):
-                        continue
-                    neuron.id = _canonical_dataset_body_id(
-                        dataset, fallback_id)
-                else:
-                    if not isinstance(neuron, navis.TreeNeuron):
-                        neuron = navis.TreeNeuron(neuron)
-                    neuron.id = _api_dataset_body_id(dataset, fallback_id)
-                    soma = getattr(neuron, "soma", None)
-                    if soma is not None and hasattr(soma, "__len__") and len(soma) > 1:
-                        neuron.soma = None
-                fetched_by_id[
-                    _canonical_dataset_body_id(dataset, fallback_id)
-                ] = neuron
-            except Exception:
-                continue
+            def _persist_worker() -> None:
+                processed = 0
+                while True:
+                    item = persist_queue.get()
+                    if item is None:
+                        persist_queue.task_done()
+                        break
+                    try:
+                        processed += len(item)
+                        # Vectorize the RAW neurons first and append their
+                        # rows BEFORE the simplified file is written
+                        # ("cached only after vectorization"); the
+                        # main + pending append makes per-batch appends
+                        # O(batch).
+                        rows = []
+                        for body_id, neuron in item.items():
+                            try:
+                                rep = _neuron_rep(neuron)
+                                if rep in {"skeleton", "mesh"}:
+                                    _, vector = vectorize_neuron(neuron)
+                                    rows.append((
+                                        _canonical_dataset_body_id(
+                                            dataset, body_id),
+                                        vector, rep,
+                                    ))
+                            except Exception as exc:
+                                # Mirrors cache_fetched_skeleton_vectors
+                                # (which this flow called with verbose=True):
+                                # glitchy fetches (empty/partial SWC) produce
+                                # neurons without nodes; they are skipped from
+                                # the vector cache, never from the result set.
+                                print(
+                                    f"[morphology] vectorization skipped "
+                                    f"for {body_id}: {exc}"
+                                )
+                                continue
+                        if (persist or not flywire) and rows \
+                                and raw_cache is not None:
+                            try:
+                                raw_cache.append_vectors(
+                                    rows, vector_basis=VECTOR_BASIS_RAW)
+                            except Exception as exc:
+                                print(
+                                    f"[morphology] vector append failed: "
+                                    f"{exc}"
+                                )
+                        if persist and raw_cache is not None:
+                            raw_cache.persist_skeletons(
+                                item, simplification=simplification)
+                            # The final skeleton is on disk: staging entries
+                            # are no longer needed (resume-safe).
+                            raw_cache.delete_temp_skeletons(
+                                list(item.keys()))
+                        if progress_callback:
+                            progress_callback(
+                                min(len(requested), processed),
+                                len(requested),
+                                f"Vectorizing + caching skeletons "
+                                f"({min(len(requested), processed)}/"
+                                f"{len(requested)})")
+                    except Exception:
+                        persist_failures["n"] += 1
+                    finally:
+                        persist_queue.task_done()
 
-        # Vectorize and persist the raw vectors before the batch returns. A
-        # single append keeps the vector cache consistent with the fetched
-        # skeleton set and exposes the previously invisible post-fetch wait.
-        vector_stats = {"cache_error": None}
-        if persist or not flywire:
-            vector_stats = cache_fetched_skeleton_vectors(
-                dataset,
-                fetched_by_id,
-                project_root=str(root),
-                vector_cache=vector_cache or raw_cache,
-                progress_callback=progress_callback,
-                progress_offset=len(loaded),
-                progress_total=len(requested),
-                verbose=True,
+            persist_thread = threading.Thread(
+                target=_persist_worker, daemon=True,
+                name=f"skeleton-persist-{_dataset_folder(dataset)}",
             )
-            if vector_stats.get("cache_error"):
-                print(
-                    f"[morphology] vector cache incomplete for {dataset}: "
-                    f"{vector_stats['cache_error']}"
-                )
+            staging_thread = threading.Thread(
+                target=_staging_worker, daemon=True,
+                name=f"skeleton-staging-{_dataset_folder(dataset)}",
+            )
+            persist_thread.start()
+            staging_thread.start()
 
-        if persist and fetched_by_id and raw_cache is not None:
-            raw_cache.persist_skeletons(fetched_by_id,
-                                        simplification=simplification)
+            # Temp-pending neurons from a crashed previous run are already on
+            # disk: route them through the pipeline without a network fetch
+            # (the staging stage skips rewriting existing temp files).
+            if temp_normalized:
+                staging_queue.put(dict(temp_normalized))
+
+            try:
+                for batch_index, start in enumerate(
+                        range(0, total_missing, effective_batch_size),
+                        start=1):
+                    # Cooperative cancel: stop submitting new batches; the
+                    # in-flight one finishes and its results are persisted
+                    # below (resume-safe).
+                    if cancel_event is not None and cancel_event.is_set():
+                        break
+                    batch_ids = missing[start:start + effective_batch_size]
+                    # Report the batch BEFORE the network call: the first
+                    # batch can take a minute or more, and the UI used to sit
+                    # frozen on the "Neuron cache (0/N)" message the whole
+                    # time.  The batch counter keeps the pull visibly alive
+                    # between the after-batch updates.
+                    done_so_far = min(len(requested), len(loaded) + start)
+                    if progress_callback:
+                        progress_callback(
+                            done_so_far, len(requested),
+                            f"Fetching skeletons - batch {batch_index}/"
+                            f"{total_batches} ({done_so_far}/{len(requested)})")
+
+                    # Per-neuron progress: the vendored loop mirrors navis'
+                    # own parallel fetch (ThreadPoolExecutor over the batch)
+                    # but reports every completed skeleton, so the UI ticks
+                    # like the terminal bar instead of waiting for the batch
+                    # boundary.
+                    def _neuron_progress(done, _batch_total):
+                        if progress_callback:
+                            current = min(
+                                len(requested), len(loaded) + start + done)
+                            progress_callback(
+                                current, len(requested),
+                                f"Fetching skeletons - batch {batch_index}/"
+                                f"{total_batches} ({current}/{len(requested)})")
+
+                    try:
+                        batch_neurons = _fetch_neuprint_batch_with_progress(
+                            batch_ids,
+                            client=client,
+                            max_threads=max(
+                                1, min(effective_threads, len(batch_ids))),
+                            on_neuron=_neuron_progress,
+                        )
+                    except Exception:
+                        # Fall back to the upstream wrapper if a future navis
+                        # release changes the vendored internals; only the
+                        # per-batch progress granularity is lost.
+                        batch_df = pd.DataFrame({"bodyId": batch_ids})
+                        result = neu.fetch_skeletons(
+                            batch_df,
+                            parallel=True,
+                            max_threads=max(
+                                1, min(effective_threads, len(batch_ids))),
+                            missing_swc="warn",
+                            client=client,
+                        )
+                        batch_neurons = list(result or [])
+                    batch_map = {}
+                    for index, neuron in enumerate(batch_neurons):
+                        neuron_id = getattr(neuron, "id", None)
+                        if neuron_id is None and index < len(batch_ids):
+                            neuron_id = batch_ids[index]
+                        try:
+                            batch_map[
+                                _canonical_dataset_body_id(dataset, neuron_id)
+                            ] = neuron
+                        except (TypeError, ValueError):
+                            continue
+                    # Normalize at the batch boundary, stage the raw
+                    # skeletons for crash-resume, and hand the batch to the
+                    # persist worker while the fetch loop continues.
+                    normalized_batch = _normalize_fetched_neurons(
+                        dataset, batch_map, flywire=False)
+                    fetched_by_id.update(normalized_batch)
+                    staging_queue.put(normalized_batch)
+                    if progress_callback:
+                        done = min(len(requested), len(loaded)
+                                   + len(fetched_by_id))
+                        progress_callback(
+                            done, len(requested),
+                            f"Fetching skeletons ({done}/{len(requested)})")
+            finally:
+                # Stop the workers only after the in-flight batch's results
+                # were handed over; both workers drain their queues
+                # (staging every fetched batch, persisting everything
+                # fetched, incl. after a cancel) before returning.
+                staging_queue.put(None)
+                staging_queue.join()
+                persist_queue.put(None)
+                persist_queue.join()
+
+        if pipeline:
+            # Pipelined NeuPrint path: per-batch normalization, vectorization
+            # (appended per batch via the main + pending design) and
+            # simplification already ran in the standalone workers (joined
+            # above, so every fetched batch is on disk and its staging
+            # entries are gone).  The final merge checkpoint folds any
+            # remaining pending rows into the main parquet, so the pull
+            # leaves a clean, deduped cache.
+            if raw_cache is not None:
+                try:
+                    raw_cache._merge_pending()
+                except Exception as exc:
+                    # The staged batches are already persisted; a failed
+                    # final merge only delays folding pending rows (they are
+                    # merged by the next append/load).
+                    print(f"[morphology] final vector merge failed: {exc}")
+        else:
+            # Normalize the object at the dataset boundary.  FlyWire remains
+            # a MeshNeuron; only NeuPrint accepts DataFrame -> TreeNeuron
+            # coercion.
+            for fallback_id, neuron in fetched_by_id.items():
+                try:
+                    if flywire:
+                        if not isinstance(neuron, navis.MeshNeuron):
+                            continue
+                        neuron.id = _canonical_dataset_body_id(
+                            dataset, fallback_id)
+                    else:
+                        if not isinstance(neuron, navis.TreeNeuron):
+                            neuron = navis.TreeNeuron(neuron)
+                        neuron.id = _api_dataset_body_id(dataset, fallback_id)
+                        soma = getattr(neuron, "soma", None)
+                        if soma is not None and hasattr(soma, "__len__") and len(soma) > 1:
+                            neuron.soma = None
+                    fetched_by_id[
+                        _canonical_dataset_body_id(dataset, fallback_id)
+                    ] = neuron
+                except Exception:
+                    continue
+
+            # Vectorize and persist the raw vectors before the batch returns.
+            # A single append keeps the vector cache consistent with the
+            # fetched skeleton set and exposes the previously invisible
+            # post-fetch wait.
+            vector_stats = {"cache_error": None}
+            if persist or not flywire:
+                vector_stats = cache_fetched_skeleton_vectors(
+                    dataset,
+                    fetched_by_id,
+                    project_root=str(root),
+                    vector_cache=vector_cache or raw_cache,
+                    progress_callback=progress_callback,
+                    progress_offset=len(loaded),
+                    progress_total=len(requested),
+                    verbose=True,
+                )
+                if vector_stats.get("cache_error"):
+                    print(
+                        f"[morphology] vector cache incomplete for {dataset}: "
+                        f"{vector_stats['cache_error']}"
+                    )
+
+            if persist and fetched_by_id and raw_cache is not None:
+                raw_cache.persist_skeletons(fetched_by_id,
+                                            simplification=simplification)
+                # Temp-pending neurons (crashed previous run) are now fully
+                # persisted: their staging entries are no longer needed.
+                raw_cache.delete_temp_skeletons(list(fetched_by_id.keys()))
 
         loaded.update(fetched_by_id)
 

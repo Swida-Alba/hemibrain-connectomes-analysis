@@ -52,8 +52,24 @@ class _FakeDownload:
 @pytest.fixture
 def fake_download(monkeypatch):
     import morphology
+    import coana
+
     holder = {"impl": _FakeDownload()}
     monkeypatch.setattr(morphology, "download_all_skeletons", holder["impl"])
+
+    # The puller ensures the dataset metadata before downloading skeletons;
+    # keep the real FNC (and its server access) out of the unit tests.
+    class FakeFNC:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def _ensure_complete_dataset(self):
+            pass
+
+        def _ensure_neuron_index_from_metadata(self):
+            pass
+
+    monkeypatch.setattr(coana, "FindNeuronConnection", FakeFNC)
     return holder
 
 
@@ -235,6 +251,37 @@ def test_find_skeleton_file_skips_rglob_on_flat_cache(tmp_path, monkeypatch):
 
 
 class TestSkeletonPuller:
+    def test_metadata_ensured_before_download(self, monkeypatch):
+        """The skeleton pull must ensure the dataset metadata (neuron table,
+        ROI table, index) before downloading any skeleton."""
+        import coana
+        import morphology
+
+        order = []
+
+        class FakeFNC:
+            def __init__(self, *args, **kwargs):
+                order.append("init")
+
+            def _ensure_complete_dataset(self):
+                order.append("metadata")
+
+            def _ensure_neuron_index_from_metadata(self):
+                order.append("index")
+
+        def fake_download_all(dataset, **kwargs):
+            order.append("download")
+            return {"total": 0, "fetched": 0, "skipped_existing": 0,
+                    "cancelled": False, "errors": 0}
+
+        monkeypatch.setattr(coana, "FindNeuronConnection", FakeFNC)
+        monkeypatch.setattr(morphology, "download_all_skeletons", fake_download_all)
+        puller = SkeletonPuller()
+        assert puller.start("np:v1") is True
+        assert _wait_until(lambda: puller.state["done"])
+        assert puller.state["error"] is None
+        assert order == ["init", "metadata", "index", "download"]
+
     def test_lifecycle_and_progress(self, fake_download):
         # Keep the worker alive long enough to assert the one-at-a-time guard;
         # the zero-delay fake can otherwise finish before start() returns.
