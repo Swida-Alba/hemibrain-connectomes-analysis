@@ -62,9 +62,44 @@ main() {
         '
     }
 
+    # Diagnostic for the envs section: prints the version key of the first
+    # envs entry that is not the current release, if any. Catches edits
+    # where the version key was changed instead of the value.
+    env_override_for_other_version() {
+        # $1 = current version, remaining args = config files
+        local version="$1" cfg other
+        shift
+        for cfg in "$@"; do
+            [[ -f "$cfg" ]] || continue
+            other="$(tr ',' '\n' < "$cfg" | awk -v ver="$version" '
+                {
+                    line = $0
+                    sub(/^[[:space:]]*/, "", line)
+                    sub(/[[:space:]]*$/, "", line)
+                    if (!in_envs) {
+                        if (line ~ /"envs"/) { in_envs = 1; sub(/^.*"envs"/, "", line) } else { next }
+                    }
+                    if (line ~ /"[^"]*"[[:space:]]*:[[:space:]]*"[^"]*"/) {
+                        if (match(line, /"[^"]*"/)) {
+                            key = substr(line, RSTART + 1, RLENGTH - 2)
+                        }
+                        if (key != ver) { print key; exit }
+                    }
+                    if (line ~ /^[[:space:]]*}/) { in_envs = 0 }
+                }
+            ' || true)"
+            if [[ -n "$other" ]]; then
+                printf '%s\n' "$other"
+                return 0
+            fi
+        done
+        return 1
+    }
+
     # Update envs.<version> in the LOCAL config (config_local.json) with the
     # environment actually used, so an auto-created env is pinned for later
-    # runs. The committed config.json is never rewritten.
+    # runs (it only applies while the config.json entry stays empty). The
+    # committed config.json is never rewritten.
     update_config_env() {
         # $1 = version, $2 = env name, $3 = file
         [[ -f "$3" ]] || return 0
@@ -89,16 +124,30 @@ main() {
 
     # Version-specific custom env override: envs.<version> is only consulted
     # for the CURRENT release, so upgrading DROCAT never reuses an older
-    # release's custom environment. The local config wins; the committed
-    # config.json is the fallback. An empty value means default auto-find.
+    # release's custom environment. config.json wins per key - it is the file
+    # a GitHub-pulled copy edits directly; the gitignored config_local.json
+    # is the developer-specific fallback for empty entries. An empty value
+    # means default auto-find.
     ENV_OVERRIDE=""
-    for cfg in "$CONFIG_LOCAL" "$CONFIG_FILE"; do
+    ENV_SOURCE=""
+    for cfg in "$CONFIG_FILE" "$CONFIG_LOCAL"; do
         if [[ -f "$cfg" ]]; then
             ENV_OVERRIDE="$(json_value envs "$DROCAT_VERSION" "$cfg" || true)"
             ENV_OVERRIDE="$(printf '%s' "$ENV_OVERRIDE" | tr -d '[:space:]')"
-            [[ -n "$ENV_OVERRIDE" ]] && break
+            if [[ -n "$ENV_OVERRIDE" ]]; then
+                ENV_SOURCE="$(basename "$cfg")"
+                break
+            fi
         fi
     done
+    # Hint when an envs entry exists for another release: the version key
+    # must match the release being launched (easy to mis-edit).
+    if [[ -z "$ENV_OVERRIDE" ]]; then
+        other_version="$(env_override_for_other_version "$DROCAT_VERSION" "$CONFIG_FILE" "$CONFIG_LOCAL" || true)"
+        if [[ -n "$other_version" ]]; then
+            printf '%s\n' "Note: configs set an env for release $other_version, but this build resolves envs.$DROCAT_VERSION - the envs key must match the release. Set envs.$DROCAT_VERSION to pin an env for this release." >&2
+        fi
+    fi
 
     find_conda() {
         if command -v conda >/dev/null 2>&1; then
@@ -118,14 +167,37 @@ main() {
         done
     }
 
+    env_exists() {
+        # $1 = env name. conda env list is authoritative; fall back to the
+        # standard envs/ directory layout when conda plugins misbehave.
+        "$CONDA_BIN" env list | awk 'NF && $1 !~ /^#/ {print $1}' | grep -Fxq "$1" \
+            || [[ -d "$(dirname "$(dirname "$CONDA_BIN")")/envs/$1" ]]
+    }
+
     resolve_env() {
         local index candidate
         ENV_NAME=""
-        if [[ -n "$ENV_OVERRIDE" ]] && "$CONDA_BIN" run -n "$ENV_OVERRIDE" python -c \
-            'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' \
-            >/dev/null 2>&1; then
-            ENV_NAME="$ENV_OVERRIDE"
-            return
+        if [[ -n "$ENV_OVERRIDE" ]]; then
+            if "$CONDA_BIN" run -n "$ENV_OVERRIDE" python -c \
+                'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' \
+                >/dev/null 2>&1; then
+                ENV_NAME="$ENV_OVERRIDE"
+                printf 'Using custom environment %s (set in %s).\n' "$ENV_NAME" "$ENV_SOURCE"
+                # config_local.json is the developer-specific fallback: it
+                # only fills entries that are empty in config.json.
+                if [[ "$ENV_SOURCE" == "config_local.json" && -f "$CONFIG_FILE" ]]; then
+                    printf '%s\n' "Note: config.json has no envs.$DROCAT_VERSION value; using the config_local.json fallback." >&2
+                fi
+                return 0
+            fi
+            if env_exists "$ENV_OVERRIDE"; then
+                printf '%s\n' "ERROR: environment '$ENV_OVERRIDE' (custom env from $ENV_SOURCE) exists but is not Python 3.11." >&2
+                printf '%s\n' "Fix it, remove it, or clear the envs.$DROCAT_VERSION entry; DROCAT never silently switches environments." >&2
+                return 1
+            fi
+            # The env does not exist yet: leave ENV_NAME empty so the caller
+            # runs the installer, which creates it and installs dependencies.
+            return 0
         fi
         for index in $(seq 0 20); do
             if [[ "$index" -eq 0 ]]; then
@@ -137,9 +209,11 @@ main() {
                 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' \
                 >/dev/null 2>&1; then
                 ENV_NAME="$candidate"
-                return
+                printf 'Using environment %s (auto-detected).\n' "$ENV_NAME"
+                return 0
             fi
         done
+        return 0
     }
 
     CONDA_BIN="$(find_conda || true)"
@@ -150,17 +224,22 @@ main() {
     fi
     [[ -n "$CONDA_BIN" ]] || { printf '%s\n' "ERROR: Conda installation failed." >&2; return 1; }
 
-    resolve_env
+    resolve_env || return 1
     if [[ -z "$ENV_NAME" ]]; then
-        printf '%s\n' "Environment $ENV_BASE not found; running the one-click installer."
+        if [[ -n "$ENV_OVERRIDE" ]]; then
+            printf '%s\n' "Environment '$ENV_OVERRIDE' (custom env from $ENV_SOURCE) does not exist; running the one-click installer to create it."
+        else
+            printf '%s\n' "Environment $ENV_BASE not found; running the one-click installer."
+        fi
         "$INSTALLER"
-        resolve_env
+        resolve_env || return 1
     fi
     [[ -n "$ENV_NAME" ]] || { printf '%s\n' "ERROR: no usable $ENV_BASE environment was found." >&2; return 1; }
 
     # Persist the resolved environment into the LOCAL config when no custom
-    # name was configured, so the auto-found env is pinned for later runs.
-    # The committed config.json is never rewritten.
+    # name was configured, so the auto-found env is pinned for later runs
+    # (it only applies while the config.json entry stays empty). The
+    # committed config.json is never rewritten.
     if [[ -z "$ENV_OVERRIDE" && -f "$CONFIG_LOCAL" ]]; then
         update_config_env "$DROCAT_VERSION" "$ENV_NAME" "$CONFIG_LOCAL"
     fi
@@ -172,14 +251,14 @@ main() {
         || ! "$CONDA_BIN" run -n "$ENV_NAME" python -m pip check >/dev/null 2>&1; then
         printf '%s\n' "Repairing dependencies in $ENV_NAME..."
         "$INSTALLER"
-        resolve_env
+        resolve_env || return 1
     fi
 
     # --- Token hint -----------------------------------------------------
     # Remind users who skipped the installer prompt that tokens can be set
     # later in the UI Settings tab or in config_local.json.
     local neuprint_token=""
-    for cfg in "$CONFIG_LOCAL" "$CONFIG_FILE"; do
+    for cfg in "$CONFIG_FILE" "$CONFIG_LOCAL"; do
         if [[ -f "$cfg" ]]; then
             neuprint_token="$(json_value tokens neuprint "$cfg" || true)"
             neuprint_token="$(printf '%s' "$neuprint_token" | tr -d '[:space:]')"

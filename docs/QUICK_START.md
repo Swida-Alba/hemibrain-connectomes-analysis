@@ -5,7 +5,7 @@ This guide provides a quick overview of how to perform common tasks using the Dr
 ## Prerequisites
 
 1. **Install the toolkit** - See [Installation Guide](INSTALLATION.md)
-2. **Set up authentication** - Copy `config.example.json` to `config_local.json` (gitignored override) and add your API tokens (one per line in the `tokens` section):
+2. **Set up authentication** - Add your API tokens directly to `config.json` (`tokens` section) - a GitHub-pulled copy is yours to modify; the gitignored `config_local.json` only fills entries left empty there:
    ```json
    {
      "tokens": {

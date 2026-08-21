@@ -29,11 +29,12 @@ automatically before starting the UI.
   is used: `drocat-4.5.0-2`, `drocat-4.5.0-3`, ... Launchers resolve the same
   way. Legacy `drocat` envs are never modified.
 - **Custom env name (version-specific):** put the env name under the matching
-  release key in the project configs (`envs` section) - the gitignored
-  `config_local.json` wins per key, the committed `config.json` is the
-  fallback. The entry is only consulted for *that* release, so upgrading
-  DROCAT never reuses an older release's custom environment. An empty value
-  means default auto-find:
+  release key in `config.json` (`envs` section) - on a GitHub-pulled copy
+  this is the file to edit, and it wins per key. The gitignored
+  `config_local.json` is the developer-specific fallback: it is only
+  consulted when the `config.json` entry is empty. The entry is only
+  consulted for *that* release, so upgrading DROCAT never reuses an older
+  release's custom environment. An empty value means default auto-find:
 
   ```json
   {
@@ -48,10 +49,11 @@ automatically before starting the UI.
   config).
 - **Auto-fill:** an empty `envs."4.5.0"` entry means "create/use the default
   versioned env automatically". The installers and launchers write the
-  environment they actually used back into `config_local.json`, so after the
-  first install the entry holds the concrete env name (e.g.
-  `drocat-4.5.0`) and every script resolves it directly. The committed
-  `config.json` is never rewritten.
+  environment they actually used back into `config_local.json` (never
+  `config.json`), so after the first install the fallback entry holds the
+  concrete env name (e.g. `drocat-4.5.0`) and every script resolves it
+  directly - while the `config.json` entry stays empty. Editing
+  `config.json` always wins.
 - All installers/launchers set `PYTHONNOUSERSITE=1`, so packages from a
   user-level Python cannot contaminate the environment.
 - Do **not** install `neuronbridge-python` — DROCAT bundles its own client
@@ -76,18 +78,22 @@ python skills/drocat-install/scripts/verify_install.py --project .
 NeuPrint datasets need a **NeuPrint token** (required). The **CAVE token is
 optional** — it is only needed for FlyWire FAFB *online* fetching; local
 converted FlyWire tables work without it. Tokens live in the project configs:
-the gitignored `config_local.json` (override, wins per key) and the committed
-clean `config.json` (fallback). `token_info.txt` / `token_info_local.txt`
+`config.json` (wins per key; the file a GitHub-pulled copy edits directly)
+and the gitignored `config_local.json` (developer-specific fallback for
+empty entries). `token_info.txt` / `token_info_local.txt`
 were removed and are never read. Two equivalent ways:
 
 1. **UI Settings tab** — paste the tokens there after launching; the tab
    reminds you when tokens are missing. Saving writes `config_local.json`
    and keeps its `envs` section intact (the committed `config.json` stays
    clean).
-2. **Config file** — copy the template to the local override and edit it:
+2. **Config file** — edit `config.json` directly; a GitHub-pulled copy is
+   yours to modify. Git users who want to keep tokens out of version control
+   can instead copy the template to the gitignored override and edit that -
+   it only applies to entries left empty in `config.json`:
 
 ```bash
-cp config.example.json config_local.json     # gitignored override
+cp config.example.json config_local.json     # gitignored developer fallback
 ```
 
 ```json

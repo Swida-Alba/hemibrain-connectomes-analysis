@@ -923,10 +923,11 @@ python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter impor
 
 
 def _load_tokens() -> dict:
-    """Load valid tokens from config_local.json (override) then config.json.
+    """Load valid tokens from config.json (primary) then config_local.json.
 
-    A ``YOUR_*`` placeholder is treated as unconfigured; an empty local
-    value falls through to the committed config.json.
+    config.json wins per key; the gitignored config_local.json only fills
+    entries that are empty there. A ``YOUR_*`` placeholder is treated as
+    unconfigured.
     """
     tokens = {}
     for filename in ("config.json", "config_local.json"):
@@ -944,7 +945,8 @@ def _load_tokens() -> dict:
             for key in ("neuprint", "cave"):
                 value = cfg_tokens.get(key)
                 if isinstance(value, str) and value.strip() and not value.startswith("YOUR_"):
-                    tokens[key] = value.strip()
+                    # First non-empty value wins: config.json is read first.
+                    tokens.setdefault(key, value.strip())
     return tokens
 
 

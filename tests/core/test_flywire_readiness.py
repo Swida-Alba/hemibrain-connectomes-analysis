@@ -11,6 +11,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from utils.flywire_readiness import (  # noqa: E402
     FlyWireSkeletonAccessError,
+    _cave_token_from_config,
     flywire_skeleton_readiness,
     print_download_instructions,
     require_flywire_skeleton_access,
@@ -147,8 +148,8 @@ def test_fafb_cave_token_from_config_json_enables_fallback(tmp_path, monkeypatch
     assert "cfg-cave-token" not in "\n".join(log)
 
 
-def test_fafb_cave_token_from_config_local_overrides(tmp_path, monkeypatch):
-    """The gitignored config_local.json wins over config.json per key."""
+def test_fafb_cave_token_from_config_json_wins_over_config_local(tmp_path, monkeypatch):
+    """config.json wins per key; config_local.json only fills empty entries."""
     monkeypatch.delenv("CAVE_TOKEN", raising=False)
     (tmp_path / "config.json").write_text(
         '{"tokens": {"cave": "cfg-cave-token"}}\n', encoding="utf-8"
@@ -157,6 +158,24 @@ def test_fafb_cave_token_from_config_local_overrides(tmp_path, monkeypatch):
         '{"tokens": {"cave": "local-cave-token"}}\n', encoding="utf-8"
     )
 
+    assert _cave_token_from_config(tmp_path) == "cfg-cave-token"
+    status = flywire_skeleton_readiness(
+        "flywire_FAFB_v783", project_root=tmp_path
+    )
+    assert status["cave_token"] is True
+
+
+def test_fafb_cave_token_from_config_local_fills_empty_config_json(tmp_path, monkeypatch):
+    """An empty config.json entry falls back to config_local.json."""
+    monkeypatch.delenv("CAVE_TOKEN", raising=False)
+    (tmp_path / "config.json").write_text(
+        '{"tokens": {"cave": ""}}\n', encoding="utf-8"
+    )
+    (tmp_path / "config_local.json").write_text(
+        '{"tokens": {"cave": "local-cave-token"}}\n', encoding="utf-8"
+    )
+
+    assert _cave_token_from_config(tmp_path) == "local-cave-token"
     status = flywire_skeleton_readiness(
         "flywire_FAFB_v783", project_root=tmp_path
     )

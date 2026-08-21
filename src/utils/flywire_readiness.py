@@ -143,10 +143,10 @@ def _configured_cave_token(project_root: Path) -> Optional[str]:
 
 
 def _cave_token_from_config(project_root: Path) -> Optional[str]:
-    """Read the CAVE token from config_local.json (override) or config.json."""
+    """Read the CAVE token from config.json (primary) or config_local.json."""
     import json
 
-    for filename in ("config_local.json", "config.json"):
+    for filename in ("config.json", "config_local.json"):
         config_path = project_root / filename
         try:
             # utf-8-sig tolerates the UTF-8 BOM that Windows editors

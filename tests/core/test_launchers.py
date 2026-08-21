@@ -21,11 +21,11 @@ class TestRunDrocatLaunchers:
         assert "config_local.json" in text
         assert "NeuPrint token is not configured yet" in text
         assert "CAVE token is optional" in text
-        # version-specific custom env override: local config first
+        # version-specific custom env override: config.json wins per key
         assert "json_value envs" in text
         assert "ENV_OVERRIDE" in text
         assert "json_value tokens" in text
-        assert 'for cfg in "$CONFIG_LOCAL" "$CONFIG_FILE"' in text
+        assert 'for cfg in "$CONFIG_FILE" "$CONFIG_LOCAL"' in text
         # the resolved environment is written back into config_local.json
         assert "update_config_env" in text
         assert "CONFIG_LOCAL" in text
@@ -40,7 +40,8 @@ class TestRunDrocatLaunchers:
         assert "netstat -ano" in text
         assert "NeuPrint token is not configured yet" in text
         assert "CAVE token is optional" in text
-        # version-specific custom env override: local config first
+        # version-specific custom env override: config.json wins per key;
+        # the gitignored config_local.json is the fallback for empty entries
         assert "config.json" in text
         assert "config_local.json" in text
         assert "ENV_OVERRIDE" in text

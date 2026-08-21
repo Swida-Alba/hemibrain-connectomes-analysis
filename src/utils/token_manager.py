@@ -6,8 +6,10 @@ class TokenManager:
     
     Token Priority (in order of precedence):
     1. Direct input (if provided)
-    2. config_local.json tokens section (gitignored local override)
-    3. config.json tokens section (committed clean defaults)
+    2. config.json tokens section (committed clean defaults; the file a
+       GitHub-pulled copy edits directly)
+    3. config_local.json tokens section (gitignored developer-specific
+       fallback; only fills entries empty in config.json)
     4. Environment variables
     
     Token Type Detection (for direct input without specifying type):
@@ -23,7 +25,7 @@ class TokenManager:
         self.tokens = self._load_tokens_from_files()
         
     def _load_tokens_from_files(self):
-        """Load tokens from config_local.json (override) then config.json."""
+        """Load tokens from config.json first, then config_local.json."""
         tokens = {}
         
         # Check current directory and project root
@@ -31,8 +33,8 @@ class TokenManager:
         # Project root is ../../ relative to this file
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-        # config.json ships clean on GitHub; the gitignored config_local.json
-        # overrides it per key (non-empty values only).
+        # config.json wins per key (the file a GitHub-pulled copy edits);
+        # the gitignored config_local.json only fills empty entries.
         self._parse_config_file(project_root, 'config.json', tokens)
         self._parse_config_file(project_root, 'config_local.json', tokens)
             
@@ -68,7 +70,8 @@ class TokenManager:
                 ('cave', 'CAVE_TOKEN')):
             value = section.get(config_key)
             if isinstance(value, str) and value.strip():
-                tokens_dict[token_key] = value.strip()
+                # First non-empty value wins: config.json is parsed first.
+                tokens_dict.setdefault(token_key, value.strip())
 
     def get_token(self, token_name, direct_input=None):
         """
@@ -76,7 +79,7 @@ class TokenManager:
         
         Priority order:
         1. Direct input (if provided)
-        2. config_local.json / config.json tokens section
+        2. config.json / config_local.json tokens section (config.json wins)
         3. Environment variable
         
         Args:
@@ -90,7 +93,7 @@ class TokenManager:
         if direct_input:
             return direct_input
             
-        # 2. Local file (highest priority after direct input)
+        # 2. Config files (config.json wins per key)
         file_token = self.tokens.get(token_name)
         if file_token and not file_token.startswith('YOUR_'):
             return file_token

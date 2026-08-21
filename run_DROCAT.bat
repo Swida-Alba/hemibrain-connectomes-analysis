@@ -32,12 +32,13 @@ set "REPAIRED=0"
 set "CONFIG_FILE=%SCRIPT_DIR%config.json"
 set "CONFIG_LOCAL=%SCRIPT_DIR%config_local.json"
 set "ENV_OVERRIDE="
-REM Version-specific custom env override from the local config first, then
-REM the committed config.json: envs.<version> is only consulted for the
-REM CURRENT release, so upgrading DROCAT never reuses an older release's
-REM custom environment.
-if exist "!CONFIG_LOCAL!" for /f "usebackq delims=" %%e in (`powershell -NoProfile -Command "try { $c = Get-Content -Raw -LiteralPath '!CONFIG_LOCAL!' | ConvertFrom-Json; if ($c.envs.'!DROCAT_VERSION!') { $c.envs.'!DROCAT_VERSION!' } } catch {}"`) do if not defined ENV_OVERRIDE set "ENV_OVERRIDE=%%e"
-if not defined ENV_OVERRIDE if exist "!CONFIG_FILE!" for /f "usebackq delims=" %%e in (`powershell -NoProfile -Command "try { $c = Get-Content -Raw -LiteralPath '!CONFIG_FILE!' | ConvertFrom-Json; if ($c.envs.'!DROCAT_VERSION!') { $c.envs.'!DROCAT_VERSION!' } } catch {}"`) do set "ENV_OVERRIDE=%%e"
+REM Version-specific custom env override: config.json wins per key - it is
+REM the file a GitHub-pulled copy edits directly; the gitignored
+REM config_local.json is the developer-specific fallback for empty entries.
+REM envs.<version> is only consulted for the CURRENT release, so upgrading
+REM DROCAT never reuses an older release's custom environment.
+if exist "!CONFIG_FILE!" for /f "usebackq delims=" %%e in (`powershell -NoProfile -Command "try { $c = Get-Content -Raw -LiteralPath '!CONFIG_FILE!' | ConvertFrom-Json; if ($c.envs.'!DROCAT_VERSION!') { $c.envs.'!DROCAT_VERSION!' } } catch {}"`) do if not defined ENV_OVERRIDE set "ENV_OVERRIDE=%%e"
+if not defined ENV_OVERRIDE if exist "!CONFIG_LOCAL!" for /f "usebackq delims=" %%e in (`powershell -NoProfile -Command "try { $c = Get-Content -Raw -LiteralPath '!CONFIG_LOCAL!' | ConvertFrom-Json; if ($c.envs.'!DROCAT_VERSION!') { $c.envs.'!DROCAT_VERSION!' } } catch {}"`) do set "ENV_OVERRIDE=%%e"
 
 :resolve_reset
 set "ENV_NAME="
@@ -57,6 +58,14 @@ if defined CONDA_BIN (
         goto env_found
     )
 )
+REM A configured custom env must be the env used: never silently switch to a
+REM default name. If it is missing or not Python 3.11, the installer is the
+REM only path that can create or repair it.
+if !N! EQU 0 if defined ENV_OVERRIDE (
+    echo ERROR: environment "!ENV_OVERRIDE!" (custom env from envs.!DROCAT_VERSION!) is missing or is not Python 3.11.
+    echo Fix it, remove it, or clear the envs entry; DROCAT never silently switches environments.
+    goto error
+)
 set /a N+=1
 if !N! LEQ 20 goto resolve
 goto repair
@@ -68,14 +77,15 @@ call "!CONDA_BIN!" run -n "!ENV_NAME!" python -m pip check >nul 2>nul
 if errorlevel 1 goto repair
 
 REM Persist the resolved environment into the LOCAL config when no custom
-REM name was configured, so the auto-found env is pinned for later runs.
-REM The committed config.json is never rewritten.
+REM name was configured, so the auto-found env is pinned for later runs
+REM (it only applies while the config.json entry stays empty). The
+REM committed config.json is never rewritten.
 if not defined ENV_OVERRIDE if exist "!CONFIG_LOCAL!" powershell -NoProfile -Command "try { $c = Get-Content -Raw -LiteralPath '!CONFIG_LOCAL!' | ConvertFrom-Json; if (-not $c.envs) { $c | Add-Member -NotePropertyName 'envs' -NotePropertyValue ([pscustomobject]@{}) -Force }; $c.envs | Add-Member -NotePropertyName '!DROCAT_VERSION!' -NotePropertyValue '!ENV_NAME!' -Force; $c | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath '!CONFIG_LOCAL!' -Encoding UTF8 } catch {}"
 
 REM Token hint: remind users who skipped the installer prompt.
 set "NP_TOKEN="
-if exist "!CONFIG_LOCAL!" for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "try { $c = Get-Content -Raw -LiteralPath '!CONFIG_LOCAL!' | ConvertFrom-Json; if ($c.tokens.neuprint) { $c.tokens.neuprint } } catch {}"`) do set "NP_TOKEN=%%t"
-if not defined NP_TOKEN if exist "!CONFIG_FILE!" for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "try { $c = Get-Content -Raw -LiteralPath '!CONFIG_FILE!' | ConvertFrom-Json; if ($c.tokens.neuprint) { $c.tokens.neuprint } } catch {}"`) do set "NP_TOKEN=%%t"
+if exist "!CONFIG_FILE!" for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "try { $c = Get-Content -Raw -LiteralPath '!CONFIG_FILE!' | ConvertFrom-Json; if ($c.tokens.neuprint) { $c.tokens.neuprint } } catch {}"`) do set "NP_TOKEN=%%t"
+if not defined NP_TOKEN if exist "!CONFIG_LOCAL!" for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "try { $c = Get-Content -Raw -LiteralPath '!CONFIG_LOCAL!' | ConvertFrom-Json; if ($c.tokens.neuprint) { $c.tokens.neuprint } } catch {}"`) do set "NP_TOKEN=%%t"
 set "HINT=0"
 if not defined NP_TOKEN set "HINT=1"
 if defined NP_TOKEN echo !NP_TOKEN! | findstr /C:"YOUR_NEUPRINT_TOKEN_HERE" >nul && set "HINT=1"

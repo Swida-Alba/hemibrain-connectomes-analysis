@@ -141,12 +141,12 @@ class CAVEDataFetcher:
         return None
 
     def _load_token_from_config(self, token_name: str) -> Optional[str]:
-        """Read a token from config_local.json (override) or config.json."""
+        """Read a token from config.json (primary) or config_local.json."""
         import json
         config_key = token_name.lower().replace('_token', '')
-        # config.json ships clean on GitHub; the gitignored config_local.json
-        # wins per key when it carries a non-empty value.
-        for filename in ('config_local.json', 'config.json'):
+        # config.json wins per key; the gitignored config_local.json only
+        # fills entries that are empty in config.json.
+        for filename in ('config.json', 'config_local.json'):
             config_path = os.path.join(self.project_root, filename)
             try:
                 with open(config_path, 'r', encoding='utf-8-sig') as f:

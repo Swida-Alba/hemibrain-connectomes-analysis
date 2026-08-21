@@ -2276,12 +2276,30 @@ class TestDatasetService:
 
         assert settings_module._load_tokens() == {}
 
-    def test_settings_token_loader_prefers_config_local(self, tmp_path, monkeypatch):
-        """config_local.json wins per key over the committed config.json."""
+    def test_settings_token_loader_prefers_config_json(self, tmp_path, monkeypatch):
+        """config.json wins per key; config_local.json only fills empties."""
         from ui.tabs import settings as settings_module
 
         (tmp_path / "config.json").write_text(
             '{"tokens": {"neuprint": "cfg-np", "cave": "cfg-cave"}}\n',
+            encoding="utf-8",
+        )
+        (tmp_path / "config_local.json").write_text(
+            '{"tokens": {"neuprint": "local-np"}}\n', encoding="utf-8"
+        )
+        monkeypatch.setattr(settings_module, "PROJECT_ROOT", tmp_path)
+
+        assert settings_module._load_tokens() == {
+            "neuprint": "cfg-np",
+            "cave": "cfg-cave",
+        }
+
+    def test_settings_token_loader_config_local_fills_empty(self, tmp_path, monkeypatch):
+        """An empty config.json entry falls back to config_local.json."""
+        from ui.tabs import settings as settings_module
+
+        (tmp_path / "config.json").write_text(
+            '{"tokens": {"neuprint": "", "cave": "cfg-cave"}}\n',
             encoding="utf-8",
         )
         (tmp_path / "config_local.json").write_text(

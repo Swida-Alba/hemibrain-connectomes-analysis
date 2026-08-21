@@ -180,9 +180,21 @@ class TestTokenConfigJson:
         svc = self._svc(monkeypatch, tmp_path, None)
         assert svc.get_token() is None
 
-    def test_config_local_overrides_config_json(self, monkeypatch, tmp_path):
+    def test_config_json_wins_over_config_local(self, monkeypatch, tmp_path):
         (tmp_path / "config.json").write_text(
             '{"tokens": {"neuprint": "cfg-np", "cave": "cfg-cave"}}\n',
+            encoding="utf-8",
+        )
+        (tmp_path / "config_local.json").write_text(
+            '{"tokens": {"neuprint": "local-np"}}\n', encoding="utf-8"
+        )
+        svc = self._svc(monkeypatch, tmp_path, None)
+        assert svc.get_token() == "cfg-np"
+        assert svc.get_cave_token() == "cfg-cave"
+    
+    def test_config_local_fills_empty_config_json_entry(self, monkeypatch, tmp_path):
+        (tmp_path / "config.json").write_text(
+            '{"tokens": {"neuprint": "", "cave": "cfg-cave"}}\n',
             encoding="utf-8",
         )
         (tmp_path / "config_local.json").write_text(

@@ -270,13 +270,14 @@ class DatasetService:
         return updated_at
 
     def _load_tokens(self):
-        """Load tokens from config_local.json (override) then config.json."""
+        """Load tokens from config.json (primary) then config_local.json."""
         if self._token is not None and self._cave_token is not None:
             return
 
         loaded = {}
-        # config.json ships clean on GitHub; the gitignored config_local.json
-        # wins per key when it carries a non-empty value.
+        # config.json wins per key (the file a GitHub-pulled copy edits
+        # directly); the gitignored config_local.json only fills entries
+        # that are empty in config.json.
         for filename in ("config.json", "config_local.json"):
             config_path = PROJECT_ROOT / filename
             if not config_path.exists():
@@ -291,7 +292,8 @@ class DatasetService:
                     for key in ("neuprint", "cave"):
                         value = cfg_tokens.get(key)
                         if isinstance(value, str) and value.strip() and not value.startswith("YOUR_"):
-                            loaded[key] = value.strip()
+                            # First non-empty value wins: config.json is read first.
+                            loaded.setdefault(key, value.strip())
             except (OSError, ValueError):
                 pass
 

@@ -23,8 +23,9 @@ if [[ -z "$DROCAT_VERSION" ]]; then
 fi
 DROCAT_VERSION="${DROCAT_VERSION:-4.5.0}"
 ENV_BASE="drocat-${DROCAT_VERSION}"
-# config.json ships clean on GitHub (committed defaults); the gitignored
-# config_local.json is the per-user override and wins per key.
+# config.json ships clean on GitHub (committed defaults) and wins per key -
+# it is the file a GitHub-pulled copy edits directly; the gitignored
+# config_local.json is the developer-specific fallback for empty entries.
 CONFIG_FILE="$PROJECT_ROOT/config.json"
 CONFIG_LOCAL="$PROJECT_ROOT/config_local.json"
 
@@ -173,7 +174,8 @@ fi
 printf "%b✓ Using %s%b\n" "$GREEN" "$CONDA_BIN" "$NC"
 
 env_exists() {
-    "$CONDA_BIN" env list | awk 'NF && $1 !~ /^#/ {print $1}' | grep -Fxq "$1"
+    "$CONDA_BIN" env list | awk 'NF && $1 !~ /^#/ {print $1}' | grep -Fxq "$1" \
+        || [[ -d "$(dirname "$(dirname "$CONDA_BIN")")/envs/$1" ]]
 }
 
 env_usable() {
@@ -185,32 +187,36 @@ env_usable() {
 printf "\n%b[2/5] Selecting a Python %s environment...%b\n" "$BLUE" "$PYTHON_VERSION" "$NC"
 # Version-specific custom env override: envs.<version> is only consulted
 # for the CURRENT release, so upgrading DROCAT never reuses an older
-# release's custom environment. The local config wins; the committed
-# config.json is the fallback.
+# release's custom environment. config.json wins per key; the gitignored
+# config_local.json fills empty entries.
 ENV_NAME=""
 ENV_OVERRIDE=""
-for cfg in "$CONFIG_LOCAL" "$CONFIG_FILE"; do
+ENV_SOURCE=""
+for cfg in "$CONFIG_FILE" "$CONFIG_LOCAL"; do
     if [[ -f "$cfg" ]]; then
         ENV_OVERRIDE="$(json_value envs "$DROCAT_VERSION" "$cfg" || true)"
         ENV_OVERRIDE="$(printf '%s' "$ENV_OVERRIDE" | tr -d '[:space:]')"
-        [[ -n "$ENV_OVERRIDE" ]] && break
+        if [[ -n "$ENV_OVERRIDE" ]]; then
+            ENV_SOURCE="$(basename "$cfg")"
+            break
+        fi
     fi
 done
 if [[ -n "$ENV_OVERRIDE" ]]; then
     if env_exists "$ENV_OVERRIDE"; then
         if env_usable "$ENV_OVERRIDE"; then
             ENV_NAME="$ENV_OVERRIDE"
-            printf "%b✓ Reusing %s (custom env from config.json)%b\n" "$GREEN" "$ENV_NAME" "$NC"
+            printf "%b✓ Reusing %s (custom env from %s)%b\n" "$GREEN" "$ENV_NAME" "$ENV_SOURCE" "$NC"
         else
             # A configured custom env must be the env used: never silently
             # switch to a default name and clobber the config entry.
-            printf "%bERROR: %s (custom env from config.json) exists but is not Python %s. Fix or remove it, or clear the envs entry.%b\n" \
-                "$RED" "$ENV_OVERRIDE" "$PYTHON_VERSION" "$NC" >&2
+            printf "%bERROR: %s (custom env from %s) exists but is not Python %s. Fix or remove it, or clear the envs entry.%b\n" \
+                "$RED" "$ENV_OVERRIDE" "$ENV_SOURCE" "$PYTHON_VERSION" "$NC" >&2
             exit 1
         fi
     else
         ENV_NAME="$ENV_OVERRIDE"
-        printf '%s\n' "Creating $ENV_NAME (custom env from config.json)..."
+        printf '%s\n' "Creating $ENV_NAME (custom env from $ENV_SOURCE)..."
         "$CONDA_BIN" create -n "$ENV_NAME" "python=$PYTHON_VERSION" -y
     fi
 fi
@@ -244,8 +250,9 @@ fi
 # Persist the auto-selected environment into the LOCAL config
 # (config_local.json) when no custom name was configured - an empty entry
 # is filled with the auto-created name so launchers and scripts resolve it
-# directly. The committed config.json is never rewritten, and a configured
-# custom name is never touched.
+# directly (it only applies while the config.json entry stays empty). The
+# committed config.json is never rewritten, and a configured custom name is
+# never touched.
 if [[ -z "$ENV_OVERRIDE" ]]; then
     update_config_env "$DROCAT_VERSION" "$ENV_NAME" "$CONFIG_LOCAL"
 fi
@@ -315,14 +322,14 @@ printf '%s\n' 'Launch with: ./run_DROCAT.command'
 printf '\n%b[Token setup]%b\n' "$BLUE" "$NC"
 configure_tokens() {
     local neuprint_now="" cave_now=""
-    for cfg in "$CONFIG_LOCAL" "$CONFIG_FILE"; do
+    for cfg in "$CONFIG_FILE" "$CONFIG_LOCAL"; do
         if [[ -f "$cfg" ]]; then
             neuprint_now="$(json_value tokens neuprint "$cfg" || true)"
             neuprint_now="$(printf '%s' "$neuprint_now" | tr -d '[:space:]')"
             [[ -n "$neuprint_now" ]] && break
         fi
     done
-    for cfg in "$CONFIG_LOCAL" "$CONFIG_FILE"; do
+    for cfg in "$CONFIG_FILE" "$CONFIG_LOCAL"; do
         if [[ -f "$cfg" ]]; then
             cave_now="$(json_value tokens cave "$cfg" || true)"
             cave_now="$(printf '%s' "$cave_now" | tr -d '[:space:]')"

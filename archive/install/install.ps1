@@ -42,10 +42,11 @@ if (-not (Test-Path $ConfigFile) -and (Test-Path $ConfigExample)) {
     Write-Host "Created config.json from config.example.json (missing in this checkout)." -ForegroundColor Yellow
 }
 
-# Version-specific custom env (envs.<version>) and tokens: the local config
-# wins; the committed config.json is the fallback. envs.<version> is only
-# consulted for the CURRENT release, so upgrading DROCAT never reuses an
-# older release's custom environment.
+# Version-specific custom env (envs.<version>) and tokens: config.json wins
+# per key (the file a GitHub-pulled copy edits directly); the gitignored
+# config_local.json is the developer-specific fallback for empty entries.
+# envs.<version> is only consulted for the CURRENT release, so upgrading
+# DROCAT never reuses an older release's custom environment.
 $Config = $null
 if (Test-Path $ConfigFile) {
     try {
@@ -63,11 +64,11 @@ if (Test-Path $ConfigLocal) {
     }
 }
 $EnvOverride = ""
-if ($ConfigLocalData -and $ConfigLocalData.envs) {
-    $EnvOverride = [string]$ConfigLocalData.envs."$DrocatVersion"
-}
-if (-not $EnvOverride -and $Config -and $Config.envs) {
+if ($Config -and $Config.envs) {
     $EnvOverride = [string]$Config.envs."$DrocatVersion"
+}
+if (-not $EnvOverride -and $ConfigLocalData -and $ConfigLocalData.envs) {
+    $EnvOverride = [string]$ConfigLocalData.envs."$DrocatVersion"
 }
 
 function Set-ConfigEnvOverride([string]$Version, [string]$EnvName) {
@@ -319,7 +320,7 @@ Write-Host ""
 Write-Host "[Token setup]" -ForegroundColor Cyan
 $NeuprintNow = ""
 $CaveNow = ""
-foreach ($Cfg in @($ConfigLocalData, $Config)) {
+foreach ($Cfg in @($Config, $ConfigLocalData)) {
     if ($Cfg -and $Cfg.tokens) {
         if (-not $NeuprintNow -and $Cfg.tokens.neuprint) { $NeuprintNow = [string]$Cfg.tokens.neuprint }
         if (-not $CaveNow -and $Cfg.tokens.cave) { $CaveNow = [string]$Cfg.tokens.cave }
