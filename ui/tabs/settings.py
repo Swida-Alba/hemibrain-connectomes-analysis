@@ -316,16 +316,18 @@ def create_settings_tab():
                 # Bulk skeleton downloads are disabled for FlyWire datasets:
                 # print the explicit manual-download instruction (mirrors the
                 # file converter) instead of starting a pull.
+                # Note: the dataset predicate lives in flywire_ids, not in
+                # flywire_readiness (which only defines is_banc/is_fafb).
                 try:
                     from src.utils.flywire_readiness import (
                         flywire_manual_skeleton_instruction,
-                        is_flywire_dataset,
                     )
+                    from src.flywire_ids import is_flywire_dataset
                 except ImportError:
                     from utils.flywire_readiness import (
                         flywire_manual_skeleton_instruction,
-                        is_flywire_dataset,
                     )
+                    from flywire_ids import is_flywire_dataset
                 if is_flywire_dataset(dataset):
                     message = flywire_manual_skeleton_instruction(dataset)
                     skeleton_status.text = "Manual download required (FlyWire)"

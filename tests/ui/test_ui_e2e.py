@@ -2416,6 +2416,51 @@ class TestDatasetService:
         assert elements.index(dataset_cache_title) < elements.index(download_button)
         assert elements.index(download_button) < elements.index(cancel_button)
 
+    def test_settings_skeleton_pull_blocks_flywire_with_manual_instruction(self):
+        """Clicking 'Download All Skeletons' on a FlyWire dataset must not
+        start a pull; it shows the manual Codex instruction instead.
+
+        Regression: the guard imported ``is_flywire_dataset`` from
+        utils.flywire_readiness, which only defines is_banc/is_fafb, so the
+        click crashed with ImportError before showing the instruction.
+        """
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs import settings as settings_module
+
+        client = Client(page("/settings-skeleton-flywire-guard"))
+        with client:
+            settings_module.create_settings_tab()
+
+        # Pick a FlyWire dataset in the shared dataset selector.
+        dataset_select = next(
+            el for el in client.elements.values()
+            if (getattr(el, "_props", {}).get("label") == "Dataset")
+        )
+        dataset_select.value = "flywire_FAFB_v783"
+
+        skeleton_btn = next(
+            el for el in client.elements.values()
+            if getattr(el, "text", None) == "Download All Skeletons"
+        )
+        next(iter(skeleton_btn._event_listeners.values())).handler(None)
+
+        # The guard ran (no ImportError) and displayed the manual instruction.
+        result_texts = [
+            el.text for el in client.elements.values()
+            if getattr(el, "text", "") and el.text.startswith("❌")
+        ]
+        assert any(
+            "sk_lod1_783_healed.zip" in text and "codex.flywire.ai" in text
+            for text in result_texts
+        ), result_texts
+        # The status line switched to the manual-download state (the guard
+        # returned before any pull could start).
+        assert any(
+            getattr(el, "text", "") == "Manual download required (FlyWire)"
+            for el in client.elements.values()
+        )
+
     def test_settings_shows_availability_timestamp_and_shared_mapping_panel(
         self, tmp_path, monkeypatch
     ):
