@@ -3052,6 +3052,81 @@ class TestTabs:
         assert "drocat-active" in buttons["Net-Viz"]._classes
         assert "drocat-active" not in buttons["Complete Paths"]._classes
 
+    def test_token_warning_dialog_opens_when_neuprint_missing(self, tmp_path, monkeypatch):
+        """main_page builds a token warning dialog; without a NeuPrint token
+        the one-shot timer opens it, and Open Settings jumps to the panel."""
+        from nicegui import Client, ui
+        from nicegui.page import page
+        import ui.app as app_module
+        from ui.tabs import settings as settings_module
+
+        (tmp_path / "config.json").write_text(
+            '{"tokens": {"neuprint": "", "cave": ""}}\n', encoding="utf-8"
+        )
+        monkeypatch.setattr(settings_module, "PROJECT_ROOT", tmp_path)
+
+        client = Client(page("/token-warning-missing"))
+        with client:
+            app_module.main_page()
+
+        dialog = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("id") == "drocat-token-warning"
+        )
+        assert dialog.value is False
+        assert app_module._neuprint_token_configured() is False
+
+        # the one-shot timer opens the dialog once the page is live
+        timer = next(
+            el for el in client.elements.values()
+            if isinstance(el, ui.timer)
+            and el.callback.__name__ == "_maybe_open_token_warning"
+        )
+        timer.callback()
+        assert dialog.value is True
+
+        # Open Settings navigates to the Settings panel and closes
+        settings_btn = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("id") == "drocat-token-warning-settings"
+        )
+        panels = next(
+            el for el in client.elements.values()
+            if type(el).__name__ == "TabPanels"
+        )
+        next(iter(settings_btn._event_listeners.values())).handler(None)
+        assert panels.value == "Settings"
+        assert dialog.value is False
+
+    def test_token_warning_dialog_stays_closed_when_neuprint_configured(self, tmp_path, monkeypatch):
+        """With a NeuPrint token in config.json the warning never opens."""
+        from nicegui import Client, ui
+        from nicegui.page import page
+        import ui.app as app_module
+        from ui.tabs import settings as settings_module
+
+        (tmp_path / "config.json").write_text(
+            '{"tokens": {"neuprint": "real-token", "cave": ""}}\n', encoding="utf-8"
+        )
+        monkeypatch.setattr(settings_module, "PROJECT_ROOT", tmp_path)
+
+        client = Client(page("/token-warning-configured"))
+        with client:
+            app_module.main_page()
+
+        assert app_module._neuprint_token_configured() is True
+        dialog = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("id") == "drocat-token-warning"
+        )
+        timer = next(
+            el for el in client.elements.values()
+            if isinstance(el, ui.timer)
+            and el.callback.__name__ == "_maybe_open_token_warning"
+        )
+        timer.callback()
+        assert dialog.value is False
+
     def test_flatten_neuron_layers(self):
         """The nested layer model flattens into one neuron per entry for
         the per-neuron palette counts (single-neuron layers are plain

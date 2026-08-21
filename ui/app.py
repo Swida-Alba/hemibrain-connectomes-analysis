@@ -1627,6 +1627,17 @@ html, body {
 }
 """
 
+def _neuprint_token_configured() -> bool:
+    """Whether a NeuPrint token is configured in the project configs.
+
+    Mirrors the Settings tab reminder: config.json wins per key, the
+    gitignored config_local.json fills empty entries. The CAVE token is
+    optional and does not gate the warning.
+    """
+    from ui.tabs.settings import _load_tokens as _load_configured_tokens
+    return bool((_load_configured_tokens() or {}).get("neuprint"))
+
+
 @ui.page("/")
 def main_page():
     """Main application page with light/dark Photo-Selector-inspired layout."""
@@ -1819,6 +1830,40 @@ def main_page():
 
         nav_panels.on_value_change(lambda event: sync_active_tab(event.value))
         sync_active_tab(nav_panels.value)
+
+    # --- Token warning dialog -------------------------------------------
+    # When no NeuPrint token is configured, pop a warning once the page is
+    # live, pointing the user to the Settings tab. It is opened from a
+    # one-shot timer (same pattern as the pull-state refresh timers) so
+    # building the page never needs the client loop.
+    token_warning = ui.dialog().props('id="drocat-token-warning"')
+    with token_warning, ui.card().classes("w-96 max-w-[90vw] gap-2"):
+        with ui.row().classes("items-center gap-2"):
+            ui.icon("key_off").classes("drocat-warn")
+            ui.label("NeuPrint token not configured").classes("text-h6")
+        ui.label(
+            "The NeuPrint token is required for NeuPrint datasets. Get one from "
+            "neuprint.janelia.org/account and set it in the Settings tab (the "
+            "CAVE token is optional; only needed for FlyWire FAFB online fetching)."
+        ).classes("text-sm drocat-muted")
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button(
+                "Open Settings",
+                icon="settings",
+                on_click=lambda: (
+                    nav_panels.set_value("Settings"),
+                    token_warning.close(),
+                ),
+            ).props('unelevated color="primary" id="drocat-token-warning-settings"')
+            ui.button("Later", on_click=token_warning.close).props(
+                'flat id="drocat-token-warning-later"'
+            )
+
+    def _maybe_open_token_warning() -> None:
+        if not _neuprint_token_configured():
+            token_warning.open()
+
+    ui.timer(0.5, _maybe_open_token_warning, once=True)
 
     # Footer
     with ui.footer().classes("drocat-footer justify-center"):

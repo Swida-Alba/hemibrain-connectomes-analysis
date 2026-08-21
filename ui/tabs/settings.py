@@ -383,7 +383,7 @@ def create_settings_tab():
                 if missing == ["neuprint"]:
                     token_reminder_text.text = (
                         "⚠️ NeuPrint token not configured - it is required for NeuPrint datasets. "
-                        "Set it below or in config_local.json."
+                        "Set it below or in config.json."
                     )
                 elif missing == ["cave"]:
                     token_reminder_text.text = (
@@ -394,7 +394,7 @@ def create_settings_tab():
                     token_reminder_text.text = (
                         "⚠️ No API tokens configured. The NeuPrint token is required for NeuPrint "
                         "datasets; the CAVE token is optional (only needed for FlyWire FAFB online "
-                        "fetching). Set them below or in config_local.json."
+                        "fetching). Set them below or in config.json."
                     )
                 token_reminder_text.update()
 
