@@ -1330,6 +1330,38 @@ class SkeletonVectorCache:
                 preferred[body_id] = path
         return sorted(str(path) for path in preferred.values())
 
+    def _cached_dir_listing(self, directory: Path):
+        """Flat file names + subdirectory flag of a cache directory.
+
+        Cached per directory mtime: bulk pulls write thousands of files, and
+        a per-id rglob would rescan the whole tree on every cache miss
+        (O(N^2) across a full-dataset pull).  Returns ``(names, has_subdirs)``.
+        """
+        cache = getattr(self, "_dir_listing_cache", None)
+        if cache is None:
+            cache = {}
+            self._dir_listing_cache = cache
+        try:
+            mtime = directory.stat().st_mtime_ns
+        except OSError:
+            return set(), False
+        entry = cache.get(directory)
+        if entry is not None and entry[0] == mtime:
+            return entry[1], entry[2]
+        names = set()
+        has_subdirs = False
+        try:
+            with os.scandir(directory) as iterator:
+                for item in iterator:
+                    if item.is_dir(follow_symlinks=False):
+                        has_subdirs = True
+                    else:
+                        names.add(item.name)
+        except OSError:
+            pass
+        cache[directory] = (mtime, names, has_subdirs)
+        return names, has_subdirs
+
     def find_skeleton_file(self, body_id: Union[int, str]) -> Optional[Path]:
         """Find a skeleton belonging to this cache namespace.
 
@@ -1360,13 +1392,18 @@ class SkeletonVectorCache:
             for directory in directories:
                 if not directory.exists():
                     continue
+                _, has_subdirs = self._cached_dir_listing(directory)
                 for name in names:
                     direct = directory / name
                     if direct.exists():
                         return direct
-                    nested = sorted(directory.rglob(name))
-                    if nested:
-                        return nested[0]
+                    # Nested bulk folders exist only when the directory has
+                    # subdirectories; skip the per-id rglob otherwise (it
+                    # rescans the whole tree on every cache miss).
+                    if has_subdirs:
+                        nested = sorted(directory.rglob(name))
+                        if nested:
+                            return nested[0]
             return None
         return _find_skeleton_file(
             self.dataset, body_id, project_root=str(self.project_root)
@@ -2741,7 +2778,35 @@ def fetch_skeletons_on_demand_batch(
             raw_cache = raw_lookup_cache
 
     if raw_lookup_cache is not None:
+        # Cache membership is decided with ONE directory scan instead of one
+        # per-id lookup: a full-dataset pull with an almost-empty cache used
+        # to spend ~30 minutes re-scanning the cache directory (rglob per
+        # missing id) before the first batch even completed.  Only ids that
+        # ARE cached go through load_skeleton (which loads/migrates the
+        # actual neuron); the rest go straight to the fetch list.  Caches
+        # without a directory scanner (e.g. test fakes) keep the per-id
+        # lookup semantics.
+        cached_ids: set = set()
+        scan_ok = False
+        scanner = getattr(raw_lookup_cache, "_discover_skeleton_files", None)
+        if callable(scanner):
+            try:
+                for path in scanner():
+                    try:
+                        cached_ids.add(
+                            _canonical_dataset_body_id(
+                                dataset, _skeleton_body_id(path)
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                scan_ok = True
+            except Exception:
+                cached_ids = set()
         for bid in requested:
+            if scan_ok and bid not in cached_ids:
+                missing.append(bid)
+                continue
             neuron = raw_lookup_cache.load_skeleton(
                 bid, simplification=simplification)
             if neuron is None:

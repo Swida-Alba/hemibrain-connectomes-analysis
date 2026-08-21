@@ -135,6 +135,104 @@ def test_batch_fetch_honours_pre_set_cancel(tmp_path, monkeypatch):
     assert calls["n"] == 0
 
 
+def test_batch_fetch_cache_membership_uses_one_scan_not_per_id_lookups(
+        tmp_path, monkeypatch):
+    """The cache-first loop must decide membership from one directory scan:
+    a full-dataset pull with an almost-empty cache used to call load_skeleton
+    (and its per-id rglob) for EVERY missing id - ~30 minutes of cache scans
+    before the first batch completed."""
+    import threading
+    import neuprint
+    import morphology
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+    monkeypatch.setattr(neuprint, "Client", FakeClient)
+
+    # Two cached files, one flat and one nested (bulk folder).
+    cache_dir = tmp_path / "skeletons" / "raw_skeletons"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "1.swc.zst").write_bytes(b"x")
+    nested = cache_dir / "bulk"
+    nested.mkdir()
+    (nested / "2.swc.gz").write_bytes(b"x")
+
+    loaded = []
+
+    class FakeRawCache:
+        raw_only = True
+
+        def _discover_skeleton_files(self):
+            return [str(cache_dir / "1.swc.zst"), str(nested / "2.swc.gz")]
+
+        def load_skeleton(self, bid, simplification=None):
+            loaded.append(bid)
+            return object()  # a loaded neuron
+
+    fetch_batches = []
+
+    def fake_fetch_skeletons(batch_df, **kwargs):
+        fetch_batches.append(batch_df["bodyId"].tolist())
+        return []
+
+    monkeypatch.setattr(
+        "navis.interfaces.neuprint.fetch_skeletons", fake_fetch_skeletons
+    )
+
+    result = morphology.fetch_skeletons_on_demand_batch(
+        "hemibrain:v1.2.1", [1, 2, 3], project_root=str(tmp_path),
+        persist=False, raw_cache=FakeRawCache(),
+    )
+    # Cached ids are returned directly from the cache; the missing id went
+    # to the (empty) fetch list.
+    assert set(result) == {1, 2}, result
+    # Only the ids that are actually cached go through load_skeleton.
+    assert loaded == [1, 2], loaded
+    # The missing id went straight to the fetch list.
+    assert fetch_batches == [[3]], fetch_batches
+
+
+def test_find_skeleton_file_skips_rglob_on_flat_cache(tmp_path, monkeypatch):
+    """find_skeleton_file must not rglob the cache tree per cache miss when
+    the directory is flat (bulk pulls used to rescan the whole tree for every
+    missing id)."""
+    import pathlib
+    import morphology
+
+    cache = morphology.find_similar_raw_cache(
+        "hemibrain:v1.2.1", project_root=str(tmp_path), verbose=False
+    )
+    skeleton_dir = cache.skeleton_dir
+    skeleton_dir.mkdir(parents=True)
+    (skeleton_dir / "5.swc.zst").write_bytes(b"x")
+    (skeleton_dir / "6.swc.gz").write_bytes(b"x")
+
+    original_rglob = pathlib.Path.rglob
+    calls = {"n": 0}
+
+    def counting_rglob(self, pattern):
+        calls["n"] += 1
+        return original_rglob(self, pattern)
+
+    monkeypatch.setattr(pathlib.Path, "rglob", counting_rglob)
+
+    # Flat cache: a missing id must not rescan the tree per id.
+    assert cache.find_skeleton_file(999) is None
+    assert calls["n"] == 0, calls
+    # Cached flat files still resolve through the direct path.
+    assert cache.find_skeleton_file(5).name == "5.swc.zst"
+    assert calls["n"] == 0, calls
+
+    # Nested bulk folders still resolve via rglob once a subdir appears.
+    nested = skeleton_dir / "bulk"
+    nested.mkdir()
+    (nested / "7.swc.zst").write_bytes(b"x")
+    assert cache.find_skeleton_file(7).name == "7.swc.zst"
+    assert calls["n"] >= 1, calls
+
+
 class TestSkeletonPuller:
     def test_lifecycle_and_progress(self, fake_download):
         # Keep the worker alive long enough to assert the one-at-a-time guard;
