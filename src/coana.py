@@ -1,7 +1,7 @@
 # connectome analysis module -- coana
 import os
 import threading
-from typing import List, Optional
+from typing import Callable, List, Optional
 import sys
 import json
 import shutil
@@ -2101,6 +2101,22 @@ class FindNeuronConnection:
     cross-dataset comparison, profiling, cache builders) stay silent and
     never override the outer tool's progress protocol.
     '''
+
+    progress_callback: Optional[Callable] = None
+    '''
+    Optional callback ``(current, total)`` invoked as the full neuron table
+    / ROI table download progresses during ``_ensure_complete_dataset`` (a
+    first pull for a new dataset).  Used by the Settings-tab dataset-metadata
+    pull to drive the determinate progress bar; other callers leave it None.
+    '''
+
+    cancel_event: Optional[object] = None
+    '''
+    Optional ``threading.Event`` checked by ``_ensure_complete_dataset``
+    (forwarded to ``pull_dataset``) so the Settings-tab pulls can stop a
+    first-time full dataset download when the user presses Cancel.  Other
+    callers leave it None.
+    '''
     
     def __post_init__(self):
         if self.verbose is not None:
@@ -2328,6 +2344,9 @@ class FindNeuronConnection:
             os.makedirs(self.cache_folder, exist_ok=True)
             self._vprint(f'Cache enabled: {self.cache_folder}', level='full')
             # Ensure complete dataset with ALL neurons exists (including type=None)
+            # ``_ensure_complete_dataset`` falls back to the instance
+            # ``progress_callback`` field, so callers that patch this method
+            # with a no-arg lambda (tests) remain unaffected.
             self._ensure_complete_dataset()
             # Build the materialized searchable neuron index as soon as the
             # pulled metadata exists.  Connection fetching updates only the
@@ -2400,11 +2419,19 @@ class FindNeuronConnection:
             else:
                 raise
     
-    def _ensure_complete_dataset(self):
+    def _ensure_complete_dataset(self, progress_callback=None, cancel_event=None,
+                                 batch_size=None, max_workers=1):
         '''
         Ensure complete local dataset exists (including neurons with type=None).
         This is needed for cache enrichment since cached connections may reference
         neurons without types.
+
+        ``progress_callback`` and ``cancel_event`` are forwarded to
+        ``pull_dataset`` (when the tables must be downloaded); the progress
+        callback observes download progress and the event stops it mid-download
+        (raising ``DatasetPullCancelled``).  ``batch_size``/``max_workers``
+        tune the chunk size and concurrency of that download.  All fall back to
+        the instance fields / defaults when not supplied.
         '''
         if self.client_type == 'flywire':
             # No need to print anything - FlyWire uses local files or CAVE API, not downloaded dataset
@@ -2441,9 +2468,24 @@ class FindNeuronConnection:
             # Ensure we have a valid client for THIS dataset (not a different one from global default)
             self._ensure_neuprint_client()
             try:
+                if progress_callback is None:
+                    progress_callback = getattr(self, 'progress_callback', None)
+                if cancel_event is None:
+                    cancel_event = getattr(self, 'cancel_event', None)
                 # Pull complete dataset with omitNoneType=False
-                sv.pull_dataset(self.dataset, save_path=dataset_path, omitNoneType=False)
+                sv.pull_dataset(
+                    self.dataset, save_path=dataset_path, omitNoneType=False,
+                    progress_callback=progress_callback,
+                    cancel_event=cancel_event,
+                    batch_size=batch_size or 2000,
+                    max_workers=max_workers or 1,
+                )
                 self._vprint(f'✅ Complete dataset saved to: {dataset_path}_neuron_df.csv / _roi_count_df.parquet', level='always')
+            except sv.DatasetPullCancelled:
+                # A first-time download was cancelled mid-way; propagate so the
+                # caller (Settings pull) marks the pull as cancelled, not failed.
+                self._vprint(f'   Dataset pull cancelled.', level='always')
+                raise
             except Exception as e:
                 self._vprint(f'⚠️ Warning: Failed to download complete dataset: {e}', level='always')
                 self._vprint(f'   Cache enrichment may fail for neurons without types.', level='always')
@@ -2842,6 +2884,25 @@ class FindNeuronConnection:
         # cached in-memory frame stays valid for ``_load_neuron_index``.
         self._record_neuron_index_signature()
 
+    def _neuron_index_bodyid_lookup(self, frame):
+        """Cached ``{bodyId(str): integer row idx}`` + id-set for an index frame.
+
+        Rebuilding is O(N) but is done once per pull instead of once per
+        batch; appending rows (``concat(..., ignore_index=True)``) renumbers
+        existing rows, so the cache is keyed on ``(id(frame), len(frame))``
+        and rebuilt whenever the frame grows.  The in-memory frame is held by
+        ``self`` for the whole pull, so its ``id`` is stable and the key is
+        reliable.
+        """
+        key = (id(frame), len(frame))
+        cached = getattr(self, '_neuron_index_bodyid_lookup_cache', None)
+        if cached is not None and cached[0] == key:
+            return cached[1], cached[2]
+        bodyids = frame['bodyId'].astype(str)
+        positions = {bid: idx for idx, bid in enumerate(bodyids)}
+        self._neuron_index_bodyid_lookup_cache = (key, positions, set(positions))
+        return positions, set(positions)
+
     def _refresh_neuron_index_dict(self, touched_bodyids=None):
         """Keep the O(1) lookup dict in sync with the current frame.
 
@@ -2862,16 +2923,16 @@ class FindNeuronConnection:
             return
         if self._neuron_index_dict is None:
             self._neuron_index_dict = {}
-        # row_idx must point at the CURRENT frame rows (concat shifts them).
-        bodyids = df['bodyId'].astype(str)
-        positions = {
-            bid: idx for idx, bid in enumerate(bodyids)
-            if bid in ids
+        # O(batch) lookups via the cached bodyId->row-idx map (a full-frame
+        # ``astype(str)`` + enumeration per batch was O(N) -> O(N^2)).  The
+        # map is rebuilt only when the frame grows (concat renumbers rows).
+        positions, _existing = self._neuron_index_bodyid_lookup(df)
+        hit_positions = {
+            bid: positions[bid] for bid in ids if bid in positions
         }
-        if not positions:
+        if not hit_positions:
             return
-        hit = bodyids.isin(set(positions))
-        rows = df.loc[hit]
+        rows = df.iloc[list(hit_positions.values())]
         downstream_complete = rows['downstream_complete'].values if 'downstream_complete' in rows.columns else [False] * len(rows)
         types = rows['type'].values if 'type' in rows.columns else [''] * len(rows)
         instances = rows['instance'].values if 'instance' in rows.columns else [''] * len(rows)
@@ -2886,7 +2947,7 @@ class FindNeuronConnection:
                 'post': posts[idx] if posts[idx] is not None else 0,
                 'last_fetched': last_fetched[idx] if last_fetched[idx] is not None else '',
                 'connection_count': connection_counts[idx] if connection_counts[idx] is not None else 0,
-                'row_idx': positions[bid],
+                'row_idx': hit_positions[bid],
             }
 
     def _ensure_neuron_index_from_metadata(self):
@@ -4486,14 +4547,12 @@ class FindNeuronConnection:
             neuron was fetched and has zero connections).
         '''
         neuron_index = self._load_neuron_index()
-        # The string bodyId column is reused several times below; casting it
-        # once instead of per use avoids 4 full-index astype(str) passes per
-        # batch (176k rows each on the current datasets).
-        index_str = (
-            neuron_index['bodyId'].astype(str)
-            if not neuron_index.empty else None
-        )
-        
+        # Cached bodyId->row-idx map + id set.  Building them is O(N) once per
+        # pull (rebuilt only when the frame grows); the old per-batch
+        # full-index ``astype(str)`` + set build made the batch loop O(N^2).
+        positions, existing_set = self._neuron_index_bodyid_lookup(neuron_index)
+        is_empty = neuron_index.empty
+
         bodyids_str = (
             normalize_flywire_body_ids(bodyids)
             if is_flywire_dataset(self.dataset)
@@ -4503,14 +4562,15 @@ class FindNeuronConnection:
 
         # The compact index already contains the metadata projection.  Reuse
         # it for every batch instead of reparsing the pulled neuron CSV.
+        batch_positions = [positions[b] for b in bodyids_str if b in positions]
         if (
-            not neuron_index.empty
-            and index_str is not None
+            not is_empty
+            and batch_positions
             and {'bodyId', 'type', 'instance', 'post'}.issubset(neuron_index.columns)
         ):
-            neuron_info = neuron_index[
-                index_str.isin(bodyids_set)
-            ][['bodyId', 'type', 'instance', 'post']].copy()
+            neuron_info = neuron_index.iloc[batch_positions][
+                ['bodyId', 'type', 'instance', 'post']
+            ].copy()
             missing_ids = bodyids_set - set(neuron_info['bodyId'].astype(str))
         else:
             neuron_info = pd.DataFrame(columns=['bodyId', 'type', 'instance', 'post'])
@@ -4570,29 +4630,38 @@ class FindNeuronConnection:
                 )
             }
         
-        # Check existing in index
-        existing_set = set(index_str.values) if index_str is not None else set()
-        
-        # Update existing entries.
-        # Vectorized single-pass update: the previous per-bodyId loop ran
-        # `neuron_index['bodyId'].astype(str) == bid` (a full-index scan,
-        # re-casting every time) up to 3x per neuron -> O(index x batch),
-        # which dominated bulk cache building.
+        # Update existing entries via the cached bodyId->row-idx map: looking up
+        # only the batch's ids keeps the per-batch cost O(batch) instead of the
+        # old O(N) per-batch ``astype(str)`` + ``isin`` scans (O(N^2) overall).
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         existing_bids = [bid for bid in bodyids_str if bid in existing_set]
-        if existing_bids and not neuron_index.empty and index_str is not None:
-            hit_mask = index_str.isin(set(existing_bids))
-            neuron_index.loc[hit_mask, 'last_fetched'] = now
+        if existing_bids and not is_empty:
+            # The status columns are part of the canonical index schema, but
+            # guard anyway so older/legacy indexes (which the update creates
+            # lazily below) never raise on a column mismatch.
+            for column, default in (
+                ('last_fetched', ''),
+                ('connection_count', 0),
+                ('downstream_complete', False),
+            ):
+                if column not in neuron_index.columns:
+                    neuron_index[column] = default
+            row_positions = [positions[bid] for bid in existing_bids]
+            neuron_index.iloc[
+                row_positions,
+                neuron_index.columns.get_loc('last_fetched'),
+            ] = now
             if connection_counts is not None:
                 count_map = {bid: connection_counts.get(bid, 0) for bid in existing_bids}
-                neuron_index.loc[hit_mask, 'connection_count'] = index_str[hit_mask].map(count_map)
+                counts = [count_map[bid] for bid in existing_bids]
+                conn_col = neuron_index.columns.get_loc('connection_count')
                 # The completion flag is only the zero-outdegree marker:
                 # rows in the cache prove completeness for neurons with
                 # connections (verified against the server), so the flag is
                 # set solely for neurons verified to have 0 downstream rows.
-                neuron_index.loc[hit_mask, 'downstream_complete'] = (
-                    index_str[hit_mask].map(count_map) == 0
-                )
+                down_col = neuron_index.columns.get_loc('downstream_complete')
+                neuron_index.iloc[row_positions, conn_col] = counts
+                neuron_index.iloc[row_positions, down_col] = [c == 0 for c in counts]
             else:
                 # No counts: the batch produced no rows at all, i.e. every
                 # neuron has zero downstream connections (empty-fetch case).
@@ -4600,8 +4669,14 @@ class FindNeuronConnection:
                 # count would otherwise keep the neuron in the refetch set
                 # on every later run (rows are the completeness proof, so a
                 # positive count without rows reads as stale).
-                neuron_index.loc[hit_mask, 'connection_count'] = 0
-                neuron_index.loc[hit_mask, 'downstream_complete'] = True
+                neuron_index.iloc[
+                    row_positions,
+                    neuron_index.columns.get_loc('connection_count'),
+                ] = 0
+                neuron_index.iloc[
+                    row_positions,
+                    neuron_index.columns.get_loc('downstream_complete'),
+                ] = True
         
         # Add new entries in bulk
         new_entries = []

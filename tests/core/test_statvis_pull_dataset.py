@@ -145,6 +145,126 @@ class TestPullDatasetChunked:
         assert meta['neuron_counts']['total'] == 4500
         assert meta['dataset'] == 'fake:v1'
 
+    def test_progress_callback_reports_cumulative_counts(self, tmp_path, monkeypatch):
+        """progress_callback receives (current, total) after each chunk, so a
+        UI caller (the Settings-tab metadata pull) can drive a determinate bar
+        as the long download progresses."""
+        import time as _time
+        monkeypatch.setattr(_time, 'sleep', lambda s: None)
+        monkeypatch.setattr(statvis, 'tqdm', lambda *a, **k: type('T', (), {
+            'update': lambda self, n: None, 'close': lambda self: None})())
+        self._patch_retry(monkeypatch)
+        calls = []
+        progress = []
+
+        def fake_fetch(criteria, client=None):
+            ids = criteria.bodyId if isinstance(criteria.bodyId, list) else [criteria.bodyId]
+            calls.append(len(ids))
+            return _make_chunk_df(ids), _make_chunk_df(ids)
+
+        out = tmp_path / 'ds_pcb'
+        statvis.pull_dataset(
+            'fake:v1', save_path=str(out),
+            client=_FakeClient(n_ids=4500),
+            fetch_fn=fake_fetch,
+            progress_callback=lambda c, t: progress.append((c, t)),
+        )
+        assert calls == [2000, 2000, 500]
+        # cumulative current / total after each of the three chunks
+        assert progress == [(2000, 4500), (4000, 4500), (4500, 4500)]
+
+    def test_cancel_mid_download_raises_without_writing(self, tmp_path, monkeypatch):
+        """cancel_event set between chunks stops the download, raises
+        DatasetPullCancelled, and leaves no partial tables behind (a cancelled
+        dataset must not look 'ready' for cache enrichment)."""
+        import time as _time
+        import threading
+        monkeypatch.setattr(_time, 'sleep', lambda s: None)
+        monkeypatch.setattr(statvis, 'tqdm', lambda *a, **k: type('T', (), {
+            'update': lambda self, n: None, 'close': lambda self: None})())
+        self._patch_retry(monkeypatch)
+
+        calls = []
+        cancel = threading.Event()
+
+        def fake_fetch(criteria, client=None):
+            ids = criteria.bodyId if isinstance(criteria.bodyId, list) else [criteria.bodyId]
+            calls.append(len(ids))
+            # cancel after the first chunk lands, before the next iteration
+            cancel.set()
+            return _make_chunk_df(ids), _make_chunk_df(ids)
+
+        out = tmp_path / 'ds_cancel'
+        with pytest.raises(statvis.DatasetPullCancelled):
+            statvis.pull_dataset(
+                'fake:v1', save_path=str(out),
+                client=_FakeClient(n_ids=4500),
+                fetch_fn=fake_fetch,
+                cancel_event=cancel,
+            )
+        assert calls == [2000]  # stopped after the first chunk
+        assert not (tmp_path / 'ds_cancel_neuron_df.csv').exists()
+        assert not (tmp_path / 'ds_cancel_roi_count_df.parquet').exists()
+
+    def test_cancel_already_set_raises_immediately(self, tmp_path, monkeypatch):
+        """A cancel_event already set fails fast before any network query."""
+        import threading
+        monkeypatch.setattr(statvis, 'tqdm', lambda *a, **k: type('T', (), {
+            'update': lambda self, n: None, 'close': lambda self: None})())
+        self._patch_retry(monkeypatch)
+
+        cancel = threading.Event()
+        cancel.set()  # pressed before the pull started
+        with pytest.raises(statvis.DatasetPullCancelled):
+            statvis.pull_dataset(
+                'fake:v1', save_path=str(tmp_path / 'ds_c'),
+                client=_FakeClient(n_ids=100),
+                cancel_event=cancel,
+            )
+
+    def test_parallel_fetch_overlaps_chunks_and_writes_same_output(self, tmp_path, monkeypatch):
+        """max_workers>1 overlaps the chunk fetches (bounded in-flight) yet still
+        writes the same neuron CSV + ROI parquet (a long dataset pull is a chain
+        of server requests, so overlapping them cuts wall time)."""
+        import time as _time
+        import threading
+        monkeypatch.setattr(_time, 'sleep', lambda s: None)
+        monkeypatch.setattr(statvis, 'tqdm', lambda *a, **k: type('T', (), {
+            'update': lambda self, n: None, 'close': lambda self: None})())
+        self._patch_retry(monkeypatch)
+
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def fake_fetch(criteria, client=None):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            _time.sleep(0.02)
+            ids = criteria.bodyId if isinstance(criteria.bodyId, list) else [criteria.bodyId]
+            result = _make_chunk_df(ids), _make_chunk_df(ids)
+            with lock:
+                active -= 1
+            return result
+
+        out = tmp_path / 'ds_par'
+        statvis.pull_dataset(
+            'fake:v1', save_path=str(out),
+            client=_FakeClient(n_ids=4500),
+            fetch_fn=fake_fetch,
+            max_workers=3,
+        )
+        # at least two chunks were in flight at once
+        assert max_active >= 2
+        assert (tmp_path / 'ds_par_neuron_df.csv').exists()
+        assert (tmp_path / 'ds_par_roi_count_df.parquet').exists()
+        assert len(pd.read_csv(tmp_path / 'ds_par_neuron_df.csv', index_col=0)) == 4500
+        roi = pd.read_parquet(tmp_path / 'ds_par_roi_count_df.parquet')
+        assert len(roi) == 4500
+        assert list(roi.columns) == ['bodyId', 'type', 'instance']
+
     def test_metadata_sidecar_computed_from_pulled_frames(self, tmp_path, monkeypatch):
         """pull_dataset writes <dataset>_metadata.json computed from the
         pulled neuron/roi frames (counts, synapse totals, per-ROI neurons)."""

@@ -128,12 +128,22 @@ class SkeletonPuller:
                 __import__("pathlib").Path(__file__).resolve().parents[1] / "src"
             ))
             from coana import FindNeuronConnection
+            from statvis import DatasetPullCancelled
             from morphology import download_all_skeletons
 
             # The skeleton download reads the bodyId list from the local
             # neuron table, so the dataset metadata must be present first.
             # Ensure it (idempotent; a first pull downloads the neuron table
             # + ROI table and builds the materialized index).
+            def _prepare_download(current: int, total: int) -> None:
+                # A first pull may download the full neuron table here; stream
+                # it into the state so the UI shows a determinate bar instead
+                # of an indeterminate 'Preparing...' during the download.
+                self._progress(
+                    current, total,
+                    "Downloading the full neuron table and ROI table...",
+                )
+
             with self._lock:
                 self._state["info"] = (
                     "Ensuring dataset metadata (neuron table, ROI table, "
@@ -144,6 +154,8 @@ class SkeletonPuller:
                 use_cache=True,
                 cache_only=False,
                 verbose=False,
+                progress_callback=_prepare_download,
+                cancel_event=self._cancel_event,
             )
             fc._ensure_complete_dataset()
             fc._ensure_neuron_index_from_metadata()
@@ -176,6 +188,17 @@ class SkeletonPuller:
                 self._state["summary"] = summary
                 self._state["cancelled"] = bool(summary.get("cancelled"))
                 self._state["info"] = "Cancelled." if summary.get("cancelled") else "Finished."
+                self._state["done"] = True
+        except DatasetPullCancelled:
+            # A first-time neuron-table download was cancelled during the
+            # metadata preparation; mark the pull as cancelled, not failed.
+            with self._lock:
+                self._state["summary"] = {
+                    "total": 0, "fetched": 0, "skipped_existing": 0,
+                    "errors": 0, "cancelled": True,
+                }
+                self._state["cancelled"] = True
+                self._state["info"] = "Cancelled during metadata preparation."
                 self._state["done"] = True
         except Exception as exc:  # network errors, token problems, ...
             with self._lock:

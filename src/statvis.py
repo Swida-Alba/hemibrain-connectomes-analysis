@@ -1395,7 +1395,17 @@ def _build_dataset_metadata(dataset, neuron_df, roi_count_df, client=None):
     }
 
 
-def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch_size=2000, fetch_fn=None, drop_roi_cols=True):
+class DatasetPullCancelled(Exception):
+    """Raised when ``pull_dataset`` detects a cancel request mid-download.
+
+    The download stops without writing partial tables, so a dataset's
+    ``_neuron_df`` / ``_roi_count_df`` files are never left incomplete; the
+    caller (Settings metadata / connections / skeleton pull) treats it as a
+    user cancel instead of a failure.
+    """
+
+
+def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch_size=2000, fetch_fn=None, drop_roi_cols=True, progress_callback=None, cancel_event=None, max_workers=1):
     '''
     Download the complete neuron table of a NeuPrint dataset (including
     neurons with type=None) and save it as CSV (neurons) and zstd parquet
@@ -1436,11 +1446,34 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch
         ``_roi_count_df.parquet`` and dominate the neuron CSV size
         (male-cns); set False only when the raw per-neuron columns must be
         stored locally.
+    progress_callback : callable, optional
+        Callback ``(current, total)`` invoked after each chunk is fetched,
+        giving the cumulative number of neurons downloaded out of the total.
+        Used by the Settings-tab dataset-metadata pull to drive the
+        determinate progress bar; the terminal tqdm bar is always shown.
+    cancel_event : threading.Event, optional
+        When set, the download stops between chunks and raises
+        ``DatasetPullCancelled`` without writing partial tables, so the
+        Settings-tab pulls can honour the Cancel button mid-download.
+    max_workers : int
+        Batches fetched concurrently (1 = sequential).  A long dataset pull
+        is a chain of server requests that NeuPrint rate-limits, so a bound
+        of a small number of workers (e.g. 4) overlaps the fetches to reduce
+        wall time; only raise it when the server tolerates concurrent
+        requests.
+
+    Memory: the per-neuron ROI detail columns (``roiInfo``/``inputRois``/
+    ``outputRois``) are dropped per chunk and the ROI rows are streamed to a
+    temp dir then consolidated, so a large dataset does not accumulate every
+    frame in RAM during a long download.
 
     A ``<dataset>_metadata.json`` sidecar (neuron/synapse counts, ROI
     coverage) is always written next to the tables, computed from the pulled
     frames.
     '''
+    if cancel_event is not None and cancel_event.is_set():
+        raise DatasetPullCancelled("Dataset pull cancelled.")
+
     # requires login to hemibrain dataset
     if save_path is None:
         # Go up from src/ to project root, then into datasets/
@@ -1532,9 +1565,17 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch
     all_ids = [int(x) for x in ids_df['bodyId'].tolist()]
     total = len(all_ids)
 
-    # 2) Chunked neuron download with timeout/retry + live progress bar
+    # 2) Chunked neuron download with timeout/retry + live progress bar,
+    #    optional bounded parallelism, and memory-efficient streaming: the
+    #    per-neuron ROI detail columns are dropped per chunk and the ROI rows
+    #    are written to a temp dir, so a huge dataset (male-cns ROI table is
+    #    millions of rows) does not accumulate every frame in RAM during a
+    #    long, slow download.
+    import tempfile
+    import shutil
+    from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+
     neuron_frames = []
-    roi_frames = []
     n_batches = (total + batch_size - 1) // batch_size
     # Keep this bar on stdout, alongside NeuronBridgeFinder._vprint().  The
     # UI runner can then preserve the clear/write/refresh sequence as one
@@ -1546,38 +1587,115 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch
         leave=False,
         file=sys.stdout,
     )
+    stream_dir = tempfile.mkdtemp(prefix='drocat_pull_')
+    roi_batch_paths = []
+
+    def _record_chunk(i, ndf, rdf):
+        """Consume one fetched chunk (drop ROI detail cols, stream ROI rows)."""
+        if ndf is not None and not ndf.empty:
+            if drop_roi_cols:
+                ndf = ndf.drop(
+                    columns=[c for c in ('roiInfo', 'inputRois', 'outputRois')
+                             if c in ndf.columns]
+                )
+            neuron_frames.append(ndf)
+        if rdf is not None and not rdf.empty:
+            path = os.path.join(stream_dir, f'roi_{i:06d}.parquet')
+            rdf.to_parquet(path, index=False)
+            roi_batch_paths.append(path)
+
+    def _fetch_chunk(i):
+        """Fetch one chunk; never raises (returns a failure flag)."""
+        chunk = all_ids[i:i + batch_size]
+        batch_num = i // batch_size + 1
+        try:
+            ndf, rdf = api_call_with_retry(
+                lambda c=chunk: fetch_fn(NC(bodyId=c), client=client),
+                timeout=180.0,
+                max_retries=5,
+                retry_delay=5.0,
+                description=f'Neuron batch {batch_num}/{n_batches}',
+                on_retry=lambda attempt, exc, b=batch_num: _tqdm_print(
+                    f'⚠️ Server not responding (neuron batch {b}/{n_batches}) '
+                    f'— reconnecting, attempt {attempt}/5...'),
+                verbose=True,
+            )
+            return i, ndf, rdf, False
+        except (APITimeoutError, APIRetryExhaustedError) as e:
+            _tqdm_print(
+                f'⚠️ Neuron batch {batch_num}/{n_batches} failed after retries: {e}'
+            )
+            return i, None, None, True
+
     try:
-        for i in range(0, total, batch_size):
-            batch_num = i // batch_size + 1
-            chunk = all_ids[i:i + batch_size]
-
-            def fetch_chunk(c=chunk):
-                return fetch_fn(NC(bodyId=c), client=client)
-
+        current = 0
+        if max_workers and max_workers > 1:
+            # Bounded in-flight parallel fetch (mirrors build_connection_cache):
+            # appends/streaming stay in this single thread; only the network
+            # fetches overlap.  Cancellation stops new submissions; in-flight
+            # fetches finish in the background and their results are discarded.
+            batch_indices = iter(range(0, total, batch_size))
+            executor = ThreadPoolExecutor(max_workers=max_workers)
             try:
-                ndf, rdf = api_call_with_retry(
-                    fetch_chunk,
-                    timeout=180.0,
-                    max_retries=5,
-                    retry_delay=5.0,
-                    description=f'Neuron batch {batch_num}/{n_batches}',
-                    on_retry=lambda attempt, exc, b=batch_num: _tqdm_print(
-                        f'⚠️ Server not responding (neuron batch {b}/{n_batches}) '
-                        f'— reconnecting, attempt {attempt}/5...'),
-                    verbose=True,
-                )
-            except (APITimeoutError, APIRetryExhaustedError) as e:
-                _tqdm_print(
-                    f'⚠️ Neuron batch {batch_num}/{n_batches} failed after retries: {e}'
-                )
-                continue  # keep going with the remaining batches
-            if ndf is not None and not ndf.empty:
-                neuron_frames.append(ndf)
-            if rdf is not None and not rdf.empty:
-                roi_frames.append(rdf)
-            progress.update(len(chunk))
+                pending = {}
+                for _ in range(max_workers):
+                    i = next(batch_indices, None)
+                    if i is None:
+                        break
+                    pending[executor.submit(_fetch_chunk, i)] = i
+                while pending:
+                    if cancel_event is not None and cancel_event.is_set():
+                        break
+                    done, _ = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                    if not done:
+                        continue
+                    for fut in done:
+                        i = pending.pop(fut)
+                        _, ndf, rdf, failed = fut.result()
+                        if not failed:
+                            _record_chunk(i, ndf, rdf)
+                            n = len(all_ids[i:i + batch_size])
+                            current += n
+                            progress.update(n)
+                            if progress_callback is not None:
+                                progress_callback(min(current, total), total)
+                        next_i = next(batch_indices, None)
+                        if (
+                            next_i is not None
+                            and (cancel_event is None or not cancel_event.is_set())
+                        ):
+                            pending[executor.submit(_fetch_chunk, next_i)] = next_i
+                    if cancel_event is not None and cancel_event.is_set():
+                        break
+            finally:
+                executor.shutdown(wait=False)
+        else:
+            for i in range(0, total, batch_size):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise DatasetPullCancelled("Dataset pull cancelled.")
+                _, ndf, rdf, failed = _fetch_chunk(i)
+                if not failed:
+                    _record_chunk(i, ndf, rdf)
+                    n = len(all_ids[i:i + batch_size])
+                    current += n
+                    progress.update(n)
+                    if progress_callback is not None:
+                        progress_callback(min(current, total), total)
+        if cancel_event is not None and cancel_event.is_set():
+            raise DatasetPullCancelled("Dataset pull cancelled.")
+        # Consolidate the streamed ROI rows HERE (while the temp files still
+        # exist); the finally-block removes the temp dir right after.
+        if roi_batch_paths:
+            import polars as pl
+            roi_count_df = pl.concat(
+                [pl.scan_parquet(p) for p in roi_batch_paths],
+                how='vertical_relaxed',
+            ).collect().to_pandas()
+        else:
+            roi_count_df = pd.DataFrame()
     finally:
         progress.close()
+        shutil.rmtree(stream_dir, ignore_errors=True)
 
     if not neuron_frames:
         raise RuntimeError(
@@ -1585,17 +1703,6 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch
             f'(server unreachable). Check the connection and re-run.'
         )
     neuron_df = pd.concat(neuron_frames, ignore_index=True)
-    roi_count_df = pd.concat(roi_frames, ignore_index=True) if roi_frames else pd.DataFrame()
-
-    # Drop the per-neuron ROI detail columns before saving: roiInfo is a
-    # dict per neuron and inputRois/outputRois are lists derivable from it
-    # (inputRois = ROIs with post > 0, outputRois = ROIs with pre > 0).
-    # Every value is preserved in roi_count_df (long-form), so keeping them
-    # would only bloat the local CSV (male-cns: ~90% of the file).
-    if drop_roi_cols:
-        for col in ('roiInfo', 'inputRois', 'outputRois'):
-            if col in neuron_df.columns:
-                neuron_df = neuron_df.drop(columns=col)
 
     if omitNoneType:
         # delete rows with type is empty
@@ -1605,7 +1712,7 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch
     # write neuron table as csv; the ROI-count table is numeric long-form
     # (bodyId/roi/count columns), so a zstd parquet is ~5x smaller than the
     # equivalent CSV and loads without schema inference
-    neuron_df.to_csv(save_path + '_neuron_df.csv',index=True)
+    neuron_df.to_csv(save_path + '_neuron_df.csv', index=True)
     roi_count_df.to_parquet(save_path + '_roi_count_df.parquet', index=False, compression='zstd')
     stale_roi_csv = save_path + '_roi_count_df.csv'
     if os.path.exists(stale_roi_csv):

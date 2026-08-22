@@ -150,20 +150,23 @@ class DatasetPuller:
         if operation == "connections":
             self._run_connections(dataset, force_rebuild, batch_size, max_workers)
         else:
-            self._run_metadata(dataset)
+            self._run_metadata(dataset, batch_size=batch_size, max_workers=max_workers)
 
     @staticmethod
-    def _ensure_metadata(fc) -> None:
+    def _ensure_metadata(fc, **kwargs) -> None:
         """Ensure the dataset metadata: neuron table, ROI table, index.
 
         Idempotent: already-present files are never re-downloaded.  Both the
         connections pull and the skeleton pull run this before their network
         phase, because each reads the local neuron table / index first.
+        ``kwargs`` (``batch_size`` / ``max_workers``) tune the first-time
+        neuron-table download.
         """
-        fc._ensure_complete_dataset()
+        fc._ensure_complete_dataset(**kwargs)
         fc._ensure_neuron_index_from_metadata()
 
-    def _run_metadata(self, dataset: str) -> None:
+    def _run_metadata(self, dataset: str, batch_size: int = 100,
+                      max_workers: int = 1) -> None:
         """Pull only the dataset metadata: neuron table, ROI table, index.
 
         ``FindNeuronConnection`` already ensures the metadata during init;
@@ -173,19 +176,45 @@ class DatasetPuller:
         """
         try:
             from coana import FindNeuronConnection
+            from statvis import DatasetPullCancelled
 
             self._phase(
                 "prepare",
                 "Checking local dataset files (a first pull downloads the "
                 "full neuron table and ROI table if missing)...",
             )
+
+            def _download_progress(current: int, total: int) -> None:
+                # Drives the determinate bar while the full neuron table and
+                # ROI table are downloaded (a first pull for a new dataset);
+                # otherwise the UI would sit on "Preparing..." while the long
+                # download runs in the terminal.
+                self._progress(
+                    current, total,
+                    "Downloading the full neuron table and ROI table...",
+                )
+
             fc = FindNeuronConnection(
                 dataset=dataset,
                 use_cache=True,
                 cache_only=False,
                 verbose=False,
+                progress_callback=_download_progress,
+                cancel_event=self._cancel_event,
             )
-            self._ensure_metadata(fc)
+            # The download (if any) already completed during FindNeuronConnection
+            # init; let the UI know it is now building the materialized index so
+            # the bar does not sit at a misleading 100% while the index builds.
+            if not self._state.get("done"):
+                self._status("Building the materialized neuron index...")
+            # A first pull downloads the full neuron table; use a larger chunk
+            # (>=2000) and the puller's worker count so a big dataset pulls
+            # faster without hammering the server with thousands of requests.
+            self._ensure_metadata(
+                fc,
+                batch_size=max(2000, batch_size or 0),
+                max_workers=max_workers or 1,
+            )
             if self._cancel_event.is_set():
                 with self._lock:
                     self._state["summary"] = {
@@ -215,6 +244,17 @@ class DatasetPuller:
                 }
                 self._state["info"] = "Finished."
                 self._state["done"] = True
+        except DatasetPullCancelled:
+            # A first-time neuron-table download was cancelled; mark the pull
+            # as cancelled (not failed) and leave it resumable.
+            with self._lock:
+                self._state["summary"] = {
+                    "operation": "full_dataset",
+                    "cancelled": True,
+                }
+                self._state["cancelled"] = True
+                self._state["info"] = "Cancelled during download."
+                self._state["done"] = True
         except Exception as exc:  # network errors, token problems, ...
             with self._lock:
                 self._state["error"] = f"{type(exc).__name__}: {exc}"
@@ -233,26 +273,42 @@ class DatasetPuller:
     ) -> None:
         try:
             from coana import FindNeuronConnection
+            from statvis import DatasetPullCancelled
 
             # Phase 1/2 — dataset metadata + client init.  The connection
             # fetch reads the local neuron table / index, so the metadata is
             # ensured first (idempotent; a first pull may download the full
             # neuron table here, which can take several minutes with no
             # neuron totals yet).
+            def _prepare_progress(current: int, total: int) -> None:
+                # A first pull may download the full neuron table here; stream
+                # it into the state so the UI shows a determinate bar instead
+                # of an indeterminate 'Preparing...' during the download.
+                self._progress(
+                    current, total,
+                    "Downloading the full neuron table and ROI table...",
+                )
+
             self._phase(
                 "prepare",
                 "Ensuring dataset metadata and preparing local data "
                 "(neuron table, ROI table, index) before fetching "
                 "connections — a first pull may download the full neuron "
-                "table; press Cancel to stop after it.",
+                "table; press Cancel to stop it.",
             )
             fc = FindNeuronConnection(
                 dataset=dataset,
                 use_cache=True,
                 cache_only=False,
                 verbose=False,
+                progress_callback=_prepare_progress,
+                cancel_event=self._cancel_event,
             )
-            self._ensure_metadata(fc)
+            self._ensure_metadata(
+                fc,
+                batch_size=max(2000, batch_size or 0),
+                max_workers=max_workers or 1,
+            )
             if self._cancel_event.is_set():
                 # Cancelled during preparation (e.g. while the full neuron
                 # table was being downloaded): stop before the fetch loop.
@@ -290,6 +346,22 @@ class DatasetPuller:
                 self._state["summary"] = summary
                 self._state["cancelled"] = bool(summary.get("cancelled"))
                 self._state["info"] = "Finished."
+                self._state["done"] = True
+        except DatasetPullCancelled:
+            # A first-time neuron-table download was cancelled during the
+            # prepare phase; mark the pull as cancelled, not failed.
+            with self._lock:
+                self._state["summary"] = {
+                    "total_neurons": 0,
+                    "already_cached": 0,
+                    "newly_cached": 0,
+                    "failed_neurons": [],
+                    "total_connections": 0,
+                    "elapsed_time": 0.0,
+                    "cancelled": True,
+                }
+                self._state["cancelled"] = True
+                self._state["info"] = "Cancelled during download."
                 self._state["done"] = True
         except Exception as exc:  # network errors, token problems, ...
             with self._lock:

@@ -83,7 +83,7 @@ def fake_fnc(monkeypatch):
         def __init__(self, *args, **kwargs):
             self.kwargs = kwargs
 
-        def _ensure_complete_dataset(self):
+        def _ensure_complete_dataset(self, *args, **kwargs):
             pass
 
         def _ensure_neuron_index_from_metadata(self):
@@ -156,7 +156,7 @@ class TestDatasetPuller:
             def __init__(self, *args, **kwargs):
                 self.kwargs = kwargs
 
-            def _ensure_complete_dataset(self):
+            def _ensure_complete_dataset(self, *args, **kwargs):
                 calls["metadata"] += 1
 
             def _ensure_neuron_index_from_metadata(self):
@@ -184,6 +184,83 @@ class TestDatasetPuller:
         assert st["summary"]["neuron_count"] == 1000
         assert st["summary"]["index_rows"] == 1000
 
+    def test_metadata_pull_cancel_during_download_marks_cancelled(self, monkeypatch):
+        """Cancel during the first-time download propagates DatasetPullCancelled
+        out of FindNeuronConnection init; the puller marks the pull as cancelled
+        (not failed) and stops instead of carrying on to the connection fetch."""
+        import coana
+        from statvis import DatasetPullCancelled
+
+        class CancelDuringDownloadFNC:
+            def __init__(self, *args, **kwargs):
+                self.kwargs = kwargs
+                # progress was already being shown when the cancel landed
+                progress_callback = kwargs.get("progress_callback")
+                if progress_callback:
+                    progress_callback(20000, 176422)
+                raise DatasetPullCancelled("Dataset pull cancelled.")
+
+            def _ensure_complete_dataset(self, *args, **kwargs):
+                pass
+
+            def _ensure_neuron_index_from_metadata(self):
+                pass
+
+        monkeypatch.setattr(coana, "FindNeuronConnection", CancelDuringDownloadFNC)
+        puller = DatasetPuller()
+        assert puller.start("male-cns:v1.0", operation="full_dataset") is True
+        assert _wait_until(lambda: puller.state["done"])
+        st = puller.state
+        assert st["cancelled"] is True
+        assert st["error"] is None
+        assert st["info"] == "Cancelled during download."
+        assert st["summary"]["cancelled"] is True
+
+    def test_metadata_pull_reports_download_progress(self, monkeypatch):
+        """'Pull Dataset Metadata' streams the neuron/ROI table download
+        progress into the puller state so the Settings UI shows a determinate
+        bar.  Without it the long download runs invisibly in the terminal while
+        the UI sits on the indeterminate 'Preparing...' message."""
+        import coana
+
+        class DownloadProgressFNC:
+            def __init__(self, *args, **kwargs):
+                self.kwargs = kwargs
+                # The download (if any) runs during FindNeuronConnection init;
+                # make sure the callback handed to the constructor drives the
+                # puller state as chunks download.
+                progress_callback = kwargs.get("progress_callback")
+                if progress_callback:
+                    progress_callback(0, 176422)
+                    progress_callback(20000, 176422)
+                    progress_callback(88000, 176422)
+
+            def _ensure_complete_dataset(self, *args, **kwargs):
+                pass
+
+            def _ensure_neuron_index_from_metadata(self):
+                pass
+
+            def _get_all_dataset_bodyids(self):
+                return [str(x) for x in range(1000, 2000)]
+
+            def _load_neuron_index(self):
+                import pandas as pd
+                return pd.DataFrame({"bodyId": [str(x) for x in range(1000, 2000)]})
+
+        monkeypatch.setattr(coana, "FindNeuronConnection", DownloadProgressFNC)
+        puller = DatasetPuller()
+        assert puller.start("male-cns:v1.0", operation="full_dataset") is True
+        assert _wait_until(lambda: puller.state["done"])
+        st = puller.state
+        assert st["error"] is None
+        assert st["operation"] == "full_dataset"
+        # The download progress reached the state so the Settings tab shows a
+        # determinate bar (total>0) with the current chunk count.
+        assert st["total"] == 176422
+        assert st["current"] == 88000
+        assert st["fetch_started_at"] is not None
+
     def test_max_workers_passed_through(self, fake_fnc):
         fake_fnc["build"] = _FakeBuild()
         puller = DatasetPuller()
@@ -202,7 +279,7 @@ class TestDatasetPuller:
             def __init__(self, *args, **kwargs):
                 order.append("init")
 
-            def _ensure_complete_dataset(self):
+            def _ensure_complete_dataset(self, *args, **kwargs):
                 order.append("metadata")
 
             def _ensure_neuron_index_from_metadata(self):
@@ -307,7 +384,7 @@ class TestDatasetPullerPhases:
                 events.append("init")
                 init_done.wait(5)  # hold the prepare phase observable
 
-            def _ensure_complete_dataset(self):
+            def _ensure_complete_dataset(self, *args, **kwargs):
                 pass
 
             def _ensure_neuron_index_from_metadata(self):
@@ -353,7 +430,7 @@ class TestDatasetPullerPhases:
             def __init__(self, *args, **kwargs):
                 release_init.wait(5)
 
-            def _ensure_complete_dataset(self):
+            def _ensure_complete_dataset(self, *args, **kwargs):
                 pass
 
             def _ensure_neuron_index_from_metadata(self):
