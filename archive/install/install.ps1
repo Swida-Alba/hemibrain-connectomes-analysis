@@ -208,7 +208,12 @@ if ($EnvOverride) {
         $PreviousErrorActionPreference = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
         try {
-            & $script:CondaPath create -n $EnvOverride "python=$PythonVersion" -y
+            # Create against conda-forge with --override-channels: a fresh
+            # Miniconda 26.x blocks non-interactive `conda create` against the
+            # default (repo.anaconda.com) channels until the Anaconda Terms of
+            # Service are accepted (CondaToSNonInteractiveError). conda-forge
+            # requires no such acceptance; post-creation deps are pip-installed.
+            & $script:CondaPath create -n $EnvOverride -c conda-forge --override-channels "python=$PythonVersion" -y
         } finally {
             $ErrorActionPreference = $PreviousErrorActionPreference
         }
@@ -232,7 +237,9 @@ if (-not $script:EnvName) {
         $PreviousErrorActionPreference = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
         try {
-            & $script:CondaPath create -n $Candidate "python=$PythonVersion" -y
+            # See the custom-env branch above: conda-forge + --override-channels
+            # sidesteps the Anaconda ToS gate on fresh Miniconda 26.x installs.
+            & $script:CondaPath create -n $Candidate -c conda-forge --override-channels "python=$PythonVersion" -y
         } finally {
             $ErrorActionPreference = $PreviousErrorActionPreference
         }

@@ -62,9 +62,9 @@ REM A configured custom env must be the env used: never silently switch to a
 REM default name. If it is missing or not Python 3.11, the installer is the
 REM only path that can create or repair it.
 if !N! EQU 0 if defined ENV_OVERRIDE (
-    echo ERROR: environment "!ENV_OVERRIDE!" (custom env from envs.!DROCAT_VERSION!) is missing or is not Python 3.11.
-    echo Fix it, remove it, or clear the envs entry; DROCAT never silently switches environments.
-    goto error
+    echo Environment "!ENV_OVERRIDE!" ^(from envs.!DROCAT_VERSION!^) is missing or is not Python 3.11.
+    echo Running the installer to create or repair it...
+    goto repair
 )
 set /a N+=1
 if !N! LEQ 20 goto resolve
