@@ -67,14 +67,14 @@ class VisualizeSkeleton:
 
 ## Path Resolution
 
-For a project at: `/path/to/hemibrain-connectomes-analysis-now/`
+For a project at: `/path/to/drocat/`
 
 | Attribute | Value | Purpose |
 |-----------|-------|---------|
-| `source_path` | `/path/to/hemibrain-connectomes-analysis-now/src` | Points to src/ directory |
-| `script_path` | `/path/to/hemibrain-connectomes-analysis-now` | Points to project root |
-| `output_dir` | `/path/to/hemibrain-connectomes-analysis-now/connection_data` | Data storage location |
-| `cache_folder` | `/path/to/hemibrain-connectomes-analysis-now/cache/<dataset>` | Cache storage location |
+| `source_path` | `/path/to/drocat/src` | Points to src/ directory |
+| `script_path` | `/path/to/drocat` | Points to project root |
+| `output_dir` | `/path/to/drocat/connection_data` | Data storage location |
+| `cache_folder` | `/path/to/drocat/cache/<dataset>` | Cache storage location |
 
 ## Benefits
 
@@ -114,15 +114,15 @@ fc = FindNeuronConnection(
 )
 
 # Access the paths
-print(fc.source_path)  # .../hemibrain-connectomes-analysis-now/src
-print(fc.script_path)  # .../hemibrain-connectomes-analysis-now
-print(fc.output_dir)  # .../hemibrain-connectomes-analysis-now/connection_data
+print(fc.source_path)  # .../drocat/src
+print(fc.script_path)  # .../drocat
+print(fc.output_dir)  # .../drocat/connection_data
 ```
 
 ### Directory Structure
 
 ```
-hemibrain-connectomes-analysis-now/         ← script_path
+drocat/         ← script_path
 ├── src/                                     ← source_path
 │   ├── coana.py
 │   ├── statvis.py

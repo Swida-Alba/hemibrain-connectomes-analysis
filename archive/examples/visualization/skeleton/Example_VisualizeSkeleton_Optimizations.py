@@ -6,7 +6,7 @@ Demonstrates the new optimizations for faster and more efficient visualization:
 2. Optimized visualization methods - smaller file sizes, faster rendering
 3. Enhanced export_video - load from existing HTML, use cached images
 
-Author: hemibrain-connectomes-analysis-v3.1
+Author: drocat
 Date: November 20, 2024
 """
 

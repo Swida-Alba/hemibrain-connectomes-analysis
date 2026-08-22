@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel", "setuptools_scm[toml]>=6.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hemibrain-connectomes-analysis"
+name = "drocat"
 version = "4.5.0"
 description = "Hemibrain connectome analysis and visualization toolkit with reorganized modular structure"
 readme = {file = "README.md", content-type = "text/markdown"}
@@ -111,13 +111,13 @@ gui = [
 ]
 
 all = [
-    "hemibrain-connectomes-analysis[dev,viz,gui,ui]"
+    "drocat[dev,viz,gui,ui]"
 ]
 
 [project.urls]
-Homepage = "https://github.com/Swida-Alba/hemibrain-connectomes-analysis"
-Repository = "https://github.com/Swida-Alba/hemibrain-connectomes-analysis"
-Documentation = "https://github.com/Swida-Alba/hemibrain-connectomes-analysis/blob/main/README.md"
+Homepage = "https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis"
+Repository = "https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis"
+Documentation = "https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/blob/main/README.md"
 
 [tool.setuptools]
 # Package discovery - src layout (v2.1.0 reorganization)

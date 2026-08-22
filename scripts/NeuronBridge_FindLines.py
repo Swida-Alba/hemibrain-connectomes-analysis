@@ -87,7 +87,7 @@ Specificity/Selectivity Analysis:
     - Specificity score distributions
     - Detailed per-line neuron breakdowns
 
-Author: Hemibrain Connectomes Analysis Project
+Author: DROCAT Project
 """
 
 import os

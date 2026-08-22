@@ -327,7 +327,7 @@ Historical documentation and fixes are in the [archive](./archive/DOCUMENTATION_
 - Review [examples directory](../archive/examples/)
 
 ### Technical Support
-- [GitHub Issues](https://github.com/Swida-Alba/hemibrain-connectomes-analysis/issues)
+- [GitHub Issues](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/issues)
 - Check [Technical Documentation](./technical/README.md)
 - Review [FAQ](#) (coming soon)
 

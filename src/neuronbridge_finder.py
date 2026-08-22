@@ -33,7 +33,7 @@ Example usage:
     # Find neurons matching a driver line (returns neurons from all datasets)
     neurons = nbf.line_to_neuron('LH173', top_n=10)
 
-Author: Generated for hemibrain-connectomes-analysis project
+Author: Generated for DROCAT project
 """
 
 import json

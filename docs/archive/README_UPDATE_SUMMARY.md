@@ -89,8 +89,8 @@ package requirements are in the setup.py (pandas should be 1.5.1)
 ### Simple Path (Recommended)
 ```bash
 # 1. Clone repository
-git clone https://github.com/Swida-Alba/hemibrain-connectomes-analysis.git
-cd hemibrain-connectomes-analysis
+git clone https://github.com/Swida-Alba/drocat.git
+cd drocat
 
 # 2. Install dependencies
 pip install -r requirements.txt
@@ -102,8 +102,8 @@ python -c "import PyQt5; print('✅ Ready to go!')"
 ### Developer Path
 ```bash
 # 1. Clone repository
-git clone https://github.com/Swida-Alba/hemibrain-connectomes-analysis.git
-cd hemibrain-connectomes-analysis
+git clone https://github.com/Swida-Alba/drocat.git
+cd drocat
 
 # 2. Install in editable mode with dev tools
 pip install -e ".[dev]"

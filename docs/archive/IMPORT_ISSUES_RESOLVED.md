@@ -118,7 +118,7 @@ for f in sorted(files)[:5]:
 ## Project Structure
 
 ```
-hemibrain-connectomes-analysis-now/
+drocat/
 ├── src/                    # Core modules (imported by scripts)
 │   ├── coana.py
 │   ├── statvis.py

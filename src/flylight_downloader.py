@@ -76,7 +76,7 @@ File Types:
     - *.lsm.bz2: Raw confocal data (compressed)
     - VT lines: *_total.jpg, *_ch2_total.jpg (projections), *.t.mp4 (translations)
 
-Author: Hemibrain Connectomes Analysis Project
+Author: DROCAT Project
 """
 
 import os

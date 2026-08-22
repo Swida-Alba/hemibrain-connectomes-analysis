@@ -1,6 +1,6 @@
 # Core Features Documentation
 
-Documentation for the fundamental features of the Hemibrain Connectomes Analysis toolkit.
+Documentation for the fundamental features of the DROCAT toolkit.
 
 ## Overview
 

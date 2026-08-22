@@ -1,6 +1,6 @@
 # Examples Directory
 
-This directory contains example scripts demonstrating the key features of the Hemibrain Connectomes Analysis toolkit, organized by category.
+This directory contains example scripts demonstrating the key features of the DROCAT toolkit, organized by category.
 
 ## 📁 Directory Structure
 

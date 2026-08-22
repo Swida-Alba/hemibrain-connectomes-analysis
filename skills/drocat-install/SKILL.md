@@ -1,6 +1,6 @@
 ---
 name: drocat-install
-description: Auto-install the DROCAT Drosophila connectome analysis toolkit (hemibrain-connectomes-analysis) on macOS, Linux, or Windows. Use when the user asks to install, set up, repair, or prepare DROCAT (e.g., "install DROCAT", "set up the connectome toolkit", "fix my DROCAT install", "fresh machine setup") - fetches the repository from GitHub, creates the conda environment, installs dependencies, configures NeuPrint/CAVE tokens, verifies the installation, and launches the web UI.
+description: Auto-install the DROCAT Drosophila connectome analysis toolkit (drocat) on macOS, Linux, or Windows. Use when the user asks to install, set up, repair, or prepare DROCAT (e.g., "install DROCAT", "set up the connectome toolkit", "fix my DROCAT install", "fresh machine setup") - fetches the repository from GitHub, creates the conda environment, installs dependencies, configures NeuPrint/CAVE tokens, verifies the installation, and launches the web UI.
 ---
 
 # DROCAT Install

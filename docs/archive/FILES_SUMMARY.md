@@ -158,7 +158,7 @@ DA1_PN,LHON2,120
 ## File Organization
 
 ```
-hemibrain-connectomes-analysis-now/
+drocat/
 │
 ├── vispath.py ⭐ MODIFIED
 │   ├── _validate_data() - Enhanced

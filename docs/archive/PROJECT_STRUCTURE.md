@@ -6,14 +6,14 @@
 
 ## Overview
 
-This document describes the organization of the hemibrain-connectomes-analysis project.
+This document describes the organization of the drocat project.
 
 ---
 
 ## Directory Structure
 
 ```
-hemibrain-connectomes-analysis-now/
+drocat/
 │
 ├── README.md                          # Main documentation
 ├── DOCUMENTATION_STRUCTURE.md         # Documentation index

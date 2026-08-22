@@ -22,7 +22,7 @@ The `VisualizePath` class is a **standalone visualization module** for neural pa
 ### File Structure
 
 ```
-hemibrain-connectomes-analysis-now/
+drocat/
 ├── coana.py                                    # Main analysis class
 │   └── FindNeuronConnection.VisualizeSelectedPaths()  # Wrapper method
 ├── vispath.py                                  # NEW: Standalone visualization

@@ -58,7 +58,7 @@ The VSCode Python linter shows "Import could not be resolved" errors because:
 ## Project Structure
 
 ```
-hemibrain-connectomes-analysis-now/
+drocat/
 ├── src/                           # Core source code
 │   ├── __init__.py
 │   ├── coana.py                   # Main analysis module

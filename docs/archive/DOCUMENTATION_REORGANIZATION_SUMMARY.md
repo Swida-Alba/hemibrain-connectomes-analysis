@@ -127,7 +127,7 @@ Moved to `docs/archive/`:
 ## New Documentation Structure
 
 ```
-hemibrain-connectomes-analysis-now/
+drocat/
 ├── README.md                                   # Main entry point
 ├── REQUIREMENTS_CHECKLIST.md
 ├── DOCUMENTATION_CONSOLIDATION_PLAN.md

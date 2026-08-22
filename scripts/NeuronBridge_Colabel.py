@@ -50,7 +50,7 @@ Use Cases:
     3. Assess specificity of driver lines for experimental planning
     4. Design intersectional genetics experiments (Split-GAL4)
 
-Author: Hemibrain Connectomes Analysis Project
+Author: DROCAT Project
 """
 
 import sys

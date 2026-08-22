@@ -7,7 +7,7 @@ This example shows:
 3. Backward compatibility with primary_rois/
 4. Brain transformation handling with user confirmation
 
-Author: hemibrain-connectomes-analysis-v3.1
+Author: drocat
 Date: November 2024
 """
 

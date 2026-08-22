@@ -1,6 +1,6 @@
 # Visualization Documentation Overview
 
-Comprehensive guides for all visualization types in the Hemibrain Connectomes Analysis toolkit.
+Comprehensive guides for all visualization types in the DROCAT toolkit.
 
 ## Quick Reference
 
@@ -348,7 +348,7 @@ plot_navis_3d(bodyIds=[...], show_rois=True)
 1. Check individual visualization guides
 2. Review [troubleshooting sections](#) in each guide
 3. Examine [examples directory](../../archive/examples/)
-4. Check [GitHub issues](https://github.com/Swida-Alba/hemibrain-connectomes-analysis/issues)
+4. Check [GitHub issues](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/issues)
 
 ---
 

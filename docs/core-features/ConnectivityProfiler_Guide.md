@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `ConnectivityProfiler` is the **foundational module** for building connectivity profiles in the hemibrain-connectomes-analysis project. It implements the **1-hop/2-hop hybrid approach** with **top-k/top-m dynamic expansion**, which is the authoritative method for all profile construction.
+The `ConnectivityProfiler` is the **foundational module** for building connectivity profiles in the drocat project. It implements the **1-hop/2-hop hybrid approach** with **top-k/top-m dynamic expansion**, which is the authoritative method for all profile construction.
 
 **Key Principle**: All connectivity profiles are built at the bodyId level. Type-level profiles are aggregations of bodyId-level profiles.
 

@@ -179,7 +179,7 @@ Progress: 25/50 sources (50.0%) |
 Run the test script to validate:
 
 ```bash
-cd hemibrain-connectomes-analysis-now
+cd drocat
 python examples/test_pathfinding_optimization.py
 ```
 

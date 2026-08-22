@@ -6,7 +6,7 @@ core/optional imports, token configuration, and the UI package import.
 Token configuration is advisory unless ``--require-token`` is passed.
 
 Usage:
-    python verify_install.py --project /path/to/hemibrain-connectomes-analysis
+    python verify_install.py --project /path/to/drocat
     python verify_install.py --project . --python /path/to/env/bin/python
 """
 

@@ -7,7 +7,7 @@ This script tests:
 3. Dataset-specific caching
 4. Error handling and fallback mechanisms
 
-Author: hemibrain-connectomes-analysis-v3.1
+Author: drocat
 Date: November 20, 2024
 """
 

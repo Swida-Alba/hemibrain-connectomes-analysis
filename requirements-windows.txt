@@ -1,5 +1,5 @@
 # =============================================================================
-# Hemibrain Connectomes Analysis - Windows Requirements
+# DROCAT - Windows Requirements
 # Project Structure: Reorganized with src/ layout (v4.1)
 # Versions pinned to tested working versions from conda env 'drocat'
 # =============================================================================

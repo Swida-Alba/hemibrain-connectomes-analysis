@@ -1,5 +1,5 @@
 """
-Utility modules for hemibrain-connectomes-analysis.
+Utility modules for DROCAT.
 
 Modules:
     api_utils: API call utilities with timeout, retry, and Cypher escaping

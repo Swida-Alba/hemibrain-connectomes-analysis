@@ -33,7 +33,7 @@ Visualization Features:
     - Natural sorting in PDF: r1, r2, ..., r9, r10 (not r1, r10, r11...)
     - Line or tube skeleton modes based on neuron count (>50 uses line mode)
 
-Author: Hemibrain Connectomes Analysis Project
+Author: DROCAT Project
 """
 
 import sys

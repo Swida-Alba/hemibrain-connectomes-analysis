@@ -474,5 +474,5 @@ python examples/Example_VisualizeSkeleton_Optimizations.py
 ---
 
 **Version**: 3.1  
-**Author**: hemibrain-connectomes-analysis-v3.1  
+**Author**: drocat  
 **Date**: November 20, 2024

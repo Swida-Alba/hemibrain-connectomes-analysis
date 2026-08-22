@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `vispath-subproject` directory contains a standalone installable version of the VisualizePath visualization toolkit. This allows users to install just the visualization component without the full hemibrain connectomes analysis suite.
+The `vispath-subproject` directory contains a standalone installable version of the VisualizePath visualization toolkit. This allows users to install just the visualization component without the full DROCAT suite.
 
 ## Installation Options
 
@@ -32,7 +32,7 @@ cd vispath-subproject
 pip install -e .
 
 # Or directly from GitHub
-pip install git+https://github.com/Swida-Alba/hemibrain-connectomes-analysis.git#subdirectory=vispath-subproject
+pip install git+https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git#subdirectory=vispath-subproject
 ```
 
 **Dependencies (minimal):**
@@ -48,7 +48,7 @@ pip install git+https://github.com/Swida-Alba/hemibrain-connectomes-analysis.git
 
 ### Option 2: Full Installation (Recommended)
 
-Install the complete hemibrain-connectomes-analysis package, which includes VisualizePath:
+Install the complete drocat package, which includes VisualizePath:
 
 ```bash
 # From the root directory
@@ -285,7 +285,7 @@ If you see import errors about `statvis`:
 ```python
 # This is expected in standalone mode
 # Install the full package for complete functionality
-pip install hemibrain-connectomes-analysis
+pip install drocat
 ```
 
 ### Module Not Found
@@ -303,7 +303,7 @@ export PYTHONPATH="${PYTHONPATH}:${PWD}/src"
 ## Support
 
 For issues, questions, or contributions:
-- GitHub Issues: https://github.com/Swida-Alba/hemibrain-connectomes-analysis/issues
+- GitHub Issues: https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/issues
 - Main Documentation: ../README.md
 
 ## License

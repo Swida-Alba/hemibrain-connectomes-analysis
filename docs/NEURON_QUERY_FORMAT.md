@@ -1,6 +1,6 @@
 # Neuron Query Format Guide
 
-This document describes the flexible neuron query format supported throughout the hemibrain-connectomes-analysis project.
+This document describes the flexible neuron query format supported throughout the drocat project.
 
 ## Overview
 

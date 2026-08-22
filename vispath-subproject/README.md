@@ -39,13 +39,13 @@ pip install -e .
 ### As a standalone package:
 
 ```bash
-pip install git+https://github.com/Swida-Alba/hemibrain-connectomes-analysis.git#subdirectory=vispath-subproject
+pip install git+https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git#subdirectory=vispath-subproject
 ```
 
 ### As part of the main project:
 
 ```bash
-pip install git+https://github.com/Swida-Alba/hemibrain-connectomes-analysis.git
+pip install git+https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git
 ```
 
 ### Development installation:
@@ -222,9 +222,9 @@ VisualizePath supports three input formats:
 For full documentation, see:
 - [VisualizePath Quick Reference](../docs/visualizations/VisualizePath_QuickRef.md)
 - [Network Features Guide](../docs/visualizations/VisualizePath_Network_Features.md)
-- [Main Project README](https://github.com/Swida-Alba/hemibrain-connectomes-analysis)
+- [Main Project README](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis)
 Swida Alba & Copilot
 
 ## Part of
 
-[Hemibrain Connectomes Analysis](https://github.com/Swida-Alba/hemibrain-connectomes-analysis)
+[DROCAT](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis)

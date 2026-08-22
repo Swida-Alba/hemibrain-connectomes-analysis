@@ -28,7 +28,7 @@ Finding Methods:
     - find_homologs(): Comprehensive search (builds all target profiles)
     - find_homologs_fast(): Fast search via adjacency expansion
 
-Author: Example script for hemibrain-connectomes-analysis
+Author: Example script for drocat
 """
 
 import sys

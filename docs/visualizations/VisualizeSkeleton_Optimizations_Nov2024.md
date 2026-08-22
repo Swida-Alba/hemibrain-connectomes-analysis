@@ -253,6 +253,6 @@ Tests all features including online fetching and automatic downloads.
 
 ---
 
-**Author**: hemibrain-connectomes-analysis-v3.1  
+**Author**: drocat  
 **Date**: November 20, 2024  
 **Version**: 3.1

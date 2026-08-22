@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vispath"
 version = "1.0.0"
-description = "Visualization toolkit for neural pathways - standalone component from Hemibrain Connectomes Analysis"
+description = "Visualization toolkit for neural pathways - standalone component from DROCAT"
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.10,<3.12"
 license = {text = "MIT"}
@@ -44,10 +44,10 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Swida-Alba/hemibrain-connectomes-analysis"
-Repository = "https://github.com/Swida-Alba/hemibrain-connectomes-analysis"
-Documentation = "https://github.com/Swida-Alba/hemibrain-connectomes-analysis/blob/main/README.md"
-"Parent Project" = "https://github.com/Swida-Alba/hemibrain-connectomes-analysis"
+Homepage = "https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis"
+Repository = "https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis"
+Documentation = "https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/blob/main/README.md"
+"Parent Project" = "https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

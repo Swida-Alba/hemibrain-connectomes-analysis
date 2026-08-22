@@ -1,5 +1,5 @@
 """
-Hemibrain Connectomes Analysis - Core Module
+DROCAT - Core Module
 
 This module provides tools for analyzing and visualizing Drosophila hemibrain connectome data.
 

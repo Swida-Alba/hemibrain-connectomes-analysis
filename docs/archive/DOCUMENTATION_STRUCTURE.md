@@ -22,7 +22,7 @@ See [Quick Reference](#new-features-quick-reference) below.
 ## File Organization
 
 ```
-hemibrain-connectomes-analysis-now/
+drocat/
 │
 ├── README.md                          ← Main entry point with navigation
 │

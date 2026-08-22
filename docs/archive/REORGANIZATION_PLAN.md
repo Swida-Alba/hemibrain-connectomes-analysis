@@ -9,7 +9,7 @@
 ## Proposed Structure
 
 ```
-hemibrain-connectomes-analysis/
+drocat/
 ├── README.md
 ├── LICENSE
 ├── setup.py

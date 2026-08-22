@@ -58,10 +58,10 @@ Both modes now:
 4. Produce the expected results
 
 ## Files Modified
-- `/Users/apple/Documents/GitHub/hemibrain-connectomes-analysis-now/coana.py`
+- `/Users/apple/Documents/GitHub/drocat/coana.py`
   - `_apply_type_level_filters()` method (lines 882-970)
   
-- `/Users/apple/Documents/GitHub/hemibrain-connectomes-analysis-now/FindPath.py`
+- `/Users/apple/Documents/GitHub/drocat/FindPath.py`
   - Updated to use min_synapse_num=1, min_ratio=0
 
 ## Test Results

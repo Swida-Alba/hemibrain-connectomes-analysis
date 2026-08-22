@@ -92,7 +92,7 @@ function updateEdgeMetric(metric) {
 
 ### Test Sankey Toggle:
 ```bash
-cd /Users/apple/Documents/GitHub/hemibrain-connectomes-analysis-now
+cd /Users/apple/Documents/GitHub/drocat
 python test_metric_toggle.py
 ```
 
