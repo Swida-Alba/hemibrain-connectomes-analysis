@@ -205,7 +205,11 @@ if [[ -n "$ENV_OVERRIDE" ]]; then
     else
         ENV_NAME="$ENV_OVERRIDE"
         printf '%s\n' "Creating $ENV_NAME (custom env from $ENV_SOURCE)..."
-        "$CONDA_BIN" create -n "$ENV_NAME" "python=$PYTHON_VERSION" -y
+        # Fresh Miniconda 26.x blocks non-interactive `conda create` against the
+        # default (repo.anaconda.com) channels until the Anaconda Terms of
+        # Service are accepted (CondaToSNonInteractiveError). conda-forge
+        # requires no such acceptance; post-creation deps are pip-installed.
+        "$CONDA_BIN" create -n "$ENV_NAME" -c conda-forge --override-channels "python=$PYTHON_VERSION" -y
     fi
 fi
 if [[ -z "$ENV_NAME" ]]; then
@@ -227,7 +231,9 @@ if [[ -z "$ENV_NAME" ]]; then
         fi
         ENV_NAME="$candidate"
         printf '%s\n' "Creating $ENV_NAME..."
-        "$CONDA_BIN" create -n "$ENV_NAME" "python=$PYTHON_VERSION" -y
+        # See the custom-env branch above: conda-forge + --override-channels
+        # sidesteps the Anaconda ToS gate on fresh Miniconda 26.x installs.
+        "$CONDA_BIN" create -n "$ENV_NAME" -c conda-forge --override-channels "python=$PYTHON_VERSION" -y
         break
     done
 fi
