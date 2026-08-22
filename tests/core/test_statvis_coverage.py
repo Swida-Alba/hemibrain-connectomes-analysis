@@ -553,6 +553,44 @@ class TestPathBuilders:
             targets=["B"], level="type", engine="auto")
         assert isinstance(df2, pl.DataFrame)
 
+    def test_enrich_engines_keep_untyped_neurons_as_bodyid(self):
+        """Both enrichment engines resolve labels by the exclusive chain
+        label -> type -> bodyId (groups: custom_group -> type -> bodyId):
+        untyped neurons survive as their bodyId, typed-but-ungrouped
+        neurons keep their type as the group label, and null group keys
+        never reach the aggregated tables."""
+        rows = {
+            "bodyId_pre": ["1", "2", "5"],
+            "bodyId_post": ["3", "4", "6"],
+            "weight": [5, 6, 7],
+            "post": [100, 100, 100],
+            "type_pre": [None, "A", None],
+            "type_post": ["B", None, None],
+            "custom_group_pre": ["G1", None, None],
+            "custom_group_post": [None, "G2", None],
+        }
+        expected_type = {("1", "B"), ("A", "4"), ("5", "6")}
+        expected_group = {("G1", "B"), ("A", "G2"), ("5", "6")}
+        frames = [("polars", pl.DataFrame(rows)),
+                  ("pandas", pd.DataFrame(rows))]
+        for engine, frame in frames:
+            _, conn_t, conn_g = sv.EnrichConnectionTable(
+                frame, dataset=None, script_path=None, engine=engine)
+            type_edges = set(zip(conn_t["type_pre"], conn_t["type_post"]))
+            assert type_edges == expected_type
+            assert conn_g is not None
+            group_edges = set(zip(conn_g["custom_group_pre"],
+                                  conn_g["custom_group_post"]))
+            assert group_edges == expected_group
+            pre_nulls = (conn_g["custom_group_pre"].is_null()
+                         if hasattr(conn_g["custom_group_pre"], "is_null")
+                         else conn_g["custom_group_pre"].isna())
+            post_nulls = (conn_g["custom_group_post"].is_null()
+                          if hasattr(conn_g["custom_group_post"], "is_null")
+                          else conn_g["custom_group_post"].isna())
+            assert pre_nulls.sum() == 0
+            assert post_nulls.sum() == 0
+
 
 # =============================================================================
 # Streaming polars pipeline

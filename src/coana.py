@@ -535,6 +535,21 @@ def load_flywire_merged_connections(conn_file: str) -> 'pd.DataFrame':
     return df
 
 
+def _is_missing_type_label(value) -> bool:
+    """True when a type/group label cell is effectively absent.
+
+    Real neuron tables carry float NaN for untyped neurons, and string
+    columns can hold the literals 'nan'/'None'; all of them must be treated
+    as missing, never as a valid label (a 'nan' type would silently drop
+    untyped neurons from the type/group derivation).
+    """
+    if value is None:
+        return True
+    if isinstance(value, float) and pd.isna(value):
+        return True
+    return str(value).strip().lower() in ('', 'none', 'nan')
+
+
 @dataclass
 class FindNeuronConnection:
     '''
@@ -5828,6 +5843,11 @@ class FindNeuronConnection:
         cached_raw = self._empty_path_connection_frame()
         if getattr(self, 'use_cache', False):
             conn_db = self._load_connection_db()
+            # Instances that picked the connection frame up from the
+            # module-level cache may not have the row indexes built yet; the
+            # post-synaptic index is required for the target-rooted lookup.
+            if getattr(self, '_conn_index_post', None) is None:
+                self._build_conn_index()
             row_indices = []
             post_index = getattr(self, '_conn_index_post', None) or {}
             for post_id in requested_posts:
@@ -10189,34 +10209,35 @@ class FindNeuronConnection:
             'complete': discovery_complete,
         }
 
-    def _derive_type_paths_from_bodyid_paths(self, all_paths, node_label,
-                                             kept_type_edges, source_types,
-                                             target_types, verbose=False):
-        """Derive type-level paths from the discovered bodyId paths.
+    def _derive_label_paths_from_bodyid_paths(self, all_paths, node_label,
+                                              kept_edges, source_labels,
+                                              target_labels, verbose=False):
+        """Derive label-level paths (type or custom group) from the
+        discovered bodyId paths.
 
-        Each discovered bodyId path is mapped to its type sequence via
-        ``node_label`` (a callable bodyId -> final type label, matching the
-        labels used in conn_types), and the unique sequences are returned as
-        lists. A sequence is accepted only when:
+        Each discovered bodyId path is mapped to its label sequence via
+        ``node_label`` (a callable bodyId -> final label, matching the
+        labels used in the aggregated edge table), and the unique sequences
+        are returned as lists. A sequence is accepted only when:
 
-        - it starts at a queried source type and ends at a queried target
-          type, and
-        - every consecutive type pair exists in ``kept_type_edges`` (the
-          type-edge table; a defensive label-consistency check — the hops
-          always come from in-path bodyId pairs, and no type-level edge
+        - it starts at a queried source label and ends at a queried target
+          label, and
+        - every consecutive label pair exists in ``kept_edges`` (the
+          label-edge table; a defensive label-consistency check — the hops
+          always come from in-path bodyId pairs, and no label-level edge
           limit is applied to the derivation).
 
         ``verbose`` wraps the (potentially millions of) bodyId paths with a
         single-line progress display (LineProgress), refreshed in place.
 
-        Unlike running a pathfinding on the type-level graph, this never
-        produces phantom type paths (type chains whose hops are each backed
-        by a different bodyId pair but never realized by one bodyId path),
-        and it preserves repeated-type routes (A->B->A) that a simple-path
-        search on the type graph would drop.
+        Unlike running a pathfinding on the label-level graph, this never
+        produces phantom label paths (label chains whose hops are each
+        backed by a different bodyId pair but never realized by one bodyId
+        path), and it preserves repeated-label routes (A->B->A) that a
+        simple-path search on the label graph would drop.
         """
-        source_set = set(source_types)
-        target_set = set(target_types)
+        source_set = set(source_labels)
+        target_set = set(target_labels)
         iterator = all_paths
         if verbose:
             try:
@@ -10232,7 +10253,7 @@ class FindNeuronConnection:
         for seq in seen:
             if seq[0] not in source_set or seq[-1] not in target_set:
                 continue
-            if all((seq[i], seq[i + 1]) in kept_type_edges
+            if all((seq[i], seq[i + 1]) in kept_edges
                    for i in range(len(seq) - 1)):
                 out.append(list(seq))
         return out
@@ -12598,6 +12619,25 @@ class FindNeuronConnection:
         if target_type_appearances:
             self._vprint(f'  ✓ Updated real_layer for {len(target_type_appearances)} target types', level='full')
         
+        # Raw per-bodyId types come from the fetched layer tables — the same
+        # types EnrichConnectionTablePolars aggregated into conn_types. Built
+        # here (before the group layer map) so the group-layer fallback and
+        # the type/group label callables share one source of truth.
+        raw_type_map = {}
+        for tbl in all_connections_filtered:
+            if tbl is None or tbl.is_empty():
+                continue
+            for u, t in zip(tbl['bodyId_pre'], tbl['type_pre']):
+                if not _is_missing_type_label(t):
+                    raw_type_map.setdefault(str(u), str(t))
+            for v, t in zip(tbl['bodyId_post'], tbl['type_post']):
+                if not _is_missing_type_label(t):
+                    raw_type_map.setdefault(str(v), str(t))
+        for df_ in (self.source_df, self.target_df):
+            for b, t in zip(df_['bodyId'], df_['type']):
+                if not _is_missing_type_label(t):
+                    raw_type_map.setdefault(str(b), str(t))
+
         # Create group-level real layer map if custom groups exist
         real_layer_map_group = {}
         if conn_groups is not None and not conn_groups.is_empty() and 'custom_group' in self.source_df.columns:
@@ -12609,10 +12649,42 @@ class FindNeuronConnection:
             target_group_appearances = {}
             
             if not conn_inpath.is_empty() and 'custom_group_pre' in conn_inpath.columns:
-                # Create mapping from bodyId to group from conn_inpath
-                pre_map = conn_inpath.select(['bodyId_pre', 'custom_group_pre']).rename({'bodyId_pre': 'bodyId', 'custom_group_pre': 'group'})
-                post_map = conn_inpath.select(['bodyId_post', 'custom_group_post']).rename({'bodyId_post': 'bodyId', 'custom_group_post': 'group'})
-                body_group_map = pl.concat([pre_map, post_map]).unique()
+                # Create mapping from bodyId to group from conn_inpath.
+                # Group labels follow the same exclusive chain as the
+                # enrichment engines (custom_group -> type -> bodyId), so
+                # ungrouped/untyped neurons keep their identity and the map
+                # keys match the labels the group-path derivation emits.
+                pre_map = conn_inpath.select([
+                    pl.col('bodyId_pre').cast(pl.Utf8).alias('bodyId'),
+                    pl.coalesce([
+                        pl.when(pl.col('custom_group_pre').is_not_null()
+                                & (pl.col('custom_group_pre') != ''))
+                        .then(pl.col('custom_group_pre')).otherwise(None),
+                        pl.when(pl.col('type_pre').is_not_null()
+                                & (pl.col('type_pre') != ''))
+                        .then(pl.col('type_pre')).otherwise(None),
+                        pl.col('bodyId_pre').cast(pl.Utf8),
+                    ]).alias('group'),
+                ])
+                post_map = conn_inpath.select([
+                    pl.col('bodyId_post').cast(pl.Utf8).alias('bodyId'),
+                    pl.coalesce([
+                        pl.when(pl.col('custom_group_post').is_not_null()
+                                & (pl.col('custom_group_post') != ''))
+                        .then(pl.col('custom_group_post')).otherwise(None),
+                        pl.when(pl.col('type_post').is_not_null()
+                                & (pl.col('type_post') != ''))
+                        .then(pl.col('type_post')).otherwise(None),
+                        pl.col('bodyId_post').cast(pl.Utf8),
+                    ]).alias('group'),
+                ])
+                body_group_map = pl.concat([pre_map, post_map]).unique(subset=['bodyId'])
+                # Plain dict for the group-path derivation (survives the
+                # conn_inpath memory release on skip_bodyId runs).
+                body_to_group_map = {
+                    str(b): str(g) for b, g in
+                    zip(body_group_map['bodyId'], body_group_map['group'])
+                }
                 
                 # Join with real_layer_df
                 group_layers = body_group_map.join(real_layer_df, on='bodyId', how='inner')
@@ -12623,7 +12695,7 @@ class FindNeuronConnection:
                 real_layer_map_group = dict(zip(min_layers['group'].to_list(), min_layers['real_layer'].to_list()))
                 
                 # Handle target group appearances
-                body_to_group_dict = dict(zip(body_group_map['bodyId'].to_list(), body_group_map['group'].to_list()))
+                body_to_group_dict = body_to_group_map
                 
                 for bodyId, layers in target_appearance_layers.items():
                     bodyId_str = str(bodyId)
@@ -13203,7 +13275,7 @@ class FindNeuronConnection:
                     hemi_suffix = _extract_hemi_suffix(str(t))
                     if hemi_suffix and not label.endswith(hemi_suffix):
                         label = label + hemi_suffix
-            elif t is not None and (not isinstance(t, float) or not pd.isna(t)) and str(t).strip() != '':
+            elif not _is_missing_type_label(t):
                 label = str(t)
             elif b:
                 # Use bodyId as fallback for untyped neurons
@@ -13228,7 +13300,7 @@ class FindNeuronConnection:
                     hemi_suffix = _extract_hemi_suffix(str(t))
                     if hemi_suffix and not label.endswith(hemi_suffix):
                         label = label + hemi_suffix
-            elif t is not None and (not isinstance(t, float) or not pd.isna(t)) and str(t).strip() != '':
+            elif not _is_missing_type_label(t):
                 label = str(t)
             elif b:
                 # Use bodyId as fallback for untyped neurons
@@ -13245,20 +13317,8 @@ class FindNeuronConnection:
         # Aggregate the discovered bodyId paths into type-level paths.
         # Raw per-bodyId types come from the fetched layer tables — the same
         # types EnrichConnectionTablePolars aggregated into conn_types.
-        raw_type_map = {}
-        for tbl in all_connections_filtered:
-            if tbl is None or tbl.is_empty():
-                continue
-            for u, t in zip(tbl['bodyId_pre'], tbl['type_pre']):
-                if t is not None and str(t).strip() not in ('', 'None'):
-                    raw_type_map.setdefault(str(u), str(t))
-            for v, t in zip(tbl['bodyId_post'], tbl['type_post']):
-                if t is not None and str(t).strip() not in ('', 'None'):
-                    raw_type_map.setdefault(str(v), str(t))
-        for df_ in (self.source_df, self.target_df):
-            for b, t in zip(df_['bodyId'], df_['type']):
-                if t is not None and str(t).strip() not in ('', 'None'):
-                    raw_type_map.setdefault(str(b), str(t))
+        # ``raw_type_map`` was built before the group layer map (see above);
+        # untyped neurons fall back to their bodyId in _node_type_label.
 
         def _node_type_label(b: str) -> str:
             """Final type label of a bodyId inside conn_types (same
@@ -13273,7 +13333,7 @@ class FindNeuronConnection:
                         label = label + hemi
                 return label
             t = raw_type_map.get(b)
-            if t is not None and str(t).strip() not in ('', 'None'):
+            if not _is_missing_type_label(t):
                 return str(t)
             return b
 
@@ -13301,9 +13361,9 @@ class FindNeuronConnection:
         # edge limit is applied — the bodyId discovery already bounds the
         # search space (see the comment above).
         kept_type_edges = set(zip(conn_types['type_pre'], conn_types['type_post']))
-        type_paths_to_save = self._derive_type_paths_from_bodyid_paths(
+        type_paths_to_save = self._derive_label_paths_from_bodyid_paths(
             all_paths, _node_type_label, kept_type_edges,
-            source_types=source_types, target_types=target_types,
+            source_types, target_types,
             verbose=(self.verbose_mode in ['simple', 'full']),
         )
         self._vprint(f'  Derived {len(type_paths_to_save):,} unique type-level paths '
@@ -13395,52 +13455,59 @@ class FindNeuronConnection:
         # Build DataFrame from type paths (SKIPPED - already done via streaming)
         # path_df_type = sv.build_path_dataframe_from_paths(...)
         
-        # Group-level paths - Use separate DFS on group-level graph (if custom groups exist)
+        # Group-level paths - DERIVED from the discovered bodyId paths (if
+        # custom groups exist), never re-searched on a group-level graph: a
+        # group edge aggregates many bodyId pairs, so a graph search could
+        # chain hops backed by different pairs into a path no single neuron
+        # chain realizes (the same bundle effect the type level avoids).
         path_df_group = pd.DataFrame()
         path_df_group_excluded = pd.DataFrame()
         
         if conn_groups is not None and not conn_groups.is_empty() and 'custom_group' in self.source_df.columns:
-            self._vprint('\nFinding group-level paths using group-level graph...', level='full')
+            self._vprint('\nDeriving group-level paths from discovered bodyId paths...', level='full')
             
-            # Build the group-level graph from the full custom-group table.
-            # No edge limit applies: custom groups are few and user-defined,
-            # so the group-level search is naturally bounded (like the
-            # type-level derivation, which needs no limit either).
-            G_group = FastGraph()
-            G_group.build_from_dataframe(conn_groups, 'group_pre', 'group_post', 'weight')
+            def _node_group_label(b: str) -> str:
+                """Group label of a bodyId: custom_group -> type -> bodyId
+                (first non-empty wins; the same exclusive chain the
+                enrichment engines apply, so a bodyId never appears under
+                both its custom group and its raw type)."""
+                b = str(b)
+                g = body_to_group_map.get(b)
+                if not _is_missing_type_label(g):
+                    label = str(g)
+                    if self.separate_hemispheres:
+                        hemi = _extract_hemi_suffix(raw_type_map.get(b, ''))
+                        if hemi and not label.endswith(hemi):
+                            label = label + hemi
+                    return label
+                t = raw_type_map.get(b)
+                if not _is_missing_type_label(t):
+                    return str(t)
+                return b
             
-            self._vprint(f'  Group-level graph: {G_group.number_of_nodes()} groups, {G_group.number_of_edges()} edges', level='full')
+            # Source and target groups with the same fallback chain
+            # (ungrouped sources/targets keep their identity as a group).
+            source_groups = sorted({_node_group_label(b)
+                                    for b in self.source_df['bodyId']})
+            target_groups = sorted({_node_group_label(b)
+                                    for b in self.target_df.loc[
+                                        self.target_df.Checked, 'bodyId']})
             
-            # Get source and target groups
-            source_groups = self.source_df['custom_group'].unique().tolist()
-            target_groups = self.target_df.loc[self.target_df.Checked, 'custom_group'].unique().tolist()
+            # Group-edge table for the defensive hop check. No group-level
+            # edge limit applies: the bodyId discovery already bounds the
+            # search space (like the type-level derivation).
+            kept_group_edges = set(zip(
+                conn_groups['custom_group_pre'].to_list(),
+                conn_groups['custom_group_post'].to_list(),
+            ))
             
-            # Find paths using DFS on group graph
-            group_paths = []
-            if path_mode == 'shortest':
-                # Shortest mode: per (source group, target group)
-                # minimum-hop paths (all ties); the all-paths depth cap
-                # only applies when the user set an explicit limit.
-                valid_sources = [g for g in source_groups
-                                 if not pd.isna(g) and g in G_group]
-                valid_targets = [g for g in target_groups
-                                 if not pd.isna(g) and g in G_group]
-                group_cutoff = self.max_interlayer + 1
-                for path in G_group.find_paths_shortest(
-                        valid_sources, valid_targets, cutoff=group_cutoff):
-                    group_paths.append(path)
-            else:
-                for source_group in source_groups:
-                    if pd.isna(source_group) or source_group not in G_group:
-                        continue
-                    for target_group in target_groups:
-                        if pd.isna(target_group) or target_group not in G_group:
-                            continue
-                        # Find all simple paths with length <= max_interlayer + 1
-                        for path in G_group.all_simple_paths(source_group, target_group, cutoff=self.max_interlayer + 1):
-                            group_paths.append(path)
-            
-            self._vprint(f'  Found {len(group_paths):,} group-level paths', level='full')
+            group_paths = self._derive_label_paths_from_bodyid_paths(
+                all_paths, _node_group_label, kept_group_edges,
+                source_groups, target_groups,
+                verbose=(self.verbose_mode in ['simple', 'full']),
+            )
+            self._vprint(f'  Derived {len(group_paths):,} unique group-level paths '
+                         f'from {len(all_paths):,} bodyId paths', level='full')
             
             # Debug: Check if all groups in paths have layer assignments
             if forward_only and len(group_paths) > 0:

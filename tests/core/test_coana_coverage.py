@@ -687,7 +687,7 @@ class TestHemisphereConservation:
 # =============================================================================
 
 class TestPathHelpers:
-    def test_derive_type_paths_from_bodyid_paths(self):
+    def test_derive_label_paths_from_bodyid_paths(self):
         fc, _ = make_fc()
         label = {"1": "S", "2": "M", "3": "T", "4": "T"}
         kept_edges = {("S", "M"), ("M", "T")}
@@ -695,7 +695,7 @@ class TestPathHelpers:
                  ["1", "2", "4"],      # duplicate type sequence
                  ["2", "3"],           # starts outside source set
                  ["1", "3"]]           # missing type edge S->T
-        out = fc._derive_type_paths_from_bodyid_paths(
+        out = fc._derive_label_paths_from_bodyid_paths(
             paths, label.get, kept_edges, ["S"], ["T"])
         assert out == [["S", "M", "T"]]
 

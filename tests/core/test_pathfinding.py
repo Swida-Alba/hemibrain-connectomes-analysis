@@ -594,13 +594,13 @@ def test_early_viz_type_level_and_bodyid_conditional(monkeypatch, tmp_path):
     assert (tmp_path / "network_early").is_dir()
 
 
-def test_derive_type_paths_from_bodyid_paths():
-    """Type-level paths are DERIVED from the discovered bodyId paths
-    (aggregate node types + verify hops) instead of a second pathfinding on
-    a type-level graph: sequences are deduplicated, repeated-type routes
-    (A->B->A) are preserved, and hops removed by the type-level edge limit
-    (or endpoints outside the queried source/target type sets) drop the
-    path — so no phantom type path can appear."""
+def test_derive_label_paths_from_bodyid_paths():
+    """Label-level paths (type or custom group) are DERIVED from the
+    discovered bodyId paths (aggregate node labels + verify hops) instead of
+    a second pathfinding on a label-level graph: sequences are deduplicated,
+    repeated-label routes (A->B->A) are preserved, and hops removed by an
+    edge limit (or endpoints outside the queried source/target label sets)
+    drop the path — so no phantom label path can appear."""
     import sys
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
     import coana
@@ -614,15 +614,15 @@ def test_derive_type_paths_from_bodyid_paths():
         ["a1", "b1", "c1"],   # A->B->C (real)
         ["a1", "b1", "c1"],   # duplicate -> deduplicated
         ["a1", "b1", "d1"],   # A->B->D (real)
-        ["a2", "b2", "a3"],   # A->B->A (repeated type on a real path)
-        ["x1", "y1"],          # X->Y: X is not a queried source type
-        ["a1", "b1"],          # A->B: B is not a queried target type
+        ["a2", "b2", "a3"],   # A->B->A (repeated label on a real path)
+        ["x1", "y1"],          # X->Y: X is not a queried source label
+        ["a1", "b1"],          # A->B: B is not a queried target label
     ]
-    # (X, Y) was removed by the type-level edge limit
+    # (X, Y) was removed by the label-level edge limit
     kept = {("A", "B"), ("B", "C"), ("B", "D"), ("B", "A")}
-    out = fc._derive_type_paths_from_bodyid_paths(
+    out = fc._derive_label_paths_from_bodyid_paths(
         all_paths, labels.__getitem__, kept,
-        source_types=["A"], target_types=["C", "D", "A"],
+        ["A"], ["C", "D", "A"],
     )
     got = sorted(tuple(p) for p in out)
     assert got == [("A", "B", "A"), ("A", "B", "C"), ("A", "B", "D")], got
@@ -640,9 +640,9 @@ def test_derive_type_paths_verbose_shows_single_line_progress(capsys):
     labels = {"a1": "A", "b1": "B", "c1": "C", "a2": "A", "b2": "B"}
     all_paths = [["a1", "b1", "c1"], ["a2", "b2"]]
     kept = {("A", "B"), ("B", "C")}
-    out = fc._derive_type_paths_from_bodyid_paths(
+    out = fc._derive_label_paths_from_bodyid_paths(
         all_paths, labels.__getitem__, kept,
-        source_types=["A"], target_types=["C", "B"], verbose=True)
+        ["A"], ["C", "B"], verbose=True)
     got = sorted(tuple(p) for p in out)
     assert got == [("A", "B"), ("A", "B", "C")], got
     out_str = capsys.readouterr().out
@@ -1257,22 +1257,44 @@ class TestFindShortestPathCacheKey:
 
 _PIPELINE_TYPES = {"S": "TS", "S2": "TS2", "S1": "TS1",
                    "A": "TA", "B": "TB", "C": "TC", "T": "TT",
-                   "Z": "TZ", "D": "TD", "T2": "TT"}
+                   "Z": "TZ", "D": "TD", "T2": "TT",
+                   "X1": "TX1", "X2": "TX2", "Y1": "TY1", "Y2": "TY2",
+                   "C1": "TC1", "T1": "TT1"}
 
 
 def _make_pipeline_fc(monkeypatch, tmp_path, edges, max_interlayer,
                       graph_edge_limit=0, target_ids=("T",), min_synapse=1,
-                      source_ids=("S",)):
+                      source_ids=("S",), custom_groups=None, untyped=None):
     """Build a FindNeuronConnection wired for an offline _find_paths_core run.
 
     Returns (fc, fetch_calls, logs). Connection fetching is served from the
     static ``edges`` list (bodyId_pre, bodyId_post, weight), filtered by the
     requested min_weight exactly like the real fetch; every upstream fetch is
     recorded in ``fetch_calls``.
+
+    ``custom_groups`` maps bodyId -> custom group (emits the group columns
+    the real fetch would add); ``untyped`` is a set of bodyIds whose type
+    comes back null/empty.
     """
     import coana
 
     edge_set = [(str(u), str(v), w) for (u, v, w) in edges]
+    untyped = set(untyped or ())
+    custom_groups = dict(custom_groups or {})
+
+    def _frame(rows):
+        return pd.DataFrame({
+            "bodyId_pre": [r[0] for r in rows],
+            "bodyId_post": [r[1] for r in rows],
+            "weight": [r[2] for r in rows],
+            "type_pre": [None if r[0] in untyped else _PIPELINE_TYPES[r[0]]
+                         for r in rows],
+            "type_post": [None if r[1] in untyped else _PIPELINE_TYPES[r[1]]
+                          for r in rows],
+            **({"custom_group_pre": [custom_groups.get(r[0]) for r in rows],
+                "custom_group_post": [custom_groups.get(r[1]) for r in rows]}
+               if custom_groups else {}),
+        })
 
     fetch_calls = []
 
@@ -1291,13 +1313,7 @@ def _make_pipeline_fc(monkeypatch, tmp_path, edges, max_interlayer,
         if not rows:
             return pd.DataFrame(columns=["bodyId_pre", "bodyId_post",
                                          "weight", "type_pre", "type_post"])
-        return pd.DataFrame({
-            "bodyId_pre": [r[0] for r in rows],
-            "bodyId_post": [r[1] for r in rows],
-            "weight": [r[2] for r in rows],
-            "type_pre": [_PIPELINE_TYPES[r[0]] for r in rows],
-            "type_post": [_PIPELINE_TYPES[r[1]] for r in rows],
-        })
+        return _frame(rows)
 
     def fake_backward_fetch(self, downstream_bodyIds, source_bodyIds=None):
         """Serve the target-rooted test path from the same static edge set."""
@@ -1312,19 +1328,14 @@ def _make_pipeline_fc(monkeypatch, tmp_path, edges, max_interlayer,
         if not rows:
             return pd.DataFrame(columns=["bodyId_pre", "bodyId_post",
                                          "weight", "type_pre", "type_post"])
-        return pd.DataFrame({
-            "bodyId_pre": [r[0] for r in rows],
-            "bodyId_post": [r[1] for r in rows],
-            "weight": [r[2] for r in rows],
-            "type_pre": [_PIPELINE_TYPES[r[0]] for r in rows],
-            "type_post": [_PIPELINE_TYPES[r[1]] for r in rows],
-        })
+        return _frame(rows)
 
     def fake_neurons(self, bodyIds, columns=None, **kwargs):
         ids = [str(b) for b in bodyIds]
         return pd.DataFrame({
             "bodyId": ids,
-            "type": [_PIPELINE_TYPES.get(b, b) for b in ids],
+            "type": [None if b in untyped else _PIPELINE_TYPES.get(b, b)
+                     for b in ids],
             "post": [100] * len(ids),
         })
 
@@ -1337,13 +1348,44 @@ def _make_pipeline_fc(monkeypatch, tmp_path, edges, max_interlayer,
             pl.lit(0.5).alias("traversal_probability"),
             pl.lit(0.5).alias("connection_ratio"),
         ])
+        # Emulate EnrichConnectionTablePolars label resolution (first
+        # non-empty wins, untyped falls back to the bodyId): type -> bodyId
+        # and custom_group -> type -> bodyId.
+        def _chain(col_label, col_type, col_body):
+            return pl.coalesce([
+                pl.when(pl.col(col_label).is_not_null()
+                        & (pl.col(col_label) != ''))
+                .then(pl.col(col_label)).otherwise(None),
+                pl.when(pl.col(col_type).is_not_null()
+                        & (pl.col(col_type) != ''))
+                .then(pl.col(col_type)).otherwise(None),
+                pl.col(col_body),
+            ])
+        conn_e = conn_e.with_columns([
+            _chain('type_pre', 'type_pre', 'bodyId_pre').alias('type_pre'),
+            _chain('type_post', 'type_post', 'bodyId_post').alias('type_post'),
+        ])
         conn_t = (conn_e.group_by(["type_pre", "type_post"])
                   .agg(pl.col("weight").sum())
                   .with_columns([
                       pl.lit(0.5).alias("traversal_probability"),
                       pl.lit(0.5).alias("connection_ratio"),
                   ]))
-        return conn_e, conn_t, None
+        conn_g = None
+        if 'custom_group_pre' in conn_e.columns:
+            conn_e = conn_e.with_columns([
+                _chain('custom_group_pre', 'type_pre', 'bodyId_pre')
+                .alias('custom_group_pre'),
+                _chain('custom_group_post', 'type_post', 'bodyId_post')
+                .alias('custom_group_post'),
+            ])
+            conn_g = (conn_e.group_by(["custom_group_pre", "custom_group_post"])
+                      .agg(pl.col("weight").sum())
+                      .with_columns([
+                          pl.lit(0.5).alias("traversal_probability"),
+                          pl.lit(0.5).alias("connection_ratio"),
+                      ]))
+        return conn_e, conn_t, conn_g
 
     class FakeVisualizePath:
         def __init__(self, *args, **kwargs):
@@ -1373,10 +1415,18 @@ def _make_pipeline_fc(monkeypatch, tmp_path, edges, max_interlayer,
     fc._vprint = lambda msg="", level="full", end="\n", flush=False: logs.append(str(msg))
     fc.source_df = pd.DataFrame({
         "bodyId": list(source_ids),
-        "type": [_PIPELINE_TYPES[source] for source in source_ids],
+        "type": [None if s in untyped else _PIPELINE_TYPES[s]
+                 for s in source_ids],
+        **({"custom_group": [custom_groups.get(s) for s in source_ids]}
+           if custom_groups else {}),
     })
-    fc.target_df = pd.DataFrame({"bodyId": list(target_ids),
-                                 "type": [_PIPELINE_TYPES[t] for t in target_ids]})
+    fc.target_df = pd.DataFrame({
+        "bodyId": list(target_ids),
+        "type": [None if t in untyped else _PIPELINE_TYPES[t]
+                 for t in target_ids],
+        **({"custom_group": [custom_groups.get(t) for t in target_ids]}
+           if custom_groups else {}),
+    })
     fc.saveas = ""
     fc.output_dir = str(tmp_path)
     fc.source_fname = "src"
@@ -1774,3 +1824,142 @@ class TestLimitReachedFlags:
             monkeypatch, tmp_path, edges, max_interlayer=99, min_synapse=3)
         fc2.FindShortestPath()
         assert fc2._min_synapse_excluded is True
+
+
+class TestGroupAndUntypedDerivation:
+    """Group-level paths are DERIVED from the discovered bodyId paths (no
+    phantom group chains from a group-graph search), and untyped/ungrouped
+    neurons survive the type/group aggregation under their bodyId label."""
+
+    def setup_method(self):
+        _FINDALLPATH_GRAPH_CACHE.clear()
+
+    def teardown_method(self):
+        _FINDALLPATH_GRAPH_CACHE.clear()
+
+    def _group_csv_paths(self, fc):
+        path_csv = os.path.join(fc.allpath_folder,
+                                "src_to_tgt_allpaths_group.csv")
+        if not os.path.exists(path_csv):
+            return set()
+        return set(pl.read_csv(path_csv)["path"].to_list())
+
+    def test_group_paths_derived_not_searched(self, monkeypatch, tmp_path):
+        """The group graph has GA->GB and GB->GC edges, so a group-graph
+        search would report GA->GB->GC — but the two hops are backed by
+        different GB neurons (Y1, Y2), so no bodyId chain realizes it. The
+        derivation must only report the two real chains."""
+        edges = [("X1", "Y1", 5), ("Y1", "T1", 5),
+                 ("X2", "Y2", 5), ("Y2", "C1", 5)]
+        groups = {"X1": "GA", "X2": "GX", "Y1": "GB", "Y2": "GB",
+                  "T1": "GD", "C1": "GC"}
+        fc, _, _ = _make_pipeline_fc(
+            monkeypatch, tmp_path, edges, max_interlayer=1,
+            source_ids=("X1", "X2"), target_ids=("T1", "C1"),
+            custom_groups=groups)
+        fc.FindAllPath()
+
+        group_paths = self._group_csv_paths(fc)
+        assert group_paths == {"GA->GB->GD", "GX->GB->GC"}
+        # the phantom chains (each hop backed by a different GB neuron)
+        assert "GA->GB->GC" not in group_paths
+        assert "GX->GB->GD" not in group_paths
+
+    def test_group_paths_keep_repeated_group_routes(self, monkeypatch, tmp_path):
+        """A route that revisits a group (G1->G2->G1) is kept when a real
+        chain realizes it (X1->Y1->X2 with two distinct G1 neurons)."""
+        edges = [("X1", "Y1", 5), ("Y1", "X2", 5)]
+        groups = {"X1": "G1", "X2": "G1", "Y1": "G2"}
+        fc, _, _ = _make_pipeline_fc(
+            monkeypatch, tmp_path, edges, max_interlayer=1,
+            source_ids=("X1",), target_ids=("X2",), custom_groups=groups)
+        fc.FindAllPath()
+        assert self._group_csv_paths(fc) == {"G1->G2->G1"}
+
+    def test_shortest_group_paths_keep_all_target_instance_lengths(
+            self, monkeypatch, tmp_path):
+        """Two target instances of the SAME group at different distances:
+        bodyId shortest paths are per-instance, so the group output keeps
+        both group sequences (mirror of the type-level behavior)."""
+        edges = [("S", "T", 10), ("S", "B", 10), ("B", "C", 10),
+                 ("C", "T2", 10)]
+        groups = {"S": "GA", "T": "GC", "T2": "GC", "B": "GB",
+                  "C": "GD"}
+        fc, _, _ = _make_pipeline_fc(
+            monkeypatch, tmp_path, edges, max_interlayer=99,
+            source_ids=("S",), target_ids=("T", "T2"), custom_groups=groups)
+        fc.FindShortestPath()
+        assert self._group_csv_paths(fc) == {"GA->GC", "GA->GB->GD->GC"}
+
+    def test_untyped_intermediate_survives_type_derivation(
+            self, monkeypatch, tmp_path):
+        """An untyped intermediate neuron keeps its identity in the type
+        output: it is labeled by its bodyId and its hops stay real edges of
+        the type table (no silent elimination)."""
+        edges = [("S", "U", 5), ("U", "T", 5)]
+        fc, _, _ = _make_pipeline_fc(
+            monkeypatch, tmp_path, edges, max_interlayer=1,
+            source_ids=("S",), target_ids=("T",), untyped={"U"})
+        fc.FindAllPath()
+
+        path_csv = os.path.join(fc.allpath_folder, "src_to_tgt_allpaths_type.csv")
+        df = pl.read_csv(path_csv)
+        assert set(df["path"].to_list()) == {"TS->U->TT"}
+        # the untyped hops are real rows of the type edge table
+        conn_csv = os.path.join(fc.allpath_folder, "data_details",
+                                "connection_type.csv")
+        ct = pl.read_csv(conn_csv)
+        type_edges = set(zip(ct["type_pre"], ct["type_post"]))
+        assert ("U", "TT") in type_edges and ("TS", "U") in type_edges
+
+    def test_nan_type_labels_survive_type_derivation(
+            self, monkeypatch, tmp_path):
+        """Real neuron tables store untyped labels as float NaN (not None).
+        The label resolution must treat NaN — and the literals 'nan'/'None'
+        — as missing; otherwise untyped neurons project to the bogus type
+        'nan' and every type path through them is silently dropped."""
+        edges = [("S", "U", 5), ("U", "T", 5)]
+        fc, _, _ = _make_pipeline_fc(
+            monkeypatch, tmp_path, edges, max_interlayer=1,
+            source_ids=("S",), target_ids=("T",), untyped={"U", "T"})
+        # emulate the real neuron table: untyped cells are float NaN
+        fc.target_df.loc[fc.target_df['bodyId'] == 'T', 'type'] = float('nan')
+        fc.FindAllPath()
+
+        path_csv = os.path.join(fc.allpath_folder, "src_to_tgt_allpaths_type.csv")
+        df = pl.read_csv(path_csv)
+        # T is untyped -> its bodyId is the label; no 'nan' token anywhere
+        assert set(df["path"].to_list()) == {"TS->U->T"}
+        assert not any("nan" in p for p in df["path"].to_list())
+
+    def test_untyped_intermediate_survives_group_derivation(
+            self, monkeypatch, tmp_path):
+        """An untyped, ungrouped intermediate neuron becomes its own group
+        (bodyId label) instead of being eliminated from the group output."""
+        edges = [("S", "U", 5), ("U", "T", 5)]
+        groups = {"S": "GA", "T": "GC"}   # U has no group and no type
+        fc, _, _ = _make_pipeline_fc(
+            monkeypatch, tmp_path, edges, max_interlayer=1,
+            source_ids=("S",), target_ids=("T",), custom_groups=groups,
+            untyped={"U"})
+        fc.FindAllPath()
+        assert self._group_csv_paths(fc) == {"GA->U->GC"}
+
+    def test_typed_ungrouped_intermediate_uses_type_as_group(
+            self, monkeypatch, tmp_path):
+        """Exclusivity of the group chain: a TYPED neuron without a custom
+        group resolves to its type as the group label (never to both its
+        type and a fallback label)."""
+        edges = [("S", "A", 5), ("A", "T", 5)]
+        groups = {"S": "GA", "T": "GC"}   # A is typed (TA) but ungrouped
+        fc, _, _ = _make_pipeline_fc(
+            monkeypatch, tmp_path, edges, max_interlayer=1,
+            source_ids=("S",), target_ids=("T",), custom_groups=groups)
+        fc.FindAllPath()
+        assert self._group_csv_paths(fc) == {"GA->TA->GC"}
+        # no null-labelled group edges reach the group table
+        conn_csv = os.path.join(fc.allpath_folder, "data_details",
+                                "connection_custom_groups.csv")
+        cg = pl.read_csv(conn_csv)
+        assert cg["custom_group_pre"].null_count() == 0
+        assert cg["custom_group_post"].null_count() == 0

@@ -36,12 +36,15 @@ bodyId graph G ──────────► 2. bodyId-level pathfinding  (T
 conn_types — type-level edges, every one backed by a real bodyId path
    │
    ▼
-5. derive the type-level paths: map each discovered bodyId path to its
-   type sequence, then VERIFY every hop against the type-edge table (no
-   second pathfinding on a type-level graph, and no type-level edge
-   limit — the bodyId discovery already bounds the search space; the
-   Visualization Edge Limit `edgeN_limit` remains the only type-level
-   cap, applied when drawing)
+5. derive the type-level (and custom-group-level) paths: map each
+   discovered bodyId path to its type/group sequence, then VERIFY every
+   hop against the corresponding edge table (no second pathfinding on a
+   label-level graph, and no label-level edge limit — the bodyId
+   discovery already bounds the search space; the Visualization Edge
+   Limit `edgeN_limit` remains the only type-level cap, applied when
+   drawing). Custom-group paths are derived exactly like type paths, so
+   they cannot chain group edges backed by different bodyId pairs into
+   phantom routes.
 ```
 
 ## Shortest discovery is target-rooted
@@ -97,6 +100,37 @@ the type graph silently drops. Measured on the battery in Section 5: the
 old re-search added 0–3 phantom paths per query and missed 0–31 real
 repeated-type paths; the derivation matches the discovered bodyId paths
 exactly.
+
+Custom-group paths follow the exact same rule. Historically the group
+branch ran a DFS on the aggregated group graph, which could report a
+group chain G1→G2→G3 whose hops were backed by different bodyId pairs
+(the same bundle effect); it also crashed once the group tables carried
+the `custom_group_pre`/`custom_group_post` schema. The group output is
+now derived from the discovered bodyId paths with the same endpoint and
+hop verification, and repeated-group routes (G1→G2→G1) are preserved.
+
+### Untyped and unassigned neurons keep their identity
+
+A neuron without a type (or without a custom group) is never dropped
+from the type/group aggregation. Both enrichment engines resolve each
+bodyId to exactly one label by the exclusive chain
+
+- type level: `std_label -> type -> bodyId`
+- group level: `custom_group -> type -> bodyId`
+
+first non-empty wins, so a bodyId never appears under both its custom
+group and its raw type. Untyped neurons therefore aggregate under their
+bodyId (per-neuron groups) instead of vanishing or merging into an
+'Unknown' bucket, and the derivation callables use the same chain, so
+the type/group paths they emit stay consistent with the edge tables.
+
+The label resolution treats every absent cell identically: `None`, float
+`NaN` (real neuron tables store untyped labels this way), and the literal
+strings `''`, `'nan'`, `'None'` are all missing. Without the `NaN` guard,
+untyped neurons project to the bogus type `'nan'` and every type path
+through them is silently dropped (`_is_missing_type_label` in `coana.py`).
+Verified on real male-cns data: untyped targets survive as their bodyId
+in the type and group outputs.
 
 ## 2. Why the type level cannot simply aggregate all pairs (the bundle effect)
 

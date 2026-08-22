@@ -6202,12 +6202,6 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
             if mask_post.any():
                 conn_df.loc[mask_post, 'type_post'] = conn_df.loc[mask_post, 'bodyId_post'].map(type_map).fillna('Unknown')
 
-    # Fill custom_group columns if they exist
-    if 'custom_group_pre' in conn_df.columns:
-        conn_df.loc[conn_df.custom_group_pre.isnull(),'custom_group_pre'] = conn_df.loc[conn_df.custom_group_pre.isnull(),'type_pre']
-    if 'custom_group_post' in conn_df.columns:
-        conn_df.loc[conn_df.custom_group_post.isnull(),'custom_group_post'] = conn_df.loc[conn_df.custom_group_post.isnull(),'type_post']
-
     # Untyped neurons group by their bodyId (Polars std_label semantics): a
     # null/empty type that stayed 'Unknown' after the type_map lookup is
     # replaced by the bodyId, so untyped neurons form per-bodyId groups
@@ -6219,6 +6213,24 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
     if was_null_post.any():
         mask_post = was_null_post & conn_df['type_post'].isin(['Unknown', ''])
         conn_df.loc[mask_post, 'type_post'] = conn_df.loc[mask_post, 'bodyId_post'].astype(str)
+
+    # Custom-group labels follow the same exclusivity chain as the Polars
+    # engine: custom_group -> type -> bodyId (first non-empty wins; runs
+    # after the untyped conversion above so untyped neurons resolve their
+    # group to the bodyId). A neuron never appears under both its custom
+    # group and its raw type, and null group keys never reach the groupby.
+    if 'custom_group_pre' in conn_df.columns:
+        fill_pre = conn_df['custom_group_pre'].isnull() | (conn_df['custom_group_pre'] == '')
+        if fill_pre.any():
+            conn_df.loc[fill_pre, 'custom_group_pre'] = conn_df.loc[fill_pre, 'type_pre']
+            still_missing = conn_df['custom_group_pre'].isnull() | (conn_df['custom_group_pre'] == '')
+            conn_df.loc[still_missing, 'custom_group_pre'] = conn_df.loc[still_missing, 'bodyId_pre'].astype(str)
+    if 'custom_group_post' in conn_df.columns:
+        fill_post = conn_df['custom_group_post'].isnull() | (conn_df['custom_group_post'] == '')
+        if fill_post.any():
+            conn_df.loc[fill_post, 'custom_group_post'] = conn_df.loc[fill_post, 'type_post']
+            still_missing = conn_df['custom_group_post'].isnull() | (conn_df['custom_group_post'] == '')
+            conn_df.loc[still_missing, 'custom_group_post'] = conn_df.loc[still_missing, 'bodyId_post'].astype(str)
     
     # Ensure bodyId columns are strings for merging to avoid warnings
     conn_df['bodyId_post'] = conn_df['bodyId_post'].astype(str)
@@ -7751,6 +7763,32 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
                 pl.when(pl.col('type_post').is_not_null() & (pl.col('type_post') != '')).then(pl.col('type_post')).otherwise(None),
                 pl.col('bodyId_post')
             ]).alias('std_label_post')
+        ])
+
+    # Custom-group labels follow the same exclusivity chain as std_labels:
+    # custom_group -> type -> bodyId (first non-empty wins). A neuron
+    # without a custom group must not be dropped from the group aggregation,
+    # and it never appears under both its custom group and its raw type.
+    if 'custom_group_pre' in conn_df.columns:
+        conn_df = conn_df.with_columns([
+            pl.coalesce([
+                pl.when(pl.col('custom_group_pre').is_not_null()
+                        & (pl.col('custom_group_pre') != ''))
+                .then(pl.col('custom_group_pre')).otherwise(None),
+                pl.when(pl.col('type_pre').is_not_null()
+                        & (pl.col('type_pre') != ''))
+                .then(pl.col('type_pre')).otherwise(None),
+                pl.col('bodyId_pre'),
+            ]).alias('custom_group_pre'),
+            pl.coalesce([
+                pl.when(pl.col('custom_group_post').is_not_null()
+                        & (pl.col('custom_group_post') != ''))
+                .then(pl.col('custom_group_post')).otherwise(None),
+                pl.when(pl.col('type_post').is_not_null()
+                        & (pl.col('type_post') != ''))
+                .then(pl.col('type_post')).otherwise(None),
+                pl.col('bodyId_post'),
+            ]).alias('custom_group_post'),
         ])
 
     # 1. Enrich BodyId Level
