@@ -150,6 +150,23 @@ class TestWriteRunGuide:
         assert "w<sub>ij</sub>" in text
         assert "Σ<sub>k</sub>" in text
 
+    def test_metrics_panel_referenced_by_output_files(self, tmp_path):
+        """Descriptions live once in the Metrics & parameters panel; the
+        Output Files section lists metric names and links back to the panel
+        instead of repeating each description inline."""
+        run = _make_pathfinding_folder(tmp_path)
+        path = guide.write_run_guide(run, "find_path", PARAMS, fmt="html")
+        text = path.read_text(encoding="utf-8")
+        # A dedicated metrics panel exists with per-metric anchors.
+        assert '<h2 id="metrics">Metrics &amp; parameters</h2>' in text
+        assert 'id="metric-connection_ratio"' in text
+        # The formula description appears once, in the panel.
+        assert text.count("w<sub>ij</sub>") == 1
+        # Output Files reference the panel through links, not descriptions.
+        outp = text[text.index("<h2>Output files</h2>"):]
+        assert 'href="#metric-connection_ratio"' in outp
+        assert "w<sub>ij</sub>" not in outp  # description not repeated inline
+
     def test_markdown_keeps_inline_latex_math(self, tmp_path):
         """Markdown output keeps the standard $...$ inline-math markers."""
         run = _make_pathfinding_folder(tmp_path)
@@ -174,7 +191,8 @@ class TestWriteRunGuide:
         assert path is not None and path.suffix == ".md"
         text = path.read_text(encoding="utf-8")
         assert text.startswith("# DROCAT Run Guide")
-        assert "| Column | Description | Range |" in text
+        assert "| Metric | Description | Range |" in text
+        assert "## Metrics & parameters" in text
 
     def test_disabled_writes_nothing(self, tmp_path):
         run = _make_pathfinding_folder(tmp_path)

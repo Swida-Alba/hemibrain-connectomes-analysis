@@ -325,8 +325,8 @@ def _latex_to_uniform(math_text: str) -> str:
     for old, new in _MATH_SYMBOL_SUBS:
         math_text = math_text.replace(old, new)
     # Subscripts / superscripts: braced forms first, then single-token forms.
-    math_text = re.sub(r"(?<!\\)_\{([^}]*)\}\s*", r"_{<\1>}", math_text)
-    math_text = re.sub(r"(?<!\\)\^\{([^}]*)\}\s*", r"^{<\1>}", math_text)
+    math_text = re.sub(r"(?<!\\)_\{([^}]*)\}", r"_{<\1>}", math_text)
+    math_text = re.sub(r"(?<!\\)\^\{([^}]*)\}", r"^{<\1>}", math_text)
     math_text = re.sub(r"(?<!\\)_([A-Za-z0-9]+)", r"_{<\1>}", math_text)
     math_text = re.sub(r"(?<!\\)\^([A-Za-z0-9]+)", r"^{<\1>}", math_text)
     math_text = math_text.replace(r"\_", "_").replace("\\", "")
@@ -350,7 +350,11 @@ def _latex_to_html(math_text: str) -> str:
 
 def _math_to_txt(description: str) -> str:
     """Strip $...$ markers and render readable plain text for the txt output."""
-    return _latex_to_plain(re.sub(r"\$([^$]+)\$", r"\1", description))
+    return re.sub(
+        r"\$([^$]+)\$",
+        lambda m: _latex_to_plain(m.group(1)),
+        description,
+    )
 
 
 def _latex_to_plain(text: str) -> str:
@@ -1029,6 +1033,22 @@ def _describe_unmatched(path_rel: str) -> str:
     return "Output file."
 
 
+def _ordered_unique(values) -> list:
+    """Return values in first-seen order without duplicates."""
+    seen = set()
+    out = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _metric_anchor(name) -> str:
+    """HTML-safe anchor fragment for a metric/column name."""
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", str(name)).strip("-")
+
+
 def assemble_run_content(run_folder: Path, tool_name: str,
                          params: Optional[dict]) -> dict:
     """Build the format-independent content model for one run folder."""
@@ -1069,6 +1089,18 @@ def assemble_run_content(run_folder: Path, tool_name: str,
         leftovers.append({"path": rel,
                           "description": _describe_unmatched(rel)})
 
+    # Metrics & parameters: the ordered union of every column/metric the
+    # matched files carry, with its description.  The renderers present these
+    # once in a dedicated reference panel; the Output Files section only lists
+    # the metric names and links back here, instead of repeating each
+    # description inline.
+    metrics = []
+    for column in _ordered_unique(
+            c for e in entries if e["matched"] for c in e["columns"]):
+        description, value_range = glossary_entry(column)
+        metrics.append({"name": column, "anchor": _metric_anchor(column),
+                        "description": description, "range": value_range})
+
     warnings = _read_warnings(run_folder)
 
     return {
@@ -1079,6 +1111,7 @@ def assemble_run_content(run_folder: Path, tool_name: str,
         "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "params": params,
         "entries": entries,
+        "metrics": metrics,
         "leftovers": leftovers,
         "warnings": warnings,
     }
@@ -1146,6 +1179,17 @@ def render_txt(content: dict) -> str:
     lines.append(content["warnings"] or NO_WARNINGS_TEXT)
     lines.append("")
 
+    lines.append("METRICS & PARAMETERS")
+    lines.append("-" * 72)
+    if content["metrics"]:
+        for metric in content["metrics"]:
+            suffix = f" [{metric['range']}]" if metric["range"] else ""
+            lines.append(f"  {metric['name']}{suffix}: "
+                         f"{_math_to_txt(metric['description'])}")
+    else:
+        lines.append("  (none)")
+    lines.append("")
+
     lines.append("OUTPUT FILES")
     lines.append("-" * 72)
     for entry in content["entries"]:
@@ -1158,10 +1202,9 @@ def render_txt(content: dict) -> str:
         lines.append(f"    {entry['description']}")
         if entry["matrix"]:
             lines.append(f"    Layout: {entry['matrix']}")
-        for column in entry["columns"]:
-            description, value_range = glossary_entry(column)
-            suffix = f" [{value_range}]" if value_range else ""
-            lines.append(f"      - {column}: {_math_to_txt(description)}{suffix}")
+        if entry["columns"]:
+            lines.append(f"    Metrics: {', '.join(entry['columns'])} — "
+                         "definitions in Metrics & Parameters above.")
         lines.append("")
 
     if content["leftovers"]:
@@ -1210,6 +1253,18 @@ def render_markdown(content: dict) -> str:
         md.append(NO_WARNINGS_TEXT)
     md.append("")
 
+    md.append("## Metrics & parameters")
+    md.append("")
+    if content["metrics"]:
+        md.append("| Metric | Description | Range |")
+        md.append("| --- | --- | --- |")
+        for metric in content["metrics"]:
+            cell = _math_to_md(metric["description"]).replace("|", "\\|")
+            md.append(f"| `{metric['name']}` | {cell} | {metric['range']} |")
+    else:
+        md.append("*No metrics or parameters are documented for this run.*")
+    md.append("")
+
     md.append("## Output files")
     md.append("")
     for entry in content["entries"]:
@@ -1226,12 +1281,9 @@ def render_markdown(content: dict) -> str:
             md.append(f"*Layout: {entry['matrix']}*")
         if entry["columns"]:
             md.append("")
-            md.append("| Column | Description | Range |")
-            md.append("| --- | --- | --- |")
-            for column in entry["columns"]:
-                description, value_range = glossary_entry(column)
-                md_cell = _math_to_md(description).replace("|", "\\|")
-                md.append(f"| `{column}` | {md_cell} | {value_range} |")
+            cols = ", ".join(f"`{c}`" for c in entry["columns"])
+            md.append(f"*Metrics: {cols} — definitions in the Metrics & "
+                      "parameters section above.*")
         md.append("")
 
     if content["leftovers"]:
@@ -1326,6 +1378,21 @@ def render_html(content: dict) -> str:
         parts.append(f'<div class="ok">{_html_escape(NO_WARNINGS_TEXT)}'
                      "</div>")
 
+    parts.append('<h2 id="metrics">Metrics &amp; parameters</h2>')
+    if content["metrics"]:
+        parts.append('<div class="card"><table>'
+                     '<tr><th>Metric</th><th>Description</th><th>Range</th></tr>')
+        for metric in content["metrics"]:
+            parts.append(
+                f'<tr id="metric-{_html_escape(metric["anchor"])}">'
+                f'<td><code>{_html_escape(metric["name"])}</code></td>'
+                f'<td>{_math_to_html(_html_escape(metric["description"]))}</td>'
+                f'<td>{_html_escape(metric["range"])}</td></tr>')
+        parts.append("</table></div>")
+    else:
+        parts.append('<div class="card"><span class="small">No metrics or '
+                     'parameters are documented for this run.</span></div>')
+
     parts.append("<h2>Output files</h2>")
     for entry in content["entries"]:
         if not entry["matched"]:
@@ -1348,16 +1415,14 @@ def render_html(content: dict) -> str:
             parts.append(f'<div class="small">Layout: '
                          f'{_html_escape(entry["matrix"])}</div>')
         if entry["columns"]:
-            parts.append("<table>"
-                         "<tr><th>Column</th><th>Description</th>"
-                         "<th>Range</th></tr>")
-            for column in entry["columns"]:
-                description, value_range = glossary_entry(column)
-                parts.append(
-                    f"<tr><td><code>{_html_escape(column)}</code></td>"
-                    f"<td>{_math_to_html(_html_escape(description))}</td>"
-                    f"<td>{_html_escape(value_range)}</td></tr>")
-            parts.append("</table>")
+            links = ", ".join(
+                f'<a href="#metric-{_html_escape(_metric_anchor(c))}">'
+                f"<code>{_html_escape(c)}</code></a>"
+                for c in entry["columns"])
+            parts.append(
+                f'<div class="small">Metrics: {links} — '
+                '<a href="#metrics">definitions in Metrics &amp; '
+                'parameters</a>.</div>')
         parts.append("</div>")
 
     if content["leftovers"]:
