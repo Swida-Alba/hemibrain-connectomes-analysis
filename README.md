@@ -20,12 +20,17 @@ DROCAT is a Python toolkit for analyzing and visualizing connectome data from **
 
 ## Table of Contents
 
-- [Key Features](#key-features)
-- [Quick Start](#quick-start)
-- [Documentation](#documentation)
-- [Supported Datasets](#supported-datasets)
-- [What's New in v4.5.0](#whats-new-in-v450)
-- [Contributing](#contributing) · [License](#license) · [Support](#support)
+- [*Drosophila* Connectome Analysis Toolkit (DROCAT) v4.5.0](#drosophila-connectome-analysis-toolkit-drocat-v450)
+  - [Table of Contents](#table-of-contents)
+  - [Key Features](#key-features)
+  - [Quick Start](#quick-start)
+  - [Documentation](#documentation)
+  - [Supported Datasets](#supported-datasets)
+    - [FlyWire / Codex (3, local files required)](#flywire--codex-3-local-files-required)
+  - [What's New in v4.5.0](#whats-new-in-v450)
+  - [Contributing](#contributing)
+  - [License](#license)
+  - [Support](#support)
 
 ---
 
@@ -46,12 +51,12 @@ DROCAT is a Python toolkit for analyzing and visualizing connectome data from **
 
 **Requirements:** conda (auto-installed if missing) and internet access on first run.
 
-**Option 1 — One-click install & launch.** After cloning the repository, run the launcher:
+**Option 1 — One-click install & launch.** After cloning the repository, double-click to open the launcher:
 
 | Platform | Command |
 | --- | --- |
-| macOS / Linux | `./mac_DROCAT.command` (or double-click) |
-| Windows | `windows_DROCAT.bat` (or double-click) |
+| macOS / Linux | `mac_DROCAT.command` |
+| Windows | `windows_DROCAT.bat` |
 
 On first run it creates the versioned `drocat-4.5.0` Python 3.11 environment (via the bundled installer in `archive/install/`), installs the pinned dependencies, runs `pip check`, verifies the installation, and opens the web UI at **http://127.0.0.1:8080**. Later runs are self-healing: a missing or inconsistent environment is repaired automatically before starting. If the port is busy, the launcher offers a new one interactively.
 
