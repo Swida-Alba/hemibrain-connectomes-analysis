@@ -298,6 +298,9 @@ def test_report_heatmaps_use_red_positive_blue_negative_white_zero():
     assert '"colorscale":[[0.0,"#053061"]' in signed_fragment
     assert '"#ffffff"' in signed_fragment
     assert '"#67001f"' in signed_fragment
+    # The report heatmaps must not show the background plotly_white gridlines.
+    assert '"showgrid":false' in positive_fragment
+    assert '"zeroline":false' in positive_fragment
     assert '"xgap"' not in positive_fragment
     assert '"ygap"' not in positive_fragment
 

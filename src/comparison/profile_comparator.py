@@ -8535,7 +8535,9 @@ class ConnectivityProfileComparer:
           each group is one row, regardless of aggregation level
         - aggregation_level='type': bodyIds resolve to their type rows;
           exact types are one row per type; pattern items ('aMe.*') expand
-          into their matched types, each an INDEPENDENT row
+          into their matched types, each an INDEPENDENT row; a coarse
+          taxonomy label (cell class / cell type) that the dataset maps to
+          several real types also expands into one row per real type
         - aggregation_level='bodyid': every individual bodyId is its own
           row (labels {bodyId}_{type}); patterns expand to types, then to
           their bodyIds
@@ -8644,8 +8646,31 @@ class ConnectivityProfileComparer:
                     # No exact type and no pattern match: keep the raw item
                     neurons[item_str] = [item_str]
             else:
-                # Single type with no bodyIds found
-                neurons[item_str] = [item_str]
+                # Single type with no exact bodyIds: it may be a coarse taxonomy
+                # label (cell class / cell type, e.g. 'circadian_clock') that the
+                # dataset maps to several real types.  Expand it into one
+                # independent row per real type, mirroring the network tab's
+                # multi-column query resolution.  A label with a single real type
+                # still becomes that single row; only a true miss keeps the raw
+                # literal so the user sees the unresolved query.
+                label_resolver = getattr(self.profiler, 'get_types_for_label', None)
+                label_groups = (
+                    label_resolver(item_str, dataset) if label_resolver else {}
+                )
+                if label_groups:
+                    for real_type, ids in label_groups.items():
+                        if effective_aggregation == 'bodyid':
+                            for bid in ids:
+                                neurons[f"{bid}_{real_type}"] = [bid]
+                        else:
+                            if real_type not in neurons:
+                                neurons[real_type] = []
+                            neurons[real_type].extend(
+                                int(bid) if isinstance(bid, str) and bid.isdigit()
+                                else bid for bid in ids)
+                else:
+                    # No exact type, no pattern, no taxonomy match: keep raw item
+                    neurons[item_str] = [item_str]
         
         return neurons
     
@@ -10203,11 +10228,17 @@ a:hover { text-decoration: underline; }
             'title': {'text': x_title, 'font': {'size': 10}},
             'tickangle': -42,
             'automargin': True,
+            'showgrid': False,
+            'zeroline': False,
+            'showline': False,
         }
         yaxis = {
             'title': {'text': y_title, 'font': {'size': 10}},
             'autorange': 'reversed',
             'automargin': True,
+            'showgrid': False,
+            'zeroline': False,
+            'showline': False,
         }
         if square_cells:
             # Equal axis scaling makes each matrix cell a true square even

@@ -176,6 +176,67 @@ def test_custom_aggregation_flat_items_taken_literally():
 
 
 # ---------------------------------------------------------------------------
+# Aggregation level = type: a coarse taxonomy label expands into its real types
+# ---------------------------------------------------------------------------
+
+def test_type_aggregation_expands_coarse_label_to_real_types():
+    """A cell-class / cell-type label that maps to several real types becomes
+    one independent row per real type, like the network tab."""
+    comparer = _make_comparer(query=["circadian_clock"])
+    # The label has no direct bodyId match and is not a pattern.
+    comparer.profiler.get_bodyids_for_type = lambda t, ds: {}.get(t, [])
+    comparer.profiler.list_types = lambda p, ds: []
+    comparer.profiler.get_types_for_label = lambda label, ds: {
+        "aMe12": [1, 2], "DN1p": [3],
+    }
+    neurons = comparer._get_neurons_to_compare()
+    assert neurons == {"aMe12": [1, 2], "DN1p": [3]}
+    assert "circadian_clock" not in neurons
+
+
+def test_type_aggregation_single_real_type_from_label():
+    """A coarse label that collapses to one real type still becomes one row."""
+    comparer = _make_comparer(query=["clock_type"])
+    comparer.profiler.get_bodyids_for_type = lambda t, ds: {}.get(t, [])
+    comparer.profiler.list_types = lambda p, ds: []
+    comparer.profiler.get_types_for_label = lambda label, ds: {"DN1p": [5, 6]}
+    neurons = comparer._get_neurons_to_compare()
+    assert neurons == {"DN1p": [5, 6]}
+
+
+def test_type_aggregation_unmatched_label_keeps_raw_item():
+    """A label the resolver cannot map is kept literally so the user sees it."""
+    comparer = _make_comparer(query=["NoSuchLabel"])
+    comparer.profiler.get_bodyids_for_type = lambda t, ds: []
+    comparer.profiler.list_types = lambda p, ds: []
+    comparer.profiler.get_types_for_label = lambda label, ds: {}
+    neurons = comparer._get_neurons_to_compare()
+    assert neurons == {"NoSuchLabel": ["NoSuchLabel"]}
+
+
+def test_type_aggregation_resolver_absent_keeps_raw_item():
+    """Older profilers without get_types_for_label degrade to the raw literal."""
+    comparer = _make_comparer(query=["Unmapped"])
+    comparer.profiler.get_bodyids_for_type = lambda t, ds: []
+    comparer.profiler.list_types = lambda p, ds: []
+    comparer.profiler.get_types_for_label = None  # resolver not available
+    neurons = comparer._get_neurons_to_compare()
+    assert neurons == {"Unmapped": ["Unmapped"]}
+
+
+def test_bodyid_aggregation_expands_coarse_label_to_neurons():
+    """The same coarse label under bodyid aggregation rows every neuron."""
+    comparer = _make_comparer(query=["circadian_clock"], aggregation_level="bodyid")
+    comparer.profiler.get_bodyids_for_type = lambda t, ds: {}.get(t, [])
+    comparer.profiler.list_types = lambda p, ds: []
+    comparer.profiler.get_types_for_label = lambda label, ds: {
+        "aMe12": [1, 2], "DN1p": [3],
+    }
+    neurons = comparer._get_neurons_to_compare()
+    assert neurons == {"1_aMe12": [1], "2_aMe12": [2], "3_DN1p": [3]}
+
+
+# ---------------------------------------------------------------------------
 # run(): bodyid aggregation uses the main matrices (bodyId-level steps skipped)
 # ---------------------------------------------------------------------------
 

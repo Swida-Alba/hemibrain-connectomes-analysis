@@ -4316,6 +4316,109 @@ class ConnectivityProfiler:
                     result_map[bid] = None
                 return result_map
 
+    def get_types_for_label(
+        self,
+        label: str,
+        dataset: str,
+        search_columns: Optional[List[str]] = None,
+    ) -> Dict[str, List[int]]:
+        """Resolve a coarse taxonomy label into the real neuron types it maps to.
+
+        ``label`` may be a cell class, cell type, subclass or another taxonomy
+        value rather than a concrete neuron type.  The local neuron table is
+        searched across the identity/taxonomy columns; the matching rows are
+        grouped by their fine-grained ``type`` column so a query such as a cell
+        class that covers many real types expands into one entry per type
+        (mirroring the network tab's multi-column query resolution).
+
+        Returns ``{real_type: [bodyIds]}``; empty when nothing matches or the
+        dataset has no local table (NeuPrint falls back to the single-column
+        lookup in ``get_bodyids_for_type``).
+        """
+        dataset_lower = dataset.lower()
+        if not ('flywire' in dataset_lower or 'fafb' in dataset_lower
+                or 'banc' in dataset_lower):
+            return {}
+
+        src_dir = Path(__file__).parent.parent
+        project_root = src_dir.parent
+        safe_name = dataset.replace(':', '_').replace('.', '_')
+        dataset_path = project_root / 'datasets' / safe_name
+        neurons_files = [
+            dataset_path / f'{safe_name}_allneurons_neuron_df.parquet',
+            dataset_path / f'{safe_name}_allneurons_neuron_df.csv',
+            dataset_path / f'{safe_name}_neurons.parquet',
+            dataset_path / f'{safe_name}_neurons.csv',
+            dataset_path / 'neurons.parquet',
+            dataset_path / 'neurons.csv',
+        ]
+        df = None
+        for neurons_file in neurons_files:
+            if neurons_file.exists():
+                try:
+                    if str(neurons_file).endswith('.parquet'):
+                        df = pd.read_parquet(neurons_file)
+                    else:
+                        df = pd.read_csv(neurons_file)
+                    break
+                except Exception:
+                    df = None
+        if df is None or df.empty:
+            return {}
+
+        bid_col = None
+        for col in ['bodyId', 'pt_root_id', 'root_id', 'body_id']:
+            if col in df.columns:
+                bid_col = col
+                break
+        if bid_col is None:
+            return {}
+
+        # The fine-grained type column the returned rows are grouped by.
+        type_col = None
+        for col in ['type', 'Type', 'cellType', 'cell_type']:
+            if col in df.columns:
+                type_col = col
+                break
+        if type_col is None:
+            return {}
+
+        taxonomy_cols = search_columns or [
+            'type', 'Type', 'cellType', 'cell_type', 'celltype',
+            'cell_class', 'sub_class', 'subclass',
+            'super_class', 'superclass', 'class',
+            'flywireType', 'hemibrainType', 'mancType',
+        ]
+        present = [c for c in taxonomy_cols if c in df.columns]
+        if not present:
+            return {}
+
+        target = str(label).strip()
+        mask = pd.Series(False, index=df.index)
+        for col in present:
+            try:
+                col_values = df[col].astype(str).str.strip()
+            except Exception:
+                continue
+            mask = mask | (col_values == target)
+        if not mask.any():
+            return {}
+
+        matched = df.loc[mask]
+        result: Dict[str, List[int]] = {}
+        for _, row in matched.iterrows():
+            raw_type = row[type_col]
+            tname = str(raw_type).strip() if pd.notna(raw_type) else ''
+            if not tname:
+                continue
+            raw_bid = row[bid_col]
+            try:
+                bid = int(raw_bid)
+            except (TypeError, ValueError):
+                bid = raw_bid
+            result.setdefault(tname, []).append(bid)
+        return result
+
     def get_type_profile_from_bodyids(
         self,
         neuron_type: str,

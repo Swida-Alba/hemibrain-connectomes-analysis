@@ -18,6 +18,7 @@ the setting (used by tests and scripts for determinism).
 import fnmatch
 import html
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -76,17 +77,19 @@ COLUMN_GLOSSARY = {
     # --- Connection scores ----------------------------------------------------
     "connection_ratio": (
         "Fraction of the postsynaptic neuron's input coming from this "
-        "partner, = weight / postsynaptic total input "
-        "(w_ij / Σ_k w_kj over D_t).", "0-1"),
+        "partner: $w_{ij} / \\sum_k w_{kj}$ over the postsynaptic total "
+        "input $D_t$.", "0-1"),
     "ratios": ("Per-edge connection ratios along the path.", "list of 0-1"),
     "min_ratio": ("Smallest edge connection ratio along the path.", "0-1"),
     "traversal_probability": (
-        "Probability that a signal traverses the edge, "
-        "= min(1.0, connection_ratio / 0.3).", "0-1"),
+        "Probability that a signal traverses the edge: "
+        "$\\min(1.0,\\ connection\\_ratio/0.3)$.", "0-1"),
     "probabilities": ("Per-edge traversal probabilities along the path.", "list of 0-1"),
-    "block_probability": ("Probability the signal is blocked: = 1 - traversal_probability.", "0-1"),
+    "block_probability": ("Probability the signal is blocked: "
+                         "$1 - \\text{traversal\\_probability}$.", "0-1"),
     "path": ("Path as a neuron-type sequence, e.g. aMe12 → SMP238 → PPL101.", "text"),
-    "path_prob": ("Overall path probability = product of edge traversal probabilities (Π p_k).", "0-1"),
+    "path_prob": ("Overall path probability = product of edge traversal "
+                   "probabilities $\\left(\\prod p_k\\right)$.", "0-1"),
     "min_weight": ("Smallest edge weight along the path.", "integer"),
     "length": ("Number of hops (edges) in the path.", "integer"),
     "nt_type": ("Predicted neurotransmitter type (ACh, GABA, glutamate, ...).", "text"),
@@ -121,23 +124,26 @@ COLUMN_GLOSSARY = {
     # Formulas are written inline so the exported run guide explains HOW each
     # score is computed, not only what it means.  A = one profile's partner set,
     # B = the other's; w_a/w_b are partner weights; ρ = Spearman correlation.
-    "jaccard": ("Jaccard similarity of the two partner sets: |A ∩ B| / |A ∪ B|.", "0-1"),
+    "jaccard": ("Jaccard similarity of the two partner sets: "
+                 "$\\lvert A \\cap B\\rvert / \\lvert A \\cup B\\rvert$.", "0-1"),
     "weighted_jaccard": (
-        "Score-weighted (Ruzicka) Jaccard similarity: Σ min(w_a, w_b) / "
-        "Σ max(w_a, w_b) over the partner-type union.", "0-1"),
+        "Score-weighted (Ruzicka) Jaccard similarity: "
+        "$\\sum \\min(w_a, w_b) / \\sum \\max(w_a, w_b)$ "
+        "over the partner-type union.", "0-1"),
     "cosine": (
-        "Cosine similarity of the partner-weight vectors: (A·B) / (‖A‖·‖B‖) "
+        "Cosine similarity of the partner-weight vectors: "
+        "$(A \\cdot B) / (\\lVert A \\rVert \\cdot \\lVert B \\rVert)$ "
         "over the partner-type union (missing = 0).", "0-1"),
     "rank_corr": (
-        "Raw Spearman rank correlation (ρ) of partner weights on shared "
-        "partners; NaN when fewer than 3 shared partners.", "-1 to 1"),
+        "Raw Spearman rank correlation ($\\rho$) of partner weights on "
+        "shared partners; NaN when fewer than 3 shared partners.", "-1 to 1"),
     "rank_union": (
         "Spearman rank correlation over the union of both partner sets "
         "(missing partners weighted 0), raw -1 to 1.", "-1 to 1"),
     "similarity": ("Overall similarity score used for sorting; see method/metric.", "0-1"),
     "profile_similarity": (
-        "Connectivity-profile similarity evidence: shared-count / "
-        "max-shared-count (0-1).", "0-1"),
+        "Connectivity-profile similarity evidence: "
+        "$\\text{shared-count} / \\text{max-shared-count}$ (0-1).", "0-1"),
     "roi_similarity": (
         "ROI overlap similarity: cosine of input/output synapse distributions "
         "over primary ROIs, mirrored across the midline.", "0-1"),
@@ -148,17 +154,22 @@ COLUMN_GLOSSARY = {
     "metric": ("Distance metric used (cosine / pearson).", "text"),
     "morph_cosine": (
         "Morphology vector cosine similarity (when enrichment ran): "
-        "(A·B) / (‖A‖·‖B‖) on z-scored vectors.", "0-1"),
+        "$(A \\cdot B) / (\\lVert A \\rVert \\cdot \\lVert B \\rVert)$ "
+        "on z-scored vectors.", "0-1"),
     "morph_pearson": (
         "Morphology vector Pearson correlation (when enrichment ran); "
-        "= cosine of the mean-centered vectors.", "-1 to 1"),
+        "= cosine of the mean-centered vectors ($\\rho$).", "-1 to 1"),
     "adjacency_score": (
         "Direct adjacency (shared-partner / synaptic-contact) score between "
         "the pair.", "number"),
-    "shared_type_count": ("Number of partner types shared by both profiles: |A ∩ B|.", "integer"),
-    "union_type_count": ("Number of unique partner types across both profiles: |A ∪ B|.", "integer"),
-    "overlap_a_in_b": ("Fraction of A's partners present in B: |A ∩ B| / |A|.", "0-1"),
-    "overlap_b_in_a": ("Fraction of B's partners present in A: |A ∩ B| / |B|.", "0-1"),
+    "shared_type_count": ("Number of partner types shared by both profiles: "
+                         "$\\lvert A \\cap B\\rvert$.", "integer"),
+    "union_type_count": ("Number of unique partner types across both profiles: "
+                         "$\\lvert A \\cup B\\rvert$.", "integer"),
+    "overlap_a_in_b": ("Fraction of A's partners present in B: "
+                       "$\\lvert A \\cap B\\rvert / \\lvert A\\rvert$.", "0-1"),
+    "overlap_b_in_a": ("Fraction of B's partners present in A: "
+                       "$\\lvert A \\cap B\\rvert / \\lvert B\\rvert$.", "0-1"),
     "overlap_avg": ("Mean of overlap_a_in_b and overlap_b_in_a.", "0-1"),
     # --- Type-level aggregates --------------------------------------------------
     "avg_rank_corr": ("Mean rank_corr over all bodyId pairs of the type pair.", "-1 to 1"),
@@ -185,20 +196,29 @@ COLUMN_GLOSSARY = {
     "threshold": ("Minimum synapse threshold applied.", "integer"),
     "conservation": ("Number/fraction of datasets in which the edge is present.", "text"),
     "conserved_at_lowest": ("Edge present in every dataset at the lowest threshold.", "boolean"),
-    "jaccard_similarity": ("Jaccard similarity of the two datasets' edge sets: |E1 ∩ E2| / |E1 ∪ E2|.", "0-1"),
-    "ruzicka_similarity": ("Ruzicka (weighted Jaccard) of edge weights: Σ min(W1, W2) / Σ max(W1, W2).", "0-1"),
+    "jaccard_similarity": ("Jaccard similarity of the two datasets' edge sets: "
+                            "$\\lvert E_1 \\cap E_2\\rvert / "
+                            "\\lvert E_1 \\cup E_2\\rvert$.", "0-1"),
+    "ruzicka_similarity": ("Ruzicka (weighted Jaccard) of edge weights: "
+                            "$\\sum \\min(W_1, W_2) / \\sum \\max(W_1, W_2)$.", "0-1"),
     "pearson_correlation": ("Pearson correlation of matched edge weights (sparse-data caution).", "-1 to 1"),
     "edges_in_d1": ("Number of edges in dataset 1.", "integer"),
     "edges_in_d2": ("Number of edges in dataset 2.", "integer"),
-    "common_edges": ("Number of edges present in both datasets: |E1 ∩ E2|.", "integer"),
-    "union_edges": ("Number of unique edges across both datasets: |E1 ∪ E2|.", "integer"),
+    "common_edges": ("Number of edges present in both datasets: "
+                      "$\\lvert E_1 \\cap E_2\\rvert$.", "integer"),
+    "union_edges": ("Number of unique edges across both datasets: "
+                     "$\\lvert E_1 \\cup E_2\\rvert$.", "integer"),
     "unique_to_d1": ("Edges present only in dataset 1.", "integer"),
     "unique_to_d2": ("Edges present only in dataset 2.", "integer"),
     "edge_rank_correlation": ("Spearman correlation of edge-weight ranks over the union (missing = 0).", "-1 to 1"),
-    "cosine_similarity": ("Cosine similarity of edge-weight vectors over the union: (E1·E2)/(‖E1‖·‖E2‖).", "0-1"),
+    "cosine_similarity": ("Cosine similarity of edge-weight vectors over the union: "
+                            "$(E_1 \\cdot E_2) / "
+                            "(\\lVert E_1 \\rVert \\cdot \\lVert E_2 \\rVert)$.", "0-1"),
     "path_rank_correlation": ("Spearman correlation of path-probability ranks.", "-1 to 1"),
     "spearman_rank_correlation": ("Spearman rank correlation of the compared values.", "-1 to 1"),
-    "rv_coefficient": ("RV coefficient (multivariate correlation) of the edge matrices: ⟨A,B⟩_F² / (‖A‖_F²·‖B‖_F²).", "0-1"),
+    "rv_coefficient": ("RV coefficient (multivariate correlation) of the edge "
+                         "matrices: $\\langle A, B\\rangle_F^2 / "
+                         "(\\lVert A \\rVert_F^2 \\cdot \\lVert B \\rVert_F^2)$.", "0-1"),
     "dataset_1": ("First dataset of the pairwise comparison.", "text"),
     "dataset_2": ("Second dataset of the pairwise comparison.", "text"),
     # --- Dataset metadata ---------------------------------------------------------
@@ -250,6 +270,69 @@ def glossary_entry(column: str) -> tuple:
         column, ("(see docs/OUTPUT_FILES.md)", ""))
 
 
+# Inline-math markers: descriptions may wrap a formula fragment in ``$...$``
+# (LaTeX). Each renderer presents those fragments as formatted math:
+#   - markdown: keeps ``$...$`` so the viewer's MathJax/KaTeX renders it
+#   - html:     rewrites to MathJax ``\(...\)`` and loads MathJax in the head
+#   - txt:      strips the markers for plain text
+
+def _math_to_md(description: str) -> str:
+    """Return the description unchanged (already uses $...$ inline math)."""
+    return description
+
+
+def _math_to_html(description: str) -> str:
+    """Rewrite $...$ fragments to MathJax \\(...\\) for HTML output.
+
+    MathJax reads the \\( delimiter from the page source, so each fragment
+    must be emitted with two backslashes (the browser's JS parser collapses
+    them to the \\( MathJax uses).
+    """
+    return re.sub(
+        r"\$([^$]+)\$",
+        lambda m: _HTML_MATH_OPEN + m.group(1) + _HTML_MATH_CLOSE,
+        description,
+    )
+
+
+# Inline MathJax delimiters: two backslashes + the bracket, so the page source
+# shows \\( and \\) and the browser turns them into the \\(/\\) MathJax uses.
+_HTML_MATH_OPEN = r"\\("
+_HTML_MATH_CLOSE = r"\\)"
+
+
+def _math_to_txt(description: str) -> str:
+    """Strip $...$ markers and render readable plain text for the txt output."""
+    return _latex_to_plain(re.sub(r"\$([^$]+)\$", r"\1", description))
+
+
+def _latex_to_plain(text: str) -> str:
+    """Convert the small LaTeX set the glossary uses back to plain text.
+
+    Keep it minimal and order-sensitive (long commands first), so the plain
+    txt guide stays readable without embedding raw TeX. Function names
+    (min/max) are preserved as words; set/norm delimiters lose the inner
+    spacing LaTeX inserts around operands.
+    """
+    text = re.sub(r"\\text\{([^}]*)\}", r"\1", text)
+    subs = [
+        (r"\lVert", "‖"), (r"\rVert", "‖"),
+        (r"\lvert", "|"), (r"\rvert", "|"),
+        (r"\left(", "("), (r"\right)", ")"),
+        (r"\langle", "⟨"), (r"\rangle", "⟩"),
+        (r"\min", "min"), (r"\max", "max"),
+        (r"\cdot", "·"), (r"\sum", "Σ"), (r"\prod", "Π"),
+        (r"\rho", "ρ"), (r"\cap", "∩"), (r"\cup", "∪"),
+        (r"\,", " "), (r"\_", "_"),
+    ]
+    for old, new in subs:
+        text = text.replace(old, new)
+    # LaTeX puts a space after a delimiter command before its operand;
+    # plain text reads better without it (| A -> |A, ‖ A -> ‖A, ⟨ A -> ⟨A).
+    text = re.sub(r"([|‖⟨])\s+", r"\1", text)
+    return re.sub(r"\\[a-zA-Z]+\b", "", text)  # drop any leftover commands
+
+
 # =============================================================================
 # Per-tool file specifications. Each entry describes one file (or a glob of
 # files) in the run folder. ``columns`` reference COLUMN_GLOSSARY keys;
@@ -278,6 +361,13 @@ _HOMOLOG_RESULT_COLUMNS = [
     "jaccard", "weighted_jaccard", "cosine", "is_same_type",
     "is_same_dataset", "source_status", "target_status", "weak_source",
     "weak_target", "source_partner_count", "target_partner_count",
+]
+
+# Profiles carry one similarity matrix per metric/direction.  These are the
+# score columns whose values fill the matrix cells; the glossary explains the
+# formula behind each so the profiling run guide documents the score logic.
+_PROFILING_METRIC_COLUMNS = [
+    "jaccard", "weighted_jaccard", "cosine", "rank_corr", "rank_union",
 ]
 
 _FIND_NETWORK = {
@@ -571,7 +661,8 @@ TOOL_GUIDE_SPECS = {
         "files": [
             {"pattern": "report.html",
              "description": "Overall HTML report linking every metric and "
-                            "heatmap."},
+                            "heatmap.",
+             "columns": _PROFILING_METRIC_COLUMNS},
             {"pattern": "parameters.json",
              "description": "All analysis parameters (query, datasets, "
                             "top_k/top_m, thresholds, metrics)."},
@@ -582,15 +673,18 @@ TOOL_GUIDE_SPECS = {
              "description": "Type-level N×N similarity matrices, one file "
                             "per direction × metric.",
              "matrix": "rows/columns = neuron types, values = similarity "
-                       "for the metric/direction in the file name"},
+                       "for the metric/direction in the file name",
+             "columns": _PROFILING_METRIC_COLUMNS},
             {"pattern": "intra_dataset/*/results/bodyid_similarity_*.csv",
              "description": "BodyId-to-bodyId similarity matrices.",
              "matrix": "rows/columns = bodyId_type labels, values = "
-                       "similarity"},
+                       "similarity",
+             "columns": _PROFILING_METRIC_COLUMNS},
             {"pattern": "intra_dataset/*/results/type_avg_bodyid_similarity_*.csv",
              "description": "Type similarities averaged from bodyId pairs.",
              "matrix": "rows/columns = neuron types, values = averaged "
-                       "similarity"},
+                       "similarity",
+             "columns": _PROFILING_METRIC_COLUMNS},
             {"pattern": "intra_dataset/*/visualization/heatmap_*.html",
              "description": "Interactive intra-dataset heatmaps."},
             {"pattern": "cross_dataset/mapping_summary.csv",
@@ -601,7 +695,8 @@ TOOL_GUIDE_SPECS = {
              "description": "N×M similarity matrices comparing the queried "
                             "types across datasets.",
              "matrix": "rows = types in one dataset, columns = types in the "
-                       "other, values = similarity"},
+                       "other, values = similarity",
+             "columns": _PROFILING_METRIC_COLUMNS},
             {"pattern": "cross_dataset/all_types/visualization/heatmap_*.html",
              "description": "Interactive cross-dataset heatmaps."},
             {"pattern": "profiles/*/aggregated/*_profile.json",
@@ -1033,7 +1128,7 @@ def render_txt(content: dict) -> str:
         for column in entry["columns"]:
             description, value_range = glossary_entry(column)
             suffix = f" [{value_range}]" if value_range else ""
-            lines.append(f"      - {column}: {description}{suffix}")
+            lines.append(f"      - {column}: {_math_to_txt(description)}{suffix}")
         lines.append("")
 
     if content["leftovers"]:
@@ -1102,7 +1197,8 @@ def render_markdown(content: dict) -> str:
             md.append("| --- | --- | --- |")
             for column in entry["columns"]:
                 description, value_range = glossary_entry(column)
-                md.append(f"| `{column}` | {description} | {value_range} |")
+                md_cell = _math_to_md(description).replace("|", "\\|")
+                md.append(f"| `{column}` | {md_cell} | {value_range} |")
         md.append("")
 
     if content["leftovers"]:
@@ -1147,6 +1243,20 @@ code { background: #eef1f7; border-radius: 4px; padding: 1px 5px;
 """
 
 
+# Load MathJax so inline $...$ formula fragments present as formatted math.
+# Inline delimiters are configured to (...); the HTML renderer rewrites the
+# glossary's $...$ markers to those before inserting the description.
+_MATHJAX = (
+    "<script>window.MathJax = {tex: {inlineMath: [['"
+    r"\\("
+    "', '"
+    r"\\)"
+    "']]}};</script>\n"
+    "<script async src=\"https://cdn.jsdelivr.net/npm/mathjax@3/es5/"
+    "tex-mml-chtml.js\"></script>"
+)
+
+
 def _html_escape(text) -> str:
     return html.escape(str(text))
 
@@ -1162,6 +1272,7 @@ def render_html(content: dict) -> str:
     parts.append(f"<title>DROCAT Run Guide — "
                  f"{_html_escape(content['title'])}</title>")
     parts.append(f"<style>{_HTML_STYLE}</style>")
+    parts.append(_MATHJAX)
     parts.append("</head>")
     parts.append("<body>")
     parts.append("<main>")
@@ -1223,7 +1334,7 @@ def render_html(content: dict) -> str:
                 description, value_range = glossary_entry(column)
                 parts.append(
                     f"<tr><td><code>{_html_escape(column)}</code></td>"
-                    f"<td>{_html_escape(description)}</td>"
+                    f"<td>{_html_escape(_math_to_html(description))}</td>"
                     f"<td>{_html_escape(value_range)}</td></tr>")
             parts.append("</table>")
         parts.append("</div>")
