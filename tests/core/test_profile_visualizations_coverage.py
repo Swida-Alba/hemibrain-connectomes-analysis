@@ -384,7 +384,7 @@ def test_save_all_visualizations(tmp_path, verification_df, summary_df,
     assert os.path.exists(saved["html_report"])
     assert os.path.exists(saved["summary"])
     assert os.path.exists(saved["role_comparison"])
-    assert os.path.exists(saved["heatmap_combined"])
+    assert os.path.exists(saved["heatmap_overall"])
     # metric / directional heatmaps written into subfolders
     assert (out_dir / "metric_heatmaps").is_dir()
     assert (out_dir / "directional_heatmaps").is_dir()

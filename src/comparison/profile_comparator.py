@@ -115,16 +115,8 @@ class ComparisonResult:
         rank_correlation: Spearman rank correlation
         overlap_a_in_b: Fraction of A's partners found in B (|A ∩ B| / |A|)
         overlap_b_in_a: Fraction of B's partners found in A (|A ∩ B| / |B|)
-        combined: Weighted combined score
-        confidence: Confidence level ('High', 'Medium', 'Low', 'Very Low')
         weak_connectivity_a: Flag if profile A has weak connectivity
         weak_connectivity_b: Flag if profile B has weak connectivity
-    
-    Confidence Interpretation:
-        - High (>0.7): Profiles match well - type assignment likely correct
-        - Medium (0.5-0.7): Some differences - may need review
-        - Low (0.3-0.5): Significant differences - type assignment questionable
-        - Very Low (<0.3): Profiles differ substantially - likely different neurons
     """
     profile_a_id: str
     profile_b_id: str
@@ -139,24 +131,11 @@ class ComparisonResult:
     overlap_a_in_b: float  # |A ∩ B| / |A| - fraction of A's partners found in B
     overlap_b_in_a: float  # |A ∩ B| / |B| - fraction of B's partners found in A
     
-    # Combined score
-    combined: float
-    
-    # Confidence level
-    confidence: str
-    
     # Flags
     rank_union: float = np.nan
     weak_connectivity_a: bool = False
     weak_connectivity_b: bool = False
     notes: str = ""  # Additional notes (e.g., "constant_array" when rank correlation is NaN)
-    
-    @property
-    def rank_correlation_norm(self) -> float:
-        """Normalized rank correlation in [0, 1] range using (x+1)/2."""
-        if np.isnan(self.rank_correlation):
-            return np.nan
-        return (self.rank_correlation + 1) / 2
     
     def to_dict(self) -> dict:
         """Convert to dictionary for CSV/JSON export."""
@@ -168,13 +147,10 @@ class ComparisonResult:
             'direction': self.direction,
             'jaccard': round(self.jaccard, 4),
             'cosine': round(self.cosine, 4),
-            'rank_correlation': round(self.rank_correlation, 4) if not np.isnan(self.rank_correlation) else np.nan,
-            'rank_correlation_norm': round(self.rank_correlation_norm, 4) if not np.isnan(self.rank_correlation_norm) else np.nan,
+            'rank_corr': round(self.rank_correlation, 4) if not np.isnan(self.rank_correlation) else np.nan,
             'rank_union': round(self.rank_union, 4) if not np.isnan(self.rank_union) else np.nan,
             'overlap_a_in_b': round(self.overlap_a_in_b, 4),
             'overlap_b_in_a': round(self.overlap_b_in_a, 4),
-            'combined': round(self.combined, 4),
-            'confidence': self.confidence,
             'weak_connectivity_warning': self.weak_connectivity_a or self.weak_connectivity_b
         }
         if self.notes:
@@ -185,13 +161,11 @@ class ComparisonResult:
         """Generate a human-readable summary string."""
         # Handle NaN in rank correlation display
         rank_corr_str = f"{self.rank_correlation:.3f}" if not np.isnan(self.rank_correlation) else "NaN"
-        rank_norm_str = f"{self.rank_correlation_norm:.3f}" if not np.isnan(self.rank_correlation_norm) else "NaN"
         
         lines = [
             f"Comparison: {self.profile_a_id} ({self.dataset_a}) vs {self.profile_b_id} ({self.dataset_b})",
             f"  Direction: {self.direction}",
-            f"  Combined Score: {self.combined:.4f} ({self.confidence})",
-            f"  Metrics: Jaccard={self.jaccard:.3f}, Cosine={self.cosine:.3f}, RankCorr={rank_corr_str} (norm={rank_norm_str})",
+            f"  Metrics: Jaccard={self.jaccard:.3f}, Cosine={self.cosine:.3f}, RankCorr={rank_corr_str}",
             f"  Overlap: A_in_B={self.overlap_a_in_b:.3f}, B_in_A={self.overlap_b_in_a:.3f}"
         ]
         if self.weak_connectivity_a or self.weak_connectivity_b:
@@ -199,18 +173,6 @@ class ComparisonResult:
         if self.notes:
             lines.append(f"  ℹ️ {self.notes}")
         return "\n".join(lines)
-    
-    @staticmethod
-    def determine_confidence(combined_score: float) -> str:
-        """Determine confidence level from combined score."""
-        if combined_score >= 0.7:
-            return 'High'
-        elif combined_score >= 0.5:
-            return 'Medium'
-        elif combined_score >= 0.3:
-            return 'Low'
-        else:
-            return 'Very Low'
 
 
 # ============================================================================
@@ -228,7 +190,7 @@ class ProfileComparator:
     Example:
         >>> comparator = ProfileComparator()
         >>> result = comparator.compare_profiles(profile_a, profile_b)
-        >>> print(f"Combined score: {result.combined:.3f}")
+        >>> print(f"Jaccard: {result.jaccard:.3f}, rank_corr: {result.rank_correlation:.3f}")
     """
     
     @staticmethod
@@ -557,29 +519,26 @@ class ProfileComparator:
         direction: str = 'both'
     ) -> Dict[str, float]:
         """
-        Combined similarity score using Jaccard and rank correlation.
+        Combined similarity metric calculator (Jaccard + rank based).
         
-        Default weights (equal):
-        - jaccard: 0.50 (set-based overlap of partner types)
-        - rank: 0.50 (Spearman correlation normalized to 0-1)
-        
-        These metrics work well for both bodyId-level and type-level comparison.
-        Cosine similarity is computed but not included in combined score.
+        Only the raw (unnormalized) metrics are returned: Jaccard and the two
+        Spearman rank correlations (shared and union).  The normalized 0-1
+        rank variants and the derived 'combined' score are no longer computed.
+        The ``weights`` argument is retained only for API compatibility and has
+        no effect.
         
         Args:
             profile_a: First connectivity profile
             profile_b: Second connectivity profile
-            weights: Custom weight dictionary (optional)
+            weights: Custom weight dictionary (optional, inert)
             direction: 'upstream', 'downstream', or 'both'
         
         Returns:
             Dict with scores:
-            - 'combined': Weighted combination of jaccard and rank_norm
             - 'jaccard': Jaccard similarity (0-1)
             - 'rank': Original rank correlation (-1 to 1)
-            - 'rank_norm': Normalized rank correlation (0-1)
-            - 'cosine': Cosine similarity (for reference, not in combined)
-            - 'overlap_a_in_b', 'overlap_b_in_a': Overlap fractions (for reference)
+            - 'cosine': Cosine similarity
+            - 'overlap_a_in_b', 'overlap_b_in_a': Overlap fractions
         """
         if weights is None:
             weights = DEFAULT_SCORE_WEIGHTS
@@ -604,9 +563,6 @@ class ProfileComparator:
         else:
             weighted_jaccard = 0.0
         
-        # Normalize rank_corr from [-1, 1] to [0, 1]
-        rank_norm = (rank_corr + 1) / 2 if not np.isnan(rank_corr) else np.nan
-        
         # Rank correlation on the UNION of partner types (missing = 0.0) —
         # same semantics as the homolog scorer's rank_union
         if len(w_partners) >= 3:
@@ -623,28 +579,16 @@ class ProfileComparator:
                 rank_union = np.nan
         else:
             rank_union = np.nan
-        rank_union_norm = (rank_union + 1) / 2 if not np.isnan(rank_union) else 0.5
-        
-        # Compute weighted combined score (only Jaccard + normalized rank)
-        # Use 0.5 for missing rank (neutral)
-        rank_for_combined = 0.5 if np.isnan(rank_norm) else rank_norm
-        combined = (
-            weights.get('jaccard', 0.50) * jaccard +
-            weights.get('rank', 0.50) * rank_for_combined
-        )
-        
+
         # Keep overlap values for backward compatibility
         overlap_avg = (overlap_a + overlap_b) / 2
-        
+
         return {
-            'combined': combined,
             'jaccard': jaccard,
             'weighted_jaccard': weighted_jaccard,
             'cosine': cosine,
             'rank': rank_corr,  # Original [-1, 1]
-            'rank_norm': rank_norm,  # Normalized [0, 1]
             'rank_union': rank_union,  # Union-based rank, original [-1, 1]
-            'rank_union_norm': rank_union_norm,  # Normalized [0, 1]
             'overlap_a_in_b': overlap_a,
             'overlap_b_in_a': overlap_b,
             'overlap_avg': overlap_avg
@@ -1129,13 +1073,10 @@ class ProfileComparator:
         # If either profile has 0 partners, return NaN for all metrics
         if len(bodyids_a) == 0 or len(bodyids_b) == 0:
             return {
-                'combined': np.nan,
                 'jaccard': np.nan,
                 'cosine': np.nan,
                 'rank': np.nan,
-                'rank_norm': np.nan,
                 'rank_union': np.nan,
-                'rank_union_norm': np.nan,
                 'overlap_a_in_b': np.nan,
                 'overlap_b_in_a': np.nan,
                 'overlap_avg': np.nan,
@@ -1147,17 +1088,6 @@ class ProfileComparator:
         jaccard = ProfileComparator.bodyid_jaccard(profile_a, profile_b, direction)
         rank_corr = ProfileComparator.bodyid_rank_correlation(profile_a, profile_b, direction)
         rank_union = ProfileComparator.bodyid_rank_correlation_union(profile_a, profile_b, direction)
-        
-        # Normalize rank_corr from [-1, 1] to [0, 1]
-        rank_norm = (rank_corr + 1) / 2 if not np.isnan(rank_corr) else np.nan
-        rank_union_norm = (rank_union + 1) / 2 if not np.isnan(rank_union) else np.nan
-        
-        # Compute weighted combined score
-        rank_for_combined = 0.5 if np.isnan(rank_norm) else rank_norm
-        combined = (
-            weights.get('jaccard', 0.50) * jaccard +
-            weights.get('rank', 0.50) * rank_for_combined
-        )
         
         # Cosine similarity using bodyId weights (bodyids_a/b already computed above)
         # Ensure all bodyIds are strings for sorting
@@ -1187,14 +1117,11 @@ class ProfileComparator:
             weighted_jaccard = 0.0
         
         return {
-            'combined': combined,
             'jaccard': jaccard,
             'weighted_jaccard': weighted_jaccard,
             'cosine': cosine,
             'rank': rank_corr,
-            'rank_norm': rank_norm,
             'rank_union': rank_union,
-            'rank_union_norm': rank_union_norm,
             'overlap_a_in_b': 0.0,  # Not computed for bodyId-level
             'overlap_b_in_a': 0.0,
             'overlap_avg': 0.0,
@@ -1235,13 +1162,10 @@ class ProfileComparator:
         # If either profile has 0 partners, return NaN for all metrics
         if len(types_a) == 0 or len(types_b) == 0:
             return {
-                'combined': np.nan,
                 'jaccard': np.nan,
                 'cosine': np.nan,
                 'rank': np.nan,
-                'rank_norm': np.nan,
                 'rank_union': np.nan,
-                'rank_union_norm': np.nan,
                 'overlap_a_in_b': np.nan,
                 'overlap_b_in_a': np.nan,
                 'overlap_avg': np.nan,
@@ -1253,17 +1177,6 @@ class ProfileComparator:
         jaccard = ProfileComparator.expanded_type_jaccard(profile_a, profile_b, direction)
         rank_corr = ProfileComparator.expanded_type_rank_correlation(profile_a, profile_b, direction)
         rank_union = ProfileComparator.expanded_type_rank_correlation_union(profile_a, profile_b, direction)
-        
-        # Normalize rank_corr from [-1, 1] to [0, 1]
-        rank_norm = (rank_corr + 1) / 2 if not np.isnan(rank_corr) else np.nan
-        rank_union_norm = (rank_union + 1) / 2 if not np.isnan(rank_union) else np.nan
-        
-        # Compute weighted combined score
-        rank_for_combined = 0.5 if np.isnan(rank_norm) else rank_norm
-        combined = (
-            weights.get('jaccard', 0.50) * jaccard +
-            weights.get('rank', 0.50) * rank_for_combined
-        )
         
         # Cosine similarity using expanded type weights (types_a/b already computed above)
         all_types = sorted(set(types_a.keys()) | set(types_b.keys()))
@@ -1278,13 +1191,10 @@ class ProfileComparator:
             cosine = 0.0
         
         return {
-            'combined': combined,
             'jaccard': jaccard,
             'cosine': cosine,
             'rank': rank_corr,
-            'rank_norm': rank_norm,
             'rank_union': rank_union,
-            'rank_union_norm': rank_union_norm,
             'overlap_a_in_b': 0.0,  # Not computed for expanded types
             'overlap_b_in_a': 0.0,
             'overlap_avg': 0.0,
@@ -1359,7 +1269,6 @@ class ProfileComparator:
                 results.append({
                     'target_bid': target_bid,
                     'shared_count': shared_count,
-                    'combined': np.nan,
                     'jaccard': np.nan,
                     'cosine': np.nan,
                     'rank': np.nan,
@@ -1428,19 +1337,9 @@ class ProfileComparator:
             else:
                 weighted_jaccard = 0.0
             
-            # Compute combined score
-            rank_norm = (rank_corr + 1) / 2 if not np.isnan(rank_corr) else 0.5
-            
-            # If jaccard is 0 (no overlap), combined score should be 0
-            if jaccard == 0:
-                combined = 0.0
-            else:
-                combined = 0.5 * jaccard + 0.5 * rank_norm
-            
             results.append({
                 'target_bid': target_bid,
                 'shared_count': shared_count,
-                'combined': combined,
                 'jaccard': jaccard,
                 'weighted_jaccard': weighted_jaccard,
                 'cosine': cosine,
@@ -1474,13 +1373,11 @@ class ProfileComparator:
             score_weights: Alias for weights (compatibility)
         
         Returns:
-            ComparisonResult with all metrics and confidence level
+            ComparisonResult with all metrics
         """
         merged_weights = weights if weights is not None else score_weights
         scores = ProfileComparator.combined_score(profile_a, profile_b, weights=merged_weights, direction=direction)
         rank_union = ProfileComparator.expanded_type_rank_correlation_union(profile_a, profile_b, direction)
-        
-        confidence = ComparisonResult.determine_confidence(scores['combined'])
         
         # Add note if rank correlation is NaN (due to constant arrays)
         notes = ""
@@ -1499,8 +1396,6 @@ class ProfileComparator:
             rank_union=rank_union,
             overlap_a_in_b=scores['overlap_a_in_b'],
             overlap_b_in_a=scores['overlap_b_in_a'],
-            combined=scores['combined'],
-            confidence=confidence,
             weak_connectivity_a=profile_a.is_weak_connectivity,
             weak_connectivity_b=profile_b.is_weak_connectivity,
             notes=notes
@@ -1525,7 +1420,7 @@ class ProfileComparator:
             direction: 'upstream', 'downstream', or 'both'
         
         Returns:
-            Dict with keys: jaccard, cosine, rank_correlation, shared_count, combined
+            Dict with keys: jaccard, cosine, rank_correlation, shared_count
         """
         scores = ProfileComparator.combined_score(profile_a, profile_b, direction=direction)
         
@@ -1543,8 +1438,7 @@ class ProfileComparator:
             'jaccard': scores['jaccard'],
             'cosine': scores['cosine'],
             'rank_correlation': scores['rank'],
-            'shared_count': len(shared),
-            'combined': scores['combined']
+            'shared_count': len(shared)
         }
     
     @staticmethod
@@ -1871,11 +1765,6 @@ class ProfileComparator:
                 for _, row in type_summary.iterrows():
                     rank_corr = row.get('avg_rank_corr', np.nan)
                     rank_union = row.get('avg_rank_union', np.nan)
-                    rank_norm = (rank_corr + 1) / 2 if not np.isnan(rank_corr) else np.nan
-                    combined = (
-                        weights.get('jaccard', 0.5) * row.get('avg_jaccard', np.nan) +
-                        weights.get('rank', 0.5) * (0.5 if np.isnan(rank_norm) else rank_norm)
-                    )
                     rows.append({
                         'neuron_a': row['neuron_type'],
                         'neuron_b': row['neuron_type'],
@@ -1884,17 +1773,13 @@ class ProfileComparator:
                         'dataset_a': dataset_a,
                         'dataset_b': dataset_b,
                         'direction': direction,
-                        'combined': combined,
                         'rank_corr': rank_corr,
-                        'rank_corr_norm': rank_norm,
                         'rank_union': rank_union,
-                        'rank_union_norm': (rank_union + 1) / 2 if not np.isnan(rank_union) else np.nan,
                         'jaccard': row.get('avg_jaccard', np.nan),
                         'cosine': row.get('avg_cosine', np.nan),
                         'shared_type_count': np.nan,
                         'union_type_count': np.nan,
                         'is_same_type': True,
-                        'confidence': ComparisonResult.determine_confidence(combined),
                         'n_source_bodyIds': row.get('n_source_bodyIds', np.nan),
                         'n_target_bodyIds': row.get('n_target_bodyIds', np.nan),
                     })
@@ -1902,13 +1787,12 @@ class ProfileComparator:
                 results_df = pd.DataFrame(rows)
                 summary = {
                     'n_types': len(strict_types),
-                    'avg_combined': results_df['combined'].mean() if not results_df.empty else np.nan,
                     'avg_rank_corr': results_df['rank_corr'].mean() if not results_df.empty else np.nan,
                     'avg_jaccard': results_df['jaccard'].mean() if not results_df.empty else np.nan,
                 }
 
                 return {
-                    'results': results_df.sort_values('combined', ascending=False) if not results_df.empty else results_df,
+                    'results': results_df.sort_values('rank_corr', ascending=False) if not results_df.empty else results_df,
                     'profiles_a': {},
                     'profiles_b': {},
                     'type_summary': type_summary,
@@ -1994,17 +1878,13 @@ class ProfileComparator:
                             'dataset_a': dataset_a,
                             'dataset_b': dataset_b,
                             'direction': direction,
-                            'combined': np.nan,
                             'rank_corr': np.nan,
-                            'rank_corr_norm': np.nan,
                             'rank_union': np.nan,
-                            'rank_union_norm': np.nan,
                             'jaccard': np.nan,
                             'cosine': np.nan,
                             'shared_type_count': 0,
                             'union_type_count': 0,
-                            'is_same_type': type_a == type_b,
-                            'confidence': 'Low'
+                            'is_same_type': type_a == type_b
                         })
                 continue
 
@@ -2019,25 +1899,9 @@ class ProfileComparator:
                     continue
                 is_same_type = type_a == type_b
 
-                # Recalculate combined score using user-provided weights
-                # batch_compare uses default 0.5/0.5, but we want to respect 'weights'
                 rank_corr = res['rank']
                 rank_union = res['rank_union']
                 jaccard = res['jaccard']
-                
-                rank_corr_norm = (rank_corr + 1) / 2 if not np.isnan(rank_corr) else np.nan
-                rank_union_norm = (rank_union + 1) / 2 if not np.isnan(rank_union) else np.nan
-                
-                # Use rank_norm for combined score (fallback to 0.5 if NaN)
-                rank_for_combined = 0.5 if np.isnan(rank_corr_norm) else rank_corr_norm
-                
-                if jaccard == 0:
-                    combined = 0.0
-                else:
-                    combined = (
-                        weights.get('jaccard', 0.50) * jaccard +
-                        weights.get('rank', 0.50) * rank_for_combined
-                    )
 
                 rows.append({
                     'neuron_a': key_a,
@@ -2047,22 +1911,18 @@ class ProfileComparator:
                     'dataset_a': dataset_a,
                     'dataset_b': dataset_b,
                     'direction': direction,
-                    'combined': combined,
                     'rank_corr': rank_corr,
-                    'rank_corr_norm': rank_corr_norm,
                     'rank_union': rank_union,
-                    'rank_union_norm': rank_union_norm,
                     'jaccard': jaccard,
                     'cosine': res['cosine'],
                     'shared_type_count': res['shared_type_count'],
                     'union_type_count': res['union_type_count'],
-                    'is_same_type': is_same_type,
-                    'confidence': ComparisonResult.determine_confidence(combined)
+                    'is_same_type': is_same_type
                 })
 
         results_df = pd.DataFrame(rows)
         if not results_df.empty:
-            results_df = results_df.sort_values('combined', ascending=False)
+            results_df = results_df.sort_values('rank_corr', ascending=False)
 
         # Build summary
         summary = {}
@@ -2071,13 +1931,11 @@ class ProfileComparator:
                 'n_comparisons': len(results_df),
                 'n_neurons_a': len(profiles_a),
                 'n_neurons_b': len(profiles_b),
-                'avg_combined': results_df['combined'].mean(),
-                'max_combined': results_df['combined'].max(),
                 'avg_rank_corr': results_df['rank_corr'].mean(),
                 'avg_jaccard': results_df['jaccard'].mean(),
                 'same_type_matches': results_df['is_same_type'].sum(),
             }
-            _log(f"Comparison complete: {summary['n_comparisons']} pairs, avg_combined={summary['avg_combined']:.3f}")
+            _log(f"Comparison complete: {summary['n_comparisons']} pairs, avg_rank_corr={summary['avg_rank_corr']:.3f}")
 
         return {
             'results': results_df,
@@ -2090,7 +1948,7 @@ class ProfileComparator:
     @staticmethod
     def build_similarity_matrix(
         profiles: Dict[str, ConnectivityProfile],
-        metric: str = 'combined',
+        metric: str = 'rank',
         direction: str = 'both'
     ) -> pd.DataFrame:
         """
@@ -2098,7 +1956,7 @@ class ProfileComparator:
         
         Args:
             profiles: Dict mapping identifier to profile
-            metric: 'combined', 'jaccard', 'cosine', or 'rank'
+            metric: 'jaccard', 'cosine', or 'rank'
             direction: 'upstream', 'downstream', or 'both'
         
         Returns:
@@ -2122,9 +1980,8 @@ class ProfileComparator:
                     sim = ProfileComparator.weighted_cosine_similarity(profile_a, profile_b, direction)
                 elif metric == 'rank':
                     sim = ProfileComparator.rank_correlation(profile_a, profile_b, direction)
-                else:  # combined
-                    scores = ProfileComparator.combined_score(profile_a, profile_b, direction=direction)
-                    sim = scores['combined']
+                else:
+                    sim = ProfileComparator.rank_correlation(profile_a, profile_b, direction)
                 
                 matrix[i, j] = sim
                 matrix[j, i] = sim
@@ -2149,7 +2006,7 @@ class ProfileComparator:
         
         Args:
             profiles_by_dataset: Dict of {dataset: {type_name: ConnectivityProfile}}
-            metric: Similarity metric to use ('rank', 'combined', 'jaccard', 'cosine')
+            metric: Similarity metric to use ('rank', 'jaccard', 'cosine')
             direction: 'upstream', 'downstream', or 'both'
         
         Returns:
@@ -2202,9 +2059,8 @@ class ProfileComparator:
                                 sim = ProfileComparator.jaccard_similarity(profile1, profile2, direction)
                             elif metric == 'cosine':
                                 sim = ProfileComparator.weighted_cosine_similarity(profile1, profile2, direction)
-                            else:  # combined
-                                scores = ProfileComparator.combined_score(profile1, profile2, direction=direction)
-                                sim = scores['combined']
+                            else:
+                                sim = ProfileComparator.rank_correlation(profile1, profile2, direction)
                             
                             cross_dataset_rows.append({
                                 'dataset_1': ds1,
@@ -2234,7 +2090,7 @@ class ProfileComparator:
         Args:
             profiles_by_dataset: Dict of {dataset: {type_name: ConnectivityProfile}}
             type_name: Name of the type to find similar types for
-            metric: Similarity metric ('rank', 'combined', 'jaccard', 'cosine')
+            metric: Similarity metric ('rank', 'jaccard', 'cosine')
             direction: 'upstream', 'downstream', or 'both'
             top_n: Number of top similar types to return per dataset
         
@@ -2268,9 +2124,8 @@ class ProfileComparator:
                     sim = ProfileComparator.jaccard_similarity(source_profile, other_profile, direction)
                 elif metric == 'cosine':
                     sim = ProfileComparator.weighted_cosine_similarity(source_profile, other_profile, direction)
-                else:  # combined
-                    scores = ProfileComparator.combined_score(source_profile, other_profile, direction=direction)
-                    sim = scores['combined']
+                else:
+                    sim = ProfileComparator.rank_correlation(source_profile, other_profile, direction)
                 
                 rows.append({
                     'source_type': type_name,
@@ -2416,12 +2271,11 @@ class HomologFinder:
             use_cache: Enable profile caching (uses ConnectivityProfiler cache)
             visualize_skeleton: Generate 3D skeleton visualizations (default: False)
             visualize_top_n: Number of top candidates to visualize (default: 5)
-            similarity_metric: Metric for sorting top-N candidates. Can be:
-                - str: One of 'rank_union', 'rank_corr', 'combined', 'jaccard', 'cosine'
-                - dict: Custom weights like {'jaccard': 0.3, 'rank': 0.7} for combined score
-                When dict is provided, computes weighted combination of metrics.
-            score_weights: (Deprecated) Use similarity_metric dict instead.
-                Custom weights for combined score: {'jaccard': 0.5, 'rank': 0.5}
+            similarity_metric: Metric for sorting top-N candidates:
+                - str: One of 'rank_union', 'rank_corr', 'jaccard', 'cosine'
+                - dict: Accepted for backward compatibility; no longer selects a
+                  weighted 'combined' score (the comparator falls back to rank_corr).
+            score_weights: (Deprecated) Retained for backward compatibility only.
             verbose: Print progress messages
             token: API token for NeuPrint (if empty, FNC auto-handles from env vars)
             min_shared_partners: Minimum shared partners for adjacency-expansion
@@ -2513,14 +2367,14 @@ class HomologFinder:
         self.use_auto_type_mapping = use_auto_type_mapping
         self._type_mapper: Optional[CrossDatasetTypeMapper] = None
         
-        # Similarity metric for sorting - can be str or dict
-        # If dict: custom weights for computing combined score
+        # Similarity metric for sorting.  Escalation can still pass a dict for
+        # backward compatibility, but it no longer selects a 'combined' score;
+        # the comparator therefore falls back to the raw rank_corr sort.
         if isinstance(similarity_metric, dict):
-            self.similarity_metric = 'combined'
-            self.score_weights = similarity_metric
+            self.similarity_metric = 'rank_corr'
         else:
             self.similarity_metric = similarity_metric
-            self.score_weights = score_weights if score_weights else DEFAULT_SCORE_WEIGHTS
+        self.score_weights = score_weights if score_weights else DEFAULT_SCORE_WEIGHTS
         
         # Profiler configuration
         self.verbose = verbose
@@ -3565,7 +3419,7 @@ class HomologFinder:
         source_dataset: Optional[str] = None,
         target_dataset: Optional[str] = None,
         top_n: Optional[int] = None,
-        metric: str = 'combined',
+        metric: str = 'rank_corr',
         direction: str = 'both',
         min_score: float = 0.0,
         show_progress: bool = True,
@@ -3610,7 +3464,7 @@ class HomologFinder:
             target_dataset: Target dataset to search for homologs.
                            Uses self.target_dataset if not provided.
             top_n: Number of top candidates to return per source neuron
-            metric: Similarity metric ('combined', 'jaccard', 'cosine', 'rank')
+            metric: Similarity metric ('rank_corr', 'jaccard', 'cosine')
             direction: Connection direction ('upstream', 'downstream', 'both')
             min_score: Minimum similarity score to include
             show_progress: Show progress bar
@@ -4618,12 +4472,11 @@ class HomologFinder:
                     target_status = target_status_map.get(target_bid, ConnectivityStatus.NONE)
                     target_type_str = target_type_lookup.get(target_bid, '')
 
-                    rank_corr_raw = score_dict['rank']
-                    rank_corr_norm = (rank_corr_raw + 1) / 2 if not np.isnan(rank_corr_raw) else np.nan
+                    rank_corr_value = score_dict['rank']
                     rank_union_raw = score_dict['rank_union']
 
                     # Optional score filter
-                    if min_score is not None and (pd.isna(rank_corr_norm) or rank_corr_norm < min_score):
+                    if min_score is not None and (pd.isna(rank_corr_value) or rank_corr_value < min_score):
                         continue
 
                     all_results.append({
@@ -4635,15 +4488,13 @@ class HomologFinder:
                         'adjacency_score': int(score_dict.get('shared_count', 0)),
                         'shared_type_count': score_dict['shared_type_count'],
                         'union_type_count': score_dict['union_type_count'],
-                        'rank_corr': rank_corr_norm,
-                        'rank_corr_raw': rank_corr_raw,
+                        'rank_corr': rank_corr_value,
                         # rank_union is the RAW union-based Spearman correlation
                         # (sign meaningful, 0 = no monotonic relation)
                         'rank_union': rank_union_raw,
                         'jaccard': score_dict['jaccard'],
                         'weighted_jaccard': score_dict.get('weighted_jaccard', 0.0),
                         'cosine': score_dict['cosine'],
-                        'combined': score_dict['combined'],
                         'is_same_type': source_type_str == target_type_str if target_type_str else False,
                         'is_same_dataset': not is_cross_dataset,
                         'source_status': source_status.value,
@@ -4662,11 +4513,10 @@ class HomologFinder:
                     target_status = target_status_map.get(target_bid, ConnectivityStatus.NONE)
                     scores = ProfileComparator.combined_score_intra_dataset(source_profile, target_profile)
 
-                    rank_corr_raw = scores['rank']
-                    rank_corr_norm = (rank_corr_raw + 1) / 2 if not np.isnan(rank_corr_raw) else np.nan
+                    rank_corr_value = scores['rank']
                     rank_union_raw = scores.get('rank_union', np.nan)
 
-                    if min_score is not None and (pd.isna(rank_corr_norm) or rank_corr_norm < min_score):
+                    if min_score is not None and (pd.isna(rank_corr_value) or rank_corr_value < min_score):
                         continue
 
                     target_type_str = target_type_lookup.get(target_bid, '')
@@ -4681,13 +4531,11 @@ class HomologFinder:
                         'adjacency_score': int(shared_count),
                         'shared_type_count': scores.get('shared_type_count', 0),
                         'union_type_count': scores.get('union_type_count', 0),
-                        'rank_corr': rank_corr_norm,
-                        'rank_corr_raw': rank_corr_raw,
+                        'rank_corr': rank_corr_value,
                         'rank_union': rank_union_raw,
                         'jaccard': scores['jaccard'],
                         'weighted_jaccard': scores.get('weighted_jaccard', 0.0),
                         'cosine': scores['cosine'],
-                        'combined': scores['combined'],
                         'is_same_type': source_type_str == target_type_str if target_type_str else False,
                         'is_same_dataset': not is_cross_dataset,
                         'source_status': source_status.value,
@@ -4713,8 +4561,7 @@ class HomologFinder:
                         continue
 
                     scores = ProfileComparator.combined_score_intra_dataset(profile_a, profile_b)
-                    rank_corr_raw = scores['rank']
-                    rank_corr_norm = (rank_corr_raw + 1) / 2 if not np.isnan(rank_corr_raw) else np.nan
+                    rank_corr_value = scores['rank']
                     rank_union_raw = scores.get('rank_union', np.nan)
 
                     source_partner_count = len(ProfileComparator._get_all_bodyids(profile_a, 'both'))
@@ -4732,13 +4579,11 @@ class HomologFinder:
                         'adjacency_score': 0,
                         'shared_type_count': scores.get('shared_type_count', 0),
                         'union_type_count': scores.get('union_type_count', 0),
-                        'rank_corr': rank_corr_norm,
-                        'rank_corr_raw': rank_corr_raw,
+                        'rank_corr': rank_corr_value,
                         'rank_union': rank_union_raw,
                         'jaccard': scores['jaccard'],
                         'weighted_jaccard': scores.get('weighted_jaccard', 0.0),
                         'cosine': scores['cosine'],
-                        'combined': scores['combined'],
                         'is_same_type': True,
                         'is_same_dataset': not is_cross_dataset,
                         'source_status': status_a.value,
@@ -4756,7 +4601,7 @@ class HomologFinder:
 
         # Sorting and top-N trimming
         if not results_df.empty:
-            sort_col = similarity_metric if similarity_metric in results_df.columns else 'combined'
+            sort_col = similarity_metric if similarity_metric in results_df.columns else 'rank_corr'
             results_df = results_df.sort_values(['source_bodyId', sort_col], ascending=[True, False], na_position='last')
             if top_n > 0:
                 results_df = results_df.groupby('source_bodyId').head(top_n).reset_index(drop=True)
@@ -5000,9 +4845,8 @@ class HomologFinder:
             visualize_skeleton: Generate 3D visualizations. Uses self.visualize_skeleton if None.
             visualize_top_n: Number of top candidates to visualize. Uses self.visualize_top_n if None.
             similarity_metric: Metric for sorting top-N candidates. Options:
-                - 'combined': Weighted average of jaccard and rank_corr (default)
-                - 'rank_corr': Rank correlation on shared partners only
-                - 'rank_union': Rank correlation on union of all partners (missing=0)
+                - 'rank_corr': Raw Spearman rank correlation on shared partners only
+                - 'rank_union': Raw Spearman rank correlation on union of all partners (missing=0)
                 - 'jaccard': Jaccard similarity
                 - 'cosine': Cosine similarity
         
@@ -5016,13 +4860,11 @@ class HomologFinder:
                 - adjacency_score: Number of shared partners found during candidate discovery
                 - shared_type_count: Number of types used for rank_corr calculation
                 - union_type_count: Total unique types/bodyIds in union
-                - rank_corr: Normalized rank correlation [0,1] (shared partners only)
-                - rank_corr_raw: Raw Spearman correlation [-1,1]
+                - rank_corr: Raw Spearman correlation [-1,1] (shared partners only)
                 - rank_union: Raw Spearman correlation [-1,1] on the partner
                   union (missing = 0); sign is meaningful, 0 = no relation
                 - jaccard: Jaccard similarity
                 - cosine: Cosine similarity
-                - combined: Weighted combined score
                 - is_same_type: True if source and target types match
             
             Results are sorted by source_bodyId then selected similarity_metric (descending).
@@ -6049,7 +5891,7 @@ class HomologFinder:
             visualize_top_n: Number of top matches to visualize
             intra_type_df: Optional DataFrame with intra-type comparison results
             similarity_metric: The metric to use for sorting results 
-                             ('rank_union', 'rank_corr', 'jaccard', 'cosine', 'combined')
+                             ('rank_union', 'rank_corr', 'jaccard', 'cosine')
             source_status_summary: Optional dict with source neuron connectivity status breakdown
         
         Returns:
@@ -6172,9 +6014,7 @@ class HomologFinder:
             f.write("\n" + "-" * 70 + "\n")
             f.write("  INTERPRETATION GUIDE\n")
             f.write("-" * 70 + "\n")
-            f.write("  combined: Weighted score of jaccard + rank_corr (0-1, higher=better)\n")
-            f.write("  rank_corr: Spearman correlation on SHARED partners (0-1, higher=better)\n")
-            f.write("  rank_corr_raw: Raw Spearman correlation (-1 to 1)\n")
+            f.write("  rank_corr: Raw Spearman correlation on SHARED partners (-1 to 1)\n")
             f.write("  rank_union: Raw Spearman correlation on the partner union (-1 to 1)\n")
             f.write("  jaccard: Jaccard similarity of partner sets (0-1, higher=better)\n")
             f.write("  cosine: Cosine similarity of weight vectors (0-1, higher=better)\n")
@@ -6196,7 +6036,7 @@ class HomologFinder:
         # This is the foundational comparison data showing each source-target bodyId pair
         if not results_df.empty:
             # Round numeric columns for better readability
-            numeric_cols = ['rank_corr', 'rank_corr_raw', 'rank_union', 'rank_union_raw', 'jaccard', 'cosine', 'combined']
+            numeric_cols = ['rank_corr', 'rank_union', 'rank_union_raw', 'jaccard', 'cosine']
             results_rounded = results_df.copy()
             for col in numeric_cols:
                 if col in results_rounded.columns:
@@ -6207,7 +6047,7 @@ class HomologFinder:
             sort_metric = similarity_metric if similarity_metric in results_rounded.columns else 'rank_union'
             if sort_metric not in results_rounded.columns:
                 # Fallback to any available metric
-                for fallback in ['rank_corr', 'combined', 'jaccard', 'cosine']:
+                for fallback in ['rank_corr', 'rank_union', 'jaccard', 'cosine']:
                     if fallback in results_rounded.columns:
                         sort_metric = fallback
                         break
@@ -6228,7 +6068,7 @@ class HomologFinder:
                 # shared_type_count shows how many shared types were used for rank correlation
                 # union_type_count shows total unique types in union (for rank_union)
                 bodyid_cols = ['source_bodyId', 'source_type', 'target_bodyId', 'target_type',
-                              'combined', 'rank_corr', 'rank_corr_raw', 'rank_union', 'rank_union_raw',
+                              'rank_corr', 'rank_union', 'rank_union_raw',
                               'jaccard', 'cosine', 
                               'adjacency_score', 'shared_type_count', 'union_type_count',
                               'is_same_type', 'is_same_dataset', 
@@ -6254,12 +6094,12 @@ class HomologFinder:
         if intra_type_df is not None and not intra_type_df.empty:
             # Round numeric columns
             intra_type_rounded = intra_type_df.copy()
-            for col in ['rank_corr', 'rank_corr_raw', 'rank_union', 'rank_union_raw', 'jaccard', 'cosine', 'combined']:
+            for col in ['rank_corr', 'rank_union', 'rank_union_raw', 'jaccard', 'cosine']:
                 if col in intra_type_rounded.columns:
                     intra_type_rounded[col] = intra_type_rounded[col].round(4)
             
-            # Sort by combined (descending) to show most similar pairs first
-            sort_col = 'combined' if 'combined' in intra_type_rounded.columns else 'jaccard'
+            # Sort by rank_corr (descending) to show most similar pairs first
+            sort_col = 'rank_corr' if 'rank_corr' in intra_type_rounded.columns else 'jaccard'
             intra_type_sorted = intra_type_rounded.sort_values(sort_col, ascending=False)
             intra_type_sorted.to_csv(results_dir / 'intra_type_results.csv', index=False)
             files_saved.append('results/intra_type_results.csv')
@@ -6346,7 +6186,7 @@ class HomologFinder:
             # For bodyId-level comparisons, save target bodyId summary for top matches
             if has_bodyid_cols:
                 target_cols = ['target_bodyId', 'target_type', 'target_status', 
-                              'target_partner_count', 'rank_corr', 'jaccard', 'combined']
+                              'target_partner_count', 'rank_corr', 'jaccard']
                 available_target_cols = [c for c in target_cols if c in top_matches.columns]
                 target_summary = top_matches[available_target_cols].drop_duplicates(subset=['target_bodyId'])
                 target_summary = target_summary.sort_values('rank_corr', ascending=False, na_position='last')
@@ -6410,7 +6250,7 @@ class HomologFinder:
                     # Create empty type summary with proper columns (averages only)
                     type_summary = pd.DataFrame(columns=[
                         'query', 'source_dataset', 'target_dataset', 'source_type', target_col,
-                        'avg_rank_corr', 'avg_jaccard', 'avg_combined', 'avg_rank_union',
+                        'avg_rank_corr', 'avg_jaccard', 'avg_rank_union',
                         'avg_cosine', 'avg_adjacency_score', 'n_bodyid_comparisons',
                         'n_complete_sources', 'n_incomplete_sources'
                     ])
@@ -6426,8 +6266,6 @@ class HomologFinder:
                     agg_dict = {'rank_corr': ['mean', 'count']}
                     if 'jaccard' in valid_results.columns:
                         agg_dict['jaccard'] = 'mean'
-                    if 'combined' in valid_results.columns:
-                        agg_dict['combined'] = 'mean'
                     if 'rank_union' in valid_results.columns:
                         agg_dict['rank_union'] = 'mean'
                     if 'cosine' in valid_results.columns:
@@ -6453,7 +6291,6 @@ class HomologFinder:
                         'rank_corr_mean': 'avg_rank_corr',
                         'rank_corr_count': 'n_bodyid_comparisons',
                         'jaccard_mean': 'avg_jaccard',
-                        'combined_mean': 'avg_combined',
                         'rank_union_mean': 'avg_rank_union',
                         'cosine_mean': 'avg_cosine',
                         'adjacency_score_mean': 'avg_adjacency_score',
@@ -6489,7 +6326,7 @@ class HomologFinder:
                 # Already type-level, just format
                 # Filter out NaN rows here too
                 valid_results = results_df[results_df['rank_corr'].notna()].copy() if 'rank_corr' in results_df.columns else results_df.copy()
-                pairwise_cols = [target_col, 'rank_corr', 'rank_corr_raw', 'jaccard', 
+                pairwise_cols = [target_col, 'rank_corr', 'rank_union', 'jaccard', 
                                 'adjacency_score', 'is_same_type']
                 available_cols = [c for c in pairwise_cols if c in valid_results.columns]
                 type_summary = valid_results[available_cols].drop_duplicates().copy()
@@ -7928,9 +7765,9 @@ class ConnectivityProfileComparer:
     # can compare cards across datasets.
     _REPORT_METRICS = (
         'jaccard', 'weighted_jaccard', 'cosine',
-        'rank_corr', 'rank_corr_union', 'combined',
+        'rank_corr', 'rank_corr_union',
     )
-    _REPORT_DIRECTIONS = ('combined', 'upstream', 'downstream')
+    _REPORT_DIRECTIONS = ('overall', 'upstream', 'downstream')
 
     # Use explicit report scales so zero is always white. Positive-only
     # similarity metrics run from white to red; signed rank metrics run from
@@ -9029,7 +8866,7 @@ class ConnectivityProfileComparer:
         """
         mapper = self._type_mapper
         directions = ['both', 'upstream', 'downstream'] if self.direction == 'both' else [self.direction]
-        metrics = ['jaccard', 'weighted_jaccard', 'cosine', 'rank_corr', 'rank_corr_union', 'combined']
+        metrics = ['jaccard', 'weighted_jaccard', 'cosine', 'rank_corr', 'rank_corr_union']
         out: Dict[str, Dict[str, Dict[str, pd.DataFrame]]] = {}
             
         for anchor, per_ds in anchor_profiles.items():
@@ -9037,7 +8874,7 @@ class ConnectivityProfileComparer:
             n = len(present)
             matrices = {}
             for direction in directions:
-                dir_name = 'combined' if direction == 'both' else direction
+                dir_name = 'overall' if direction == 'both' else direction
                 metric_matrices = {m: np.full((n, n), np.nan) for m in metrics}
                 for i, d1 in enumerate(present):
                     p1 = per_ds[d1][1]
@@ -9058,7 +8895,7 @@ class ConnectivityProfileComparer:
                         metric_matrices['jaccard'][i, j] = scores.get('jaccard', 0.0)
                         metric_matrices['weighted_jaccard'][i, j] = scores.get('weighted_jaccard', 0.0)
                         metric_matrices['cosine'][i, j] = scores.get('cosine', 0.0)
-                        metric_matrices['combined'][i, j] = scores.get('combined', 0.0)
+                        
                         rank_val = scores.get('rank', np.nan)
                         metric_matrices['rank_corr'][i, j] = rank_val if not np.isnan(rank_val) else 0.0
                         # rank_corr_union = the RAW union-based rank — sign is
@@ -9104,13 +8941,13 @@ class ConnectivityProfileComparer:
         pair_labels = [f"{dataset_a} vs {dataset_b}" for dataset_a, dataset_b in pair_specs]
         anchors = list(inter_matrices.keys())
         directions = (
-            ['combined', 'upstream', 'downstream']
+            ['overall', 'upstream', 'downstream']
             if self.direction == 'both'
             else [self.direction]
         )
         metrics = [
             'jaccard', 'weighted_jaccard', 'cosine',
-            'rank_corr', 'rank_corr_union', 'combined',
+            'rank_corr', 'rank_corr_union',
         ]
 
         aggregate: Dict[str, Dict[str, pd.DataFrame]] = {}
@@ -9290,7 +9127,7 @@ class ConnectivityProfileComparer:
         n_cols = len(col_labels)
         
         directions = ['both', 'upstream', 'downstream'] if self.direction == 'both' else [self.direction]
-        metrics = ['jaccard', 'weighted_jaccard', 'cosine', 'rank_corr', 'rank_corr_union', 'combined']
+        metrics = ['jaccard', 'weighted_jaccard', 'cosine', 'rank_corr', 'rank_corr_union']
         
         all_matrices = {}
         total_pairs = n_rows * n_cols
@@ -9307,7 +9144,7 @@ class ConnectivityProfileComparer:
                 type_mapper = None
         
         for direction in directions:
-            dir_name = 'combined' if direction == 'both' else direction
+            dir_name = 'overall' if direction == 'both' else direction
             
             # Initialize matrices for all metrics
             metric_matrices = {m: np.zeros((n_rows, n_cols)) for m in metrics}
@@ -9348,7 +9185,7 @@ class ConnectivityProfileComparer:
                         metric_matrices['jaccard'][i, j] = scores.get('jaccard', 0.0)
                         metric_matrices['weighted_jaccard'][i, j] = scores.get('weighted_jaccard', 0.0)
                         metric_matrices['cosine'][i, j] = scores.get('cosine', 0.0)
-                        metric_matrices['combined'][i, j] = scores.get('combined', 0.0)
+                        
                         
                         rank_val = scores.get('rank', np.nan)
                         metric_matrices['rank_corr'][i, j] = rank_val if not np.isnan(rank_val) else 0.0
@@ -9444,19 +9281,12 @@ class ConnectivityProfileComparer:
         else:
             rank_union = np.nan
         
-        # Normalized rank correlations
-        rank_norm = (rank_corr + 1) / 2 if not np.isnan(rank_corr) else 0.5
-        rank_union_norm = (rank_union + 1) / 2 if not np.isnan(rank_union) else 0.5
-        
         return {
             'jaccard': jaccard,
             'weighted_jaccard': weighted_jaccard,
             'cosine': cosine,
             'rank': rank_corr,
-            'rank_norm': rank_norm,
             'rank_union': rank_union,
-            'rank_union_norm': rank_union_norm,
-            'combined': 0.5 * jaccard + 0.5 * rank_norm if jaccard > 0 else 0.0,
         }
 
     def _aggregate_profiles_from_list(
@@ -9553,14 +9383,14 @@ class ConnectivityProfileComparer:
         
         Returns:
             Nested dictionary: {direction: {metric: DataFrame}}
-            - direction: 'combined', 'upstream', 'downstream'
+            - direction: 'overall', 'upstream', 'downstream'
             - metric: 'jaccard', 'cosine', 'rank_corr', 'rank_corr_union'
         """
         labels = sorted(profiles.keys())
         n = len(labels)
         
         directions = ['both', 'upstream', 'downstream'] if self.direction == 'both' else [self.direction]
-        metrics = ['jaccard', 'weighted_jaccard', 'cosine', 'rank_corr', 'rank_corr_union', 'combined']
+        metrics = ['jaccard', 'weighted_jaccard', 'cosine', 'rank_corr', 'rank_corr_union']
         
         all_matrices = {}
         
@@ -9568,7 +9398,7 @@ class ConnectivityProfileComparer:
         total_pairs = n * (n - 1) // 2
         
         for direction in directions:
-            dir_name = 'combined' if direction == 'both' else direction
+            dir_name = 'overall' if direction == 'both' else direction
             
             # Initialize matrices for all metrics
             metric_matrices = {m: np.zeros((n, n)) for m in metrics}
@@ -9602,8 +9432,7 @@ class ConnectivityProfileComparer:
                             metric_matrices['cosine'][i, j] = scores['cosine']
                             metric_matrices['cosine'][j, i] = scores['cosine']
                             
-                            metric_matrices['combined'][i, j] = scores['combined']
-                            metric_matrices['combined'][j, i] = scores['combined']
+
                             
                             rank_val = scores['rank'] if not np.isnan(scores['rank']) else 0.0
                             metric_matrices['rank_corr'][i, j] = rank_val
@@ -9650,7 +9479,7 @@ class ConnectivityProfileComparer:
         n = len(labels)
         
         directions = ['both', 'upstream', 'downstream'] if self.direction == 'both' else [self.direction]
-        metrics = ['jaccard', 'weighted_jaccard', 'cosine', 'rank_corr', 'rank_corr_union', 'combined']
+        metrics = ['jaccard', 'weighted_jaccard', 'cosine', 'rank_corr', 'rank_corr_union']
         
         all_matrices = {}
         
@@ -9658,7 +9487,7 @@ class ConnectivityProfileComparer:
         total_pairs = n * (n - 1) // 2
         
         for direction in directions:
-            dir_name = 'combined' if direction == 'both' else direction
+            dir_name = 'overall' if direction == 'both' else direction
             
             metric_matrices = {m: np.zeros((n, n)) for m in metrics}
             
@@ -9688,12 +9517,7 @@ class ConnectivityProfileComparer:
                                 'weighted_jaccard', 0.0
                             )
 
-                            metric_matrices['combined'][i, j] = scores.get(
-                                'combined', 0.0
-                            )
-                            metric_matrices['combined'][j, i] = scores.get(
-                                'combined', 0.0
-                            )
+
                             
                             metric_matrices['cosine'][i, j] = scores['cosine']
                             metric_matrices['cosine'][j, i] = scores['cosine']
@@ -9747,12 +9571,12 @@ class ConnectivityProfileComparer:
         n = len(type_labels)
         
         directions = ['both', 'upstream', 'downstream'] if self.direction == 'both' else [self.direction]
-        metrics = ['jaccard', 'weighted_jaccard', 'cosine', 'rank_corr', 'rank_corr_union', 'combined']
+        metrics = ['jaccard', 'weighted_jaccard', 'cosine', 'rank_corr', 'rank_corr_union']
         
         all_matrices = {}
         
         for direction in directions:
-            dir_name = 'combined' if direction == 'both' else direction
+            dir_name = 'overall' if direction == 'both' else direction
             
             metric_matrices = {m: np.zeros((n, n)) for m in metrics}
             
@@ -9783,7 +9607,6 @@ class ConnectivityProfileComparer:
                                         scores_list['jaccard'].append(scores['jaccard'])
                                         scores_list['weighted_jaccard'].append(scores['weighted_jaccard'])
                                         scores_list['cosine'].append(scores['cosine'])
-                                        scores_list['combined'].append(scores['combined'])
                                         scores_list['rank_corr'].append(
                                             scores['rank'] if not np.isnan(scores['rank']) else 0.0
                                         )
@@ -9816,7 +9639,6 @@ class ConnectivityProfileComparer:
                                     scores_list['jaccard'].append(scores['jaccard'])
                                     scores_list['weighted_jaccard'].append(scores['weighted_jaccard'])
                                     scores_list['cosine'].append(scores['cosine'])
-                                    scores_list['combined'].append(scores['combined'])
                                     scores_list['rank_corr'].append(
                                         scores['rank'] if not np.isnan(scores['rank']) else 0.0
                                     )
@@ -9909,7 +9731,7 @@ class ConnectivityProfileComparer:
             'output_path': str(output_path)
         }
         
-        metrics_list = ['jaccard', 'weighted_jaccard', 'cosine', 'rank_corr', 'rank_corr_union', 'combined']
+        metrics_list = ['jaccard', 'weighted_jaccard', 'cosine', 'rank_corr', 'rank_corr_union']
         directions_available = list(type_matrices.keys())
         
         # Save parameters
@@ -10090,7 +9912,7 @@ class ConnectivityProfileComparer:
     def _direction_display_name(cls, direction: str) -> str:
         """Use ``Overall`` for the both-directions matrix in reader-facing UI."""
         return {
-            'combined': 'Overall',
+            'overall': 'Overall',
             'upstream': 'Upstream',
             'downstream': 'Downstream',
         }.get(direction, str(direction).replace('_', ' ').title())
@@ -10098,7 +9920,7 @@ class ConnectivityProfileComparer:
     @classmethod
     def _direction_note(cls, direction: str) -> str:
         return {
-            'combined': 'Upstream + downstream connectivity',
+            'overall': 'Upstream + downstream connectivity',
             'upstream': 'Presynaptic input connectivity',
             'downstream': 'Postsynaptic output connectivity',
         }.get(direction, 'Connectivity profile similarity')
@@ -10626,7 +10448,7 @@ a:hover { text-decoration: underline; }
                         lines.append(
                             f"<section class='level-block'><div class='level-heading'>"
                             f"<h3>{escape(level_title)}</h3>"
-                            "<span>2 cards per row · 6 metrics</span></div>"
+                            "<span>2 cards per row · 5 metrics</span></div>"
                         )
                         if not matrices:
                             lines.append(
@@ -11879,7 +11701,6 @@ a:hover { text-decoration: underline; }
                             'jaccard': scores['jaccard'],
                             'cosine': scores['cosine'],
                             'rank_correlation': scores['rank'],
-                            'combined': scores['combined'],
                         })
         
         # Inter-type comparisons (sample to avoid explosion)
@@ -11909,7 +11730,6 @@ a:hover { text-decoration: underline; }
                                 'jaccard': scores['jaccard'],
                                 'cosine': scores['cosine'],
                                 'rank_correlation': scores['rank'],
-                                'combined': scores['combined'],
                             })
         
         intra_df = pd.DataFrame(intra_results)

@@ -149,6 +149,47 @@
     similarity columns (<code>morph_cosine</code>, <code>morph_pearson</code>)
     computed from the final ranked rows only.</p>
 
+  <h2>Similarity score formulas (connectivity)</h2>
+  <p>Let A and B be the two connectivity profiles (each a dict of partner
+    type → weight, restricted to the top-K partners per direction), and let
+    ρ denote the Spearman rank correlation of two weight vectors. All
+    metrics are always computed for every pair; the <b>Sort By</b> metric only
+    selects the ranking cutoff. Rank correlations are reported raw (−1 to 1);
+    there is no normalized 0–1 variant and no <code>combined</code> score.</p>
+  <table>
+    <tr><th>Score</th><th>Formula</th><th>Range</th></tr>
+    <tr><td><code>jaccard</code></td><td>|A ∩ B| / |A ∪ B| (partner-type sets)</td><td>0–1</td></tr>
+    <tr><td><code>weighted_jaccard</code></td><td>Σ min(w_a, w_b) / Σ max(w_a, w_b) over the partner-type union</td><td>0–1</td></tr>
+    <tr><td><code>cosine</code></td><td>(A·B) / (‖A‖·‖B‖) over the union (missing partners = 0)</td><td>0–1</td></tr>
+    <tr><td><code>rank_corr</code></td><td>ρ = Spearman(<code>w_a</code>, <code>w_b</code>) on <b>shared</b> partners (NaN if &lt; 3 shared)</td><td>−1 to 1</td></tr>
+    <tr><td><code>rank_union</code></td><td>ρ computed over the <b>union</b> of both partner sets (missing = 0)</td><td>−1 to 1</td></tr>
+    <tr><td><code>shared_type_count</code></td><td>|A ∩ B|</td><td>integer</td></tr>
+    <tr><td><code>union_type_count</code></td><td>|A ∪ B|</td><td>integer</td></tr>
+    <tr><td><code>adjacency_score</code></td><td>shared-partner (synaptic-contact) count used for adjacency expansion</td><td>integer</td></tr>
+    <tr><td><code>morph_cosine</code></td><td>(A·B) / (‖A‖·‖B‖) on z-scored morphology vectors (enrichment)</td><td>0–1</td></tr>
+    <tr><td><code>morph_pearson</code></td><td>cosine of the mean-centered morphology vectors (enrichment)</td><td>−1 to 1</td></tr>
+  </table>
+  <p>The <b>direction</b> of a direction-aware comparison (<code>upstream</code>,
+    <code>downstream</code>) is computed per direction and then averaged for
+    <code>both</code>; rank metrics use the <code>min_partners</code>
+    threshold (default 5) and return <code>NaN</code> when the partner set is
+    too small to correlate.</p>
+
+  <h2>Similarity score formulas (morphology)</h2>
+  <p>The three evidence columns are computed independently and are never
+    mixed across candidate sources; the primary <code>similarity</code>
+    column is the morphology score only.</p>
+  <table>
+    <tr><th>Score</th><th>Formula</th><th>Range</th></tr>
+    <tr><td><code>similarity</code></td><td><b>vector</b>: cosine or Pearson of z-scored vectors (see <code>metric</code>); <b>NBLAST</b>: normalized pair score</td><td>0–1</td></tr>
+    <tr><td><code>roi_similarity</code></td><td>cosine of input/output synapse-distribution vectors over the primary ROIs, mirrored across the midline</td><td>0–1</td></tr>
+    <tr><td><code>profile_similarity</code></td><td>shared-count / max-shared-count (normalized shared-partner count)</td><td>0–1</td></tr>
+    <tr><td><code>intra_type_similarity</code></td><td>mean pairwise similarity of the type's members (the intra-type reference)</td><td>0–1</td></tr>
+  </table>
+  <p>For the vector method, each neuron is reduced to ~24 morphometrics plus
+    a 100-dim persistence block; the pool is z-scored with pool-computed
+    statistics so cosine scores stay scale-fair.</p>
+
   <h2>Intra-type reference data</h2>
   <p>Every search reports the query's intra-type similarity alongside the
     inter-type rows, so results are always comparable against a same-type

@@ -15,8 +15,8 @@
   <h1>Connectivity Profiling</h1>
   <p class="lede">
     Compare connectivity profiles of neuron types (or bodyIds / custom groups)
-    using six identical metrics — combined, Jaccard, weighted Jaccard, cosine,
-    rank correlation and rank-correlation union (same metric set as the Find
+    using identical metrics — Jaccard, weighted Jaccard, cosine, raw rank
+    correlation and rank-correlation union (same metric set as the Find
     Homologs tab) — within one dataset or across several datasets at once.
   </p>
 
@@ -67,6 +67,29 @@
     <tr><td>Aggregation Level</td><td>type</td><td><b>type</b> (each matched type is one row; patterns expand to independent types), <b>bodyid</b> (per neuron), or <b>custom group</b> (rows from a LabelMapper preset — select one in the card that appears, managed in Settings)</td></tr>
     <tr><td>Direction</td><td>both</td><td>upstream, downstream, or both</td></tr>
   </table>
+
+  <h2>Similarity metric formulas</h2>
+  <p>Let A and B be two connectivity profiles (a dict of partner type →
+    weight, restricted to top-K partners per direction), and let ρ denote the
+    Spearman rank correlation of two weight vectors. The metrics are the same
+    set used by the Homolog Finding tab; rank correlations are raw (−1 to 1)
+    and there is no normalized 0–1 variant and no <code>combined</code> score.
+    The <code>overall</code> matrix averages upstream and downstream
+    connectivity.</p>
+  <table>
+    <tr><th>Metric</th><th>Formula</th><th>Range</th></tr>
+    <tr><td><code>jaccard</code></td><td>|A ∩ B| / |A ∪ B| (partner-type sets)</td><td>0–1</td></tr>
+    <tr><td><code>weighted_jaccard</code></td><td>Σ min(w_a, w_b) / Σ max(w_a, w_b) over the union (Ruzicka)</td><td>0–1</td></tr>
+    <tr><td><code>cosine</code></td><td>(A·B) / (‖A‖·‖B‖) over the union (missing = 0)</td><td>0–1</td></tr>
+    <tr><td><code>rank_corr</code></td><td>ρ = Spearman on <b>shared</b> partners (raw, NaN if &lt; 3 shared)</td><td>−1 to 1</td></tr>
+    <tr><td><code>rank_union</code></td><td>ρ over the <b>union</b> of both partner sets (missing = 0)</td><td>−1 to 1</td></tr>
+  </table>
+  <p>Diagonal (self) entries are 1.0 for every metric. Rank metrics return
+    <code>NaN</code> for pairs with fewer than 3 comparable partners; those
+    cells are rendered as 0 in the heatmaps while the CSV matrices keep the
+    original values. In multi-dataset mode the cross-dataset matrices use the
+    homolog-finding algorithm (2-hop expanded partner types) and rank
+    correlation values are reported raw (−1 to 1).</p>
 
   <h2>Advanced options</h2>
   <ul>

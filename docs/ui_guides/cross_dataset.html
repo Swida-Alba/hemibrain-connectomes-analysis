@@ -55,6 +55,30 @@
     <tr><td>Output Format</td><td>csv</td><td>csv or xlsx</td></tr>
   </table>
 
+  <h2>Similarity score formulas</h2>
+  <p>The cross-dataset comparison writes one row per dataset pair and
+    per threshold into
+    <code>similarity_matrices/similarity_threshold_{N}.csv</code>. Let E1, E2
+    be the thresholded edge sets (edges with <code>weight ≥ N</code>) and W1,
+    W2 the corresponding edge-weight vectors over the union of edges (missing
+    edges = 0).</p>
+  <table>
+    <tr><th>Score</th><th>Formula</th><th>Range</th></tr>
+    <tr><td><code>jaccard_similarity</code></td><td>|E1 ∩ E2| / |E1 ∪ E2|</td><td>0–1</td></tr>
+    <tr><td><code>ruzicka_similarity</code></td><td>Σ min(W1, W2) / Σ max(W1, W2) (weighted Jaccard)</td><td>0–1</td></tr>
+    <tr><td><code>pearson_correlation</code></td><td>Pearson correlation of matched edge weights</td><td>−1 to 1</td></tr>
+    <tr><td><code>cosine_similarity</code></td><td>(W1·W2) / (‖W1‖·‖W2‖) over the union</td><td>0–1</td></tr>
+    <tr><td><code>edge_rank_correlation</code></td><td>Spearman ρ of edge-weight ranks over the union (missing = 0)</td><td>−1 to 1</td></tr>
+    <tr><td><code>spearman_rank_correlation</code></td><td>Spearman ρ of the compared values</td><td>−1 to 1</td></tr>
+    <tr><td><code>path_rank_correlation</code></td><td>Spearman ρ of path-probability ranks</td><td>−1 to 1</td></tr>
+    <tr><td><code>rv_coefficient</code></td><td>⟨E1, E2⟩_F² / (‖E1‖_F²·‖E2‖_F²) on normalized matrices</td><td>0–1</td></tr>
+  </table>
+  <p>Rank-based metrics return <code>NaN</code> with fewer than 3 non-zero
+    edges; cosine returns <code>NaN</code> when both vectors are zero. These
+    values are preserved as <code>NaN</code> in the CSV and rendered as 0 in
+    the heatmaps. Weights are normalized before the RV coefficient so the
+    metric is invariant to different total synapse counts.</p>
+
   <h2>Advanced options</h2>
   <ul>
     <li><b>Skip BodyId Level</b>: type-level only (faster, recommended).</li>

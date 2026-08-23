@@ -53,25 +53,10 @@ def _result(**overrides):
     params = dict(
         profile_a_id='a', profile_b_id='b', dataset_a='d1', dataset_b='d2',
         direction='both', jaccard=0.8, cosine=0.9, rank_correlation=0.6,
-        overlap_a_in_b=0.5, overlap_b_in_a=0.6, combined=0.75, confidence='High',
+        overlap_a_in_b=0.5, overlap_b_in_a=0.6,
     )
     params.update(overrides)
     return ComparisonResult(**params)
-
-
-def test_comparison_result_confidence_thresholds():
-    assert ComparisonResult.determine_confidence(0.9) == 'High'
-    assert ComparisonResult.determine_confidence(0.7) == 'High'
-    assert ComparisonResult.determine_confidence(0.55) == 'Medium'
-    assert ComparisonResult.determine_confidence(0.35) == 'Low'
-    assert ComparisonResult.determine_confidence(0.1) == 'Very Low'
-
-
-def test_comparison_result_norm_property():
-    r = _result()
-    assert r.rank_correlation_norm == pytest.approx(0.8)
-    r_nan = _result(rank_correlation=np.nan)
-    assert np.isnan(r_nan.rank_correlation_norm)
 
 
 def test_comparison_result_to_dict_and_summary():
@@ -83,11 +68,11 @@ def test_comparison_result_to_dict_and_summary():
     assert d['notes'] == 'some note'
     r_nan = _result(rank_correlation=np.nan, rank_union=np.nan)
     d_nan = r_nan.to_dict()
-    assert np.isnan(d_nan['rank_correlation'])
+    assert np.isnan(d_nan['rank_corr'])
     assert np.isnan(d_nan['rank_union'])
 
     s = r.summary()
-    assert 'Combined Score' in s
+    assert 'RankCorr' in s
     s_nan = r_nan.summary()
     assert 'NaN' in s_nan
 
@@ -205,11 +190,11 @@ def test_combined_score_identical():
     assert scores['weighted_jaccard'] == pytest.approx(1.0)
     assert scores['cosine'] == pytest.approx(1.0)
     assert scores['rank'] == pytest.approx(1.0)
-    assert scores['rank_norm'] == pytest.approx(1.0)
     assert scores['rank_union'] == pytest.approx(1.0)
-    assert scores['rank_union_norm'] == pytest.approx(1.0)
-    assert scores['combined'] == pytest.approx(1.0)
     assert scores['overlap_avg'] == pytest.approx(1.0)
+    assert 'combined' not in scores
+    assert 'rank_norm' not in scores
+    assert 'rank_union_norm' not in scores
 
 
 def test_combined_score_empty_and_custom_weights():
@@ -218,17 +203,14 @@ def test_combined_score_empty_and_custom_weights():
     assert scores['jaccard'] == 0.0
     assert scores['weighted_jaccard'] == 0.0
     assert np.isnan(scores['rank'])
-    assert np.isnan(scores['rank_norm'])
     assert np.isnan(scores['rank_union'])
-    assert scores['rank_union_norm'] == pytest.approx(0.5)
-    # neutral rank (0.5) used in combined
-    assert scores['combined'] == pytest.approx(0.25)
+    assert 'combined' not in scores
 
     weights = {'jaccard': 1.0, 'rank': 0.0}
     pa2 = _profile('a', upstream={'X': 2.0})
     pb2 = _profile('b', upstream={'X': 4.0})
     scores2 = ProfileComparator.combined_score(pa2, pb2, weights=weights)
-    assert scores2['combined'] == pytest.approx(1.0)  # jaccard of identical sets
+    assert scores2['jaccard'] == pytest.approx(1.0)
     assert scores2['weighted_jaccard'] == pytest.approx(0.5)  # min(2,4)/max(2,4)
 
 
@@ -367,7 +349,7 @@ def test_combined_score_intra_dataset_empty():
     pa = _bodyid_profile('a', typed_up={1: 5.0})
     pb = _bodyid_profile('b')
     scores = ProfileComparator.combined_score_intra_dataset(pa, pb)
-    assert np.isnan(scores['combined'])
+    assert 'combined' not in scores
     assert np.isnan(scores['jaccard'])
     assert scores['shared_type_count'] == 0
 
@@ -382,7 +364,7 @@ def test_combined_score_intra_dataset_full():
     assert scores['cosine'] == pytest.approx(1.0)
     assert scores['rank'] == pytest.approx(1.0)
     assert scores['rank_union'] == pytest.approx(1.0)
-    assert scores['combined'] == pytest.approx(1.0)
+    assert 'combined' not in scores
     assert scores['shared_type_count'] == 6
     assert scores['union_type_count'] == 6
 
@@ -391,7 +373,7 @@ def test_combined_score_cross_dataset_empty_and_full():
     pa = _profile('a', upstream={'X': 1.0})
     pb = _profile('b')
     scores = ProfileComparator.combined_score_cross_dataset(pa, pb)
-    assert np.isnan(scores['combined'])
+    assert 'combined' not in scores
     assert scores['union_type_count'] == 1
 
     up = {f'T{i}': float(10 - i) for i in range(1, 7)}
@@ -399,7 +381,7 @@ def test_combined_score_cross_dataset_empty_and_full():
     pb2 = _profile('b', upstream=up)
     scores2 = ProfileComparator.combined_score_cross_dataset(pa2, pb2, direction='upstream')
     assert scores2['jaccard'] == pytest.approx(1.0)
-    assert scores2['combined'] == pytest.approx(1.0)
+    assert 'combined' not in scores2
     assert scores2['shared_type_count'] == 6
 
 
@@ -435,15 +417,13 @@ def test_batch_compare_cross_dataset_variants():
     by_bid = {r['target_bid']: r for r in results}
 
     assert by_bid[1]['jaccard'] == pytest.approx(1.0)
-    assert by_bid[1]['combined'] == pytest.approx(1.0)
     assert by_bid[1]['rank'] == pytest.approx(1.0)
 
-    # no overlap -> combined forced to 0
+    # no overlap -> jaccard 0
     assert by_bid[2]['jaccard'] == 0.0
-    assert by_bid[2]['combined'] == 0.0
 
     # empty target -> NaN row
-    assert np.isnan(by_bid[3]['combined'])
+    assert 'combined' not in by_bid[3]
     assert by_bid[3]['target_type_count'] == 0
 
     # with type mapper standardizing names
@@ -465,8 +445,7 @@ def test_compare_profiles():
     assert isinstance(result, ComparisonResult)
     assert result.profile_a_id == 'a'
     assert result.dataset_b == DS_B
-    assert result.combined == pytest.approx(1.0)
-    assert result.confidence == 'High'
+    assert result.rank_correlation == pytest.approx(1.0)
 
     # score_weights alias + NaN rank note
     tied = {f'T{i}': 5.0 for i in range(6)}
@@ -482,7 +461,7 @@ def test_compare_profiles_simple():
     pa = _rich_profile('a')
     pb = _rich_profile('b')
     d = ProfileComparator.compare_profiles_simple(pa, pb)
-    assert set(d.keys()) == {'jaccard', 'cosine', 'rank_correlation', 'shared_count', 'combined'}
+    assert set(d.keys()) == {'jaccard', 'cosine', 'rank_correlation', 'shared_count'}
     assert d['shared_count'] == 12  # 6 up + 6 down shared
     d_up = ProfileComparator.compare_profiles_simple(pa, pb, direction='upstream')
     assert d_up['shared_count'] == 6
@@ -530,19 +509,19 @@ def test_compute_similarity_from_types():
     assert same['cosine'] == pytest.approx(1.0)
     assert same['rank'] == pytest.approx(1.0)
     assert same['rank_union'] == pytest.approx(1.0)
-    assert same['combined'] == pytest.approx(1.0)
+    assert 'combined' not in same
 
     empty = ConnectivityProfileComparer._compute_similarity_from_types(None, {}, {})
     assert empty['jaccard'] == 0.0
     assert empty['cosine'] == 0.0
-    assert empty['rank_norm'] == pytest.approx(0.5)
-    assert empty['combined'] == 0.0
+    assert 'rank_norm' not in empty
+    assert 'combined' not in empty
 
     partial = ConnectivityProfileComparer._compute_similarity_from_types(
         None, types_a, {'X': 5.0, 'Q': 1.0})
     assert partial['jaccard'] == pytest.approx(1 / 4)
     assert np.isnan(partial['rank'])  # only 1 shared type (< 3)
-    assert partial['combined'] == pytest.approx(0.5 * 0.25 + 0.5 * 0.5)
+    assert 'combined' not in partial
 
 
 def test_same_name_flag():
@@ -573,7 +552,7 @@ def test_build_similarity_matrix_metrics():
         'T2': _rich_profile('T2'),  # identical to T1
         'T3': _profile('T3', upstream={'Z9': 1.0}),  # disjoint
     }
-    m = ProfileComparator.build_similarity_matrix(profiles, metric='combined')
+    m = ProfileComparator.build_similarity_matrix(profiles, metric='rank')
     assert m.shape == (3, 3)
     assert np.allclose(np.diag(m.to_numpy()), 1.0)
     assert m.loc['T1', 'T2'] == pytest.approx(1.0)
@@ -592,7 +571,7 @@ def test_compute_inter_type_rank_correlation_matrix():
         DS_B: {'T1': _rich_profile('T1')},
     }
     out = ProfileComparator.compute_inter_type_rank_correlation_matrix(
-        profiles_by_dataset, metric='combined')
+        profiles_by_dataset, metric='rank')
     assert DS_A in out['intra_dataset']          # >= 2 types -> intra matrix
     assert DS_B not in out['intra_dataset']      # single type -> skipped
     assert out['all_types_matrix'].shape == (3, 3)
@@ -619,7 +598,7 @@ def test_find_similar_types_across_datasets():
         DS_B: {'T1': _rich_profile('T1'), 'Alt': _profile('Alt', upstream={'Q': 1.0})},
     }
     df = ProfileComparator.find_similar_types_across_datasets(
-        profiles_by_dataset, 'T1', metric='combined', top_n=1)
+        profiles_by_dataset, 'T1', metric='rank', top_n=1)
     assert not df.empty
     # best match in DS_B is the identical T1
     ds_b_rows = df[df['target_dataset'] == DS_B]

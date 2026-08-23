@@ -90,24 +90,24 @@ def _verifier(profiles, **kwargs):
 # VerificationResult
 # ---------------------------------------------------------------------------
 
-def _comparison_result(combined=0.8):
+def _comparison_result():
     return ComparisonResult(
         profile_a_id='a', profile_b_id='b', dataset_a=DS_A, dataset_b=DS_B,
         direction='both', jaccard=0.9, cosine=0.9, rank_correlation=0.8,
-        overlap_a_in_b=0.7, overlap_b_in_a=0.7, combined=combined, confidence='High')
+        overlap_a_in_b=0.7, overlap_b_in_a=0.7)
 
 
 def test_verification_result_to_dict_and_summary():
     vr = VerificationResult(
         neuron_type='T', datasets=[DS_A, DS_B],
         pairwise_scores=[_comparison_result()],
-        avg_combined_score=0.8, min_score=0.8, max_score=0.8,
-        confidence='High', weak_connectivity_datasets=[DS_B],
+        avg_rank_corr=0.8, min_score=0.8, max_score=0.8,
+        weak_connectivity_datasets=[DS_B],
         verification_status='verified')
     d = vr.to_dict()
     assert d['neuron_type'] == 'T'
     assert d['num_pairs'] == 1
-    assert d['avg_combined_score'] == 0.8
+    assert d['avg_rank_corr'] == 0.8
     assert d['weak_connectivity_datasets'] == [DS_B]
     assert len(d['pairwise_details']) == 1
     s = vr.summary()
@@ -115,10 +115,10 @@ def test_verification_result_to_dict_and_summary():
 
     vr_nan = VerificationResult(
         neuron_type='T', datasets=[DS_A, DS_B], pairwise_scores=[],
-        avg_combined_score=np.nan, min_score=np.nan, max_score=np.nan,
-        confidence='N/A', verification_status='type_not_found')
+        avg_rank_corr=np.nan, min_score=np.nan, max_score=np.nan,
+        verification_status='type_not_found')
     d_nan = vr_nan.to_dict()
-    assert d_nan['avg_combined_score'] is None  # NaN -> JSON-safe None
+    assert d_nan['avg_rank_corr'] is None  # NaN -> JSON-safe None
     assert 'N/A' in vr_nan.summary()
 
 
@@ -165,8 +165,7 @@ def test_verify_insufficient_profiles():
     verifier.profiler.raise_for = {('T', DS_B)}
     result = verifier.verify_type_assignment('T', [DS_A, DS_B])
     assert result.verification_status == 'failed'
-    assert result.confidence == 'Very Low'
-    assert result.avg_combined_score == 0.0
+    assert result.avg_rank_corr == 0.0
     assert result.pairwise_scores == []
 
 
@@ -177,8 +176,7 @@ def test_verify_identical_profiles_loose():
     })
     result = verifier.verify_type_assignment('T', [DS_A, DS_B])
     assert result.verification_status == 'verified'
-    assert result.confidence == 'Very High'
-    assert result.avg_combined_score == pytest.approx(1.0)
+    assert result.avg_rank_corr == pytest.approx(1.0)
     assert len(result.pairwise_scores) == 1
 
 
@@ -199,7 +197,6 @@ def test_verify_reversed_weights_fails():
     })
     result = verifier.verify_type_assignment('T', [DS_A, DS_B])
     assert result.verification_status == 'failed'
-    assert result.confidence == 'Very Low'
 
 
 def test_verify_empty_profiles_type_not_found():
@@ -208,9 +205,8 @@ def test_verify_empty_profiles_type_not_found():
         ('T', DS_B): _profile('T', DS_B),
     })
     result = verifier.verify_type_assignment('T', [DS_A, DS_B])
-    assert result.confidence == 'N/A'
     assert result.verification_status == 'type_not_found'
-    assert np.isnan(result.avg_combined_score)
+    assert np.isnan(result.avg_rank_corr)
     # empty profiles are weak connectivity
     assert set(result.weak_connectivity_datasets) == {DS_A, DS_B}
 
@@ -223,7 +219,7 @@ def test_verify_with_label_mapper():
     verifier = CrossDatasetVerifier(profiler, verbose=False,
                                     label_mapper=FakeLabelMapper({('T', DS_B): 'T_alt'}))
     result = verifier.verify_type_assignment('T', [DS_A, DS_B])
-    assert result.confidence == 'Very High'
+    assert result.verification_status == 'verified'
     # B-side profile was requested under the mapped name
     assert ('T_alt', DS_B, False) in profiler.calls
 
@@ -248,8 +244,6 @@ def test_compare_profiles_strict_insufficient_common():
     result = verifier._compare_profiles_strict(pa, pb)
     assert np.isnan(result.rank_correlation)
     assert 'Insufficient common partners (1 < 3)' in result.notes
-    expected = 0.5 * result.jaccard + 0.5 * 0.5
-    assert result.combined == pytest.approx(expected)
 
     # also exercise strict path through verify_type_assignment
     verifier2 = _verifier({
@@ -279,9 +273,9 @@ def test_find_similar_neurons():
     df = verifier.find_similar_neurons('Q', DS_A, DS_B, top_k=5)
     assert not df.empty
     assert df.iloc[0]['target_type'] == 'U1'
-    assert df.iloc[0]['combined_score'] == pytest.approx(1.0)
+    assert df.iloc[0]['rank_corr'] == pytest.approx(1.0)
     assert 'U3' not in df['target_type'].values  # empty profile skipped
-    assert df['combined_score'].is_monotonic_decreasing
+    assert df['rank_corr'].is_monotonic_decreasing
 
     # explicit candidate list + top_k limiting
     df2 = verifier.find_similar_neurons('Q', DS_A, DS_B,
@@ -337,7 +331,7 @@ def test_batch_verify_types_sequential():
     # sorted by datasets_found desc -> Good/Bad (2) before Partial (1)
     assert df.iloc[-1]['neuron_type'] == 'Partial'
     good = df[df['neuron_type'] == 'Good'].iloc[0]
-    assert good['confidence'] == 'Very High'
+    assert good['avg_rank_corr'] == pytest.approx(1.0)
     assert good['datasets_found'] == 2
     # directional columns included by default
     assert 'avg_rank_corr_upstream' in df.columns
@@ -365,7 +359,7 @@ def test_verify_single_type_error_row():
         raise RuntimeError('boom')
     verifier.verify_type_assignment = _boom
     row = verifier._verify_single_type('X', [DS_A, DS_B], 'both', None, True)
-    assert row['confidence'] == 'Error'
+    assert 'confidence' not in row
     assert row['datasets_found'] == 0
     assert 'avg_rank_corr_upstream' in row
 
@@ -409,7 +403,7 @@ def test_build_similarity_matrix_metrics():
     })
     datasets = [DS_A, DS_B, DS_C]
     df = verifier.build_cross_dataset_similarity_matrix(
-        ['T'], datasets, metric='combined', parallel=False)
+        ['T'], datasets, metric='rank', parallel=False)
     assert df.shape == (1, 3)
     assert np.allclose(df.loc['T'].to_numpy(), 1.0)
 
@@ -448,7 +442,7 @@ def test_directional_and_multi_metric_matrices():
     assert set(dirs.keys()) == {'upstream', 'downstream', 'both'}
     metrics = verifier.build_multi_metric_matrices(['T'], [DS_A, DS_B],
                                                    parallel=False)
-    assert set(metrics.keys()) == {'combined', 'jaccard', 'cosine', 'rank'}
+    assert set(metrics.keys()) == {'rank', 'jaccard', 'cosine'}
 
 
 def test_similarity_matrix_parallel():
@@ -483,7 +477,7 @@ def test_generate_verification_report(tmp_path):
     assert (out_dir / 'partner_details' / 'partner_overlap_T.csv').exists()
 
     summary = pd.read_csv(out_dir / 'verification_summary.csv')
-    assert summary.iloc[0]['confidence'] == 'Very High'
+    assert summary.iloc[0]['avg_rank_corr'] == pytest.approx(1.0)
 
 
 def test_generate_verification_report_minimal(tmp_path):

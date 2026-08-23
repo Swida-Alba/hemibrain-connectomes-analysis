@@ -132,7 +132,11 @@ config = ProfilerConfig(
 
 ## Similarity Metrics
 
-The comparison system uses only **Jaccard similarity** and **Rank correlation** for the combined score. Cosine similarity is computed for reference but not included in the combined score (as of v4.1).
+The comparer reports raw (unnormalized) metrics only. Jaccard and cosine are
+0–1; the two Spearman rank correlations (on shared partners and on the union)
+are raw ρ in −1..1. There is no combined score and no confidence label — the
+downstream verification derives only a `verification_status` from the raw
+average rank correlation.
 
 ### Jaccard Similarity
 
@@ -142,54 +146,34 @@ Measures set overlap of partner types between two profiles.
 Jaccard(A, B) = |A ∩ B| / |A ∪ B|
 ```
 
-**Confidence Thresholds (Updated v4.1):**
-| Score | Confidence | Interpretation |
-|-------|------------|----------------|
-| > 0.5 | Very High | Excellent overlap, very likely same type |
-| > 0.3 | High | Good overlap, likely same type |
-| > 0.2 | Medium | Moderate overlap, may need review |
-| > 0.1 | Low | Limited overlap, questionable assignment |
-| ≤ 0.1 | Very Low | Poor overlap, likely different types |
-
 ### Rank Correlation (Spearman)
 
 Measures similarity of partner rankings (are the same partners top-ranked in both profiles?).
+The raw correlation is in range [-1, 1].
 
-The raw correlation is in range [-1, 1] and is **normalized to [0, 1]** using `(x + 1) / 2` for the combined score.
+### Cosine Similarity
 
-**Normalized Confidence Thresholds:**
-| Normalized Score | Raw Correlation | Interpretation |
-|------------------|-----------------|----------------|
-| ≥ 0.925 | ≥ 0.85 | Near-identical partner ordering |
-| 0.85 - 0.925 | 0.7 - 0.85 | Similar partner priorities |
-| 0.75 - 0.85 | 0.5 - 0.7 | Some agreement in rankings |
-| 0.65 - 0.75 | 0.3 - 0.5 | Weak correlation |
-| < 0.65 | < 0.3 | Essentially uncorrelated |
-
-### Cosine Similarity (Reference Only)
-
-Measures weight vector similarity. Computed but **not included** in the combined score as of v4.1.
+Measures weight vector similarity.
 
 ```
 Cosine(A, B) = (A · B) / (||A|| × ||B||)
 ```
 
-### Combined Score (v4.1)
+### Score Metrics (raw)
 
-Weighted average of Jaccard and normalized rank correlation only:
+The comparer reports the raw (unnormalized) metrics only — the derived
+`combined` score, the normalized `(x + 1) / 2` rank variants and the
+`confidence` labels are no longer produced:
 
 ```python
-DEFAULT_SCORE_WEIGHTS = {
-    'jaccard': 0.50,  # Set-based overlap
-    'rank': 0.50      # Rank correlation (normalized 0-1)
-}
-
-# Combined score calculation:
-combined = 0.50 * jaccard + 0.50 * rank_normalized
-# where rank_normalized = (rank_correlation + 1) / 2
+# Raw metrics returned by combined_score(): jaccard, weighted_jaccard, cosine,
+# rank (raw Spearman on shared partners), rank_union (raw, on the union)
 ```
 
-**Rationale:** Jaccard captures partner overlap (what partners are shared), while rank correlation captures ordering similarity (are the same partners prioritized). These two metrics are complementary and work well for both bodyId-level and type-level comparison.
+**Rationale:** Jaccard captures partner overlap (what partners are shared),
+while rank correlation captures ordering similarity (are the same partners
+prioritized). Both are reported raw (-1 to 1 for rank) so the sign of the
+rank correlation retains meaning.
 
 ---
 
@@ -210,8 +194,7 @@ results = verifier.verify_type_assignment('aMe12', datasets=['hemibrain:v1.2.1',
 # Check results
 print(results.summary())
 print(f"Status: {results.verification_status}")
-print(f"Confidence: {results.confidence}")
-print(f"Combined Score: {results.avg_combined_score:.3f}")
+print(f"Avg rank_corr: {results.avg_rank_corr:.3f}")
 ```
 
 ### Example 2: Batch Verification
@@ -228,7 +211,7 @@ batch_results = verifier.batch_verify(
 # Summarize
 for result in batch_results:
     status = '✅' if result.verification_status == 'verified' else '⚠️'
-    print(f"{status} {result.neuron_type}: {result.confidence} ({result.avg_combined_score:.3f})")
+    print(f"{status} {result.neuron_type}: {result.verification_status} ({result.avg_rank_corr:.3f})")
 ```
 
 ### Example 3: Generate HTML Report
@@ -253,7 +236,6 @@ for pair in results.pairwise_scores:
     print(f"  Jaccard: {pair.jaccard:.3f}")
     print(f"  Cosine: {pair.cosine:.3f}")
     print(f"  Rank: {pair.rank_correlation:.3f}")
-    print(f"  Combined: {pair.combined:.3f}")
 ```
 
 ### Example 5: Directional Analysis
@@ -279,27 +261,22 @@ for pair in results.pairwise_scores:
 The verification HTML report includes:
 
 ### Verification Summary Table
-- All verified types with combined scores
-- Confidence badges (Very High, High, Medium, Low, Very Low)
-- Verification status (verified, needs_review, questionable, failed)
+- Verified types with average rank correlation
+- Verification status (verified, needs_review, questionable, failed, type_not_found)
 
 ### Jaccard Similarity Matrix
 - Pairwise dataset comparison heatmap
 - Separate matrices for upstream and downstream (v4.0)
-- Color-coded cells by confidence level
+- Color-coded cells by metric value
 
 ### Directional Breakdown
 - Avg Jaccard Upstream column
 - Avg Jaccard Downstream column
 - Helps identify input vs output connectivity differences
 
-### Confidence Indicators
-Color-coded badges:
-- 🟢 **confidence-very-high**: Green (Very High)
-- 🔵 **confidence-high**: Blue (High)
-- 🟡 **confidence-medium**: Yellow (Medium)
-- 🟠 **confidence-low**: Orange (Low)
-- 🔴 **confidence-very-low**: Red (Very Low)
+### Score Indicators
+Cells are colored by the raw rank correlation value (diverging red/green
+around 0). Confidence badges are no longer produced.
 
 ---
 
@@ -398,11 +375,11 @@ result = ProfileComparator.compare_profiles(
     weights: Dict[str, float] = None  # defaults to {'jaccard': 0.50, 'rank': 0.50}
 ) -> ComparisonResult
 
-# Get combined score dictionary
+# Get the raw metric dictionary
 scores = ProfileComparator.combined_score(
     profile_a, profile_b
 )
-# Returns: {'combined': 0.75, 'jaccard': 0.6, 'rank': 0.8, 'rank_norm': 0.9, ...}
+# Returns: {'jaccard': 0.6, 'cosine': 0.9, 'rank': 0.8, 'rank_union': 0.7, ...}
 ```
 
 ### VerificationResult
@@ -413,10 +390,9 @@ class VerificationResult:
     neuron_type: str                    # Type name
     datasets: List[str]                 # Compared datasets
     pairwise_scores: List[ComparisonResult]  # Individual comparisons
-    avg_combined_score: float           # Average across pairs
+    avg_rank_corr: float                # Average rank_corr across pairs
     min_score: float                    # Minimum score
     max_score: float                    # Maximum score
-    confidence: str                     # Confidence level
     verification_status: str            # 'verified', 'needs_review', etc.
 ```
 

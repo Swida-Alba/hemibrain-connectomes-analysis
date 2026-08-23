@@ -406,7 +406,7 @@ RUN_GUIDE_FORMATS = ["html", "txt", "markdown", "disabled"]
 NETWORK_LAYOUTS = ["distributed", "circular", "shell", "spring"]
 
 # Similarity metrics
-SIMILARITY_METRICS = ["rank_union", "jaccard", "cosine", "rank_corr", "combined"]
+SIMILARITY_METRICS = ["rank_union", "jaccard", "cosine", "rank_corr"]
 
 # Match algorithms for NeuronBridge
 MATCH_ALGORITHMS = ["cds", "pppm", "both"]

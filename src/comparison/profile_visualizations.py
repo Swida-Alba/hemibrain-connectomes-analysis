@@ -367,7 +367,7 @@ class ProfileVisualizer:
         Round 4 Feature: Visualize similarity matrix of each single score.
         
         Args:
-            metric_matrices: Dict with keys like 'combined', 'jaccard', 'cosine', 'rank'
+            metric_matrices: Dict with keys like 'rank', 'jaccard', 'cosine'
             output_dir: Optional directory to save all figures
             figsize: Figure size for each heatmap
             cmap: Colormap name
@@ -408,7 +408,7 @@ class ProfileVisualizer:
     @staticmethod
     def plot_directional_heatmaps(
         directional_matrices: Dict[str, pd.DataFrame],
-        metric_name: str = 'combined',
+        metric_name: str = 'rank',
         output_dir: Optional[str] = None,
         figsize: Tuple[int, int] = (10, 8),
         cmap: str = 'RdYlGn'
@@ -491,7 +491,7 @@ class ProfileVisualizer:
             return fig
         
         # Deduplicate types - aggregate scores for types appearing multiple times
-        score_col = 'avg_rank_corr' if 'avg_rank_corr' in verification_df.columns else 'avg_combined_score'
+        score_col = 'avg_rank_corr'
         
         # Group by neuron_type and aggregate
         type_groups = verification_df.groupby('neuron_type')
@@ -503,16 +503,7 @@ class ProfileVisualizer:
             roles = group['role'].unique()
             merged_role = '/'.join(sorted(set(r for r in roles if pd.notna(r))))
             
-            # Get first non-null confidence, prioritize higher confidence
-            confidence_priority = {'High': 0, 'Medium': 1, 'Low': 2, 'Very Low': 3, 'Error': 4}
-            confidences = group['confidence'].dropna()
-            if len(confidences) > 0:
-                best_conf = min(confidences, key=lambda x: confidence_priority.get(x, 5))
-            else:
-                best_conf = 'Error'
-            
             # For error bars: use min_score and max_score if available (variance across dataset pairs)
-            # Otherwise compute from the scores in the group (but note these are averaged values)
             min_score = group.get('min_score', pd.Series(dtype=float)).dropna()
             max_score = group.get('max_score', pd.Series(dtype=float)).dropna()
             
@@ -532,7 +523,6 @@ class ProfileVisualizer:
                 'mean_score': mean_val if not pd.isna(mean_val) else 0,
                 'err_low': max(0, err_low) if not pd.isna(err_low) else 0,
                 'err_high': max(0, err_high) if not pd.isna(err_high) else 0,
-                'confidence': best_conf,
                 'role': merged_role,
                 'count': len(group)
             })
@@ -548,22 +538,11 @@ class ProfileVisualizer:
         
         fig, ax = plt.subplots(figsize=figsize)
         
-        # Color by confidence level
-        color_map = {
-            'High': '#4CAF50',      # Green
-            'Medium': '#FFC107',    # Amber
-            'Low': '#FF9800',       # Orange
-            'Very Low': '#F44336',  # Red
-            'Error': '#9E9E9E'      # Gray
-        }
-        
-        colors = [color_map.get(c, '#9E9E9E') for c in df['confidence']]
-        
         # Create horizontal bar chart with asymmetric error bars (min to max range)
         y_pos = np.arange(len(df))
         xerr = np.array([[df['err_low'].values], [df['err_high'].values]]).reshape(2, -1)
         bars = ax.barh(y_pos, df['mean_score'], xerr=xerr, 
-                      color=colors, capsize=3, error_kw={'linewidth': 1, 'alpha': 0.7})
+                      color='#4C70B0', capsize=3, error_kw={'linewidth': 1, 'alpha': 0.7})
         
         # Labels with role indicators
         labels = []
@@ -575,18 +554,9 @@ class ProfileVisualizer:
         
         ax.set_yticks(y_pos)
         ax.set_yticklabels(labels, fontsize=9)
-        ax.set_xlabel('Normalized Rank Correlation Score [0-1]')
+        ax.set_xlabel('Rank Correlation')
         ax.set_title(title)
-        ax.set_xlim(0.0, 1.0)  # Normalized range [0, 1]
-        
-        # Add confidence thresholds as vertical lines (normalized thresholds)
-        ax.axvline(x=0.85, color='green', linestyle='--', alpha=0.5, label='High threshold')
-        ax.axvline(x=0.75, color='orange', linestyle='--', alpha=0.5, label='Medium threshold')
-        ax.axvline(x=0.65, color='red', linestyle='--', alpha=0.5, label='Low threshold')
-        
-        # Add legend - include all confidence levels including Error (gray)
-        legend_patches = [mpatches.Patch(color=c, label=l) for l, c in color_map.items()]
-        ax.legend(handles=legend_patches, loc='lower right', title='Confidence')
+        ax.set_xlim(-1.0, 1.0)
         
         ax.grid(axis='x', alpha=0.3)
         
@@ -657,7 +627,7 @@ class ProfileVisualizer:
         counts = []
         all_points = []  # For swarm plot
         
-        score_col = 'avg_rank_corr' if 'avg_rank_corr' in df_dedup.columns else 'avg_combined_score'
+        score_col = 'avg_rank_corr'
         
         for r in roles:
             # Match role in the role string (e.g., 'source' matches both 'source' and 'source/target')
@@ -692,15 +662,10 @@ class ProfileVisualizer:
         
         ax.set_xticks(x)
         ax.set_xticklabels([r.replace('/', '/\n') for r in roles])
-        ax.set_ylabel('Normalized Rank Correlation Score [0-1]')
+        ax.set_ylabel('Rank Correlation')
         ax.set_title(title)
-        ax.set_ylim(0.0, 1.05)
+        ax.set_ylim(-1.05, 1.05)
         
-        # Add threshold lines (normalized thresholds)
-        ax.axhline(y=0.85, color='green', linestyle='--', alpha=0.5, label='High (≥0.85)')
-        ax.axhline(y=0.75, color='orange', linestyle='--', alpha=0.5, label='Medium (≥0.75)')
-        
-        ax.legend(loc='lower right', fontsize=8)
         ax.grid(axis='y', alpha=0.3)
         
         plt.tight_layout()
@@ -903,7 +868,7 @@ class ProfileVisualizer:
         Args:
             profiles_by_dataset: Dict of {dataset: {type_name: ConnectivityProfile}}
             output_dir: Directory to save output files
-            metric: Similarity metric ('rank', 'combined', 'jaccard', 'cosine')
+            metric: Similarity metric ('rank', 'jaccard', 'cosine')
             direction: 'upstream', 'downstream', or 'both'
             cluster: Whether to apply hierarchical clustering
             
@@ -1186,19 +1151,6 @@ class ProfileVisualizer:
             background: #f8f9fa;
         }}
         
-        .confidence-badge {{
-            display: inline-block;
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 0.85em;
-            font-weight: 500;
-        }}
-        
-        .confidence-High {{ background: #e8f5e9; color: #2e7d32; }}
-        .confidence-Medium {{ background: #fff3e0; color: #ef6c00; }}
-        .confidence-Low {{ background: #ffebee; color: #c62828; }}
-        .confidence-Very-Low {{ background: #ffebee; color: #c62828; }}
-        
         .heatmap-container {{
             width: 100%;
             min-height: 600px;
@@ -1241,11 +1193,9 @@ class ProfileVisualizer:
         summary_df = verification_results.get('summary', pd.DataFrame())
         if not summary_df.empty:
             total_types = len(summary_df)
-            high_conf = len(summary_df[summary_df['confidence'] == 'High'])
-            medium_conf = len(summary_df[summary_df['confidence'] == 'Medium'])
-            low_conf = len(summary_df[summary_df['confidence'].isin(['Low', 'Very Low'])])
             # Use rank_corr as the primary score
             avg_rank_corr = summary_df['avg_rank_corr'].mean() if 'avg_rank_corr' in summary_df.columns else np.nan
+            verified = (summary_df['verification_status'] == 'verified').sum() if 'verification_status' in summary_df.columns else np.nan
             
             html_parts.append(f'''
         <div class="summary-cards">
@@ -1254,16 +1204,8 @@ class ProfileVisualizer:
                 <div class="value">{total_types}</div>
             </div>
             <div class="card">
-                <h3>High Confidence</h3>
-                <div class="value" style="color: var(--success-color);">{high_conf}</div>
-            </div>
-            <div class="card">
-                <h3>Medium Confidence</h3>
-                <div class="value" style="color: var(--warning-color);">{medium_conf}</div>
-            </div>
-            <div class="card">
-                <h3>Low Confidence</h3>
-                <div class="value" style="color: var(--danger-color);">{low_conf}</div>
+                <h3>Verified</h3>
+                <div class="value" style="color: var(--success-color);">{verified if not pd.isna(verified) else 'N/A'}</div>
             </div>
             <div class="card">
                 <h3>Avg Rank Correlation</h3>
@@ -1354,15 +1296,14 @@ class ProfileVisualizer:
                         <th>Rank Corr (Both)</th>
                         {"<th>Up↑</th><th>Down↓</th>" if has_directional else ""}
                         {"<th>Jaccard (Both)</th><th>Jaccard (Up)</th><th>Jaccard (Down)</th>" if has_directional_jaccard else "<th>Jaccard</th>"}
-                        <th>Confidence</th>
                     </tr>
                 </thead>
                 <tbody>
 ''')
             
-            # Helper function for colored score cells (for rank correlation - normalized [0,1] range)
+            # Helper function for colored score cells (raw rank correlation, -1..1)
             def score_cell_colored(val):
-                """Generate colored cell HTML for a normalized rank corr score value [0,1]."""
+                """Generate colored cell HTML for a raw rank corr score value [-1,1]."""
                 if pd.isna(val) or val == '-':
                     return '<td style="background: #f5f5f5; text-align: center;">-</td>'
                 try:
@@ -1370,18 +1311,11 @@ class ProfileVisualizer:
                 except (ValueError, TypeError):
                     return f'<td style="text-align: center;">{val}</td>'
                 
-                # Thresholds for normalized [0,1] range (matching confidence thresholds)
-                # Very High >= 0.85, High >= 0.7, Medium >= 0.5, Low >= 0.3, Very Low < 0.3
-                if val >= 0.85:
-                    bg = 'rgba(46, 125, 50, 0.7)'  # Dark Green - Very High
-                elif val >= 0.7:
-                    bg = 'rgba(76, 175, 80, 0.6)'  # Green - High
-                elif val >= 0.5:
-                    bg = 'rgba(255, 193, 7, 0.6)'  # Yellow - Medium
-                elif val >= 0.3:
-                    bg = 'rgba(255, 152, 0, 0.6)'  # Orange - Low
+                # Diverging color centered on 0: positive (green) / negative (red)
+                if val >= 0:
+                    bg = f'rgba(76, 175, 80, {0.25 + 0.5 * min(val, 1.0):.3f})'
                 else:
-                    bg = 'rgba(244, 67, 54, 0.5)'  # Red - Very Low
+                    bg = f'rgba(244, 67, 54, {0.25 + 0.5 * min(-val, 1.0):.3f})'
                 return f'<td style="background: {bg}; text-align: center;">{val:.3f}</td>'
             
             # Helper function for Jaccard colored cells (different thresholds)
@@ -1408,16 +1342,15 @@ class ProfileVisualizer:
                 return f'<td style="background: {bg}; text-align: center;">{val:.3f}</td>'
             
             for _, row in summary_df.iterrows():
-                conf = row['confidence']
                 role = row.get('role', '')
                 status = row.get('verification_status', '')
                 
-                # Get individual metric scores (already normalized to [0,1])
+                # Get individual metric scores (raw rank correlation)
                 rank_corr = row.get('rank_correlation', row.get('avg_rank_corr', np.nan))
                 jaccard = row.get('jaccard', row.get('avg_jaccard', np.nan))
                 cosine = row.get('cosine', row.get('avg_cosine', np.nan))
                 
-                # Directional scores (already normalized to [0,1])
+                # Directional scores
                 upstream = row.get('avg_rank_corr_upstream', np.nan)
                 downstream = row.get('avg_rank_corr_downstream', np.nan)
                 
@@ -1426,35 +1359,22 @@ class ProfileVisualizer:
                 total_datasets = row.get('total_datasets', '?')
                 found_str = f"{datasets_found}/{total_datasets}"
                 
-                conf_class = f"confidence-{conf.lower().replace(' ', '-')}" if conf else 'confidence-very-low'
                 role_class = f"role-{role.replace('/', '-')}" if role else ""
                 
-                # Score bar color - use normalized rank_corr as primary score (now in [0,1])
+                # Score bar color - use raw rank_corr as primary score (range -1..1)
                 score = rank_corr if isinstance(rank_corr, (int, float)) and not pd.isna(rank_corr) else np.nan
                 if pd.isna(score):
                     bar_color = '#ccc'
                     score_display = 'N/A'
                     bar_width = 0
-                elif score >= 0.85:  # Very High
-                    bar_color = 'var(--very-high-color, #2e7d32)'
+                elif score >= 0:
+                    bar_color = 'var(--high-color, #2e7d32)'
                     score_display = f'{score:.3f}'
-                    bar_width = score * 100
-                elif score >= 0.7:  # High
-                    bar_color = 'var(--high-color)'
+                    bar_width = min(abs(score), 1.0) * 100
+                else:
+                    bar_color = 'var(--low-color, #c62828)'
                     score_display = f'{score:.3f}'
-                    bar_width = score * 100
-                elif score >= 0.5:  # Medium
-                    bar_color = 'var(--medium-color)'
-                    score_display = f'{score:.3f}'
-                    bar_width = score * 100
-                elif score >= 0.3:  # Low
-                    bar_color = 'var(--low-color)'
-                    score_display = f'{score:.3f}'
-                    bar_width = score * 100
-                else:  # Below 0.3 = Very Low
-                    bar_color = 'var(--very-low-color)'
-                    score_display = f'{score:.3f}'
-                    bar_width = score * 100
+                    bar_width = min(abs(score), 1.0) * 100
                 
                 # Use normalized values for colored cells
                 directional_cols = f"{score_cell_colored(upstream)}{score_cell_colored(downstream)}" if has_directional else ""
@@ -1482,7 +1402,6 @@ class ProfileVisualizer:
                         </td>
                         {directional_cols}
                         {jaccard_cols}
-                        <td><span class="confidence-badge {conf_class}">{conf if conf else 'N/A'}</span></td>
                     </tr>
 ''')
             
@@ -1565,11 +1484,9 @@ class ProfileVisualizer:
                         <th>Avg Rank Corr</th>
                         <th>Avg Jaccard</th>
                         <th>N Types</th>
-                        <th>Very High (≥0.85)</th>
-                        <th>High (0.7-0.85)</th>
-                        <th>Medium (0.5-0.7)</th>
-                        <th>Low (0.3-0.5)</th>
-                        <th>Very Low (&lt;0.3)</th>
+                        <th>Pos (>&gt;0)</th>
+                        <th>Zero (=0)</th>
+                        <th>Neg (&lt;0)</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -1579,11 +1496,9 @@ class ProfileVisualizer:
                     if len(col_values) > 0:
                         avg_score = col_values.mean()
                         n_types = len(col_values)
-                        n_very_high = (col_values >= 0.85).sum()
-                        n_high = ((col_values >= 0.7) & (col_values < 0.85)).sum()
-                        n_medium = ((col_values >= 0.5) & (col_values < 0.7)).sum()
-                        n_low = ((col_values >= 0.3) & (col_values < 0.5)).sum()
-                        n_very_low = (col_values < 0.3).sum()
+                        n_positive = (col_values > 0).sum()
+                        n_zero = (col_values == 0).sum()
+                        n_negative = (col_values < 0).sum()
                         
                         # Get avg Jaccard for this dataset pair
                         avg_jaccard = np.nan
@@ -1592,17 +1507,11 @@ class ProfileVisualizer:
                             if len(jaccard_col_values) > 0:
                                 avg_jaccard = jaccard_col_values.mean()
                         
-                        # Color for avg score - normalized thresholds
-                        if avg_score >= 0.85:
-                            score_color = 'rgba(46, 125, 50, 0.7)'  # Dark Green - Very High
-                        elif avg_score >= 0.7:
-                            score_color = 'rgba(76, 175, 80, 0.7)'  # Green - High
-                        elif avg_score >= 0.5:
-                            score_color = 'rgba(255, 193, 7, 0.7)'  # Yellow - Medium
-                        elif avg_score >= 0.3:
-                            score_color = 'rgba(255, 152, 0, 0.7)'  # Orange - Low
+                        # Color for avg score - diverging on raw rank correlation
+                        if avg_score >= 0:
+                            score_color = f'rgba(76, 175, 80, {0.25 + 0.5 * min(avg_score, 1.0):.3f})'
                         else:
-                            score_color = 'rgba(244, 67, 54, 0.5)'  # Red - Very Low
+                            score_color = f'rgba(244, 67, 54, {0.25 + 0.5 * min(-avg_score, 1.0):.3f})'
                         
                         # Color for Jaccard (different thresholds)
                         if np.isnan(avg_jaccard):
@@ -1629,11 +1538,9 @@ class ProfileVisualizer:
                         <td style="background: {score_color}; text-align: center;">{avg_score:.3f}</td>
                         <td style="background: {jaccard_color}; text-align: center;">{jaccard_display}</td>
                         <td style="text-align: center;">{n_types}</td>
-                        <td style="text-align: center; color: #2e7d32;">{n_very_high}</td>
-                        <td style="text-align: center; color: #4CAF50;">{n_high}</td>
-                        <td style="text-align: center; color: #FFC107;">{n_medium}</td>
-                        <td style="text-align: center; color: #FF9800;">{n_low}</td>
-                        <td style="text-align: center; color: #F44336;">{n_very_low}</td>
+                        <td style="text-align: center; color: #2e7d32;">{n_positive}</td>
+                        <td style="text-align: center; color: #888;">{n_zero}</td>
+                        <td style="text-align: center; color: #c62828;">{n_negative}</td>
                     </tr>
 ''')
                 
@@ -1646,32 +1553,9 @@ class ProfileVisualizer:
         html_parts.append('''
         <div class="section">
             <h2>📖 Interpretation Guide</h2>
-            <table>
-                <tr>
-                    <td><span class="confidence-badge confidence-very-high">Very High</span></td>
-                    <td><strong>Rank Corr ≥ 0.85:</strong> Excellent match. Type assignment is highly reliable across datasets.</td>
-                </tr>
-                <tr>
-                    <td><span class="confidence-badge confidence-high">High</span></td>
-                    <td><strong>Rank Corr 0.7-0.85:</strong> Profiles match well. Type assignment is likely correct.</td>
-                </tr>
-                <tr>
-                    <td><span class="confidence-badge confidence-medium">Medium</span></td>
-                    <td><strong>Rank Corr 0.5-0.7:</strong> Some differences present. May warrant manual review of connectivity patterns.</td>
-                </tr>
-                <tr>
-                    <td><span class="confidence-badge confidence-low">Low</span></td>
-                    <td><strong>Rank Corr 0.3-0.5:</strong> Significant differences. Type assignment is questionable.</td>
-                </tr>
-                <tr>
-                    <td><span class="confidence-badge confidence-very-low">Very Low</span></td>
-                    <td><strong>Rank Corr < 0.3:</strong> Profiles differ substantially. Neurons may be mislabeled or biologically distinct.</td>
-                </tr>
-            </table>
-            
-            <h3>Score Metrics (Jaccard + Rank Correlation)</h3>
+            <h3>Score Metrics</h3>
             <ul>
-                <li><strong>Rank Correlation (Primary):</strong> Average of upstream and downstream Spearman correlations, normalized to [0, 1] range using (x+1)/2. Measures if the same partners are ranked similarly in both datasets. 0.5 = no correlation, 1.0 = identical rankings. Most robust to annotation completeness differences.</li>
+                <li><strong>Rank Correlation (Primary):</strong> Average of upstream and downstream Spearman correlations (raw, -1 to 1). Measures whether the same partners are ranked similarly in both datasets; 1 = identical ranking, 0 = no monotonic relation, -1 = inverse ranking.</li>
                 <li><strong>Jaccard:</strong> Set-based overlap of partner types: |A ∩ B| / |A ∪ B|. Range: 0 (no shared partners) to 1 (identical partner sets). Average of upstream and downstream directions. Ignores connection weights.</li>
             </ul>
             
@@ -1798,15 +1682,15 @@ class ProfileVisualizer:
                 plt.close(fig)
                 saved_files['role_comparison'] = str(output_path / 'role_comparison.png')
             
-            # 3. Combined similarity heatmap
+            # 3. Overall (both directions) similarity heatmap
             if similarity_matrix is not None and not similarity_matrix.empty:
                 fig = ProfileVisualizer.plot_similarity_heatmap(
                     similarity_matrix,
-                    title='Connectivity Profile Similarity (Combined)',
-                    output_path=str(output_path / 'similarity_heatmap_combined.png')
+                    title='Connectivity Profile Similarity (Overall)',
+                    output_path=str(output_path / 'similarity_heatmap_overall.png')
                 )
                 plt.close(fig)
-                saved_files['heatmap_combined'] = str(output_path / 'similarity_heatmap_combined.png')
+                saved_files['heatmap_overall'] = str(output_path / 'similarity_heatmap_overall.png')
             
             # 4. Round 4: Individual metric heatmaps
             if metric_matrices:

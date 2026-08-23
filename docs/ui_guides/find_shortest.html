@@ -88,6 +88,27 @@
     <tr><td>Output Format</td><td>csv</td><td>csv or xlsx</td></tr>
   </table>
 
+  <h2>Score formulas</h2>
+  <p>Every connection and path is scored on the <b>thresholded graph</b> D_t
+    (edges with <code>weight ≥ Min Synapse Count</code>). Ratios use the
+    global total incoming weight so the denominator reflects the whole
+    dataset, not just the query:</p>
+  <table>
+    <tr><th>Score</th><th>Formula</th><th>Range</th></tr>
+    <tr><td><code>connection_ratio</code></td><td>w_ij / Σ_k w_kj over D_t (edge weight ÷ total input to the post neuron)</td><td>0–1</td></tr>
+    <tr><td><code>traversal_probability</code></td><td>min(1.0, connection_ratio / 0.3) (30% input = maximal)</td><td>0–1</td></tr>
+    <tr><td><code>block_probability</code></td><td>1 − traversal_probability</td><td>0–1</td></tr>
+    <tr><td><code>path_prob</code></td><td>Π of the edge traversal probabilities over the path</td><td>0–1</td></tr>
+    <tr><td><code>min_weight</code></td><td>weakest edge synapse count along the path (the bottleneck)</td><td>integer</td></tr>
+    <tr><td><code>min_ratio</code></td><td>smallest edge connection ratio along the path</td><td>0–1</td></tr>
+  </table>
+  <p>At the <b>type</b> level the aggregate probabilities are computed from the
+    deduplicated bodyId-level pairs of D_t: type-level traversal probability
+    uses the <b>product</b> method by default
+    (<code>1 − Π(1 − p_pair)</code>), which models parallel channels. Full
+    derivations live in
+    <a href="../core-features/ScoreCalculation_Guide.md">Score Calculation Guide</a>.</p>
+
   <div class="callout tip">
     <b>No algorithm selector:</b> shortest enumeration is a backward-BFS
     distance pass plus a guided DFS over the shortest-path DAG — polynomial

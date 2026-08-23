@@ -76,16 +76,17 @@ COLUMN_GLOSSARY = {
     # --- Connection scores ----------------------------------------------------
     "connection_ratio": (
         "Fraction of the postsynaptic neuron's input coming from this "
-        "partner: weight / postsynaptic total.", "0-1"),
+        "partner, = weight / postsynaptic total input "
+        "(w_ij / Σ_k w_kj over D_t).", "0-1"),
     "ratios": ("Per-edge connection ratios along the path.", "list of 0-1"),
     "min_ratio": ("Smallest edge connection ratio along the path.", "0-1"),
     "traversal_probability": (
-        "Probability that a signal traverses the edge: "
-        "min(1.0, connection_ratio / 0.3).", "0-1"),
+        "Probability that a signal traverses the edge, "
+        "= min(1.0, connection_ratio / 0.3).", "0-1"),
     "probabilities": ("Per-edge traversal probabilities along the path.", "list of 0-1"),
-    "block_probability": ("Probability the signal is blocked: 1 - traversal_probability.", "0-1"),
+    "block_probability": ("Probability the signal is blocked: = 1 - traversal_probability.", "0-1"),
     "path": ("Path as a neuron-type sequence, e.g. aMe12 → SMP238 → PPL101.", "text"),
-    "path_prob": ("Overall path probability (product of edge traversal probabilities).", "0-1"),
+    "path_prob": ("Overall path probability = product of edge traversal probabilities (Π p_k).", "0-1"),
     "min_weight": ("Smallest edge weight along the path.", "integer"),
     "length": ("Number of hops (edges) in the path.", "integer"),
     "nt_type": ("Predicted neurotransmitter type (ACh, GABA, glutamate, ...).", "text"),
@@ -117,32 +118,51 @@ COLUMN_GLOSSARY = {
     "present_R": ("Edge present on the right side.", "boolean"),
     "note": ("Free-text annotation (e.g. why an edge is unconserved).", "text"),
     # --- Profile similarity metrics --------------------------------------------
-    "jaccard": ("Jaccard similarity of the two partner sets.", "0-1"),
-    "weighted_jaccard": ("Score-weighted Jaccard similarity.", "0-1"),
-    "cosine": ("Cosine similarity of the partner-weight vectors.", "0-1"),
+    # Formulas are written inline so the exported run guide explains HOW each
+    # score is computed, not only what it means.  A = one profile's partner set,
+    # B = the other's; w_a/w_b are partner weights; ρ = Spearman correlation.
+    "jaccard": ("Jaccard similarity of the two partner sets: |A ∩ B| / |A ∪ B|.", "0-1"),
+    "weighted_jaccard": (
+        "Score-weighted (Ruzicka) Jaccard similarity: Σ min(w_a, w_b) / "
+        "Σ max(w_a, w_b) over the partner-type union.", "0-1"),
+    "cosine": (
+        "Cosine similarity of the partner-weight vectors: (A·B) / (‖A‖·‖B‖) "
+        "over the partner-type union (missing = 0).", "0-1"),
     "rank_corr": (
-        "Spearman rank correlation of partner weights, normalized to 0-1 "
-        "((raw + 1) / 2).", "0-1"),
-    "rank_corr_raw": ("Raw Spearman rank correlation of partner weights.", "-1 to 1"),
+        "Raw Spearman rank correlation (ρ) of partner weights on shared "
+        "partners; NaN when fewer than 3 shared partners.", "-1 to 1"),
     "rank_union": (
-        "Spearman rank correlation computed over the union of both partner "
-        "sets.", "-1 to 1"),
-    "combined": ("Weighted combination of the individual similarity metrics.", "0-1"),
-    "similarity": ("Overall similarity score used for sorting.", "0-1"),
-    "profile_similarity": ("Connectivity-profile similarity component.", "0-1"),
-    "roi_similarity": ("ROI overlap similarity component.", "0-1"),
-    "intra_type_similarity": ("Similarity restricted to same-type candidates.", "0-1"),
+        "Spearman rank correlation over the union of both partner sets "
+        "(missing partners weighted 0), raw -1 to 1.", "-1 to 1"),
+    "similarity": ("Overall similarity score used for sorting; see method/metric.", "0-1"),
+    "profile_similarity": (
+        "Connectivity-profile similarity evidence: shared-count / "
+        "max-shared-count (0-1).", "0-1"),
+    "roi_similarity": (
+        "ROI overlap similarity: cosine of input/output synapse distributions "
+        "over primary ROIs, mirrored across the midline.", "0-1"),
+    "intra_type_similarity": (
+        "Mean pairwise similarity of the type's members — the intra-type "
+        "reference other rows are ranked against.", "0-1"),
     "method": ("Similarity method used (vector / nblast).", "text"),
     "metric": ("Distance metric used (cosine / pearson).", "text"),
-    "morph_cosine": ("Morphology vector cosine similarity (when enrichment ran).", "0-1"),
-    "morph_pearson": ("Morphology vector Pearson correlation (when enrichment ran).", "-1 to 1"),
-    "adjacency_score": ("Direct adjacency (synaptic contact) score between the pair.", "number"),
-    "shared_type_count": ("Number of partner types shared by both profiles.", "integer"),
-    "union_type_count": ("Number of unique partner types across both profiles.", "integer"),
+    "morph_cosine": (
+        "Morphology vector cosine similarity (when enrichment ran): "
+        "(A·B) / (‖A‖·‖B‖) on z-scored vectors.", "0-1"),
+    "morph_pearson": (
+        "Morphology vector Pearson correlation (when enrichment ran); "
+        "= cosine of the mean-centered vectors.", "-1 to 1"),
+    "adjacency_score": (
+        "Direct adjacency (shared-partner / synaptic-contact) score between "
+        "the pair.", "number"),
+    "shared_type_count": ("Number of partner types shared by both profiles: |A ∩ B|.", "integer"),
+    "union_type_count": ("Number of unique partner types across both profiles: |A ∪ B|.", "integer"),
+    "overlap_a_in_b": ("Fraction of A's partners present in B: |A ∩ B| / |A|.", "0-1"),
+    "overlap_b_in_a": ("Fraction of B's partners present in A: |A ∩ B| / |B|.", "0-1"),
+    "overlap_avg": ("Mean of overlap_a_in_b and overlap_b_in_a.", "0-1"),
     # --- Type-level aggregates --------------------------------------------------
-    "avg_rank_corr": ("Mean rank_corr over all bodyId pairs of the type pair.", "0-1"),
+    "avg_rank_corr": ("Mean rank_corr over all bodyId pairs of the type pair.", "-1 to 1"),
     "avg_jaccard": ("Mean jaccard over all bodyId pairs of the type pair.", "0-1"),
-    "avg_combined": ("Mean combined score over all bodyId pairs of the type pair.", "0-1"),
     "avg_rank_union": ("Mean rank_union over all bodyId pairs of the type pair.", "-1 to 1"),
     "avg_cosine": ("Mean cosine over all bodyId pairs of the type pair.", "0-1"),
     "avg_adjacency_score": ("Mean adjacency score over all bodyId pairs.", "number"),
@@ -165,20 +185,20 @@ COLUMN_GLOSSARY = {
     "threshold": ("Minimum synapse threshold applied.", "integer"),
     "conservation": ("Number/fraction of datasets in which the edge is present.", "text"),
     "conserved_at_lowest": ("Edge present in every dataset at the lowest threshold.", "boolean"),
-    "jaccard_similarity": ("Jaccard similarity of the two datasets' edge sets.", "0-1"),
-    "ruzicka_similarity": ("Ruzicka (weighted Jaccard) similarity of edge weights.", "0-1"),
-    "pearson_correlation": ("Pearson correlation of matched edge weights.", "-1 to 1"),
+    "jaccard_similarity": ("Jaccard similarity of the two datasets' edge sets: |E1 ∩ E2| / |E1 ∪ E2|.", "0-1"),
+    "ruzicka_similarity": ("Ruzicka (weighted Jaccard) of edge weights: Σ min(W1, W2) / Σ max(W1, W2).", "0-1"),
+    "pearson_correlation": ("Pearson correlation of matched edge weights (sparse-data caution).", "-1 to 1"),
     "edges_in_d1": ("Number of edges in dataset 1.", "integer"),
     "edges_in_d2": ("Number of edges in dataset 2.", "integer"),
-    "common_edges": ("Number of edges present in both datasets.", "integer"),
-    "union_edges": ("Number of unique edges across both datasets.", "integer"),
+    "common_edges": ("Number of edges present in both datasets: |E1 ∩ E2|.", "integer"),
+    "union_edges": ("Number of unique edges across both datasets: |E1 ∪ E2|.", "integer"),
     "unique_to_d1": ("Edges present only in dataset 1.", "integer"),
     "unique_to_d2": ("Edges present only in dataset 2.", "integer"),
-    "edge_rank_correlation": ("Spearman correlation of edge-weight ranks.", "-1 to 1"),
-    "cosine_similarity": ("Cosine similarity of edge-weight vectors.", "0-1"),
+    "edge_rank_correlation": ("Spearman correlation of edge-weight ranks over the union (missing = 0).", "-1 to 1"),
+    "cosine_similarity": ("Cosine similarity of edge-weight vectors over the union: (E1·E2)/(‖E1‖·‖E2‖).", "0-1"),
     "path_rank_correlation": ("Spearman correlation of path-probability ranks.", "-1 to 1"),
     "spearman_rank_correlation": ("Spearman rank correlation of the compared values.", "-1 to 1"),
-    "rv_coefficient": ("RV coefficient (multivariate correlation) of the edge matrices.", "0-1"),
+    "rv_coefficient": ("RV coefficient (multivariate correlation) of the edge matrices: ⟨A,B⟩_F² / (‖A‖_F²·‖B‖_F²).", "0-1"),
     "dataset_1": ("First dataset of the pairwise comparison.", "text"),
     "dataset_2": ("Second dataset of the pairwise comparison.", "text"),
     # --- Dataset metadata ---------------------------------------------------------
@@ -254,8 +274,8 @@ _CONNECTION_TYPE_COLUMNS = [
 _HOMOLOG_RESULT_COLUMNS = [
     "source_bodyId", "source_type", "target_bodyId", "target_type",
     "target_dataset", "adjacency_score", "shared_type_count",
-    "union_type_count", "rank_corr", "rank_corr_raw", "rank_union",
-    "jaccard", "weighted_jaccard", "cosine", "combined", "is_same_type",
+    "union_type_count", "rank_corr", "rank_union",
+    "jaccard", "weighted_jaccard", "cosine", "is_same_type",
     "is_same_dataset", "source_status", "target_status", "weak_source",
     "weak_target", "source_partner_count", "target_partner_count",
 ]
@@ -406,7 +426,7 @@ _HOMOLOG_FILES = [
      "description": "BodyId-level results (sorted by source, then metric).",
      "columns": [
          "source_bodyId", "source_type", "target_bodyId", "target_type",
-         "combined", "rank_corr", "rank_corr_raw", "rank_union", "jaccard",
+         "rank_corr", "rank_union", "jaccard",
          "cosine", "adjacency_score", "shared_type_count",
          "union_type_count", "is_same_type", "is_same_dataset",
          "source_status", "target_status", "weak_source", "weak_target",
@@ -416,7 +436,7 @@ _HOMOLOG_FILES = [
      "columns": [
          "query", "source_dataset", "target_dataset", "source_type",
          "target_type", "avg_rank_corr", "n_bodyid_comparisons",
-         "avg_jaccard", "avg_combined", "avg_rank_union", "avg_cosine",
+         "avg_jaccard", "avg_rank_union", "avg_cosine",
          "avg_adjacency_score", "avg_shared_type_count",
          "avg_union_type_count", "n_complete_sources",
          "n_incomplete_sources"]},

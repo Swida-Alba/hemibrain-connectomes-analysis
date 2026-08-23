@@ -5677,8 +5677,7 @@ class ComparisonAnalyzer:
                 'avg_rank_corr': 'rank_corr', 'rank_corr': 'rank_corr',
                 'avg_rank_union': 'rank_union', 'rank_union': 'rank_union',
                 'avg_cosine': 'cosine', 'cosine': 'cosine',
-                'avg_jaccard': 'jaccard', 'jaccard': 'jaccard',
-                'avg_combined': 'combined', 'combined': 'combined'
+                'avg_jaccard': 'jaccard', 'jaccard': 'jaccard'
             }
             
             # Initialize stores for each metric if not exists
@@ -5738,8 +5737,8 @@ class ComparisonAnalyzer:
             self._log("No valid matrices could be built")
             return {}
 
-        # Use 'combined' or 'rank_corr' as primary for sorting/display
-        primary_metric = 'combined' if 'combined' in matrices else ('rank_corr' if 'rank_corr' in matrices else list(matrices.keys())[0])
+        # Use 'rank_corr' as primary for sorting/display when present
+        primary_metric = 'rank_corr' if 'rank_corr' in matrices else list(matrices.keys())[0]
         
         # Create summary DataFrame with averages for ALL metrics
         # Start with all unique neuron types across all matrices

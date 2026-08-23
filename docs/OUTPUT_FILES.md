@@ -225,9 +225,9 @@ Example: `homologs_MCNS_to_FAFB_aMe12_20260815_143540/`
 ### Key Output Files
 
 #### Results (`results/`)
-*   **`homolog_results.csv`**: Full results with all similarity columns, sorted by the chosen metric. Columns: `source_bodyId`, `source_type`, `target_bodyId`, `target_type`, `target_dataset`, `adjacency_score`, `shared_type_count`, `union_type_count`, `rank_corr`, `rank_corr_raw`, `rank_union`, `jaccard`, `weighted_jaccard`, `cosine`, `combined`, `is_same_type`, `is_same_dataset`, `source_status`, `target_status`, `weak_source`, `weak_target`, `source_partner_count`, `target_partner_count`, `morph_cosine`, `morph_pearson` (metric definitions in the Appendix).
+*   **`homolog_results.csv`**: Full results with all similarity columns, sorted by the chosen metric. Columns: `source_bodyId`, `source_type`, `target_bodyId`, `target_type`, `target_dataset`, `adjacency_score`, `shared_type_count`, `union_type_count`, `rank_corr`, `rank_union`, `jaccard`, `weighted_jaccard`, `cosine`, `is_same_type`, `is_same_dataset`, `source_status`, `target_status`, `weak_source`, `weak_target`, `source_partner_count`, `target_partner_count`, `morph_cosine`, `morph_pearson` (metric definitions in the Appendix).
 *   **`bodyid_results.csv`**: BodyId-level results (sorted by source, then metric). Same score columns, one row per source×target bodyId pair, without `target_dataset`/`weighted_jaccard`/`morph_*`.
-*   **`type_summary.csv`**: Aggregated results at the neuron type level. Columns: `query`, `source_dataset`, `target_dataset`, `source_type`, `target_type`, `avg_rank_corr`, `n_bodyid_comparisons`, `avg_jaccard`, `avg_combined`, `avg_rank_union`, `avg_cosine`, `avg_adjacency_score`, `avg_shared_type_count`, `avg_union_type_count`, `n_complete_sources`, `n_incomplete_sources`.
+*   **`type_summary.csv`**: Aggregated results at the neuron type level. Columns: `query`, `source_dataset`, `target_dataset`, `source_type`, `target_type`, `avg_rank_corr`, `n_bodyid_comparisons`, `avg_jaccard`, `avg_rank_union`, `avg_cosine`, `avg_adjacency_score`, `avg_shared_type_count`, `avg_union_type_count`, `n_complete_sources`, `n_incomplete_sources`.
 *   **`source_status_summary.json`**: Per-source-neuron status (resolved bodyIds, candidate counts).
 *   **`shuffle_test.json`**: Random-control (shuffle) test statistics — only when `run_shuffle_test=True`.
 
@@ -362,7 +362,7 @@ Example: `profiling_MCNS_aMe_20260815_143922/` (query `aMe.*` over male-cns:v1.0
 *   **`results/bodyid_similarity_{metric}_{direction}.csv`**: BodyId-to-bodyId comparisons
 *   **`results/type_avg_bodyid_similarity_{metric}_{direction}.csv`**: Type similarities averaged from bodyId pairs
 *   **`visualization/heatmap_intra_{direction}_{metric}.html`** and **`visualization/heatmap_intra_type_avg_{direction}_{metric}.html`**: Interactive heatmaps
-*   Metrics: `jaccard`, `weighted_jaccard`, `cosine`, `rank_corr`, `rank_union`, `combined`; directions: `upstream`, `downstream`, `combined`
+*   Metrics: `jaccard`, `weighted_jaccard`, `cosine`, `rank_corr`, `rank_union`; directions: `upstream`, `downstream`, `overall` (both directions)
 
 #### Cross-Dataset Results (`cross_dataset/`)
 *   **`mapping_summary.csv`**: Resolved type names per dataset with same-name flags — columns `anchor`, one column per queried dataset, `same name`
@@ -556,11 +556,8 @@ setting (useful for scripts and tests).
 | `jaccard`             | Jaccard similarity of the two partner sets                     | 0-1          |
 | `weighted_jaccard`    | Score-weighted Jaccard similarity                              | 0-1          |
 | `cosine`              | Cosine similarity of the partner-weight vectors                | 0-1          |
-| `rank_corr`           | Spearman rank correlation of partner weights, normalized `(raw + 1) / 2` | 0-1 |
-| `rank_corr_raw`       | Raw Spearman rank correlation of partner weights               | -1 to 1      |
+| `rank_corr`           | Raw Spearman rank correlation of partner weights               | -1 to 1      |
 | `rank_union`          | Spearman rank correlation over the union of both partner sets  | -1 to 1      |
-| `combined`            | Weighted combination of the individual similarity metrics      | 0-1          |
-| `confidence`          | Categorical match confidence derived from `combined`           | High / Medium / Low / Very Low |
 | `morph_cosine`        | Morphology vector cosine similarity (when enrichment ran)      | 0-1          |
 | `morph_pearson`       | Morphology vector Pearson correlation (when enrichment ran)    | -1 to 1      |
 | `adjacency_score`     | Direct adjacency (synaptic contact) score between the pair     | number       |

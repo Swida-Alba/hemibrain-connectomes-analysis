@@ -195,12 +195,12 @@ def test_single_dataset_report_indexes_all_metrics(tmp_path):
         name: matrix
         for name in (
             "jaccard", "weighted_jaccard", "cosine", "rank_corr",
-            "rank_corr_union", "combined",
+            "rank_corr_union",
         )
     }
     report = comparer._generate_single_dataset_report(
         output,
-        {"combined": metrics},
+        {"overall": metrics},
         {},
         {},
     )
@@ -208,7 +208,7 @@ def test_single_dataset_report_indexes_all_metrics(tmp_path):
     assert report.exists()
     for metric in metrics:
         assert metric in text
-    assert "type_level/results/type_similarity_jaccard_combined.csv" in text
+    assert "type_level/results/type_similarity_jaccard_overall.csv" in text
 
 
 def test_report_redraws_plotly_and_links_vispath_editor(tmp_path):
@@ -217,7 +217,7 @@ def test_report_redraws_plotly_and_links_vispath_editor(tmp_path):
     output = tmp_path / "profiling"
     viz = output / "type_level" / "visualization"
     viz.mkdir(parents=True)
-    (viz / "heatmap_type_combined_jaccard.html").write_text(
+    (viz / "heatmap_type_overall_jaccard.html").write_text(
         "<!doctype html><title>VisPath editor</title>", encoding="utf-8"
     )
     matrix = pd.DataFrame(
@@ -228,7 +228,7 @@ def test_report_redraws_plotly_and_links_vispath_editor(tmp_path):
 
     report = comparer._generate_single_dataset_report(
         output,
-        {"combined": {"jaccard": matrix}},
+        {"overall": {"jaccard": matrix}},
         {},
         {},
     )
@@ -236,11 +236,11 @@ def test_report_redraws_plotly_and_links_vispath_editor(tmp_path):
     assert "Plotly.newPlot" in text
     assert "<iframe" not in text
     assert "Open VisPath heatmap for editing" in text
-    assert "type_level/visualization/heatmap_type_combined_jaccard.html" in text
+    assert "type_level/visualization/heatmap_type_overall_jaccard.html" in text
     assert "data-tab-button" in text
     assert "Overall" in text
     assert "grid-template-columns: repeat(2, minmax(0, 1fr))" in text
-    assert "2 cards per row · 6 metrics" in text
+    assert "2 cards per row · 5 metrics" in text
     # The inline Plotly bundle contains its own example call; inspect the
     # actual generated chart invocation at the end of the report instead.
     plot_call = text.rsplit("Plotly.newPlot(", 1)[1].split(");", 1)[0]
@@ -312,17 +312,14 @@ def test_bodyid_matrices_populate_weighted_jaccard_symmetrically():
     }
 
     matrices = comparer._compute_bodyid_similarity_matrices(bodyid_profiles)
-    weighted = matrices["combined"]["weighted_jaccard"]
+    weighted = matrices["overall"]["weighted_jaccard"]
     scores = ProfileComparator.combined_score(profile_a, profile_b, direction="both")
     expected = scores["weighted_jaccard"]
 
     assert expected > 0.0
     assert weighted.loc["1_TypeA", "2_TypeB"] == pytest.approx(expected)
     assert weighted.loc["2_TypeB", "1_TypeA"] == pytest.approx(expected)
-    assert matrices["combined"]["combined"].loc["1_TypeA", "2_TypeB"] == pytest.approx(
-        scores["combined"]
-    )
-    assert matrices["combined"]["rank_corr_union"].loc["1_TypeA", "2_TypeB"] == pytest.approx(
+    assert matrices["overall"]["rank_corr_union"].loc["1_TypeA", "2_TypeB"] == pytest.approx(
         scores["rank_union"]
     )
 
@@ -342,12 +339,12 @@ def test_aggregate_inter_dataset_matrices_uses_neurons_by_dataset_pairs():
     second.iloc[1, 1] = np.nan
     second.iloc[2, 2] = np.nan
     inter = {
-        "aMe12": {"combined": {"jaccard": first}},
-        "aMe10": {"combined": {"jaccard": second}},
+        "aMe12": {"overall": {"jaccard": first}},
+        "aMe10": {"overall": {"jaccard": second}},
     }
 
     aggregate = comparer._aggregate_inter_dataset_matrices(inter)
-    result = aggregate["combined"]["jaccard"]
+    result = aggregate["overall"]["jaccard"]
     assert result.index.tolist() == ["aMe12", "aMe10"]
     assert result.columns.tolist() == [
         f"{DS_A} vs {DS_B}",
@@ -371,14 +368,14 @@ def test_heatmap_generation_handles_nonfinite_values_and_nested_output(tmp_path)
     viz_dir = tmp_path / "nested" / "visualization"
 
     comparer._generate_heatmaps_vispath(
-        {"combined": {"jaccard": matrix}},
+        {"overall": {"jaccard": matrix}},
         viz_dir,
         saved,
         prefix="inter",
     )
 
     assert saved["heatmaps_generated"]
-    assert (viz_dir / "heatmap_inter_combined_jaccard.html").exists()
+    assert (viz_dir / "heatmap_inter_overall_jaccard.html").exists()
 
 
 def test_mapped_query_uses_type_mapper():
@@ -466,7 +463,7 @@ def test_compute_inter_dataset_matrices_standardizes_partners():
     }
     anchors = comparer._build_anchor_profiles(profiles)
     matrices = comparer._compute_inter_dataset_matrices(anchors)
-    m = matrices["aMe12"]["combined"]["jaccard"]
+    m = matrices["aMe12"]["overall"]["jaccard"]
     assert m.shape == (2, 2)
     assert m.index.tolist() == [DS_A, DS_B]
     # off-diagonal: standardized types overlap fully -> jaccard 1.0
@@ -494,7 +491,6 @@ def test_homolog_and_profiling_metrics_identical_for_same_pair():
     tb = ProfileComparator._get_expanded_types_standardized(pb, "both", mapper)
     scores = ConnectivityProfileComparer._compute_similarity_from_types(None, ta, tb)
 
-    assert row["combined"] == pytest.approx(scores["combined"], abs=1e-12)
     assert row["jaccard"] == pytest.approx(scores["jaccard"], abs=1e-12)
     assert row["weighted_jaccard"] == pytest.approx(scores["weighted_jaccard"], abs=1e-12)
     assert row["cosine"] == pytest.approx(scores["cosine"], abs=1e-12)
@@ -523,32 +519,31 @@ def _mevplo2_mapper():
     })
 
 
-def test_intra_dataset_aMe12_vs_MeVPLo2_six_metrics():
+def test_intra_dataset_aMe12_vs_MeVPLo2_metrics():
     """Intra-dataset (within male-cns v1.0): the aMe12 × MeVPLo2 cell of the
-    type-level matrix carries the same six metrics as the homolog scorer for
+    type-level matrix carries the same metrics as the homolog scorer for
     the same two profiles."""
     comparer = _make_multi_comparer(datasets=[MC], query=["aMe12", "MeVPLo2"])
     pa = _profile("pa", MC, upstream={"X": 10.0, "Y": 5.0}, downstream={"Z": 3.0})
     pm = _profile("pm", MC, upstream={"X": 10.0, "W": 2.0}, downstream={"Z": 3.0})
     profiles = {"aMe12": pa, "MeVPLo2": pm}
     matrices = comparer._compute_similarity_matrices(profiles)
-    cell = matrices["combined"]["jaccard"].loc["aMe12", "MeVPLo2"]
+    cell = matrices["overall"]["jaccard"].loc["aMe12", "MeVPLo2"]
     # same pair through the homolog scorer (intra-dataset: no mapper)
     scores = ProfileComparator.combined_score(pa, pm, direction="both")
     assert cell == pytest.approx(scores["jaccard"], abs=1e-12)
-    assert matrices["combined"]["weighted_jaccard"].loc["aMe12", "MeVPLo2"] == \
+    assert matrices["overall"]["weighted_jaccard"].loc["aMe12", "MeVPLo2"] == \
         pytest.approx(scores["weighted_jaccard"], abs=1e-12)
-    assert matrices["combined"]["cosine"].loc["aMe12", "MeVPLo2"] == \
+    assert matrices["overall"]["cosine"].loc["aMe12", "MeVPLo2"] == \
         pytest.approx(scores["cosine"], abs=1e-12)
-    assert matrices["combined"]["combined"].loc["aMe12", "MeVPLo2"] == \
-        pytest.approx(scores["combined"], abs=1e-12)
     # rank_corr_union is the RAW union rank (sign meaningful, 0 = neutral)
-    assert matrices["combined"]["rank_corr_union"].loc["aMe12", "MeVPLo2"] == \
+    assert matrices["overall"]["rank_corr_union"].loc["aMe12", "MeVPLo2"] == \
         pytest.approx(scores["rank_union"], abs=1e-12)
-    # every metric matrix is exported
+    # every metric matrix is exported (no combined score)
     for m in ("jaccard", "weighted_jaccard", "cosine", "rank_corr",
-              "rank_corr_union", "combined"):
-        assert m in matrices["combined"]
+              "rank_corr_union"):
+        assert m in matrices["overall"]
+    assert "combined" not in matrices["overall"]
 
 
 def test_inter_dataset_mevplo2_anchor_matches_homolog_scorer():
@@ -575,11 +570,10 @@ def test_inter_dataset_mevplo2_anchor_matches_homolog_scorer():
     assert anchors["MeVPLo2"][FW][0] == "MTe07"
 
     matrices = comparer._compute_inter_dataset_matrices(anchors)
-    m = matrices["MeVPLo2"]["combined"]
+    m = matrices["MeVPLo2"]["overall"]
     cell_j = m["jaccard"].loc[MC, FW]
     cell_wj = m["weighted_jaccard"].loc[MC, FW]
     cell_cos = m["cosine"].loc[MC, FW]
-    cell_comb = m["combined"].loc[MC, FW]
     cell_ru = m["rank_corr_union"].loc[MC, FW]
 
     # the homolog scorer on the SAME profiles (flywire name standardized)
@@ -589,7 +583,6 @@ def test_inter_dataset_mevplo2_anchor_matches_homolog_scorer():
     assert cell_j == pytest.approx(row["jaccard"], abs=1e-12)
     assert cell_wj == pytest.approx(row["weighted_jaccard"], abs=1e-12)
     assert cell_cos == pytest.approx(row["cosine"], abs=1e-12)
-    assert cell_comb == pytest.approx(row["combined"], abs=1e-12)
     assert cell_ru == pytest.approx(row["rank_union"], abs=1e-12)
     assert m["rank_corr"].loc[MC, FW] == pytest.approx(row["rank"], abs=1e-12)
 
@@ -617,7 +610,7 @@ def test_run_multi_dataset_output_structure(tmp_path, monkeypatch):
 
     monkeypatch.setattr(comparer, "_extract_profiles_for_dataset", fake_extract)
     monkeypatch.setattr(comparer, "_compute_similarity_matrices",
-                        lambda profiles: {"combined": {"jaccard": pd.DataFrame(
+                        lambda profiles: {"overall": {"jaccard": pd.DataFrame(
                             [[1.0, 0.5], [0.5, 1.0]],
                             index=["aMe12", "x"], columns=["aMe12", "x"])}})
     # keep the real save path but stub heatmap generation (no vispath needed)
@@ -642,7 +635,7 @@ def test_run_multi_dataset_output_structure(tmp_path, monkeypatch):
     assert (out / "cross_dataset" / "mapping_summary.csv").exists()
     assert (out / "cross_dataset" / "all_types" / "results").exists()
     assert (out / "cross_dataset" / "all_types" / "results" /
-            "similarity_combined_jaccard.csv").exists()
+            "similarity_overall_jaccard.csv").exists()
     assert not (out / "cross_dataset" / "per_neuron").exists()
     assert (out / "profiles" / safe_b / "aggregated").exists()
 
@@ -657,10 +650,10 @@ def test_run_multi_dataset_output_structure(tmp_path, monkeypatch):
     assert "data-tab-button" in report
     assert "data-tab-group='report-sections'" in report
     assert "Overall" in report
-    assert "cross_dataset/all_types/results/similarity_combined_jaccard.csv" in report
+    assert "cross_dataset/all_types/results/similarity_overall_jaccard.csv" in report
     assert "Dataset pair" in report
     assert "<iframe" not in report
-    assert "similarity_combined_jaccard.csv" in report
+    assert "similarity_overall_jaccard.csv" in report
     assert "mapping_summary" not in report  # summary is a CSV, not embedded
     assert "Detailed per-neuron" not in report
     params = json.loads((out / "parameters.json").read_text(encoding="utf-8"))
@@ -694,7 +687,6 @@ def test_multi_dataset_saves_bodyid_and_type_average_intra_levels(tmp_path, monk
             "cosine",
             "rank_corr",
             "rank_corr_union",
-            "combined",
         )
     }
     pa = _profile("a", DS_A, upstream={"X": 4.0})
@@ -711,17 +703,17 @@ def test_multi_dataset_saves_bodyid_and_type_average_intra_levels(tmp_path, monk
     monkeypatch.setattr(
         comparer,
         "_compute_similarity_matrices",
-        lambda profiles: {"combined": metrics},
+        lambda profiles: {"overall": metrics},
     )
     monkeypatch.setattr(
         comparer,
         "_compute_bodyid_similarity_matrices",
-        lambda profiles: {"combined": metrics},
+        lambda profiles: {"overall": metrics},
     )
     monkeypatch.setattr(
         comparer,
         "_compute_type_avg_bodyid_matrices",
-        lambda profiles: {"combined": metrics},
+        lambda profiles: {"overall": metrics},
     )
 
     result = comparer.run()
@@ -732,14 +724,14 @@ def test_multi_dataset_saves_bodyid_and_type_average_intra_levels(tmp_path, monk
     assert result["bodyid_level_skipped"] is False
     assert result["n_bodyid_profiles"] == 4
     assert (
-        intra_results / "bodyid_similarity_weighted_jaccard_combined.csv"
+        intra_results / "bodyid_similarity_weighted_jaccard_overall.csv"
     ).exists()
     assert (
-        intra_results / "type_avg_bodyid_similarity_weighted_jaccard_combined.csv"
+        intra_results / "type_avg_bodyid_similarity_weighted_jaccard_overall.csv"
     ).exists()
 
     report = (out / "report.html").read_text(encoding="utf-8")
     assert "BodyId level" in report
     assert "Type average of bodyIds" in report
-    assert "bodyid_similarity_weighted_jaccard_combined.csv" in report
-    assert "type_avg_bodyid_similarity_weighted_jaccard_combined.csv" in report
+    assert "bodyid_similarity_weighted_jaccard_overall.csv" in report
+    assert "type_avg_bodyid_similarity_weighted_jaccard_overall.csv" in report

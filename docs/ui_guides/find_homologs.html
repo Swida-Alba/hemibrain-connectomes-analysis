@@ -45,6 +45,29 @@
     <tr><td>Sort By</td><td>cosine</td><td>Ordering metric for the candidate list (top-N cut) — jaccard, cosine, rank_corr, rank_union. Sorting only: ALL metrics are always computed (same backend as Connectivity Profiling).</td></tr>
   </table>
 
+  <h2>Similarity metric formulas</h2>
+  <p>Each pair is scored with the same metrics (all are always computed;
+    <b>Sort By</b> only picks the ranking cutoff). Let A and B be two
+    connectivity profiles (partner type → weight, top-K per direction) and ρ
+    the Spearman rank correlation of two weight vectors. Rank correlations are
+    raw (−1 to 1); there is no normalized 0–1 variant and no
+    <code>combined</code> score.</p>
+  <table>
+    <tr><th>Metric</th><th>Formula</th><th>Range</th></tr>
+    <tr><td><code>jaccard</code></td><td>|A ∩ B| / |A ∪ B| (partner-type sets)</td><td>0–1</td></tr>
+    <tr><td><code>weighted_jaccard</code></td><td>Σ min(w_a, w_b) / Σ max(w_a, w_b) over the union (Ruzicka)</td><td>0–1</td></tr>
+    <tr><td><code>cosine</code></td><td>(A·B) / (‖A‖·‖B‖) over the union (missing = 0)</td><td>0–1</td></tr>
+    <tr><td><code>rank_corr</code></td><td>ρ = Spearman on <b>shared</b> partners (NaN if &lt; 3 shared)</td><td>−1 to 1</td></tr>
+    <tr><td><code>rank_union</code></td><td>ρ over the <b>union</b> of both partner sets (missing = 0)</td><td>−1 to 1</td></tr>
+    <tr><td><code>shared_type_count</code></td><td>|A ∩ B|</td><td>integer</td></tr>
+    <tr><td><code>union_type_count</code></td><td>|A ∪ B|</td><td>integer</td></tr>
+    <tr><td><code>adjacency_score</code></td><td>shared-partner count used for adjacency expansion</td><td>integer</td></tr>
+  </table>
+  <p>When <b>Auto Type Mapping</b> is on, partner type names are standardized
+    to canonical (male-cns v1.0) names before scoring, so that equivalent
+    types resolve across datasets. Rank metrics return <code>NaN</code> for
+    pairs with fewer than 3 comparable partners.</p>
+
   <h2>Options</h2>
   <ul>
     <li><b>Fast Search</b>: adjacency-expansion discovery (recommended).</li>

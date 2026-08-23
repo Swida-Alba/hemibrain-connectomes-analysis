@@ -58,20 +58,18 @@ class VerificationResult:
         neuron_type: Type name being verified
         datasets: List of datasets compared
         pairwise_scores: List of ComparisonResult for each dataset pair
-        avg_combined_score: Average combined score across all pairs
-        min_score: Minimum combined score
-        max_score: Maximum combined score
-        confidence: Overall confidence level
+        avg_rank_corr: Average rank_corr across all pairs
+        min_score: Minimum rank_corr
+        max_score: Maximum rank_corr
         weak_connectivity_datasets: Datasets with weak connectivity profiles
         verification_status: 'verified', 'needs_review', 'questionable', 'failed'
     """
     neuron_type: str
     datasets: List[str]
     pairwise_scores: List[ComparisonResult]
-    avg_combined_score: float
+    avg_rank_corr: float
     min_score: float
     max_score: float
-    confidence: str
     weak_connectivity_datasets: List[str] = field(default_factory=list)
     verification_status: str = 'verified'
     
@@ -87,10 +85,9 @@ class VerificationResult:
             'neuron_type': self.neuron_type,
             'datasets': self.datasets,
             'num_pairs': len(self.pairwise_scores),
-            'avg_combined_score': safe_round(self.avg_combined_score),
+            'avg_rank_corr': safe_round(self.avg_rank_corr),
             'min_score': safe_round(self.min_score),
             'max_score': safe_round(self.max_score),
-            'confidence': self.confidence,
             'weak_connectivity_datasets': self.weak_connectivity_datasets,
             'verification_status': self.verification_status,
             'pairwise_details': [s.to_dict() for s in self.pairwise_scores]
@@ -102,14 +99,13 @@ class VerificationResult:
             f"Verification Result: {self.neuron_type}",
             f"  Datasets: {', '.join(self.datasets)}",
             f"  Status: {self.verification_status}",
-            f"  Confidence: {self.confidence}",
         ]
         
         # Handle NaN scores
-        if np.isnan(self.avg_combined_score):
-            lines.append(f"  Combined Score: N/A (type not found in enough datasets)")
+        if np.isnan(self.avg_rank_corr):
+            lines.append(f"  Avg rank_corr: N/A (type not found in enough datasets)")
         else:
-            lines.append(f"  Combined Score: {self.avg_combined_score:.3f} (range: {self.min_score:.3f}-{self.max_score:.3f})")
+            lines.append(f"  Avg rank_corr: {self.avg_rank_corr:.3f} (range: {self.min_score:.3f}-{self.max_score:.3f})")
         
         if self.weak_connectivity_datasets:
             lines.append(f"  ⚠️ Weak connectivity in: {', '.join(self.weak_connectivity_datasets)}")
@@ -256,7 +252,7 @@ class CrossDatasetVerifier:
                 notes += "; "
             notes += f"Insufficient common partners ({total_common} < {min_common})"
             
-            # Create new result with NaN rank and adjusted combined score
+            # Create new result with NaN rank correlation
             result = ComparisonResult(
                 profile_a_id=result.profile_a_id,
                 profile_b_id=result.profile_b_id,
@@ -268,10 +264,6 @@ class CrossDatasetVerifier:
                 rank_correlation=np.nan,
                 overlap_a_in_b=result.overlap_a_in_b,
                 overlap_b_in_a=result.overlap_b_in_a,
-                combined=weights.get('jaccard', 0.50) * result.jaccard + weights.get('rank', 0.50) * 0.5,
-                confidence=ComparisonResult.determine_confidence(
-                    weights.get('jaccard', 0.50) * result.jaccard + weights.get('rank', 0.50) * 0.5
-                ),
                 weak_connectivity_a=result.weak_connectivity_a,
                 weak_connectivity_b=result.weak_connectivity_b,
                 notes=notes
@@ -347,8 +339,8 @@ class CrossDatasetVerifier:
             >>> result = verifier.verify_type_assignment(
             ...     'aMe12', ['hemibrain:v1.2.1', 'male-cns:v0.9']
             ... )
-            >>> print(result.confidence)
-            'High'
+            >>> print(result.verification_status)
+            'verified'
         """
         # Use instance-level comparison_mode if not specified
         mode = comparison_mode or getattr(self, 'comparison_mode', 'loose')
@@ -384,10 +376,9 @@ class CrossDatasetVerifier:
                 neuron_type=neuron_type,
                 datasets=datasets,
                 pairwise_scores=[],
-                avg_combined_score=0.0,
+                avg_rank_corr=0.0,
                 min_score=0.0,
                 max_score=0.0,
-                confidence='Very Low',
                 weak_connectivity_datasets=weak_connectivity_datasets,
                 verification_status='failed'
             )
@@ -442,7 +433,7 @@ class CrossDatasetVerifier:
             b_has_data = bool(profile_b.upstream_partners or profile_b.downstream_partners)
             
             if a_has_data and b_has_data:
-                valid_scores.append(score.combined)
+                valid_scores.append(score.rank_correlation)
         
         # Calculate stats from valid scores only
         if valid_scores:
@@ -491,40 +482,27 @@ class CrossDatasetVerifier:
         else:
             avg_rank_corr = np.nan
         
-        # Determine overall confidence and status based on RANK CORRELATION
-        # Normalize rank_corr from [-1, 1] to [0, 1] for consistent thresholds
-        avg_rank_corr_norm = (avg_rank_corr + 1) / 2 if not np.isnan(avg_rank_corr) else np.nan
-        
-        if np.isnan(avg_rank_corr_norm):
-            confidence = 'N/A'
+        # Determine verification status from the raw (unnormalized) rank correlation.
+        # Confidence levels are no longer emitted; status is still derived from
+        # the sign/strength of the average rank correlation.
+        if np.isnan(avg_rank_corr):
             status = 'type_not_found'
+        elif avg_rank_corr >= 0.7:
+            status = 'verified'
+        elif avg_rank_corr >= 0.5:
+            status = 'needs_review'
+        elif avg_rank_corr >= 0.3:
+            status = 'questionable'
         else:
-            # Use normalized rank_corr [0, 1] for confidence determination
-            # Thresholds: Very High >= 0.85, High >= 0.7, Medium >= 0.5, Low >= 0.3, Very Low < 0.3
-            if avg_rank_corr_norm >= 0.85:
-                confidence = 'Very High'
-                status = 'verified'
-            elif avg_rank_corr_norm >= 0.7:
-                confidence = 'High'
-                status = 'verified'
-            elif avg_rank_corr_norm >= 0.5:
-                confidence = 'Medium'
-                status = 'needs_review'
-            elif avg_rank_corr_norm >= 0.3:
-                confidence = 'Low'
-                status = 'questionable'
-            else:
-                confidence = 'Very Low'
-                status = 'failed'
+            status = 'failed'
         
         return VerificationResult(
             neuron_type=neuron_type,
             datasets=list(profiles.keys()),
             pairwise_scores=pairwise_scores,
-            avg_combined_score=avg_score,
+            avg_rank_corr=avg_score,
             min_score=min_score,
             max_score=max_score,
-            confidence=confidence,
             weak_connectivity_datasets=weak_connectivity_datasets,
             verification_status=status
         )
@@ -552,9 +530,7 @@ class CrossDatasetVerifier:
         Returns:
             DataFrame with columns:
             - target_type: Matched type name
-            - combined_score: Combined similarity score
             - jaccard, cosine, rank_corr: Individual metrics
-            - confidence: Confidence level
         
         Example:
             >>> matches = verifier.find_similar_neurons(
@@ -603,13 +579,11 @@ class CrossDatasetVerifier:
                 
                 results.append({
                     'target_type': candidate,
-                    'combined_score': comparison.combined,
                     'jaccard': comparison.jaccard,
                     'cosine': comparison.cosine,
                     'rank_corr': comparison.rank_correlation,
                     'overlap_a_in_b': comparison.overlap_a_in_b,
                     'overlap_b_in_a': comparison.overlap_b_in_a,
-                    'confidence': comparison.confidence,
                     'weak_connectivity': comparison.weak_connectivity_b
                 })
                 
@@ -619,9 +593,9 @@ class CrossDatasetVerifier:
         if not results:
             return pd.DataFrame()
         
-        # Create DataFrame and sort by combined score
+        # Create DataFrame and sort by rank_corr
         df = pd.DataFrame(results)
-        df = df.sort_values('combined_score', ascending=False).head(top_k)
+        df = df.sort_values('rank_corr', ascending=False).head(top_k)
         df = df.reset_index(drop=True)
         
         return df
@@ -648,8 +622,7 @@ class CrossDatasetVerifier:
             DataFrame with columns:
             - query_bodyid: Query neuron bodyId
             - target_type: Suggested type assignment
-            - combined_score: Similarity score
-            - confidence: Confidence level
+            - rank_corr: Raw Spearman rank correlation
         
         Example:
             >>> homologs = verifier.find_homologs_for_untyped(
@@ -701,8 +674,7 @@ class CrossDatasetVerifier:
         combined = pd.concat(all_results, ignore_index=True)
         
         # Reorder columns
-        cols = ['query_bodyid', 'target_type', 'combined_score', 'confidence', 
-                'jaccard', 'cosine', 'rank_corr']
+        cols = ['query_bodyid', 'target_type', 'jaccard', 'cosine', 'rank_corr']
         cols = [c for c in cols if c in combined.columns]
         combined = combined[cols + [c for c in combined.columns if c not in cols]]
         
@@ -753,7 +725,7 @@ class CrossDatasetVerifier:
                 if valid_pairs:
                     avg_jaccard = np.nanmean([p.jaccard for p in valid_pairs])
                     avg_cosine = np.nanmean([p.cosine for p in valid_pairs])
-                    rank_values = [p.rank_correlation_norm for p in valid_pairs if not np.isnan(p.rank_correlation)]
+                    rank_values = [p.rank_correlation for p in valid_pairs if not np.isnan(p.rank_correlation)]
                     avg_rank = np.mean(rank_values) if rank_values else np.nan
                     rank_union_values = [p.rank_union for p in valid_pairs if not np.isnan(p.rank_union)]
                     avg_rank_union = np.mean(rank_union_values) if rank_union_values else np.nan
@@ -774,20 +746,6 @@ class CrossDatasetVerifier:
                 except Exception:
                     pass
             
-            # Determine confidence
-            if np.isnan(avg_rank):
-                confidence_level = 'Error'
-            elif avg_rank >= 0.85:
-                confidence_level = 'Very High'
-            elif avg_rank >= 0.70:
-                confidence_level = 'High'
-            elif avg_rank >= 0.50:
-                confidence_level = 'Medium'
-            elif avg_rank >= 0.30:
-                confidence_level = 'Low'
-            else:
-                confidence_level = 'Very Low'
-            
             result_row = {
                 'neuron_type': neuron_type,
                 'datasets_found': datasets_found,
@@ -796,7 +754,6 @@ class CrossDatasetVerifier:
                 'avg_rank_corr': avg_rank,
                 'avg_rank_union': avg_rank_union,
                 'avg_overlap': avg_overlap,
-                'confidence': confidence_level,
                 'datasets_compared': len(verification.datasets),
                 'total_unique_types': total_unique_types,
             }
@@ -833,7 +790,7 @@ class CrossDatasetVerifier:
                                 )
                                 
                                 if not np.isnan(scores['rank']):
-                                    dir_rank_values.append((scores['rank'] + 1) / 2)
+                                    dir_rank_values.append(scores['rank'])
                                 if not np.isnan(scores['jaccard']):
                                     dir_jaccard_values.append(scores['jaccard'])
                         
@@ -854,7 +811,6 @@ class CrossDatasetVerifier:
                 'avg_jaccard': np.nan,
                 'avg_rank_corr': np.nan,
                 'avg_overlap': np.nan,
-                'confidence': 'Error',
                 'datasets_compared': 0,
                 'total_unique_types': 0,
             }
@@ -968,7 +924,6 @@ class CrossDatasetVerifier:
                                 'avg_jaccard': np.nan,
                                 'avg_rank_corr': np.nan,
                                 'avg_overlap': np.nan,
-                                'confidence': 'Error',
                                 'datasets_compared': 0,
                                 'total_unique_types': 0,
                             }
@@ -1006,8 +961,9 @@ class CrossDatasetVerifier:
         if 'datasets_found' in df.columns:
             sort_cols.append('datasets_found')
             ascending_flags.append(False)  # More datasets found = better
-        sort_cols.append('avg_rank_corr' if 'avg_rank_corr' in df.columns else 'avg_combined_score')
-        ascending_flags.append(False)
+        if 'avg_rank_corr' in df.columns:
+            sort_cols.append('avg_rank_corr')
+            ascending_flags.append(False)
         
         df = df.sort_values(sort_cols, ascending=ascending_flags)
         df = df.reset_index(drop=True)
@@ -1118,8 +1074,9 @@ class CrossDatasetVerifier:
                 if 'datasets_found' in results['summary'].columns:
                     sort_cols.append('datasets_found')
                     ascending.append(False)
-                sort_cols.append('avg_rank_corr' if 'avg_rank_corr' in results['summary'].columns else 'avg_combined_score')
-                ascending.append(False)
+                if 'avg_rank_corr' in results['summary'].columns:
+                    sort_cols.append('avg_rank_corr')
+                    ascending.append(False)
                 results['summary'] = results['summary'].sort_values(
                     sort_cols, ascending=ascending
                 ).drop(columns=['_role_order'])
@@ -1133,7 +1090,7 @@ class CrossDatasetVerifier:
         self,
         neuron_types: List[str],
         datasets: List[str],
-        metric: str = 'combined',
+        metric: str = 'rank',
         direction: str = 'both',
         dataset_nicknames: Optional[Dict[str, str]] = None,
         parallel: bool = True,
@@ -1150,7 +1107,7 @@ class CrossDatasetVerifier:
         Args:
             neuron_types: Types to include in matrix
             datasets: Datasets to compare
-            metric: 'combined', 'jaccard', 'cosine', or 'rank'
+            metric: 'rank', 'jaccard', 'cosine'
             direction: 'upstream', 'downstream', or 'both'
             dataset_nicknames: Optional dict mapping dataset names to short nicknames
                               e.g., {'hemibrain:v1.2.1': 'HB', 'male-cns:v0.9': 'MCNS'}
@@ -1197,11 +1154,9 @@ class CrossDatasetVerifier:
                     elif metric == 'cosine':
                         score = ProfileComparator.weighted_cosine_similarity(profile_a, profile_b, direction)
                     elif metric == 'rank':
-                        raw_score = ProfileComparator.rank_correlation(profile_a, profile_b, direction)
-                        score = (raw_score + 1) / 2 if not np.isnan(raw_score) else np.nan
-                    else:  # combined
-                        scores = ProfileComparator.combined_score(profile_a, profile_b, direction=direction)
-                        score = scores['combined']
+                        score = ProfileComparator.rank_correlation(profile_a, profile_b, direction)
+                    else:
+                        score = ProfileComparator.rank_correlation(profile_a, profile_b, direction)
                     
                     row[pair_name] = score
                 except Exception:
@@ -1243,7 +1198,7 @@ class CrossDatasetVerifier:
         self,
         neuron_types: List[str],
         datasets: List[str],
-        metric: str = 'combined',
+        metric: str = 'rank',
         dataset_nicknames: Optional[Dict[str, str]] = None,
         parallel: bool = True,
         max_workers: Optional[int] = None
@@ -1256,7 +1211,7 @@ class CrossDatasetVerifier:
         Args:
             neuron_types: Types to include in matrix
             datasets: Datasets to compare
-            metric: 'combined', 'jaccard', 'cosine', or 'rank'
+            metric: 'rank', 'jaccard', 'cosine'
             dataset_nicknames: Optional dict mapping dataset names to short nicknames
             parallel: If True, use parallel threads (default: True)
             max_workers: Max parallel workers (default: min(32, cpu_count + 4))
@@ -1306,14 +1261,14 @@ class CrossDatasetVerifier:
             max_workers: Max parallel workers (default: min(32, cpu_count + 4))
         
         Returns:
-            Dict with keys 'combined', 'jaccard', 'cosine', 'rank' containing DataFrames.
+            Dict with keys 'rank', 'jaccard', 'cosine' containing DataFrames.
             Failed type lookups return NaN (not 0).
         """
         self._log(f"Building multi-metric matrices for {len(neuron_types)} types")
         
         result = {}
         
-        for metric in ['combined', 'jaccard', 'cosine', 'rank']:
+        for metric in ['rank', 'jaccard', 'cosine']:
             result[metric] = self.build_cross_dataset_similarity_matrix(
                 neuron_types=neuron_types,
                 datasets=datasets,
@@ -1404,7 +1359,7 @@ class CrossDatasetVerifier:
         
         # 3. Combined similarity matrix (main)
         similarity_matrix = self.build_cross_dataset_similarity_matrix(
-            neuron_types, datasets, metric='combined', direction=direction,
+            neuron_types, datasets, metric='rank', direction=direction,
             dataset_nicknames=dataset_nicknames,
             parallel=parallel, max_workers=max_workers
         )
@@ -1417,7 +1372,7 @@ class CrossDatasetVerifier:
             matrices_dir.mkdir(exist_ok=True)
             
             directional = self.build_directional_similarity_matrices(
-                neuron_types, datasets, metric='combined',
+                neuron_types, datasets, metric='rank',
                 dataset_nicknames=dataset_nicknames,
                 parallel=parallel, max_workers=max_workers
             )

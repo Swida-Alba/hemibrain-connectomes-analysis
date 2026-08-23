@@ -27,6 +27,8 @@ This document provides comprehensive explanations of all score and probability c
     - [Path Probability](#path-probability)
     - [Minimum Edge Weight](#minimum-edge-weight)
     - [Path Ranking](#path-ranking)
+  - [Connectivity-Profile Similarity Metrics](#connectivity-profile-similarity-metrics)
+  - [Morphological Similarity Metrics](#morphological-similarity-metrics)
   - [NeuronBridge Matching Scores](#neuronbridge-matching-scores)
     - [Match Score](#match-score)
     - [Coverage Ratio](#coverage-ratio)
@@ -418,6 +420,55 @@ elif 'path_probability' in df_paths.columns:
 ```
 
 The `show_top_n_paths` parameter limits output to the highest-probability paths.
+
+---
+
+## Connectivity-Profile Similarity Metrics
+
+These metrics score a pair of connectivity profiles (a dict of
+partner-type → weight, restricted to the top-K partners per direction). They
+are the same six metrics used by **Homolog Finding**, **Similar
+Neurons → Connectivity similarity**, and **Connectivity Profiling** tabs,
+and are computed for every pair regardless of the chosen sort metric.
+In the tables below `A` and `B` are the two profiles' partner-type sets, `w_a`/`w_b`
+are the partner weights, and `ρ` is the Spearman rank correlation of two
+weight vectors.
+
+| Metric                | Formula | Range |
+| --------------------- | ------- | ----- |
+| `jaccard`             | \|A ∩ B\| / \|A ∪ B\| (partner-type sets) | 0–1 |
+| `weighted_jaccard`    | Σ min(w_a, w_b) / Σ max(w_a, w_b) over the union (Ruzicka) | 0–1 |
+| `cosine`              | (A·B) / (‖A‖·‖B‖) over the union (missing partners = 0) | 0–1 |
+| `rank_corr`           | ρ = Spearman on **shared** partners (raw, sign retained) | −1 to 1 |
+| `rank_union`          | ρ over the **union** of both partner sets (missing = 0) | −1 to 1 |
+
+**Notes**
+
+- `rank_corr` and `rank_union` return `NaN` when fewer than 3 comparable
+  partners exist (Spearman is undefined), and when a weight vector is
+  constant. Both are reported raw (−1 to 1) so the sign retains meaning.
+- The `combined` score and all `(ρ + 1) / 2` normalized rank variants
+  (`rank_norm`, `rank_union_norm`, `rank_corr_norm`) and the derived
+  `confidence` labels are no longer produced.
+- For a direction-aware comparison (`upstream`/`downstream`), the metric is
+  computed per direction and averaged for `both`.
+- The morphology enrichment columns are `morph_cosine = (A·B)/(‖A‖·‖B‖)`
+  and `morph_pearson`, the cosine of the mean-centered morphology vectors,
+  both computed on z-scored vectors.
+
+## Morphological Similarity Metrics
+
+| Metric                | Formula | Range |
+| --------------------- | ------- | ----- |
+| `similarity`          | vector method: cosine or Pearson of z-scored vectors; NBLAST: normalized pair score | 0–1 |
+| `roi_similarity`      | cosine of input/output synapse-distribution vectors over the primary ROIs, mirrored across the midline | 0–1 |
+| `profile_similarity`  | shared-count / max-shared-count (normalized shared-partner count) | 0–1 |
+| `intra_type_similarity` | mean pairwise similarity of the type's members (the intra-type reference) | 0–1 |
+
+For the vector method each neuron is reduced to ~24 morphometrics plus a
+100-dim persistence block; the candidate pool is z-scored with pool-computed
+statistics so cosine scores stay scale-fair regardless of the local
+population.
 
 ---
 
