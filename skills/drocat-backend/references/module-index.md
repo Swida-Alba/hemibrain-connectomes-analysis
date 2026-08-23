@@ -1,0 +1,71 @@
+# Backend module index
+
+Consolidated index of the backend classes/functions and their key methods. For
+full parameter lists, open the matching module guide in [`../modules/`](../modules/).
+All paths are relative to the repo root unless noted.
+
+## coana (`src/coana.py`)
+
+- `FindNeuronConnection(dataset, sourceNeurons, targetNeurons, output_dir, min_synapse_num, min_ratio, min_traversal_probability, max_interlayer, filter_by, pathfinding, graph_edge_limit_bodyid, visualize_before_reconstruct, search_columns, network_layout, use_cache, edgeN_limit, output_format, skip_bodyId, showfig, custom_source_name, custom_target_name, keyword_in_path_to_remove, cache_only, saveas, separate_hemispheres, hemisphere_filter, keep_only_hemisphere_conserved_connections, symmetry_analysis, find_reciprocal, custom_mapping_file)`
+  - `InitializeNeuronInfo()`
+  - `FindDirectConnections()`
+  - `FindPath(find_bodyId_path=None)`
+  - `FindAllPath(find_bodyId_path=True, forward_only=True, exclude_searched_neurons=None, use_graph_cache=True, find_reciprocal=False)`
+  - `FindShortestPath(find_bodyId_path=True, forward_only=True, exclude_searched_neurons=None, use_graph_cache=True, find_reciprocal=False)`
+  - `FindNetwork()`
+  - `build_connection_cache(neuron_types=None, neuron_bodyIds=None, batch_size=100, force_rebuild=False, quiet=False, progress_callback=None, cancel_event=None, max_workers=None, status_callback=None)`
+  - `build_connectivity_profile_cache(neuron_types=None, top_k=10, top_m=5, expand_2hop=True, max_neurons=None, force_refresh=False, progress_callback=None)`
+
+## morphology (`src/morphology.py`)
+
+- `MorphologyComparer(query, dataset, level, method, metric, candidate_cap, candidate_source, visualize_top_n, visualize_by, min_weight, min_shared_partners, roi_filter, ...)` → `find_similar()`
+- `SkeletonVectorCache(dataset, project_root=None, ...)` → `build(fetch_missing=0)`, `ensure(fetch_missing=0)`, `coverage()`, `vectors_for(body_ids, compute_missing=True)`
+- `find_similar_raw_cache(dataset, ...)`, `find_similar_dataset_cache(dataset, ...)`, `find_similar_flywire_mesh_cache(...)`
+
+## comparison (`src/comparison/__init__.py`)
+
+- `ComparisonParameters(datasets, source_neurons, target_neurons, output_folder, comparison_mode, path_mode, max_interlayer, thresholds, top_edges, graph_edge_limit_bodyid, edgeN_limit, pathfinding, search_columns, skip_bodyId, cache_only, auto_type_mapping, _min_ratio, _min_prob, _output_format, parallel, max_workers, separate_hemispheres, keep_only_hemisphere_conserved_connections, symmetry_analysis, find_reciprocal, overall_mapping_json)`
+- `ComparisonAnalyzer(params, verbose=True)` → `run_comparison()`, `run_all_analyses()`, `run_path_analysis()`, `run_edge_analysis()`, `export_results()`, `generate_report()`, `generate_html_report()`
+- `quick_compare(datasets, source_neurons, target_neurons, ...)`
+- `CrossDatasetTypeMapper`, `LabelMapper`, `DatasetConfig`, `DataLoader`, `ComparisonVisualizer`
+
+## comparison.profile_comparator (`src/comparison/profile_comparator.py`)
+
+- `ConnectivityProfileComparer(query, dataset, top_k, top_m, min_synapse_threshold, direction, output_dir, generate_heatmaps, show_figures, skip_bodyId_level, verbose, use_cache, aggregation_level, ensure_cache_complete, custom_mapping_file)` → `run()`
+- `HomologFinder(source, source_dataset, target_dataset, output_dir, top_n, top_k, top_m, min_shared_partners, vector_prune_fraction, similarity_metric, vector_prefiltering, include_untyped_partners, min_synapse_threshold, use_cache, saveas, ensure_cache_complete, morphological_enrichment, output_folder_prefix, visualize_skeleton, visualize_top_n, visualization_settings, use_auto_type_mapping, verbose)`
+  - `find_homologs_fast()`, `find_homologs()`, `find_novel_homologs()`, `find_homologs_intra_dataset(...)`, `run_random_control_test(...)`
+- `ProfileComparator` (static helpers, no constructor args) → `compare_profiles(...)`, `compare_profiles_simple(...)`, `find_similar_types_across_datasets(...)`
+- `ComparisonResult`, `DEFAULT_SCORE_WEIGHTS`
+
+## neuronbridge_finder (`src/neuronbridge_finder.py`)
+
+- `NeuronBridgeFinder(verbose=True, separate_splitgal4=False, region=None, max_workers=4)`
+  - `find_lines_batch(queries, dataset, output_dir, match_type, ...)`
+  - `find_neurons_batch(line_names, output_dir, match_type, ...)`
+  - `analyze_colabeling(lines, output_dir, similarity_methods, ...)`
+  - `visualize_colabeling_matrix(...)`, `visualize_expression_matrix(...)`, `visualize_expression_matrix_merged(...)`, `visualize_labeling_distribution(...)`, `visualize_colabeling_distribution(...)`
+
+## flylight_downloader (`src/flylight_downloader.py`)
+
+- `FlyLightDownloader(output_dir, formats, image_types, region, collection_category, max_workers, simple_mode, use_boto3, include_vt_lines, verbose)`
+  - `download(line_name, output_dir, max_files, flat_structure, add_timestamp, generate_summary, summary_images_per_page, ...)`
+  - `list_vt_files(...)`, `list_categories()`
+
+## visualize_skeleton (`src/visualize_skeleton.py`)
+
+- `VisualizeSkeleton(dataset, neuron_layers, search_columns, hemisphere, custom_layer_names, output_dir, output_format, skeleton_mode, brain_mesh, vnc_mesh, legend_mode, neuron_alpha, neuron_colors, synapse_colors, background_color, skip_synapse, min_synapse_num, synapse_size, uniform_synapse_size, synapse_alpha, synapse_mode, mesh_roi, mesh_color, mesh_alpha, cache_neurons, cache_synapses, smooth_skeleton, show_soma, show_connectors, export_method, export_scale, export_views, show_fig, brain_mesh_color, neuprint_skeleton_pipeline, skeleton_mesh_simplification, ...)`
+  - `plot_neurons()`, `plot_individuals(pdf_images_per_page, views, summary_format)`, `export_video(fps, degree_per_frame, rotate, export_gif, gif_scale, ...)`, `list_available_rois(refresh=False, fetch_online=True)`
+- `WebDriverExportSession(width, height, scale, timeout, render_wait)` (Chrome driven)
+
+## vispath (`vispath-subproject/src/vispath_pkg/vispath.py`)
+
+- `VisualizePath(path_file, output_folder, network_layout, source_color, intermediate_color, target_color, link_color, showfig, output_format, generate_empty_network)`
+  - `visualize(plot_heatmap=True, plot_Sankey=True, plot_network=True)`
+  - `visualize_heatmap(...)`, `visualize_sankey()`, `visualize_network()`, `visualized_paths_for_export()`
+
+## Supporting scripts (`src/` scripts)
+
+- `python src/build_connection_cache.py <dataset>`
+- `python src/build_connectivity_profile_cache.py <dataset>`
+- `python src/build_seed_indexes.py`
+- `src/FAFB_file_converter.py`, `src/BANC_file_converter.py` — FlyWire/FAFB convert.

@@ -9,9 +9,12 @@ DROCAT is a Python toolkit for analyzing and visualizing connectome data from **
 > 🤖 **Agent-assisted:** ask your AI agent to run the bundled
 > [`drocat-install`](skills/drocat-install/SKILL.md) skill — it installs all
 > dependencies, configures tokens, verifies the installation, and launches
-> the web UI for you. For script analysis without the UI, use the
-> [`drocat-usage`](skills/drocat-usage/SKILL.md) skill. New to agents? Start
-> with the [agent setup section](docs/INSTALLATION.md#5-agent-assisted-install--agent-setup).
+> the web UI for you. Installing the project also installs the analysis skills,
+> so the agent already has them afterward (no fetch is needed):
+> [`drocat-usage`](skills/drocat-usage/SKILL.md) for tab-matched script analyses
+> (one recipe per UI tab), and [`drocat-backend`](skills/drocat-backend/SKILL.md)
+> for flexible composition of backend modules. New to agents? Start with the
+> [agent setup section](docs/INSTALLATION.md#5-agent-assisted-install--agent-setup).
 
 ---
 
@@ -52,13 +55,15 @@ DROCAT is a Python toolkit for analyzing and visualizing connectome data from **
 
 On first run it creates the versioned `drocat-4.5.0` Python 3.11 environment (via the bundled installer in `archive/install/`), installs the pinned dependencies, runs `pip check`, verifies the installation, and opens the web UI at **http://127.0.0.1:8080**. Later runs are self-healing: a missing or inconsistent environment is repaired automatically before starting. If the port is busy, the launcher offers a new one interactively.
 
-**Option 2 — Agent-assisted install.** Ask your AI agent to fetch and follow the install skill:
+**Option 2 — Agent-assisted install.** Ask your AI agent to use the bundled install skill:
 
-> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-install/SKILL.md and follow it to finish installing, verifying, and launching DROCAT on this machine.
+> Use the bundled [`drocat-install`](skills/drocat-install/SKILL.md) skill to finish installing, verifying, and launching DROCAT on this machine.
 
-For script analysis without the UI, the agent should instead fetch the direct-analysis skill:
-
-> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then finish the requested analysis end-to-end without opening the UI.
+For script analysis without the UI, the agent uses the checked-in analysis skills
+(with the UI closed): [`drocat-usage`](skills/drocat-usage/SKILL.md) for
+one-tab analyses and [`drocat-backend`](skills/drocat-backend/SKILL.md) for
+flexible backend composition. They are part of the repository, so an installed
+agent has them — no fetch is required.
 
 **Manual launch** (after installation) — double-click `run_DROCAT.command` (macOS / Linux) or `run_DROCAT.bat` (Windows), or from a terminal:
 

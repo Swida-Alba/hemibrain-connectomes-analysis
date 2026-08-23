@@ -1,13 +1,19 @@
 ---
 name: drocat-usage
-description: Directly run, explain, debug, and safely modify DROCAT v4.5.0 connectome-analysis scripts without the NiceGUI UI. Use when an agent needs to perform pathfinding, direct-connection analysis, cross-dataset comparison, homolog or connectivity-profile analysis, NeuronBridge/FlyLight searches, PlotPath or 3D skeleton visualization, empty-network generation, output inspection, or targeted backend fixes in this repository.
+description: Layer-1 tab-matched direct analyses for DROCAT v4.5.0. Run, explain, debug, and safely execute the exact backend tools each UI tab drives, without reopening the NiceGUI UI. Use when an agent needs to reproduce a specific UI tab's scientific analysis end-to-end — pathfinding (complete/shortest/network), connectivity profiling, homolog finding, similar-neuron search, cross-dataset comparison, NeuronBridge (lines/neurons/co-labeling), FlyLight download, 3D skeleton / path visualization, or dataset & cache management — from a direct Python call using the tab's own parameters.
 ---
 
-# DROCAT Direct Analysis
+# DROCAT Direct Analysis — Layer 1 (Tab-Matched)
 
-Use this skill to operate the v4.5.0 backend as a script-driven research
-tool. Keep the UI out of the execution path: edit a focused script or create a
-small run script, execute it in the versioned environment, inspect the generated
+This is the **tab-matched** layer: for each UI tab it reproduces the exact backend
+tool that tab invokes, using the same parameters the UI builds. Use it when a
+request maps to one of the UI tabs and you want the UI-plugin-equivalent analysis
+run as a direct script. For free-form composition of backend functions across
+modules, use the [Layer-2 backend skill](../drocat-backend/SKILL.md). For
+installation/environment repair, use the [install skill](../drocat-install/SKILL.md).
+
+Keep the UI out of the execution path: build a focused script or run the tool
+directly, execute it in the versioned environment, inspect the generated
 artifacts, and report the exact parameters and output paths.
 
 ## Completion contract
@@ -15,29 +21,30 @@ artifacts, and report the exact parameters and output paths.
 Unless the user explicitly asks for a plan or diagnosis only, finish the
 requested operation end-to-end in the current agent session:
 
-1. prepare the smallest safe run;
-2. execute it with the requested parameters;
-3. validate exit status and generated artifacts; and
-4. report the command, output paths, counts, warnings, and any scientific
+1. select the matching tab recipe (or chain two recipes);
+2. prepare the smallest safe run with the tab's parameters;
+3. execute it with the requested parameters;
+4. validate exit status and generated artifacts; and
+5. report the command, output paths, counts, warnings, and any scientific
    limitation.
 
-Do not stop after fetching this skill, reading source files, creating a run
-script, or printing a command. Ask the user only for a required credential,
-scientific choice, or approval; otherwise continue until the task is complete.
-If a real blocker remains, state the exact blocker and the last completed step.
+Do not stop after reading source files, creating a run script, or printing a
+command. Ask the user only for a required credential, scientific choice, or
+approval; otherwise continue until the task is complete. If a real blocker
+remains, state the exact blocker and the last completed step.
 
-## Operating contract
+## Shared runtime
 
 1. Confirm the repository root and branch before running anything:
 
    ```bash
-   cd /path/to/Drosophila-cross-dataset-connectome-analysis
+   cd /path/to/repo
    git branch --show-current
    git status --short
    ```
 
-   Use branch `v4.5.0`. If the checkout is elsewhere, resolve that path first;
-   do not clone a second copy over an existing project.
+   Use branch `v4.5.0`. If the checkout is elsewhere, resolve that path first; do
+   not clone a second copy over an existing project.
 
 2. Use Python 3.11 in the `drocat-4.5.0` environment. Prefer
    `conda run -n drocat-4.5.0 ...` for a reproducible non-interactive command;
@@ -45,9 +52,9 @@ If a real blocker remains, state the exact blocker and the last completed step.
    `PYTHONNOUSERSITE=1` so user-site packages cannot shadow the pinned
    environment.
 
-3. Run the example scripts with their own directory as the working directory.
-   Many templates use paths such as `../local_data`; running from the repository
-   root changes where those paths resolve. Use the bundled launcher for this:
+3. Run a script through the shared launcher so template relative paths resolve
+   from the script's own directory and `PYTHONPATH` is set for `src/`, the repo
+   root, and `vispath-subproject/src`:
 
    ```bash
    python skills/drocat-usage/scripts/run_direct.py \
@@ -55,196 +62,96 @@ If a real blocker remains, state the exact blocker and the last completed step.
      --script scripts/FindPath.py
    ```
 
-   The launcher sets `PYTHONPATH` for `src/`, the repository root, and
-   `vispath-subproject/src/`, streams output, and never invokes a shell. Use
-   `--dry-run` to inspect the resolved command and working directory.
+   Use `--dry-run` to inspect the resolved command and working directory. The
+   files under `scripts/` are configuration templates, not a stable CLI — copy a
+   template into `archive/scripts_local/` (or patch an explicitly requested
+   source file) before a real scientific run.
 
-   The files under `scripts/` are configuration templates, not a stable CLI;
-   never assume their sample dataset, neurons, or output folder match the
-   user's request. Copy a template into `archive/scripts_local/` (or patch an
-   explicitly requested source file) before a real scientific run.
+4. Never print, commit, or paste `config.json`, API keys, cookies, or full
+   authentication environment variables. Read credentials through the repository
+   token manager or the environment. Ask before changing tokens, downloading
+   large datasets, or deleting/replacing result folders.
 
-4. Never print, commit, or paste `config.json`, API keys, cookies, or
-   full authentication environment variables. Read credentials through the
-   repository token manager or the environment. Ask before changing tokens,
-   downloading large datasets, or deleting/replacing result folders.
-
-5. Preserve the example templates. Before a substantial edit, copy the script
-   to a run-specific file (for example,
-   `archive/scripts_local/agent_FindPath_2026-08-04.py`) or create a new script in an
-   explicitly named output directory. Use `apply_patch` for code changes, then
-   compile the changed file and run the smallest relevant test.
+5. Preserve the example templates. Before a substantial edit, copy the script to a
+   run-specific file or create a new script in an explicitly named output
+   directory. Use `apply_patch`/`SearchReplace` for code changes, then compile the
+   changed file and run the smallest relevant test.
 
 6. Use absolute output paths when possible. Keep each run isolated, record the
-   dataset, source/target queries, filters, cache mode, and output directory,
-   and inspect the generated CSV/HTML/JSON before claiming success.
+   dataset, source/target queries, filters, cache mode, and output directory, and
+   inspect the generated CSV/HTML/JSON before claiming success.
 
-## Choose the backend operation
+## Choose the tab recipe
 
-Load [references/tool-catalog.md](references/tool-catalog.md) when selecting a
-tool or checking its constructor and method names.
+Each tab recipe in [`tabs/`](tabs/) follows the same shape: the `tool_key`, the
+backend import/class/method, the exact parameters the UI builds, the method call,
+expected outputs, and a runnable launcher command.
 
-| User goal | Direct entry point | Primary result |
+| UI Tab | Tab recipe | Backend tool_key → class.method |
 | --- | --- | --- |
-| Direct one-hop edges | `scripts/FindDirect.py` → `FindDirectConnections()` | edge tables and optional HTML/heatmap |
-| Multi-hop pathways | `scripts/FindPath.py` → `FindAllPath()` | type/bodyId path tables and summaries |
-| Render path results | `scripts/PlotPath.py` → `VisualizePath.visualize()` | network, Sankey, heatmap HTML |
-| Create a blank editable graph | `VisualizePath(..., generate_empty_network=True)` | Cytoscape HTML canvas |
-| Render neuron morphology | `scripts/plot3dSkeleton.py` → `VisualizeSkeleton.plot_neurons()` | interactive 3D HTML and optional exports |
-| Compare datasets | `scripts/InterDatasetComparator.py` | comparison tables, report, conserved-path views |
-| Find homologs | `scripts/FindHomologs.py` → `HomologFinder.find_homologs_fast()` | bodyId/type homolog tables |
-| Compare connectivity profiles | `scripts/ConnectivityProfiling.py` | similarity matrices and heatmaps |
-| Find EM→LM driver lines | `scripts/NeuronBridge_FindLines.py` | ranked line summaries and images |
-| Find LM→EM neurons | `scripts/NeuronBridge_FindNeuron.py` | ranked neuron matches and optional 3D views |
-| Analyze line co-labeling | `scripts/NeuronBridge_Colabel.py` | expression, similarity, specificity, report |
-| Download FlyLight files | `scripts/FlyLight_fetcher.py` | images/metadata under the selected output folder |
+| Complete Paths | [find-path.md](tabs/find-path.md) | `find_path` → `FindNeuronConnection.FindAllPath` |
+| Shortest Paths | [find-shortest.md](tabs/find-shortest.md) | `find_shortest` → `FindNeuronConnection.FindShortestPath` |
+| Find Network | [network.md](tabs/network.md) | `find_network` → `FindNeuronConnection.FindNetwork` |
+| Connectivity Profiling | [connectivity-profiling.md](tabs/connectivity-profiling.md) | `connectivity_profiling` → `ConnectivityProfileComparer.run` |
+| Homolog Finding | [find-homologs.md](tabs/find-homologs.md) | `find_homologs` → `HomologFinder.find_homologs_fast` / `find_homologs` |
+| Similar Neurons | [find-similar.md](tabs/find-similar.md) | `find_similar_morphology` → `MorphologyComparer.find_similar`; `find_similar_profile` → `HomologFinder.find_homologs_fast` / `find_novel_homologs` |
+| Cross-Dataset Comparison | [inter-dataset.md](tabs/inter-dataset.md) | `inter_dataset` → `ComparisonParameters` + `ComparisonAnalyzer.run_comparison` |
+| Find Driver Lines | [nb-find-lines.md](tabs/nb-find-lines.md) | `nb_find_lines` → `NeuronBridgeFinder.find_lines_batch` |
+| Find EM Neurons | [nb-find-neuron.md](tabs/nb-find-neuron.md) | `nb_find_neuron` → `NeuronBridgeFinder.find_neurons_batch` |
+| Co-Labeling Analysis | [nb-colabel.md](tabs/nb-colabel.md) | `nb_colabel` → `NeuronBridgeFinder.analyze_colabeling` |
+| FlyLight Image Download | [flylight.md](tabs/flylight.md) | `flylight_download` → `FlyLightDownloader.download` |
+| 3D Skeleton + Path Network | [visualization.md](tabs/visualization.md) | `plot3d_skeleton` → `VisualizeSkeleton.plot_neurons`; `plot_path` → `VisualizePath.visualize` |
+| Settings / Datasets & Cache | [settings.md](tabs/settings.md) | dataset_service, `SkeletonPuller`, cache builders |
 
 ## Standard agent workflow
 
-### 1. Clarify the analysis
-
-Before execution, identify:
-
-- dataset name and whether it is NeuPrint or local FlyWire/BANC data;
-- source and target neuron types, instances, bodyIds, or regex patterns;
-- direct versus multi-hop analysis and maximum intermediate layers;
-- minimum synapse/ratio/probability thresholds and bodyId/type filtering;
-- whether the user wants CSV, Excel, HTML, images, PDF/PPTX, or only tables;
-- output directory and whether cached/offline data may be used.
-
-If a request is underspecified, make the smallest safe assumption and state it
-before executing a remote query.
-
-### 2. Inspect only the focused contract
-
-Do not read the whole repository. Start with the selected example and the
-target class/method definitions:
-
-```bash
-rg -n "class |def |if __name__|output_dir|dataset|sourceNeurons|targetNeurons" \
-  scripts/FindPath.py src/coana.py
-```
-
-For a signature check, use a short import-time probe instead of loading large
-files into context:
-
-```bash
-PYTHONNOUSERSITE=1 conda run -n drocat-4.5.0 python - <<'PY'
-import inspect
-from coana import FindNeuronConnection
-print(inspect.signature(FindNeuronConnection))
-print(inspect.signature(FindNeuronConnection.FindAllPath))
-PY
-```
-
-Read the relevant reference file only when the selected operation needs it.
-
-### 3. Prepare a run
-
-For a template edit, change only the configuration block above the execution
-guard. Prefer explicit values:
-
-```python
-from pathlib import Path
-
-OUTPUT = Path("/absolute/path/to/local_data/agent_runs/aMe12_to_PPL101")
-OUTPUT.mkdir(parents=True, exist_ok=True)
-
-fc = FindNeuronConnection(
-    dataset="male-cns:v0.9",
-    sourceNeurons=["aMe12"],
-    targetNeurons=["PPL101"],
-    output_dir=str(OUTPUT),
-    min_synapse_num=3,
-    max_interlayer=2,
-    filter_by="bodyId",
-    use_cache=True,
-    output_format="csv",
-    showfig=False,
-)
-fc.InitializeNeuronInfo()
-fc.FindAllPath(forward_only=True)
-```
-
-Use `showfig=False` for unattended analysis. Generate HTML separately with
-PlotPath when the data is ready. Set `cache_only=True` only when the required
-local cache has already been verified.
-
-### 4. Execute and monitor
-
-Run the script through `run_direct.py` or from its directory:
-
-```bash
-python skills/drocat-usage/scripts/run_direct.py \
-  --conda-env drocat-4.5.0 \
-  --script archive/scripts_local/agent_FindPath_2026-08-04.py
-```
-
-Capture the exit code and last meaningful log lines. A zero exit code is not
-enough: confirm that expected files exist and contain rows/HTML content.
-
-### 5. Inspect and report
-
-Use targeted, read-only checks:
-
-```bash
-find /absolute/path/to/output -maxdepth 2 -type f -print | sort
-python - <<'PY'
-from pathlib import Path
-import pandas as pd
-
-root = Path("/absolute/path/to/output")
-for path in sorted(root.rglob("*.csv"))[:5]:
-    frame = pd.read_csv(path)
-    print(path, frame.shape, list(frame.columns)[:8])
-PY
-```
-
-Report the exact run command, parameters that matter, output folder, row/file
-counts, warnings, and any follow-up visualization or validation performed.
+1. **Clarify the analysis**: dataset (NeuPrint vs FlyWire local), source/target
+   queries, direct vs multi-hop and max layers, thresholds and filters, desired
+   output format (CSV/XLSX/HTML/images/PDF/PPTX), output folder, and whether cache
+   may be used. If underspecified, make the smallest safe assumption and state it
+   before any remote query.
+2. **Open the matching tab recipe** in [`tabs/`](tabs/), not the whole repo.
+3. **Prepare** the focused run script from the recipe's parameters (explicit
+   values, absolute output path, `showfig=False` for unattended runs).
+4. **Execute** via the launcher and capture the exit code and last log lines.
+5. **Inspect** the generated files (rows/HTML content) — a zero exit code alone is
+   not enough.
+6. **Report** the exact run command, parameters that matter, output folder,
+   row/file counts, warnings, and any follow-up visualization.
 
 ## Direct-script safety and repair
 
 - Validate dataset spelling against the configured dataset list before an API
-  call. NeuPrint names include versions, for example `hemibrain:v1.2.1` and
-  `male-cns:v0.9`; FlyWire names include `flywire_FAFB_v783` and
-  `flywire_BANC_v888`.
-- Keep `use_cache=True` for repeat work. For deprecated or offline datasets,
-  use `cache_only=True` only after checking cache coverage.
-- Prefer CSV for large intermediate tables and Excel only when the user needs
+  call. NeuPrint names include versions (`hemibrain:v1.2.1`, `male-cns:v0.9`);
+  FlyWire names include `flywire_FAFB_v783` and `flywire_BANC_v888`.
+- Keep `use_cache=True` for repeat work. Use `cache_only=True` only after checking
+  cache coverage.
+- Prefer CSV for large intermediate tables; use Excel only when the user needs
   workbook sheets.
-- Limit graph size with `edgeN_limit` before generating an interactive HTML.
-- For 3D renders, use `skeleton_mode="line"` and disable exports during a first
-  smoke test; use tube/WebDriver/PDF/video only after the HTML is valid.
-- For PlotPath, pass `path_file` from a completed FindPath result. Use
+- Limit graph size with `edgeN_limit`/`graph_edge_limit_bodyid` before generating
+  an interactive HTML.
+- For 3D renders start with `skeleton_mode="line"` and disable exports during a
+  first smoke test; use tube/WebDriver/PDF/video only after the HTML is valid.
+- For PlotPath pass `path_file` from a completed FindPath result; use
   `generate_empty_network=True` and `path_file=None` only for an empty editable
   Cytoscape canvas.
 - When modifying a backend, reproduce the bug with the smallest local fixture,
-  patch the narrowest function, run `python -m py_compile` and the relevant
-  tests, then rerun the original command.
-- Do not “fix” a failing run by silently lowering thresholds, switching datasets,
-  or disabling validation. Explain the trade-off and ask if a change affects the
+  patch the narrowest function, run `python -m py_compile` and the relevant tests,
+  then rerun the original command.
+- Do not "fix" a failing run by silently lowering thresholds, switching datasets,
+  or disabling validation. Explain the trade-off and ask if it affects the
   scientific interpretation.
+
+## Chaining tabs
+
+For workflows that need more than one function (e.g. FindPath → PlotPath, or
+similar-neuron → 3D skeleton), see [references/combinations.md](references/combinations.md).
 
 ## References
 
-- [Tool catalog and contracts](references/tool-catalog.md)
+- [Tab recipes](tabs/) — one per UI tab
+- [Tool catalog and backend contracts](references/tool-catalog.md)
 - [Workflow recipes](references/workflow-recipes.md)
+- [Cross-tab combinations](references/combinations.md)
 - [Datasets, authentication, and output files](references/datasets-and-auth.md)
 - [Beginner agent setup with DeepSeek and Codex](references/deepseek-codex.md)
-
-Use [the install skill](../drocat-install/SKILL.md) only for installation,
-environment repair, token bootstrap, or UI launch. This skill assumes the
-environment is already installed and focuses on direct analysis.
-
-## Install/use the skill through an agent
-
-Use the agent command below instead of manually copying files into a skill
-directory. It fetches the branch-pinned skill instructions and tells the agent
-to finish the requested analysis directly, with the UI closed:
-
-> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then finish the requested analysis end-to-end without opening the UI.
-
-If the agent already discovers repository-local skills, simply ask it to use
-`skills/drocat-usage/SKILL.md`. The skill contains no credentials; API keys and
-NeuPrint/CAVE tokens remain in the user's local configuration.

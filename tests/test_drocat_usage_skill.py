@@ -1,4 +1,4 @@
-"""Offline checks for the v4.5.0 direct-analysis skill."""
+"""Offline checks for the layered DROCAT skills (install / tab-matched / backend)."""
 
 from __future__ import annotations
 
@@ -8,28 +8,97 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skills" / "drocat-usage"
+INSTALL = ROOT / "skills" / "drocat-install"
+USAGE = ROOT / "skills" / "drocat-usage"
+BACKEND = ROOT / "skills" / "drocat-backend"
+
+# The 13 UI tabs (find_similar and visualization drive two backend tools each).
+TAB_RECIPES = [
+    "find-path.md",
+    "find-shortest.md",
+    "network.md",
+    "connectivity-profiling.md",
+    "find-homologs.md",
+    "find-similar.md",
+    "inter-dataset.md",
+    "nb-find-lines.md",
+    "nb-find-neuron.md",
+    "nb-colabel.md",
+    "flylight.md",
+    "visualization.md",
+    "settings.md",
+]
+
+# Layer-2 module guides and the real backend classes they must reference.
+BACKEND_MODULES = {
+    "coana-connectivity.md": "FindNeuronConnection",
+    "morphology-similarity.md": "MorphologyComparer",
+    "comparison.md": "ComparisonAnalyzer",
+    "profile-comparator.md": "HomologFinder",
+    "neuronbridge.md": "NeuronBridgeFinder",
+    "flylight.md": "FlyLightDownloader",
+    "visualize-skeleton.md": "VisualizeSkeleton",
+    "vispath.md": "VisualizePath",
+}
 
 
-def test_skill_bundle_has_required_entrypoints_and_references() -> None:
-    skill_file = SKILL / "SKILL.md"
+def test_layer0_install_bundle() -> None:
+    skill_file = INSTALL / "SKILL.md"
     text = skill_file.read_text(encoding="utf-8")
+    assert text.startswith("---\nname: drocat-install\n")
+    assert "one-click installer" in text or "installer" in text
+    assert "troubleshooting.md" in text
+    assert "custom-installation.md" in text
+    assert (INSTALL / "agents" / "openai.yaml").is_file()
+    assert (INSTALL / "scripts" / "verify_install.py").is_file()
+    assert (INSTALL / "references" / "troubleshooting.md").is_file()
+    assert (INSTALL / "references" / "custom-installation.md").is_file()
+    # no raw fetch of usage skill
+    assert "raw.githubusercontent.com" not in text
+    assert "drocat-backend/SKILL.md" in text
 
+
+def test_layer1_usage_bundle_and_tabs() -> None:
+    skill_file = USAGE / "SKILL.md"
+    text = skill_file.read_text(encoding="utf-8")
     assert text.startswith("---\nname: drocat-usage\n")
-    assert "DROCAT v4.5.0" in text
-    assert (SKILL / "agents" / "openai.yaml").is_file()
-    assert (SKILL / "scripts" / "run_direct.py").is_file()
-    for reference in (
+    assert "Layer 1" in text
+    assert "drocat-backend" in text
+    assert (USAGE / "agents" / "openai.yaml").is_file()
+    assert (USAGE / "scripts" / "run_direct.py").is_file()
+    assert (USAGE / "references" / "combinations.md").is_file()
+    for ref in (
         "tool-catalog.md",
         "workflow-recipes.md",
         "datasets-and-auth.md",
         "deepseek-codex.md",
     ):
-        assert (SKILL / "references" / reference).is_file()
+        assert (USAGE / "references" / ref).is_file()
+    for name in TAB_RECIPES:
+        assert (USAGE / "tabs" / name).is_file(), f"missing tab recipe {name}"
+    assert "raw.githubusercontent.com" not in text
+
+
+def test_layer2_backend_bundle() -> None:
+    skill_file = BACKEND / "SKILL.md"
+    text = skill_file.read_text(encoding="utf-8")
+    assert text.startswith("---\nname: drocat-backend\n")
+    assert "Layer 2" in text
+    assert (BACKEND / "agents" / "openai.yaml").is_file()
+    assert (BACKEND / "scripts" / "run_module.py").is_file()
+    for ref in ("module-index.md", "util-support.md", "combinations.md"):
+        assert (BACKEND / "references" / ref).is_file()
+    for name, class_name in BACKEND_MODULES.items():
+        mod = (BACKEND / "modules" / name)
+        assert mod.is_file(), f"missing backend module {name}"
+        assert class_name in mod.read_text(encoding="utf-8"), (
+            f"{name} does not reference {class_name}"
+        )
+    assert "raw.githubusercontent.com" not in text
 
 
 def test_direct_launcher_dry_run_resolves_script_directory() -> None:
-    launcher = SKILL / "scripts" / "run_direct.py"
+    launcher = USAGE / "scripts" / "run_direct.py"
     result = subprocess.run(
         [
             sys.executable,
@@ -52,41 +121,61 @@ def test_direct_launcher_dry_run_resolves_script_directory() -> None:
     assert str(ROOT / "scripts" / "FindPath.py") in result.stdout
 
 
-def test_readme_exposes_direct_analysis_and_beginner_setup() -> None:
+def test_module_launcher_dry_run_resolves_repo_root() -> None:
+    launcher = BACKEND / "scripts" / "run_module.py"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(launcher),
+            "--repo",
+            str(ROOT),
+            "--script",
+            "scripts/FindPath.py",
+            "--dry-run",
+        ],
+        cwd=str(BACKEND / "scripts"),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "[DROCAT] cwd:" in result.stdout
+    assert str(ROOT / "scripts") in result.stdout
+    assert str(ROOT / "scripts" / "FindPath.py") in result.stdout
+
+
+def test_readme_exposes_local_skills_no_fetch() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     install = (ROOT / "docs" / "INSTALLATION.md").read_text(encoding="utf-8")
+    # local skill paths are referenced
     assert "skills/drocat-usage/SKILL.md" in readme
+    assert "skills/drocat-backend/SKILL.md" in readme
+    assert "skills/drocat-install/SKILL.md" in readme
     assert "docs/INSTALLATION.md" in readme
     assert "run_DROCAT.command" in readme  # one-click install & launch
     assert "deepseek-v4-flash" in readme
-    # the agent fetch commands are exposed in the README installation
-    # section AND in the installation guide
-    raw_url = "raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md"
-    assert raw_url in readme
-    assert "finish the requested analysis end-to-end" in readme
-    assert raw_url in install
+    # the raw fetch command must be gone from BOTH docs
+    assert "raw.githubusercontent.com" not in readme
+    assert "raw.githubusercontent.com" not in install
+    assert "finish the requested analysis end-to-end" not in readme
 
 
-def test_skill_installation_uses_agent_command_not_manual_copy() -> None:
-    skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
-    setup = (ROOT / "docs" / "INSTALLATION.md").read_text(encoding="utf-8")
-    raw_url = "raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md"
-
-    assert raw_url in skill
-    assert raw_url in setup
-    assert "mkdir -p ~/.codex/skills/drocat-usage" not in skill
-    assert "mkdir -p ~/.codex/skills/drocat-usage" not in setup
+def test_skills_are_checked_in_no_fetch_required() -> None:
+    usage = (USAGE / "SKILL.md").read_text(encoding="utf-8")
+    install = (INSTALL / "SKILL.md").read_text(encoding="utf-8")
+    backend = (BACKEND / "SKILL.md").read_text(encoding="utf-8")
+    for text in (usage, install, backend):
+        assert "raw.githubusercontent.com" not in text
+        assert "mkdir -p ~/.codex/skills" not in text
 
 
 def test_agent_workflows_have_completion_contracts() -> None:
-    usage = (SKILL / "SKILL.md").read_text(encoding="utf-8")
-    install = (ROOT / "skills" / "drocat-install" / "SKILL.md").read_text(encoding="utf-8")
-    setup = (ROOT / "docs" / "INSTALLATION.md").read_text(encoding="utf-8")
-    deepseek = (SKILL / "references" / "deepseek-codex.md").read_text(encoding="utf-8")
+    usage = (USAGE / "SKILL.md").read_text(encoding="utf-8")
+    install = (INSTALL / "SKILL.md").read_text(encoding="utf-8")
+    backend = (BACKEND / "SKILL.md").read_text(encoding="utf-8")
 
-    assert "## Completion contract" in usage
-    assert "Do not stop after fetching this skill" in usage
-    assert "## Completion contract" in install
-    assert "Do not stop after cloning the" in install
-    assert "finish the requested analysis end-to-end" in setup
-    assert "finish by reporting the validated artifacts" in deepseek
+    for text in (usage, install, backend):
+        assert "## Completion contract" in text, "missing completion contract"
+    assert "Do not stop after reading source files" in usage
+    assert "end-to-end" in backend

@@ -1,0 +1,4 @@
+interface:
+  display_name: "DROCAT Backend Modules"
+  short_description: "Compose DROCAT backend modules and function blocks flexibly"
+  default_prompt: "Use the DROCAT v4.5.0 backend-module workflow to compose the needed classes/functions for this connectome analysis, run it, validate the outputs, and report artifacts and warnings."

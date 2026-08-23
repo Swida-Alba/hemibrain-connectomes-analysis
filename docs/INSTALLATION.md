@@ -131,10 +131,9 @@ In any coding agent, ask:
 > Install DROCAT on this machine, verify it works, and report the final environment and UI status.
 
 The agent follows the bundled
-[`drocat-install` skill](../skills/drocat-install/SKILL.md) — or, without a
-local checkout, paste:
-
-> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-install/SKILL.md and follow it to finish installing, verifying, and launching DROCAT on this machine.
+[`drocat-install` skill](../skills/drocat-install/SKILL.md). The skill both
+installs the project and installs the analysis skills with it, so after the
+install the agent already has them (no fetch is required).
 
 To fetch the release first:
 
@@ -144,8 +143,10 @@ cd drocat
 ./run_DROCAT.command
 ```
 
-For agent-driven analysis *without* the UI, use the separate
-[`drocat-usage` skill](../skills/drocat-usage/SKILL.md).
+For agent-driven analysis *without* the UI, use the checked-in skills:
+[`drocat-usage`](../skills/drocat-usage/SKILL.md) (Layer 1, one recipe per UI tab)
+and [`drocat-backend`](../skills/drocat-backend/SKILL.md) (Layer 2, backend
+module composition).
 
 ### 5.2 Recommended low-cost agent: Codex + DeepSeek V4 Flash
 
@@ -190,15 +191,19 @@ Official references:
    Keep the generated configuration files at user level; do not copy a full
    `models.json` into the DROCAT checkout.
 
-### 5.3 Install/use the direct-analysis skill through an agent
+### 5.3 Use the analysis skills in an agent (no fetch)
 
-Do not manually copy the skill. Open the repository in Codex (or another
-tool-enabled agent) and paste this command:
+Do not manually copy the skills or fetch them from a URL. The repository ships the
+analysis skills, so an installed agent has them automatically:
 
-> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then finish the requested analysis end-to-end without opening the UI.
+- [`drocat-usage`](../skills/drocat-usage/SKILL.md) — Layer 1, tab-matched direct
+  script analyses (one recipe per UI tab) via the `drocat-4.5.0` environment.
+- [`drocat-backend`](../skills/drocat-backend/SKILL.md) — Layer 2, flexible
+  composition of backend modules and function blocks.
 
-The agent can use the checked-in `skills/drocat-usage/SKILL.md` when local skill
-discovery is enabled; the raw URL is the fallback for a new agent session.
+Open the repository in Codex (or another tool-enabled agent) and ask it to use
+the relevant checked-in skill. The skills contain no credentials; API keys and
+NeuPrint/CAVE tokens remain in the user's local configuration.
 
 ### 5.4 First DROCAT agent request
 
