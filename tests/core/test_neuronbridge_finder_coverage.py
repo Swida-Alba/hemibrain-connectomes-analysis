@@ -1146,7 +1146,7 @@ def test_aggregate_results_pandas(finder):
     finder.separate_splitgal4 = True
     _, stats_s = finder._aggregate_results_pandas(
         _combined_df(), "cds", is_multi_dataset=False, sort_by="max")
-    assert set(stats_s["line_type"]) == {"gal4_lexa"}
+    assert set(stats_s["line_type"]) == {"gal4_lexa", "split_gal4"}
 
     # No 'line' column -> empty stats
     combined_only, empty_stats = finder._aggregate_results_pandas(

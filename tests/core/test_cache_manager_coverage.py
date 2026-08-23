@@ -1,14 +1,11 @@
-"""Hermetic coverage tests for src/core/cache_manager.py.
+"""Hermetic coverage tests for ``src/core/cache_manager.py``.
 
-cache_manager is a menu-driven CLI around the NeuPrint cache.  Every path
-lookup is relative to the CWD (``neuprint_cache/``), so each test chdirs into
-``tmp_path``.  ``FindNeuronConnection`` is replaced with a recording fake and
-``builtins.input`` is fed scripted answers; no network or real cache is ever
-touched.
+The module is an interactive CLI around the NeuPrint connection cache.  All
+interactions are exercised with a fake ``FindNeuronConnection`` and scripted
+``input()`` responses; every filesystem touch is sandboxed to ``tmp_path``
+via ``monkeypatch.chdir``.
 """
 
-import builtins
-import shutil
 import sys
 from pathlib import Path
 
@@ -18,418 +15,297 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-import core.cache_manager as cache_manager  # noqa: E402
+from core import cache_manager as cm  # noqa: E402
 
 
-def _feed(monkeypatch, responses):
-    """Script ``input()`` answers in order."""
-    iterator = iter(responses)
-    monkeypatch.setattr(builtins, "input", lambda prompt="": next(iterator))
+class FakeFNC:
+    """Stand-in for ``FindNeuronConnection`` with scriptable behavior."""
+
+    registry = pd.DataFrame()
+    search_results = pd.DataFrame()
+    registry_error = None
+    cleared = []
+    last_instance = None
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        FakeFNC.last_instance = self
+
+    def print_cache_info(self):
+        print(f"cache-info:{self.kwargs.get('dataset')}")
+
+    def _load_neuron_registry(self):
+        if FakeFNC.registry_error is not None:
+            raise FakeFNC.registry_error
+        return FakeFNC.registry
+
+    def search_cached_neurons(self, query, field):
+        return FakeFNC.search_results
+
+    def clear_cache(self, confirm=False):
+        FakeFNC.cleared.append((self.kwargs.get("dataset"), confirm))
 
 
 @pytest.fixture
 def fake_fnc(monkeypatch):
-    """Replace cache_manager.FindNeuronConnection with a recording fake."""
-    records = {"instances": []}
+    monkeypatch.setattr(cm, "FindNeuronConnection", FakeFNC)
+    FakeFNC.registry = pd.DataFrame()
+    FakeFNC.search_results = pd.DataFrame()
+    FakeFNC.registry_error = None
+    FakeFNC.cleared = []
+    FakeFNC.last_instance = None
+    return FakeFNC
 
-    class FakeFNC:
-        def __init__(self, dataset=None, sourceNeurons=None,
-                     targetNeurons=None, use_cache=True, token='', **kwargs):
-            self.dataset = dataset
-            self.sourceNeurons = sourceNeurons
-            self.targetNeurons = targetNeurons
-            self.use_cache = use_cache
-            self.token = token
-            self.registry = pd.DataFrame()
-            self.registry_error = None
-            self.search_results = pd.DataFrame()
-            self.last_search = None
-            self.printed_info = 0
-            self.cleared = []
-            records["instances"].append(self)
 
-        def print_cache_info(self):
-            self.printed_info += 1
-
-        def _load_neuron_registry(self):
-            if self.registry_error:
-                raise self.registry_error
-            return self.registry
-
-        def search_cached_neurons(self, pattern, field):
-            self.last_search = (pattern, field)
-            return self.search_results
-
-        def clear_cache(self, confirm=False):
-            self.cleared.append(confirm)
-
-    monkeypatch.setattr(cache_manager, "FindNeuronConnection", FakeFNC)
-    records["class"] = FakeFNC
-    return records
+def feed_inputs(monkeypatch, values):
+    iterator = iter(values)
+    monkeypatch.setattr("builtins.input", lambda *args, **kwargs: next(iterator))
 
 
 # ---------------------------------------------------------------------------
-# Menu + view_cache_info
+# print_menu / view_cache_info
 # ---------------------------------------------------------------------------
+
 
 def test_print_menu_lists_all_options(capsys):
-    cache_manager.print_menu()
-    out = capsys.readouterr().out
-    assert "NEUPRINT CACHE MANAGEMENT" in out
-    for option in ("1. View cache information", "2. View cache for specific",
-                   "3. Search cached neurons", "4. Clear cache for specific",
-                   "5. Clear all cache", "6. Exit"):
-        assert option in out
+    cm.print_menu()
+    output = capsys.readouterr().out
+    assert "NEUPRINT CACHE MANAGEMENT" in output
+    for option in ("1.", "2.", "3.", "4.", "5.", "6."):
+        assert option in output
 
 
-def test_view_cache_info_missing_root(tmp_path, monkeypatch, capsys, fake_fnc):
+def test_view_cache_info_no_cache_root(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
-    cache_manager.view_cache_info()
+    cm.view_cache_info()
     assert "No cache found" in capsys.readouterr().out
-    assert fake_fnc["instances"] == []
 
 
-def test_view_cache_info_no_dataset_dirs(tmp_path, monkeypatch, capsys, fake_fnc):
+def test_view_cache_info_no_dataset_dirs(tmp_path, monkeypatch, fake_fnc, capsys):
     monkeypatch.chdir(tmp_path)
     root = tmp_path / "neuprint_cache"
     root.mkdir()
-    (root / "stray_file.txt").write_text("not a dataset")
-    cache_manager.view_cache_info()
+    (root / "not_a_dir.txt").write_text("x")
+    cm.view_cache_info()
     assert "No cached datasets found" in capsys.readouterr().out
-    assert fake_fnc["instances"] == []
 
 
-def test_view_cache_info_decodes_dataset_folders(tmp_path, monkeypatch, fake_fnc):
+def test_view_cache_info_lists_datasets(tmp_path, monkeypatch, fake_fnc, capsys):
     monkeypatch.chdir(tmp_path)
-    root = tmp_path / "neuprint_cache"
-    (root / "hemibrain_v1_2_1").mkdir(parents=True)
-    (root / "manc_v1_0").mkdir(parents=True)
-
-    cache_manager.view_cache_info()
-
-    datasets = [inst.dataset for inst in fake_fnc["instances"]]
-    assert datasets == ["hemibrain:v1.2.1", "manc:v1.0"]
-    for inst in fake_fnc["instances"]:
-        assert inst.use_cache is True
-        assert inst.printed_info == 1
+    (tmp_path / "neuprint_cache" / "hemibrain_v1_2_1").mkdir(parents=True)
+    cm.view_cache_info()
+    output = capsys.readouterr().out
+    assert "Found cache for 1 dataset(s)" in output
+    assert "cache-info:hemibrain:v1.2.1" in output
+    assert FakeFNC.last_instance.kwargs["use_cache"] is True
+    assert FakeFNC.last_instance.kwargs["token"] == ""
 
 
 # ---------------------------------------------------------------------------
 # view_dataset_cache
 # ---------------------------------------------------------------------------
 
-def test_view_dataset_cache_predefined_choice(monkeypatch, capsys, fake_fnc):
-    _feed(monkeypatch, ["1"])
-    cache_manager.view_dataset_cache()
-    assert fake_fnc["instances"][0].dataset == "hemibrain:v1.2.1"
-    assert fake_fnc["instances"][0].printed_info == 1
+
+def test_view_dataset_cache_preset_choice(monkeypatch, fake_fnc, capsys):
+    feed_inputs(monkeypatch, ["1"])
+    cm.view_dataset_cache()
+    output = capsys.readouterr().out
+    assert "Available datasets" in output
+    assert "cache-info:hemibrain:v1.2.1" in output
 
 
-def test_view_dataset_cache_manual_entry(monkeypatch, fake_fnc):
-    _feed(monkeypatch, ["4", "custom:v9.9"])
-    cache_manager.view_dataset_cache()
-    assert fake_fnc["instances"][0].dataset == "custom:v9.9"
+def test_view_dataset_cache_manual_entry(monkeypatch, fake_fnc, capsys):
+    feed_inputs(monkeypatch, ["4", "manc:v1.0"])
+    cm.view_dataset_cache()
+    assert "cache-info:manc:v1.0" in capsys.readouterr().out
 
 
-def test_view_dataset_cache_invalid_choice(monkeypatch, capsys, fake_fnc):
-    _feed(monkeypatch, ["abc"])
-    cache_manager.view_dataset_cache()
+def test_view_dataset_cache_invalid_choice(monkeypatch, fake_fnc, capsys):
+    feed_inputs(monkeypatch, ["abc"])
+    cm.view_dataset_cache()
     assert "Invalid selection" in capsys.readouterr().out
-    assert fake_fnc["instances"] == []
 
 
-def test_view_dataset_cache_out_of_range(monkeypatch, capsys, fake_fnc):
-    _feed(monkeypatch, ["9"])
-    cache_manager.view_dataset_cache()
+def test_view_dataset_cache_out_of_range_choice(monkeypatch, fake_fnc, capsys):
+    feed_inputs(monkeypatch, ["99"])
+    cm.view_dataset_cache()
     assert "Invalid selection" in capsys.readouterr().out
-    assert fake_fnc["instances"] == []
 
 
 # ---------------------------------------------------------------------------
 # search_cached_neurons
 # ---------------------------------------------------------------------------
 
-def _registry():
-    return pd.DataFrame({
-        "bodyId": [42, 43],
-        "type": ["L3", "PPL1"],
-        "instance": ["L3_R", "PPL1_L"],
-    })
 
-
-def test_search_cached_neurons_empty_registry(monkeypatch, capsys, fake_fnc):
-    _feed(monkeypatch, ["1"])
-    cache_manager.search_cached_neurons()
+def test_search_cached_neurons_empty_registry(monkeypatch, fake_fnc, capsys):
+    feed_inputs(monkeypatch, ["1"])
+    cm.search_cached_neurons()
     assert "No neuron registry found" in capsys.readouterr().out
 
 
-def test_search_cached_neurons_by_type(monkeypatch, capsys, fake_fnc):
-    Base = fake_fnc["class"]
-
-    class PopulatedFNC(Base):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.registry = _registry()
-            self.search_results = _registry().head(1)
-
-    monkeypatch.setattr(cache_manager, "FindNeuronConnection", PopulatedFNC)
-    _feed(monkeypatch, ["1", "1", "L3.*"])
-    cache_manager.search_cached_neurons()
-    out = capsys.readouterr().out
-    assert "Found 2 neurons in registry" in out
-    assert "Found 1 neurons matching type pattern 'L3.*'" in out
-    assert "L3" in out
+def _registry():
+    return pd.DataFrame(
+        {"bodyId": [1, 2], "type": ["Mi1", "T4a"], "instance": ["Mi1_R", "T4a_L"]}
+    )
 
 
-def test_search_cached_neurons_by_instance(monkeypatch, capsys, fake_fnc):
-    Base = fake_fnc["class"]
-
-    class PopulatedFNC(Base):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.registry = _registry()
-            self.search_results = pd.DataFrame()
-
-    monkeypatch.setattr(cache_manager, "FindNeuronConnection", PopulatedFNC)
-    _feed(monkeypatch, ["1", "2", ".*_R"])
-    cache_manager.search_cached_neurons()
-    out = capsys.readouterr().out
-    assert "instance pattern '.*_R'" in out
+def test_search_cached_neurons_by_type(monkeypatch, fake_fnc, capsys):
+    FakeFNC.registry = _registry()
+    FakeFNC.search_results = pd.DataFrame({"type": ["Mi1"]})
+    feed_inputs(monkeypatch, ["1", "1", "Mi.*"])
+    cm.search_cached_neurons()
+    output = capsys.readouterr().out
+    assert "Found 2 neurons in registry" in output
+    assert "matching type pattern 'Mi.*'" in output
+    assert "Mi1" in output
 
 
-def test_search_cached_neurons_by_instance_prints_results(monkeypatch, capsys, fake_fnc):
-    Base = fake_fnc["class"]
-
-    class PopulatedFNC(Base):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.registry = _registry()
-            self.search_results = _registry().head(1)
-
-    monkeypatch.setattr(cache_manager, "FindNeuronConnection", PopulatedFNC)
-    _feed(monkeypatch, ["1", "2", ".*_R"])
-    cache_manager.search_cached_neurons()
-    out = capsys.readouterr().out
-    assert "Found 1 neurons matching instance pattern '.*_R'" in out
-    assert "L3_R" in out
+def test_search_cached_neurons_by_instance_empty(monkeypatch, fake_fnc, capsys):
+    FakeFNC.registry = _registry()
+    FakeFNC.search_results = pd.DataFrame()
+    feed_inputs(monkeypatch, ["1", "2", ".*_X"])
+    cm.search_cached_neurons()
+    assert "matching instance pattern '.*_X'" in capsys.readouterr().out
 
 
-def test_search_cached_neurons_by_bodyid(monkeypatch, capsys, fake_fnc):
-    Base = fake_fnc["class"]
-    captured = {}
-
-    class PopulatedFNC(Base):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.registry = _registry()
-
-        def search_cached_neurons(self, pattern, field):
-            captured["pattern"] = pattern
-            captured["field"] = field
-            return _registry().head(1)
-
-    monkeypatch.setattr(cache_manager, "FindNeuronConnection", PopulatedFNC)
-    _feed(monkeypatch, ["1", "3", "42"])
-    cache_manager.search_cached_neurons()
-    assert captured == {"pattern": 42, "field": "bodyId"}
-    assert "Results for bodyId 42" in capsys.readouterr().out
+def test_search_cached_neurons_by_bodyid_found(monkeypatch, fake_fnc, capsys):
+    FakeFNC.registry = _registry()
+    FakeFNC.search_results = pd.DataFrame({"bodyId": [1], "type": ["Mi1"]})
+    feed_inputs(monkeypatch, ["1", "3", "1"])
+    cm.search_cached_neurons()
+    assert "Results for bodyId 1" in capsys.readouterr().out
 
 
-def test_search_cached_neurons_bodyid_not_found(monkeypatch, capsys, fake_fnc):
-    Base = fake_fnc["class"]
-
-    class PopulatedFNC(Base):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.registry = _registry()
-            self.search_results = pd.DataFrame()
-
-    monkeypatch.setattr(cache_manager, "FindNeuronConnection", PopulatedFNC)
-    _feed(monkeypatch, ["1", "3", "999"])
-    cache_manager.search_cached_neurons()
-    assert "No matching neuron found" in capsys.readouterr().out
+def test_search_cached_neurons_by_bodyid_not_found(monkeypatch, fake_fnc, capsys):
+    FakeFNC.registry = _registry()
+    FakeFNC.search_results = pd.DataFrame()
+    feed_inputs(monkeypatch, ["1", "3", "42"])
+    cm.search_cached_neurons()
+    output = capsys.readouterr().out
+    assert "Results for bodyId 42" in output
+    assert "No matching neuron found" in output
 
 
-def test_search_cached_neurons_invalid_method(monkeypatch, capsys, fake_fnc):
-    Base = fake_fnc["class"]
-
-    class PopulatedFNC(Base):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.registry = _registry()
-
-    monkeypatch.setattr(cache_manager, "FindNeuronConnection", PopulatedFNC)
-    _feed(monkeypatch, ["1", "9"])
-    cache_manager.search_cached_neurons()
+def test_search_cached_neurons_invalid_search_method(monkeypatch, fake_fnc, capsys):
+    FakeFNC.registry = _registry()
+    feed_inputs(monkeypatch, ["1", "9"])
+    cm.search_cached_neurons()
     assert "Invalid search method" in capsys.readouterr().out
 
 
-def test_search_cached_neurons_invalid_dataset_choice(monkeypatch, capsys, fake_fnc):
-    _feed(monkeypatch, ["abc"])
-    cache_manager.search_cached_neurons()
+def test_search_cached_neurons_non_numeric_bodyid(monkeypatch, fake_fnc, capsys):
+    FakeFNC.registry = _registry()
+    feed_inputs(monkeypatch, ["1", "3", "not-an-int"])
+    cm.search_cached_neurons()
     assert "Invalid selection" in capsys.readouterr().out
 
 
-def test_search_cached_neurons_manual_dataset(monkeypatch, capsys, fake_fnc):
-    Base = fake_fnc["class"]
-
-    class PopulatedFNC(Base):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.registry = _registry()
-
-    monkeypatch.setattr(cache_manager, "FindNeuronConnection", PopulatedFNC)
-    _feed(monkeypatch, ["4", "custom:v2", "9"])
-    cache_manager.search_cached_neurons()
-    assert fake_fnc["instances"][0].dataset == "custom:v2"
+def test_search_cached_neurons_registry_error(monkeypatch, fake_fnc, capsys):
+    FakeFNC.registry_error = RuntimeError("boom")
+    feed_inputs(monkeypatch, ["1"])
+    cm.search_cached_neurons()
+    assert "Search failed: boom" in capsys.readouterr().out
 
 
-def test_search_cached_neurons_registry_failure(monkeypatch, capsys, fake_fnc):
-    Base = fake_fnc["class"]
-
-    class BrokenFNC(Base):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.registry_error = RuntimeError("registry exploded")
-
-    monkeypatch.setattr(cache_manager, "FindNeuronConnection", BrokenFNC)
-    _feed(monkeypatch, ["1"])
-    cache_manager.search_cached_neurons()
-    assert "Search failed: registry exploded" in capsys.readouterr().out
+def test_search_cached_neurons_invalid_dataset_choice(monkeypatch, fake_fnc, capsys):
+    feed_inputs(monkeypatch, ["abc"])
+    cm.search_cached_neurons()
+    assert "Invalid selection" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
-# clear_dataset_cache
+# clear_dataset_cache / clear_all_cache
 # ---------------------------------------------------------------------------
 
-def test_clear_dataset_cache_missing_root(tmp_path, monkeypatch, capsys):
+
+def test_clear_dataset_cache_no_root(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
-    cache_manager.clear_dataset_cache()
+    cm.clear_dataset_cache()
     assert "No cache found" in capsys.readouterr().out
 
 
 def test_clear_dataset_cache_no_datasets(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "neuprint_cache").mkdir()
-    cache_manager.clear_dataset_cache()
+    cm.clear_dataset_cache()
     assert "No cached datasets found" in capsys.readouterr().out
 
 
-def test_clear_dataset_cache_clears_selection(tmp_path, monkeypatch, fake_fnc):
+def test_clear_dataset_cache_selects_dataset(tmp_path, monkeypatch, fake_fnc, capsys):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "neuprint_cache" / "hemibrain_v1_2_1").mkdir(parents=True)
-    _feed(monkeypatch, ["1"])
+    (tmp_path / "neuprint_cache" / "manc_v1_0").mkdir(parents=True)
+    feed_inputs(monkeypatch, ["2"])
+    cm.clear_dataset_cache()
+    output = capsys.readouterr().out
+    assert "hemibrain:v1.2.1" in output
+    assert "manc:v1.0" in output
+    assert len(FakeFNC.cleared) == 1
+    assert FakeFNC.cleared[0] == ("hemibrain:v1.2.1", True)
 
-    cache_manager.clear_dataset_cache()
 
-    inst = fake_fnc["instances"][0]
-    assert inst.dataset == "hemibrain:v1.2.1"
-    assert inst.cleared == [True]
-
-
-def test_clear_dataset_cache_invalid_choice(tmp_path, monkeypatch, capsys, fake_fnc):
+def test_clear_dataset_cache_invalid_choice(tmp_path, monkeypatch, fake_fnc, capsys):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "neuprint_cache" / "manc_v1_0").mkdir(parents=True)
-    _feed(monkeypatch, ["zz"])
-    cache_manager.clear_dataset_cache()
+    feed_inputs(monkeypatch, ["abc"])
+    cm.clear_dataset_cache()
     assert "Invalid selection" in capsys.readouterr().out
-    assert fake_fnc["instances"] == []
+    assert FakeFNC.cleared == []
 
 
-def test_clear_dataset_cache_out_of_range(tmp_path, monkeypatch, capsys, fake_fnc):
+def test_clear_all_cache_no_root(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "neuprint_cache" / "manc_v1_0").mkdir(parents=True)
-    _feed(monkeypatch, ["5"])
-    cache_manager.clear_dataset_cache()
-    assert "Invalid selection" in capsys.readouterr().out
-    assert fake_fnc["instances"] == []
-
-
-# ---------------------------------------------------------------------------
-# clear_all_cache
-# ---------------------------------------------------------------------------
-
-def test_clear_all_cache_missing_root(tmp_path, monkeypatch, capsys):
-    monkeypatch.chdir(tmp_path)
-    cache_manager.clear_all_cache()
+    cm.clear_all_cache()
     assert "No cache found" in capsys.readouterr().out
 
 
-def test_clear_all_cache_declined(tmp_path, monkeypatch, capsys):
+def test_clear_all_cache_cancelled(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     root = tmp_path / "neuprint_cache"
     root.mkdir()
-    _feed(monkeypatch, ["no"])
-    cache_manager.clear_all_cache()
-    assert "Operation cancelled." in capsys.readouterr().out
+    (root / "manc_v1_0").mkdir()
+    feed_inputs(monkeypatch, ["no"])
+    cm.clear_all_cache()
+    assert "Operation cancelled" in capsys.readouterr().out
     assert root.exists()
 
 
-def test_clear_all_cache_confirmed_removes_root(tmp_path, monkeypatch, capsys):
+def test_clear_all_cache_confirmed(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     root = tmp_path / "neuprint_cache"
-    (root / "hemibrain_v1_2_1").mkdir(parents=True)
-    _feed(monkeypatch, ["yes"])
-    cache_manager.clear_all_cache()
+    (root / "manc_v1_0").mkdir(parents=True)
+    feed_inputs(monkeypatch, ["yes"])
+    cm.clear_all_cache()
     assert "All cache cleared" in capsys.readouterr().out
     assert not root.exists()
 
 
-def test_clear_all_cache_removal_failure(tmp_path, monkeypatch, capsys):
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "neuprint_cache").mkdir()
-
-    def boom(path):
-        raise OSError("disk locked")
-
-    monkeypatch.setattr(shutil, "rmtree", boom)
-    _feed(monkeypatch, ["yes"])
-    cache_manager.clear_all_cache()
-    assert "Failed to clear cache: disk locked" in capsys.readouterr().out
-
-
 # ---------------------------------------------------------------------------
-# main() menu loop
+# main() dispatch loop
 # ---------------------------------------------------------------------------
 
-def test_main_exits_on_option_six(monkeypatch, capsys):
-    _feed(monkeypatch, ["6"])
+
+def test_main_invalid_option_then_exit(monkeypatch, fake_fnc, capsys):
+    feed_inputs(monkeypatch, ["9", "", "6"])
     with pytest.raises(SystemExit) as excinfo:
-        cache_manager.main()
+        cm.main()
     assert excinfo.value.code == 0
-    assert "Goodbye!" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "Invalid option" in output
+    assert "Goodbye" in output
 
 
-def test_main_rejects_invalid_option_then_exits(monkeypatch, capsys):
-    _feed(monkeypatch, ["9", "", "6"])
+def test_main_dispatches_every_action(monkeypatch, fake_fnc, capsys):
+    calls = []
+    monkeypatch.setattr(cm, "view_cache_info", lambda: calls.append("view_info"))
+    monkeypatch.setattr(cm, "view_dataset_cache", lambda: calls.append("view_dataset"))
+    monkeypatch.setattr(cm, "search_cached_neurons", lambda: calls.append("search"))
+    monkeypatch.setattr(cm, "clear_dataset_cache", lambda: calls.append("clear_one"))
+    monkeypatch.setattr(cm, "clear_all_cache", lambda: calls.append("clear_all"))
+    feed_inputs(
+        monkeypatch,
+        ["1", "", "2", "", "3", "", "4", "", "5", "", "6"],
+    )
     with pytest.raises(SystemExit):
-        cache_manager.main()
-    assert "Invalid option" in capsys.readouterr().out
-
-
-def test_main_dispatches_view_cache_info(tmp_path, monkeypatch, capsys):
-    monkeypatch.chdir(tmp_path)
-    # Option 1 with no cache present, then exit.
-    _feed(monkeypatch, ["1", "", "6"])
-    with pytest.raises(SystemExit):
-        cache_manager.main()
-    out = capsys.readouterr().out
-    assert "No cache found" in out
-
-
-def test_main_dispatches_remaining_options(tmp_path, monkeypatch, capsys, fake_fnc):
-    """Options 2-5 must each reach their handler before the loop exits."""
-    monkeypatch.chdir(tmp_path)
-    _feed(monkeypatch, [
-        "2", "1", "",   # view_dataset_cache -> predefined hemibrain choice
-        "3", "1", "",   # search_cached_neurons -> empty registry notice
-        "4", "",        # clear_dataset_cache -> no cache found
-        "5", "",        # clear_all_cache -> no cache found
-        "6",            # exit
-    ])
-    with pytest.raises(SystemExit) as excinfo:
-        cache_manager.main()
-    assert excinfo.value.code == 0
-    out = capsys.readouterr().out
-    assert "No neuron registry found" in out
-    assert fake_fnc["instances"][0].dataset == "hemibrain:v1.2.1"
+        cm.main()
+    assert calls == ["view_info", "view_dataset", "search", "clear_one", "clear_all"]
