@@ -696,6 +696,32 @@ class TestNeuronIndexData:
         assert result.rows == []
         assert result.match_groups == []
 
+    def test_include_all_keys_materialises_every_matching_row(
+        self, isolated_index_root
+    ):
+        from ui.neuron_index import load_cached_neuron_index, query_neuron_index
+
+        dataset = _write_paged_index(isolated_index_root, row_count=60)
+        index = load_cached_neuron_index(dataset, enrich=False)
+
+        result = query_neuron_index(
+            index,
+            search="aMe",
+            page_size=10,
+            include_all_keys=True,
+        )
+
+        expected = {str(1000 + i) for i in range(60)}
+        assert result.total == 60
+        assert len(result.all_keys) == 60
+        assert set(result.all_keys.values()) == expected
+        for body_id in result.all_keys.values():
+            assert body_id in expected
+
+        # Without the flag the full map stays empty to keep paged browsing cheap.
+        plain = query_neuron_index(index, search="aMe", page_size=10)
+        assert plain.all_keys == {}
+
 
 class TestNeuronIndexViewer:
     def _click(self, link):
@@ -1435,6 +1461,58 @@ class TestNeuronIndexViewer:
             str(row.get("bodyId")) == "1000"
             for row in getattr(full_table, "selected", [])
         )
+
+    def test_full_table_select_all_selects_rows_on_every_page(
+        self, isolated_index_root, monkeypatch
+    ):
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.components.neuron_index_viewer as viewer
+        from ui.components.neuron_index_viewer import create_neuron_index_viewer_link
+
+        dataset = _write_paged_index(isolated_index_root, row_count=60)
+        monkeypatch.setattr(viewer, "PROJECT_ROOT", isolated_index_root)
+        selection_batches = []
+        resolution_batches = []
+
+        def sync_query(values):
+            selection_batches.append(list(values))
+
+        def sync_resolution(values):
+            resolution_batches.append(list(values))
+
+        client = Client(page("/neuron-index-viewer-select-all"))
+        with client:
+            link = create_neuron_index_viewer_link(
+                lambda: dataset,
+                query_selection=sync_query,
+                query_resolution=sync_resolution,
+            )
+        self._click(link)
+
+        tables = [el for el in client.elements.values() if type(el).__name__ == "Table"]
+        full_table = next(
+            table for table in tables
+            if table._props["columns"][0]["name"] == "bodyId"
+        )
+        assert "header" in full_table.slots
+        assert "full-table-select-all" in full_table.slots["header"].template
+        select_all_listener = next(
+            listener for listener in full_table._event_listeners.values()
+            if listener.type == "fullTableSelectAll"
+        )
+
+        expected = {str(1000 + i) for i in range(60)}
+        # The first click selects every matching row on every page (60 total),
+        # not only the 50 rows visible on the current page.
+        select_all_listener.handler(SimpleNamespace())
+        assert set(selection_batches[-1]) == expected
+        assert set(resolution_batches[-1]) == expected
+
+        # A second click toggles the whole cross-page selection back off.
+        select_all_listener.handler(SimpleNamespace())
+        assert selection_batches[-1] == []
+        assert resolution_batches[-1] == []
 
     def test_link_explains_how_to_build_a_missing_cache(
         self, isolated_index_root, monkeypatch

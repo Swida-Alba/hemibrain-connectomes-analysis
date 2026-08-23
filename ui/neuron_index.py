@@ -86,6 +86,10 @@ class NeuronIndexPage:
     match_group_related: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
     match_group_primary: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
     focus_page: Optional[int] = None
+    # Every matching ``__neuron_key`` -> user-facing bodyId across all pages.
+    # Populated only when ``include_all_keys`` is requested, so normal paged
+    # browsing never pays to materialise the full result set.
+    all_keys: Dict[str, str] = field(default_factory=dict)
 
 
 # The largest local indexes are only a few megabytes as Parquet but are read
@@ -1331,6 +1335,27 @@ def _global_match_metadata(frame, columns: List[str], text: str):
     )
 
 
+def _collect_all_keys(source, json_value) -> Dict[str, str]:
+    """Map every matching ``__neuron_key`` to its user-facing bodyId.
+
+    Used by the select-all action, which needs the complete result set across
+    all pages without sending full row data to the browser.  The bodyId is
+    normalised exactly like the viewer's per-row helper so that selecting all
+    rows and selecting a single row resolve to the same query-safe value.
+    """
+    keys: Dict[str, str] = {}
+    for key, raw_body_id in source.select(["__neuron_key", "bodyId"]).iter_rows():
+        body_id = str(json_value(raw_body_id) or "").strip()
+        if not body_id:
+            keys[str(key or "")] = ""
+            continue
+        integer, dot, fraction = body_id.partition(".")
+        if dot and integer.isdigit() and fraction and set(fraction) == {"0"}:
+            body_id = integer
+        keys[str(key or "")] = body_id
+    return keys
+
+
 def query_neuron_index(
     index: CachedNeuronIndex,
     *,
@@ -1345,6 +1370,7 @@ def query_neuron_index(
     page: int = 1,
     page_size: int = 50,
     focus_key: Optional[str] = None,
+    include_all_keys: bool = False,
 ) -> NeuronIndexPage:
     """Filter, sort, and page a cached index without sending all rows to JS.
 
@@ -1929,6 +1955,10 @@ def query_neuron_index(
         for row in safe_rows:
             row["__highlighted_cells"] = {}
 
+    all_keys: Dict[str, str] = {}
+    if include_all_keys:
+        all_keys = _collect_all_keys(filtered, json_value)
+
     # Broad global searches can build their complete match panel directly
     # from the compact sidecar. This avoids re-evaluating every searchable
     # expression against the full metadata frame and, importantly, avoids a
@@ -1977,6 +2007,7 @@ def query_neuron_index(
                 match_group_related=fast_group_related,
                 match_group_primary=fast_group_primary,
                 focus_page=focus_page,
+                all_keys=all_keys,
             )
 
     # Deduplicate by the exact matched name. A selection of one group means
@@ -2332,4 +2363,5 @@ def query_neuron_index(
         match_group_related=match_group_related,
         match_group_primary=match_group_primary,
         focus_page=focus_page,
+        all_keys=all_keys,
     )

@@ -411,6 +411,9 @@ def _render_index(
         selected_match_members: dict[str, set[str]] = {}
         selected_match_body_ids: dict[str, tuple[str, ...]] = {}
         selected_body_ids: dict[str, str] = {}
+        # Lazily-computed complete key->bodyId map for the current query, used
+        # only by the full metadata table's select-all across all pages.
+        full_table_all_keys: dict[str, str] | None = None
         current_rows = list(initial.rows)
         match_groups_all = list(initial.match_groups)
         current_groups = match_groups_all[:MATCH_GROUP_PAGE_SIZE]
@@ -447,6 +450,38 @@ def _render_index(
                 keys.update(selected_match_members.get(value, set()))
                 keys.update(group_members.get(value, set()))
             return keys
+
+        def current_query_kwargs() -> dict:
+            """Return the search/filter/sort kwargs shared by page and key queries."""
+            requested_sort = sort_column.value
+            if requested_sort == "__match_value__":
+                # Ascending matched-value order is the implicit default. Preserve
+                # an explicitly chosen descending direction for that same sort.
+                requested_sort = (
+                    "__match_value__" if direction.value == "desc" else None
+                )
+            return {
+                "search": search_input.value or "",
+                "search_column": target_column.value,
+                "search_operator": filter_operator.value,
+                "sort_by": requested_sort,
+                "descending": direction.value == "desc",
+            }
+
+        def current_full_table_keys() -> dict[str, str]:
+            """Lazily materialise every matching key->bodyId across all pages."""
+            nonlocal full_table_all_keys
+            if full_table_all_keys is None:
+                full_table_all_keys = dict(
+                    query_neuron_index(
+                        index,
+                        **current_query_kwargs(),
+                        page=1,
+                        page_size=50,
+                        include_all_keys=True,
+                    ).all_keys
+                )
+            return full_table_all_keys
 
         def related_match_values(value: str) -> List[str]:
             """Return one direct primary/secondary selection bundle.
@@ -787,6 +822,28 @@ def _render_index(
                 refresh_query_preview()
             refresh_table_selection()
 
+        def handle_full_table_select_all(_event=None) -> None:
+            """Select or deselect the current query's rows across all pages.
+
+            The header checkbox only reports a click; the server decides the
+            direction by checking whether the whole result set is already
+            selected, so a partially-selected page always resolves to
+            "select-all" and a fully-selected result toggles back off.
+            Because selections persist across searches, deselecting only
+            removes the rows currently matching the query rather than wiping
+            selections made against an earlier query.
+            """
+            keys = current_full_table_keys()
+            if not keys:
+                return
+            if set(keys).issubset(effective_body_keys()):
+                for key in keys:
+                    selected_body_ids.pop(key, None)
+            else:
+                selected_body_ids.update(keys)
+            sync_query_selection()
+            refresh_table_selection()
+
         with ui.element("div").classes("w-full drocat-neuron-results-layout"):
             with ui.element("section").classes("drocat-neuron-match-panel"):
                 with ui.row().classes("w-full items-center justify-between gap-2"):
@@ -973,6 +1030,33 @@ def _render_index(
                         </q-tr>
                         """,
                     )
+                    # The header select-all mirrors the row checkboxes but
+                    # selects every matching row across all pages, not just the
+                    # current page. The checkbox is view-only (``:model-value``)
+                    # so the server can drive the selection and refresh the whole
+                    # table from the persistent key set.
+                    table.add_slot(
+                        "header",
+                        r"""
+                        <q-tr :props="props">
+                          <q-th auto-width class="drocat-neuron-select-cell">
+                            <q-checkbox
+                              :model-value="props.selected"
+                              :indeterminate="props.selected === null"
+                              dense
+                              @click.stop="$parent.$emit('full-table-select-all')"
+                            />
+                          </q-th>
+                          <q-th
+                            v-for="col in props.cols"
+                            :key="col.name"
+                            :props="props"
+                          >
+                            {{ col.label }}
+                          </q-th>
+                        </q-tr>
+                        """,
+                    )
 
         state = {"page": initial.page, "page_size": 50}
         # A QTable gesture may emit both a value-click and a selection event.
@@ -1108,6 +1192,7 @@ def _render_index(
         focus_keys=None,
         focus_anchor_key: str | None = None,
     ):
+        nonlocal full_table_all_keys
         if reset_page:
             state["page"] = 1
             match_state["page"] = 1
@@ -1116,21 +1201,13 @@ def _render_index(
         except (TypeError, ValueError):
             current_page_size = 50
         state["page_size"] = current_page_size
-        requested_sort = sort_column.value
-        if requested_sort == "__match_value__":
-            # Ascending matched-value order is the implicit default. Preserve
-            # an explicitly chosen descending direction for that same sort.
-            requested_sort = (
-                "__match_value__" if direction.value == "desc" else None
-            )
+        # Selecting every row needs the complete result set; fetching it here
+        # would make every keystroke build the whole key map, so it stays lazy.
+        full_table_all_keys = None
         def run_query(requested_page: int, requested_focus_key: str | None = None):
             return query_neuron_index(
                 index,
-                search=search_input.value or "",
-                search_column=target_column.value,
-                search_operator=filter_operator.value,
-                sort_by=requested_sort,
-                descending=direction.value == "desc",
+                **current_query_kwargs(),
                 page=requested_page,
                 page_size=current_page_size,
                 focus_key=requested_focus_key,
@@ -1262,6 +1339,7 @@ def _render_index(
     match_next_button.on_click(lambda: change_match_page(1))
     match_table.on("match-value-click", handle_match_value_click)
     match_table.on("match-selection-toggle", handle_match_toggle)
+    table.on("full-table-select-all", handle_full_table_select_all)
     refresh()
 
 
