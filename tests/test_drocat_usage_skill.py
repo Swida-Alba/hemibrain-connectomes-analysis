@@ -145,20 +145,26 @@ def test_module_launcher_dry_run_resolves_repo_root() -> None:
     assert str(ROOT / "scripts" / "FindPath.py") in result.stdout
 
 
-def test_readme_exposes_local_skills_no_fetch() -> None:
+def test_readme_exposes_install_prompt_and_local_analysis_skills() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     install = (ROOT / "docs" / "INSTALLATION.md").read_text(encoding="utf-8")
-    # local skill paths are referenced
+    # local analysis-skill paths are referenced
     assert "skills/drocat-usage/SKILL.md" in readme
     assert "skills/drocat-backend/SKILL.md" in readme
     assert "skills/drocat-install/SKILL.md" in readme
     assert "docs/INSTALLATION.md" in readme
     assert "run_DROCAT.command" in readme  # one-click install & launch
     assert "deepseek-v4-flash" in readme
-    # the raw fetch command must be gone from BOTH docs
-    assert "raw.githubusercontent.com" not in readme
+    # Option 2 is a copyable prompt that fetches the install skill
+    assert "Copy the following prompt to your AI agent" in readme
+    assert (
+        "Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-install/SKILL.md"
+        in readme
+    )
+    # the analysis skills are checked-in, so no fetch is required for analysis
+    assert "no fetch is required" in readme
+    # INSTALLATION has no raw fetch URL
     assert "raw.githubusercontent.com" not in install
-    assert "finish the requested analysis end-to-end" not in readme
 
 
 def test_skills_are_checked_in_no_fetch_required() -> None:
