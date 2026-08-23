@@ -305,7 +305,7 @@ fi
 
 printf "\n%bInstallation complete.%b\n" "$GREEN" "$NC"
 printf 'Environment: %s\n' "$ENV_NAME"
-printf '%s\n' 'Launch with: ./run_DROCAT.command'
+printf '%s\n' 'Launch with: ./mac_DROCAT.command'
 
 # --- Token configuration notice ---
 # Tokens are NOT collected in the terminal: they are set in the UI Settings

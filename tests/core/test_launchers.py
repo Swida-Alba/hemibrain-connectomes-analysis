@@ -1,6 +1,7 @@
 """Structural tests for the launchers and installers: the unified
-run_DROCAT.* files, the packed installers, and the token workflow they
-implement. These guard the first-run / self-healing / token UX contract."""
+mac_DROCAT.command / windows_DROCAT.bat files, the packed installers, and the
+token workflow they implement. These guard the first-run / self-healing /
+token UX contract."""
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -8,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class TestRunDrocatLaunchers:
     def test_macos_launcher_is_self_healing(self):
-        text = (ROOT / "run_DROCAT.command").read_text(encoding="utf-8")
+        text = (ROOT / "mac_DROCAT.command").read_text(encoding="utf-8")
         # installs on demand from the packed location
         assert "archive/install/install.sh" in text
         assert "Conda is not installed" in text
@@ -36,7 +37,7 @@ class TestRunDrocatLaunchers:
         assert "Press Return to close" in text
 
     def test_windows_launcher_mirrors(self):
-        text = (ROOT / "run_DROCAT.bat").read_text(encoding="utf-8")
+        text = (ROOT / "windows_DROCAT.bat").read_text(encoding="utf-8")
         assert "archive\\install\\install.ps1" in text
         assert "Your choice [1-3]" in text
         assert "taskkill /PID" in text
@@ -80,7 +81,7 @@ class TestInstallers:
         assert 'PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"' in text
         assert 'verify_install.py --project "$PROJECT_ROOT"' in text
         assert 'cd "$PROJECT_ROOT"' in text
-        assert "run_DROCAT.command" in text
+        assert "mac_DROCAT.command" in text
         # config_local.json is never auto-created (developer-managed); the
         # versioned env override is consulted before the default auto-find
         assert 'cp "$CONFIG_FILE" "$CONFIG_LOCAL"' not in text

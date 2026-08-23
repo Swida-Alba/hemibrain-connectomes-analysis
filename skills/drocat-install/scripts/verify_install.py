@@ -169,8 +169,8 @@ def main() -> int:
     # Project layout
     check("project directory", project.is_dir(), str(project))
     for rel in [
-        "run_DROCAT.command",
-        "run_DROCAT.bat",
+        "mac_DROCAT.command",
+        "windows_DROCAT.bat",
         "archive/install/install.sh",
         "archive/install/install.ps1",
         "archive/install/install.bat",

@@ -25,7 +25,7 @@ Rules:
   After the environment is selected, the installers **and** launchers write the
   actual env name back into `config_local.json`; the committed `config.json` is
   never rewritten.
-- The launchers (`run_DROCAT.command` / `run_DROCAT.bat`) resolve the same
+- The launchers (`mac_DROCAT.command` / `windows_DROCAT.bat`) resolve the same
   override first.
 
 To force a fresh env even when `drocat-4.5.0` exists, set a new custom name in

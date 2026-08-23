@@ -33,8 +33,8 @@ symptoms.
 
 ### macOS
 - Miniconda at `~/miniconda3` or Anaconda at `~/anaconda3`; both are
-  auto-detected by `install.sh` and `run_DROCAT.command`.
-- `run_DROCAT.command` (double-click) repairs/creates the env through the same
+  auto-detected by `install.sh` and `mac_DROCAT.command`.
+- `mac_DROCAT.command` (double-click) repairs/creates the env through the same
   installer, then launches the UI.
 - Matplotlib "font cache" warnings on first import are benign.
 - Open the UI with `python ui/app.py`; use `DROCAT_UI_SHOW=0` for headless.
@@ -47,7 +47,7 @@ symptoms.
 - Installers and launchers use `conda run`; shell initialization is not required.
 
 ### Linux
-- Same flow as macOS (`bash archive/install/install.sh`, `./run_DROCAT.command`).
+- Same flow as macOS (`bash archive/install/install.sh`, `./mac_DROCAT.command`).
 - `xdg-open` opens output folders; install `xdg-utils` if missing.
 - If `tkinter` is unavailable, native folder pickers fall back to typing paths
   (the UI still works).
@@ -73,7 +73,7 @@ symptoms.
   the full neuron table (needs token + network, can take minutes).
 - FlyWire FAFB/BANC require manually downloaded local files (Settings tab guide).
 - UI port 8080 busy: set `DROCAT_UI_PORT` (for example
-  `DROCAT_UI_PORT=8081 ./run_DROCAT.command`) or stop the other process.
+  `DROCAT_UI_PORT=8081 ./mac_DROCAT.command`) or stop the other process.
 - 3D PNG/video exports use Chrome + WebDriver (Kaleido fallback). Install Chrome
   if exports fail.
 - Neuron indexes are persistent "system files" under `neuron_indexes/` (not

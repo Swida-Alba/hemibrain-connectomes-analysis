@@ -9,9 +9,9 @@ dependencies, `pip check`, and a bundled verifier.
 
 | Platform | Install + Launch |
 | --- | --- |
-| macOS | Double-click `run_DROCAT.command` (installs on first run) |
-| Linux | `./run_DROCAT.command` |
-| Windows | Double-click `run_DROCAT.bat` (installs on first run) |
+| macOS | Double-click `mac_DROCAT.command` (installs on first run) |
+| Linux | `./mac_DROCAT.command` |
+| Windows | Double-click `windows_DROCAT.bat` (installs on first run) |
 
 Standalone installers (usually only needed for repairs or scripting): `bash archive/install/install.sh` (macOS/Linux), `powershell -ExecutionPolicy Bypass -File archive/install/install.ps1` (Windows).
 
@@ -140,7 +140,7 @@ To fetch the release first:
 ```bash
 git clone --branch v4.5.0 https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git drocat
 cd drocat
-./run_DROCAT.command
+./mac_DROCAT.command
 ```
 
 For agent-driven analysis *without* the UI, use the checked-in skills:
@@ -280,7 +280,7 @@ For the complete operation catalog and recipes, see
 | Problem | Fix |
 | --- | --- |
 | `pip check` fails / dependency conflict | Re-run the one-click installer; it repairs the env. The release pins `chardet==5.2.0` (Requests/CloudVolume compatibility). |
-| Port 8080 busy | Running `run_DROCAT.command` / `run_DROCAT.bat` interactively now asks what to do: **[1]** start on a new port, **[2]** kill the existing DROCAT process and restart on the same port (non-DROCAT processes are never auto-killed), **[3]** cancel. Manual override: `DROCAT_UI_PORT=8081 ./run_DROCAT.command` (Windows: `set DROCAT_UI_PORT=8081 && run_DROCAT.bat`). |
+| Port 8080 busy | Running `mac_DROCAT.command` / `windows_DROCAT.bat` interactively now asks what to do: **[1]** start on a new port, **[2]** kill the existing DROCAT process and restart on the same port (non-DROCAT processes are never auto-killed), **[3]** cancel. Manual override: `DROCAT_UI_PORT=8081 ./mac_DROCAT.command` (Windows: `set DROCAT_UI_PORT=8081 && windows_DROCAT.bat`). |
 | PNG/video export fails | Install Google Chrome (WebGL/ChromeDriver). Kaleido is the fallback. |
 | Native folder picker missing | Type the path directly. Linux may need `tkinter` / `xdg-utils`. |
 

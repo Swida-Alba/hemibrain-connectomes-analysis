@@ -50,8 +50,8 @@ DROCAT is a Python toolkit for analyzing and visualizing connectome data from **
 
 | Platform | Command |
 | --- | --- |
-| macOS / Linux | `./run_DROCAT.command` (or double-click) |
-| Windows | `run_DROCAT.bat` (or double-click) |
+| macOS / Linux | `./mac_DROCAT.command` (or double-click) |
+| Windows | `windows_DROCAT.bat` (or double-click) |
 
 On first run it creates the versioned `drocat-4.5.0` Python 3.11 environment (via the bundled installer in `archive/install/`), installs the pinned dependencies, runs `pip check`, verifies the installation, and opens the web UI at **http://127.0.0.1:8080**. Later runs are self-healing: a missing or inconsistent environment is repaired automatically before starting. If the port is busy, the launcher offers a new one interactively.
 
@@ -65,7 +65,7 @@ one-tab analyses and [`drocat-backend`](skills/drocat-backend/SKILL.md) for
 flexible backend composition. They are part of the repository, so an installed
 agent has them — no fetch is required.
 
-**Manual launch** (after installation) — double-click `run_DROCAT.command` (macOS / Linux) or `run_DROCAT.bat` (Windows), or from a terminal:
+**Manual launch** (after installation) — double-click `mac_DROCAT.command` (macOS / Linux) or `windows_DROCAT.bat` (Windows), or from a terminal:
 
 ```bash
 conda activate drocat-4.5.0 && python ui/app.py

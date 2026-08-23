@@ -153,7 +153,7 @@ def test_readme_exposes_install_prompt_and_local_analysis_skills() -> None:
     assert "skills/drocat-backend/SKILL.md" in readme
     assert "skills/drocat-install/SKILL.md" in readme
     assert "docs/INSTALLATION.md" in readme
-    assert "run_DROCAT.command" in readme  # one-click install & launch
+    assert "mac_DROCAT.command" in readme  # one-click install & launch
     assert "deepseek-v4-flash" in readme
     # Option 2 is a copyable prompt that starts with Fetching the install skill;
     # both the lead-in and the prompt state it finishes cloning, installing,

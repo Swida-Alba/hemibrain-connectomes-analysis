@@ -303,7 +303,7 @@ if (-not $Verified) { throw "Environment verification failed after one rebuild r
 Write-Host ""
 Write-Host "Installation complete." -ForegroundColor Green
 Write-Host "Environment: $script:EnvName"
-Write-Host "Launch with: run_DROCAT.bat"
+Write-Host "Launch with: windows_DROCAT.bat"
 
 # --- Token configuration notice ---
 # Tokens are NOT collected in the terminal: they are set in the UI Settings

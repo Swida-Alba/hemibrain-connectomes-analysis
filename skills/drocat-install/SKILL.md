@@ -41,7 +41,7 @@ git checkout v4.5.0
 
 - If the user already has the repository locally, reuse it (ask if the path is
   not obvious) and skip the clone.
-- Confirm the required files exist: `run_DROCAT.command` / `run_DROCAT.bat`
+- Confirm the required files exist: `mac_DROCAT.command` / `windows_DROCAT.bat`
   (launchers), `archive/install/install.sh` (macOS/Linux), `archive/install/install.ps1` /
   `archive/install/install.bat` (Windows), `ui/app.py`, `src/coana.py`,
   `requirements.txt`.
@@ -57,8 +57,8 @@ steps manually.
   verifier, and asks for NeuPrint/CAVE tokens on interactive terminals).
 - **Windows:** `powershell -ExecutionPolicy Bypass -File archive/install/install.ps1`
   or `archive/install/install.bat`.
-- **Self-healing launcher (any platform):** `./run_DROCAT.command` (macOS/Linux)
-  or `run_DROCAT.bat` (Windows) invokes the same installer when the environment is
+- **Self-healing launcher (any platform):** `./mac_DROCAT.command` (macOS/Linux)
+  or `windows_DROCAT.bat` (Windows) invokes the same installer when the environment is
   missing or inconsistent, then launches the UI.
 
 The installers are idempotent: an existing `drocat-4.5.0` environment with the
@@ -83,7 +83,7 @@ configured workstation. The verifier needs no network.
 
 ### 4. Launch the UI
 
-- `./run_DROCAT.command` (macOS/Linux) or `run_DROCAT.bat` (Windows), or
+- `./mac_DROCAT.command` (macOS/Linux) or `windows_DROCAT.bat` (Windows), or
   `conda activate drocat-4.5.0 && python ui/app.py`.
 - Confirm the server responds: `curl -s http://127.0.0.1:8080/` should contain
   `DROCAT`.
