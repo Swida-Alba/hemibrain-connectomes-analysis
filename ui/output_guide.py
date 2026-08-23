@@ -282,23 +282,70 @@ def _math_to_md(description: str) -> str:
 
 
 def _math_to_html(description: str) -> str:
-    """Rewrite $...$ fragments to MathJax \\(...\\) for HTML output.
+    """Render $...$ fragments as self-contained styled HTML math.
 
-    MathJax reads the \\( delimiter from the page source, so each fragment
-    must be emitted with two backslashes (the browser's JS parser collapses
-    them to the \\( MathJax uses).
+    No MathJax / external script is required: each fragment becomes a Unicode
+    math string with <sub>/<sup> markup wrapped in a <span class="math">, so
+    the guide renders the formula correctly even when opened offline.
     """
     return re.sub(
         r"\$([^$]+)\$",
-        lambda m: _HTML_MATH_OPEN + m.group(1) + _HTML_MATH_CLOSE,
+        lambda m: '<span class="math">' + _latex_to_html(m.group(1)) + '</span>',
         description,
     )
 
 
-# Inline MathJax delimiters: two backslashes + the bracket, so the page source
-# shows \\( and \\) and the browser turns them into the \\(/\\) MathJax uses.
-_HTML_MATH_OPEN = r"\\("
-_HTML_MATH_CLOSE = r"\\)"
+# Shared LaTeX -> glyph substitution map (order-sensitive: long commands first).
+# Note: escaped underscores (\_) are intentionally NOT mapped here so the
+# subscript parser can tell a real subscript from a literal underscore.
+_MATH_SYMBOL_SUBS = [
+    (r"\lVert", "‖"), (r"\rVert", "‖"),
+    (r"\lvert", "|"), (r"\rvert", "|"),
+    (r"\left(", "("), (r"\right)", ")"),
+    (r"\langle", "⟨"), (r"\rangle", "⟩"),
+    (r"\min", "min"), (r"\max", "max"),
+    (r"\cdot", "·"), (r"\sum", "Σ"), (r"\prod", "Π"),
+    (r"\rho", "ρ"), (r"\cap", "∩"), (r"\cup", "∪"),
+    (r"\,", " "),
+]
+
+
+def _latex_to_uniform(math_text: str) -> str:
+    """Convert the small LaTeX subset used by the glossary to a uniform string
+    with ``_{<..>}`` / ``^{<..>}`` and single-token sub/superscript markers.
+    """
+    stash: dict = {}
+
+    def _store(m):
+        key = f"\x00T{len(stash)}\x00"
+        stash[key] = m.group(1).replace(r"\_", "_")
+        return key
+
+    math_text = re.sub(r"\\text\{([^}]*)\}", _store, math_text)
+    for old, new in _MATH_SYMBOL_SUBS:
+        math_text = math_text.replace(old, new)
+    # Subscripts / superscripts: braced forms first, then single-token forms.
+    math_text = re.sub(r"(?<!\\)_\{([^}]*)\}\s*", r"_{<\1>}", math_text)
+    math_text = re.sub(r"(?<!\\)\^\{([^}]*)\}\s*", r"^{<\1>}", math_text)
+    math_text = re.sub(r"(?<!\\)_([A-Za-z0-9]+)", r"_{<\1>}", math_text)
+    math_text = re.sub(r"(?<!\\)\^([A-Za-z0-9]+)", r"^{<\1>}", math_text)
+    math_text = math_text.replace(r"\_", "_").replace("\\", "")
+    # LaTeX puts a space after an opening delimiter (| A -> |A) and before a
+    # closing one (A | -> A|); drop it so set/norm formulas read tightly.
+    math_text = re.sub(r"(?<=[|‖⟨])\s+", "", math_text)
+    math_text = re.sub(r"\s+(?=[|‖⟩])", "", math_text)
+    math_text = re.sub(r"\s{2,}", " ", math_text)
+    for key, inner in stash.items():
+        math_text = math_text.replace(key, inner)
+    return math_text
+
+
+def _latex_to_html(math_text: str) -> str:
+    """Render a math fragment as HTML with </sub>/<sup> markup."""
+    uniform = _latex_to_uniform(math_text)
+    uniform = re.sub(r"_\{<([^>]*)>\}", r"<sub>\1</sub>", uniform)
+    uniform = re.sub(r"\^\{<([^>]*)>\}", r"<sup>\1</sup>", uniform)
+    return uniform
 
 
 def _math_to_txt(description: str) -> str:
@@ -311,26 +358,12 @@ def _latex_to_plain(text: str) -> str:
 
     Keep it minimal and order-sensitive (long commands first), so the plain
     txt guide stays readable without embedding raw TeX. Function names
-    (min/max) are preserved as words; set/norm delimiters lose the inner
-    spacing LaTeX inserts around operands.
+    (min/max) are preserved as words; sub/superscripts are flattened to a
+    single line (w_a -> wa) and set/norm delimiters lose the inner spacing.
     """
-    text = re.sub(r"\\text\{([^}]*)\}", r"\1", text)
-    subs = [
-        (r"\lVert", "‖"), (r"\rVert", "‖"),
-        (r"\lvert", "|"), (r"\rvert", "|"),
-        (r"\left(", "("), (r"\right)", ")"),
-        (r"\langle", "⟨"), (r"\rangle", "⟩"),
-        (r"\min", "min"), (r"\max", "max"),
-        (r"\cdot", "·"), (r"\sum", "Σ"), (r"\prod", "Π"),
-        (r"\rho", "ρ"), (r"\cap", "∩"), (r"\cup", "∪"),
-        (r"\,", " "), (r"\_", "_"),
-    ]
-    for old, new in subs:
-        text = text.replace(old, new)
-    # LaTeX puts a space after a delimiter command before its operand;
-    # plain text reads better without it (| A -> |A, ‖ A -> ‖A, ⟨ A -> ⟨A).
-    text = re.sub(r"([|‖⟨])\s+", r"\1", text)
-    return re.sub(r"\\[a-zA-Z]+\b", "", text)  # drop any leftover commands
+    uniform = _latex_to_uniform(text)
+    uniform = re.sub(r"[_^]\{<([^>]*)>\}", r"\1", uniform)
+    return re.sub(r"\\[a-zA-Z]+\b", "", uniform)  # drop any leftover commands
 
 
 # =============================================================================
@@ -1240,21 +1273,10 @@ code { background: #eef1f7; border-radius: 4px; padding: 1px 5px;
 .fname { font-weight: 600; color: #12305e; }
 .desc { margin: 6px 0; }
 .small { color: #5b6b84; font-size: 0.85em; }
+.math { font-family: 'Cambria Math', 'STIX Two Math', 'Latin Modern Math',
+        Georgia, 'Times New Roman', serif; white-space: nowrap; }
+.math sub, .math sup { font-size: 0.7em; line-height: 0; }
 """
-
-
-# Load MathJax so inline $...$ formula fragments present as formatted math.
-# Inline delimiters are configured to (...); the HTML renderer rewrites the
-# glossary's $...$ markers to those before inserting the description.
-_MATHJAX = (
-    "<script>window.MathJax = {tex: {inlineMath: [['"
-    r"\\("
-    "', '"
-    r"\\)"
-    "']]}};</script>\n"
-    "<script async src=\"https://cdn.jsdelivr.net/npm/mathjax@3/es5/"
-    "tex-mml-chtml.js\"></script>"
-)
 
 
 def _html_escape(text) -> str:
@@ -1272,7 +1294,6 @@ def render_html(content: dict) -> str:
     parts.append(f"<title>DROCAT Run Guide — "
                  f"{_html_escape(content['title'])}</title>")
     parts.append(f"<style>{_HTML_STYLE}</style>")
-    parts.append(_MATHJAX)
     parts.append("</head>")
     parts.append("<body>")
     parts.append("<main>")
@@ -1334,7 +1355,7 @@ def render_html(content: dict) -> str:
                 description, value_range = glossary_entry(column)
                 parts.append(
                     f"<tr><td><code>{_html_escape(column)}</code></td>"
-                    f"<td>{_html_escape(_math_to_html(description))}</td>"
+                    f"<td>{_math_to_html(_html_escape(description))}</td>"
                     f"<td>{_html_escape(value_range)}</td></tr>")
             parts.append("</table>")
         parts.append("</div>")

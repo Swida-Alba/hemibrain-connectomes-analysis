@@ -134,6 +134,30 @@ class TestWriteRunGuide:
         assert '<a href="visualization/Network_20240101.html"' not in text
         # (nested viz files are intentionally not linked)
 
+    def test_formulas_render_as_self_contained_html_math(self, tmp_path):
+        """Score formulas in the exported HTML guide must render as styled
+        Unicode math (no MathJax / external script), not as raw $...$/LaTeX."""
+        run = _make_pathfinding_folder(tmp_path)
+        path = guide.write_run_guide(run, "find_path", PARAMS, fmt="html")
+        text = path.read_text(encoding="utf-8")
+        # No MathJax CDN and no raw TeX delimiters.
+        assert "mathjax" not in text
+        assert "\\lvert" not in text
+        # Formulas are wrapped in a styled span with sub/superscript markup.
+        assert '<span class="math">' in text
+        assert "<sub>" in text
+        # connection_ratio carries its formula (w_ij / sum_k w_kj).
+        assert "w<sub>ij</sub>" in text
+        assert "Σ<sub>k</sub>" in text
+
+    def test_markdown_keeps_inline_latex_math(self, tmp_path):
+        """Markdown output keeps the standard $...$ inline-math markers."""
+        run = _make_pathfinding_folder(tmp_path)
+        path = guide.write_run_guide(run, "find_path", PARAMS, fmt="markdown")
+        text = path.read_text(encoding="utf-8")
+        assert "$w_{ij} / \\sum_k w_{kj}$" in text
+        assert "$\\min(1.0,\\ connection\\_ratio/0.3)$" in text
+
     def test_txt_format(self, tmp_path):
         run = _make_pathfinding_folder(tmp_path)
         path = guide.write_run_guide(run, "find_path", PARAMS, fmt="txt")
