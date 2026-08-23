@@ -55,9 +55,9 @@ DROCAT is a Python toolkit for analyzing and visualizing connectome data from **
 
 On first run it creates the versioned `drocat-4.5.0` Python 3.11 environment (via the bundled installer in `archive/install/`), installs the pinned dependencies, runs `pip check`, verifies the installation, and opens the web UI at **http://127.0.0.1:8080**. Later runs are self-healing: a missing or inconsistent environment is repaired automatically before starting. If the port is busy, the launcher offers a new one interactively.
 
-**Option 2 — Agent-assisted install.** Copy the following prompt to your AI agent and let it finish installing, verifying, and launching DROCAT:
+**Option 2 — Agent-assisted install.** Copy the following prompt to your AI agent and let it finish cloning the repo, installing, verifying, and launching DROCAT:
 
-> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-install/SKILL.md and follow it to finish installing, verifying, and launching DROCAT on this machine.
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-install/SKILL.md and follow it to finish cloning the repo, installing, verifying, and launching DROCAT on this machine.
 
 For script analysis without the UI, the agent uses the checked-in analysis skills
 (with the UI closed): [`drocat-usage`](skills/drocat-usage/SKILL.md) for

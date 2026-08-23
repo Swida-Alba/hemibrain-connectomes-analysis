@@ -155,10 +155,15 @@ def test_readme_exposes_install_prompt_and_local_analysis_skills() -> None:
     assert "docs/INSTALLATION.md" in readme
     assert "run_DROCAT.command" in readme  # one-click install & launch
     assert "deepseek-v4-flash" in readme
-    # Option 2 is a copyable prompt that fetches the install skill
+    # Option 2 is a copyable prompt that starts with Fetching the install skill;
+    # both the lead-in and the prompt state it finishes cloning, installing,
+    # verifying, and launching
     assert "Copy the following prompt to your AI agent" in readme
+    assert "let it finish cloning the repo, installing, verifying, and launching DROCAT" in readme
+    assert "Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-install/SKILL.md" in readme
+    assert "follow it to finish cloning the repo, installing, verifying, and launching DROCAT" in readme
     assert (
-        "Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-install/SKILL.md"
+        "https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-install/SKILL.md"
         in readme
     )
     # the analysis skills are checked-in, so no fetch is required for analysis
