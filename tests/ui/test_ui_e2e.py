@@ -98,6 +98,10 @@ class TestRunner:
                 code,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                # The splitter decodes subprocess output as UTF-8; on
+                # non-UTF-8 Windows locales the child must emit UTF-8 or the
+                # tqdm block characters arrive as replacement chars.
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
             )
             events = []
             await runner._stream_output(lambda msg, level: events.append((level, msg)))
@@ -3163,8 +3167,10 @@ class TestDatasetService:
         assert service._fetch_neuprint_counts("hemibrain:v1.2.1") == (0, 0)
 
     def test_settings_guide_matches_converter_layout(self):
-        guide = (PROJECT_ROOT / "docs" / "ui_guides" / "settings.html").read_text()
-        embedded_guide = (PROJECT_ROOT / "ui" / "tabs" / "settings.py").read_text()
+        guide = (PROJECT_ROOT / "docs" / "ui_guides" / "settings.html").read_text(
+            encoding="utf-8")
+        embedded_guide = (PROJECT_ROOT / "ui" / "tabs" / "settings.py").read_text(
+            encoding="utf-8")
         assert "datasets/&lt;dataset&gt;/downloads/" in guide
         assert "classification.csv.gz" in guide
         assert "connections_princeton_no_threshold.csv.gz" in guide
@@ -6278,7 +6284,9 @@ class TestHTTPServer:
         )
         try:
             url = f"http://127.0.0.1:{port}"
-            deadline = time.monotonic() + 15
+            # Cold start of ui/app.py (imports plotly/k3d/open3d/nicegui) can
+            # take 20+ s on slower machines, so allow a generous deadline.
+            deadline = time.monotonic() + 120
             while True:
                 if proc.poll() is not None:
                     stdout, stderr = proc.communicate()
@@ -6287,7 +6295,7 @@ class TestHTTPServer:
                         f"stdout:\n{stdout}\nstderr:\n{stderr}"
                     )
                 try:
-                    with urllib.request.urlopen(url, timeout=1) as response:
+                    with urllib.request.urlopen(url, timeout=5) as response:
                         html = response.read().decode()
                         assert response.status == 200
                         assert "DROCAT" in html

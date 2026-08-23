@@ -44,7 +44,8 @@ def test_cache_disabled_does_not_create_api_cache_directories(tmp_path):
     )
 
     assert not (tmp_path / "cache").exists()
-    assert fetcher.get_cache_path().endswith("cache/flywire_FAFB_v783/API_cache")
+    assert Path(fetcher.get_cache_path()).as_posix().endswith(
+        "cache/flywire_FAFB_v783/API_cache")
 
 
 def test_fafb_mesh_fetch_disables_unsupported_draco_deduplication(
@@ -92,10 +93,11 @@ def test_banc_cache_namespace_keeps_requested_release(tmp_path):
         verbose=False,
     )
 
-    assert fetcher.get_cache_path().endswith(
+    assert Path(fetcher.get_cache_path()).as_posix().endswith(
         "cache/flywire_BANC_v888/API_cache"
     )
-    assert fetcher._get_skeleton_cache_path("72057594037927937").endswith(
+    assert Path(
+        fetcher._get_skeleton_cache_path("72057594037927937")).as_posix().endswith(
         "cache/flywire_BANC_v888/skeletons/raw_skeletons/"
         "72057594037927937.swc.zst"
     )

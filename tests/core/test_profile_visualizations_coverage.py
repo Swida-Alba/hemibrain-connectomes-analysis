@@ -343,7 +343,7 @@ def test_generate_html_report(summary_df, similarity_matrix, tmp_path):
                                   "csv": "/tmp/x/data.csv"},
     )
     assert path == out
-    html = open(out).read()
+    html = open(out, encoding="utf-8").read()
     assert "Test Verification Report" in html
     assert "Verification Summary" in html
     assert "Jaccard Similarity Matrix" in html
@@ -358,7 +358,7 @@ def test_generate_html_report_minimal(tmp_path):
         {"summary": pd.DataFrame()}, output_path=out
     )
     assert os.path.exists(path)
-    html = open(path).read()
+    html = open(path, encoding="utf-8").read()
     assert "<html" in html
 
 

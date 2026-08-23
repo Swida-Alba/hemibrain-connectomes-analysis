@@ -176,12 +176,19 @@ def show_stats(dataset: str) -> None:
                     rows_pre = set(conn_df['bodyId_pre'].astype(str))
                 except (NameError, KeyError):
                     pass
-                flagged_zero = set(
-                    index_df.loc[
-                        index_df['downstream_complete'] & (index_df['connection_count'] == 0),
-                        'bodyId',
-                    ].astype(str)
-                )
+                if 'connection_count' in index_df.columns:
+                    flagged_zero = set(
+                        index_df.loc[
+                            index_df['downstream_complete'] & (index_df['connection_count'] == 0),
+                            'bodyId',
+                        ].astype(str)
+                    )
+                else:
+                    # Older indexes predate connection_count; fall back to the
+                    # zero-outdegree flag alone (it already proves completeness).
+                    flagged_zero = set(
+                        index_df.loc[index_df['downstream_complete'], 'bodyId'].astype(str)
+                    )
                 complete = len(rows_pre | flagged_zero)
                 print(f"  Fully cached neurons: {complete:,} ({100*complete/len(index_df):.1f}%)")
         except Exception as e:

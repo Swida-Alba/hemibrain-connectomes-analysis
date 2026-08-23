@@ -242,7 +242,9 @@ class TestPullDatasetChunked:
             with lock:
                 active += 1
                 max_active = max(max_active, active)
-            _time.sleep(0.02)
+            # A real blocking wait (not time.sleep, which the test stubs)
+            # forces the chunk fetches to overlap in the worker pool.
+            threading.Event().wait(0.02)
             ids = criteria.bodyId if isinstance(criteria.bodyId, list) else [criteria.bodyId]
             result = _make_chunk_df(ids), _make_chunk_df(ids)
             with lock:

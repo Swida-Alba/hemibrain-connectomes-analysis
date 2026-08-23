@@ -2,9 +2,9 @@ import os
 import pandas as pd
 
 try:
-    from .flywire_ids import normalize_flywire_id_columns
+    from .flywire_ids import canonicalize_flywire_id_expr, normalize_flywire_id_columns
 except ImportError:
-    from flywire_ids import normalize_flywire_id_columns
+    from flywire_ids import canonicalize_flywire_id_expr, normalize_flywire_id_columns
 
 try:
     from .utils.flywire_readiness import print_download_instructions
@@ -170,10 +170,7 @@ def process_connections_to_parquet(read_path, save_path):
         # integral '123.0' spellings) - same semantics as
         # normalize_flywire_id_columns, vectorized.
         def _canonical_ids(column: str):
-            s = pl.col(column).cast(pl.Utf8).str.strip_chars()
-            s = s.str.replace(r'^([0-9]+)\.0+$', '${1}')
-            s = s.str.strip_chars_start('0')
-            return pl.when(s.str.len_chars() == 0).then(pl.lit('0')).otherwise(s)
+            return canonicalize_flywire_id_expr(column)
 
         for column in ('bodyId_pre', 'bodyId_post'):
             if column in df.columns:

@@ -79,9 +79,9 @@ def _maybe_recompress_healed_bundle(dataset_dir, moved_zip: bool) -> None:
     _run_recompression_script(dataset_dir, "prompt")
 
 try:
-    from .flywire_ids import normalize_flywire_id_columns
+    from .flywire_ids import canonicalize_flywire_id_expr, normalize_flywire_id_columns
 except ImportError:
-    from flywire_ids import normalize_flywire_id_columns
+    from flywire_ids import canonicalize_flywire_id_expr, normalize_flywire_id_columns
 
 try:
     from .utils.flywire_readiness import print_download_instructions as _print_flywire_download_instructions
@@ -439,14 +439,7 @@ def process_synapse_table_to_parquet(read_path, save_path, chunksize=100000):
         # vectorized pass: every 9-digit ID gets the 720575940 prefix, then
         # the exact-string canonicalization runs like the rest of DROCAT.
         def _fix_ids(column: str):
-            s = pl.col(column).cast(pl.Utf8)
-            s = pl.when(s.str.len_chars() == 9).then(
-                pl.concat_str(pl.lit('720575940'), s)
-            ).otherwise(s)
-            s = s.str.strip_chars()
-            s = s.str.replace(r'^([0-9]+)\.0+$', '${1}')
-            s = s.str.strip_chars_start('0')
-            return pl.when(s.str.len_chars() == 0).then(pl.lit('0')).otherwise(s)
+            return canonicalize_flywire_id_expr(column)
 
         for column in (pre_root_id_col, post_root_id_col):
             df = df.with_columns(_fix_ids(column).alias(column))

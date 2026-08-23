@@ -432,6 +432,11 @@ class ScriptRunner:
             env["PYTHONPATH"] = str(SRC_DIR) + os.pathsep + str(PROJECT_ROOT)
             # Run unbuffered so log lines stream to the UI in real time
             env["PYTHONUNBUFFERED"] = "1"
+            # Force UTF-8 for the child's stdout/stderr pipes: on non-UTF-8
+            # Windows locales (e.g. zh-CN/GBK) the child would otherwise emit
+            # cp936 bytes, which _stream_output decodes as UTF-8, turning any
+            # non-ASCII output (tqdm bars, ✓, ∩, …) into replacement chars.
+            env["PYTHONIOENCODING"] = "utf-8"
 
             # Create subprocess.  Keep the tracker on its initialization step
             # until the generated script confirms that initialization ended.

@@ -115,8 +115,11 @@ def _ensure_node_with_cytoscape(node_cache):
     node_cache.mkdir(parents=True, exist_ok=True)
     npm_env = os.environ.copy()
     npm_env["npm_config_cache"] = str(node_cache / ".npm-cache")
+    # Use the resolved npm path (npm.CMD on Windows): CreateProcess does not
+    # resolve a bare "npm" through PATHEXT, so subprocess.run(["npm", ...])
+    # raises FileNotFoundError on Windows even when npm is installed.
     res = subprocess.run(
-        ["npm", "install", "cytoscape@3.28.1", "--no-audit", "--no-fund", "--prefix", str(node_cache)],
+        [npm, "install", "cytoscape@3.28.1", "--no-audit", "--no-fund", "--prefix", str(node_cache)],
         capture_output=True, text=True, timeout=600, env=npm_env,
     )
     if res.returncode != 0 or not cy_path.exists():
@@ -129,6 +132,9 @@ def _run_node_harness(node, harness_name, network_html, node_cache):
     res = subprocess.run(
         [node, str(harness), str(node_cache), str(network_html)],
         capture_output=True, text=True, timeout=300,
+        # Node writes UTF-8; on GBK-locale Windows the default decode would
+        # raise in the reader thread and leave res.stdout as None.
+        encoding="utf-8", errors="replace",
     )
     return res
 
@@ -464,6 +470,11 @@ class TestEdgeListExportMatchesPathfindingInput:
     )
 
     def _exported_rows(self, node, node_cache, tmp_path):
+        if not self.ALLPATHS.exists():
+            pytest.skip(
+                "pathfinding fixture not present: this test needs a prior "
+                f"real FindAllPath smoke run output at {self.ALLPATHS}"
+            )
         assert self.ALLPATHS.exists(), f"missing pathfinding fixture: {self.ALLPATHS}"
         vp = VisualizePath(
             path_file=str(self.ALLPATHS),
@@ -574,6 +585,11 @@ class TestExpandedEdgeListReimport:
         return conn_df, G, csv_path
 
     def test_pathfinding_export_reimports_identically(self, tmp_path):
+        if not self.ALLPATHS.exists():
+            pytest.skip(
+                "pathfinding fixture not present: this test needs a prior "
+                f"real FindAllPath smoke run output at {self.ALLPATHS}"
+            )
         assert self.ALLPATHS.exists(), f"missing pathfinding fixture: {self.ALLPATHS}"
         conn_df, G, csv_path = self._expanded_csv_from_pathfinding(tmp_path)
 

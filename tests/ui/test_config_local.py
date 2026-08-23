@@ -1,5 +1,6 @@
 """Tests for the local UI configuration (ui/config.py): the user-editable
 config JSON round-trip and the default output directory resolution."""
+import os
 import sys
 from pathlib import Path
 
@@ -8,6 +9,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import ui.config as cfg
+
+
+# POSIX "/custom/out" is not absolute on Windows (no drive), so build a
+# platform-correct absolute override path for the tests below.
+_ABS_OVERRIDE = os.path.abspath("/custom/out")
 
 
 class TestLocalConfig:
@@ -32,8 +38,8 @@ class TestLocalConfig:
 
     def test_get_default_output_dir_with_override(self, monkeypatch, tmp_path):
         monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
-        cfg.save_local_config({"default_output_dir": "/custom/out"})
-        assert cfg.get_default_output_dir() == "/custom/out"
+        cfg.save_local_config({"default_output_dir": _ABS_OVERRIDE})
+        assert cfg.get_default_output_dir() == _ABS_OVERRIDE
 
     def test_relative_override_is_rejected(self, monkeypatch, tmp_path):
         monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
@@ -149,9 +155,9 @@ class TestAutoSuggestSetting:
 
     def test_other_keys_survive_toggle(self, monkeypatch, tmp_path):
         monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
-        cfg.save_local_config({"default_output_dir": "/custom/out"})
+        cfg.save_local_config({"default_output_dir": _ABS_OVERRIDE})
         cfg.set_auto_suggest_enabled(False)
-        assert cfg.get_default_output_dir() == "/custom/out"
+        assert cfg.get_default_output_dir() == _ABS_OVERRIDE
 
 
 class TestUserDefaults:
@@ -229,14 +235,14 @@ class TestUserDefaults:
 
     def test_reset_all_clears_and_preserves_other_config(self, monkeypatch, tmp_path):
         monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
-        cfg.save_local_config({"default_output_dir": "/custom/out"})
+        cfg.save_local_config({"default_output_dir": _ABS_OVERRIDE})
         cfg.set_user_default("min_synapse_num", 7)
         cfg.set_user_default("use_cache", False)
         assert cfg.reset_user_defaults() is True
         assert cfg.get_user_defaults() == {}
         assert cfg.get_user_default("min_synapse_num") == cfg.DEFAULTS["min_synapse_num"]
         assert cfg.get_user_default("use_cache") == cfg.DEFAULTS["use_cache"]
-        assert cfg.get_default_output_dir() == "/custom/out"
+        assert cfg.get_default_output_dir() == _ABS_OVERRIDE
 
     def test_registry_covers_groups(self):
         group_ids = {group_id for group_id, _ in cfg.DEFAULT_SETTING_GROUPS}

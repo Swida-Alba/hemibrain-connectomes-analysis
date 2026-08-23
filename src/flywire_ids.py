@@ -20,6 +20,12 @@ from typing import Any, Iterable, Optional
 JS_SAFE_INTEGER = 2**53 - 1
 SIGNED_INT64_MAX = 2**63 - 1
 
+# FlyWire/FAFB body ids are "720575940" + a 9-digit short id.  A bare 9-digit
+# id is the truncated short form and must be completed to its full form before
+# it can be matched against already-full ids in another frame.
+FLYWIRE_SHORT_ID_PREFIX = "720575940"
+SHORT_ID_DIGITS = 9
+
 _DIGITS = re.compile(r"^[0-9]+$")
 _INTEGRAL_DECIMAL = re.compile(r"^([0-9]+)\.0+$")
 
@@ -81,6 +87,21 @@ def _canonical_digits(digits: str) -> str:
     return canonical or "0"
 
 
+def _complete_short_id(text: str) -> str:
+    """Complete a 9-digit FlyWire short id to its full ``720575940`` + id form.
+
+    Ids are exact decimal strings; a 9-digit value is the short-form suffix of
+    a FlyWire body id, so the fixed namespace prefix is prepended.  Longer ids
+    (already full) are returned unchanged after canonicalization.  This unifies
+    the short-form handling used by the FAFB synapse and BANC connection
+    converters with the canonical ``normalize_flywire_body_id`` path.
+    """
+
+    if _DIGITS.fullmatch(text) and len(text) == SHORT_ID_DIGITS:
+        return FLYWIRE_SHORT_ID_PREFIX + text
+    return _canonical_digits(text)
+
+
 def normalize_flywire_body_id(value: Any, *, field: str = "bodyId") -> str:
     """Return an exact canonical decimal string for one FlyWire body ID.
 
@@ -98,7 +119,7 @@ def normalize_flywire_body_id(value: Any, *, field: str = "bodyId") -> str:
         if not text:
             raise FlyWireBodyIdError(f"{field} is empty")
         if _DIGITS.fullmatch(text):
-            return _canonical_digits(text)
+            return _complete_short_id(text)
         match = _INTEGRAL_DECIMAL.fullmatch(text)
         if match:
             digits = _canonical_digits(match.group(1))
@@ -137,12 +158,15 @@ def normalize_flywire_body_id(value: Any, *, field: str = "bodyId") -> str:
         except Exception as exc:  # pragma: no cover - defensive boundary
             raise FlyWireBodyIdError(f"invalid {field}: {value!r}") from exc
         if _DIGITS.fullmatch(text):
-            return _canonical_digits(text)
+            return _complete_short_id(text)
         raise FlyWireBodyIdError(f"invalid {field}: {value!r}")
 
     if integer < 0:
         raise FlyWireBodyIdError(f"{field} must be non-negative: {value!r}")
-    return str(integer)
+    digits = str(integer)
+    if len(digits) == SHORT_ID_DIGITS:
+        digits = FLYWIRE_SHORT_ID_PREFIX + digits
+    return digits
 
 
 def normalize_flywire_body_ids(values: Iterable[Any], *, field: str = "bodyId") -> list[str]:
@@ -174,3 +198,24 @@ def normalize_flywire_id_columns(frame, columns: Iterable[str]):
                 )
             ).astype("string")
     return frame
+
+
+def canonicalize_flywire_id_expr(column: str):
+    """Polars column expression mirroring :func:`normalize_flywire_body_id`.
+
+    Completes a 9-digit short id to its full ``720575940`` + id form, then
+    canonicalizes (strip, drop integral ``.0``, strip leading zeros) exactly
+    like the rest of DROCAT.  Used by the FAFB synapse and BANC connection
+    converters so the short-form rule lives in one place.
+    """
+
+    import polars as pl
+
+    s = pl.col(column).cast(pl.Utf8)
+    s = pl.when(s.str.len_chars() == SHORT_ID_DIGITS).then(
+        pl.concat_str(pl.lit(FLYWIRE_SHORT_ID_PREFIX), s)
+    ).otherwise(s)
+    s = s.str.strip_chars()
+    s = s.str.replace(r"^([0-9]+)\.0+$", "${1}")
+    s = s.str.strip_chars_start("0")
+    return pl.when(s.str.len_chars() == 0).then(pl.lit("0")).otherwise(s)

@@ -596,7 +596,7 @@ def test_interactive_heatmap_basic(tmp_path):
         matrices, str(out), title="Test Heatmap", showfig=False, verbose=True
     )
     assert out.exists()
-    html = out.read_text()
+    html = out.read_text(encoding="utf-8")
     assert "Test Heatmap" in html
     assert "Jaccard" in html  # display name of metric option
     assert "clusteringAvailable" in html
@@ -613,7 +613,7 @@ def test_interactive_heatmap_single_cell(tmp_path):
     out = tmp_path / "single.html"
     generate_interactive_heatmap(matrices, str(out), showfig=False, verbose=False)
     assert out.exists()
-    html = out.read_text()
+    html = out.read_text(encoding="utf-8")
     assert "metricsData" in html
     assert "let showLabels = true" in html  # small matrix: labels shown
 
@@ -630,5 +630,5 @@ def test_interactive_heatmap_large_branch(tmp_path):
     out = tmp_path / "large.html"
     generate_interactive_heatmap({"m": df}, str(out), showfig=False, verbose=False)
     assert out.exists()
-    html = out.read_text()
+    html = out.read_text(encoding="utf-8")
     assert "Show Labels" in html  # large matrices start with labels hidden

@@ -31,6 +31,7 @@ import mmap
 import os
 import struct
 import sys
+import time
 import zipfile
 import zlib
 from concurrent.futures import ProcessPoolExecutor
@@ -533,6 +534,18 @@ class FAFBSkeletonBundle:
             return 0
         self._converted_since_compact = 0
         self._converted_bytes_since_compact = 0
+        # Windows cannot atomically replace a file that this process still
+        # holds open: the lazy ZIP handle opened by an earlier read/append
+        # causes os.replace() in _compact_zip_verbatim to fail with a sharing
+        # violation (PermissionError WinError 5). Drop the handle first;
+        # _zip() reopens lazily on the next use.
+        if self._zip_handle is not None:
+            try:
+                self._zip_handle.close()
+            except Exception:
+                pass
+            self._zip_handle = None
+            self._zip_names = None
         return _compact_zip_verbatim(self.zip_path, converted, best_effort=best_effort)
 
     # ---------------- lifecycle ----------------
@@ -815,7 +828,22 @@ def _compact_zip_verbatim(zip_path: Path, converted: set,
                     "<4s4H2LH", b"PK\x05\x06", 0, 0, len(central),
                     len(central), len(cd_data), cd_offset, 0))
                 out.flush()
-            os.replace(tmp_path, zip_path)
+        # The ZipFile and the raw read handle above are both closed by now:
+        # on Windows os.replace() cannot replace a file this process still
+        # holds open (sharing violation), so it must run outside the with.
+        # Windows Defender/indexer may briefly scan the freshly written tmp
+        # zip; retry with a growing backoff (total ~14 s) before giving up.
+        last_error = None
+        for attempt in range(10):
+            try:
+                os.replace(tmp_path, zip_path)
+                break
+            except PermissionError as error:
+                last_error = error
+                if attempt < 9:
+                    time.sleep(0.25 * (attempt + 1))
+        else:
+            raise last_error
         return removed
     except Exception:
         if best_effort:

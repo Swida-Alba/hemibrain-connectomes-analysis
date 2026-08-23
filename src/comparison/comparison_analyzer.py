@@ -1464,7 +1464,7 @@ class ComparisonAnalyzer:
         metadata_path = self._get_metadata_path(dataset_name)
         if os.path.exists(metadata_path):
             try:
-                with open(metadata_path, 'r') as f:
+                with open(metadata_path, 'r', encoding='utf-8') as f:
                     return json.load(f)
             except Exception as e:
                 self._log(f"Warning: Failed to load cached metadata for {dataset_name}: {e}")
@@ -1475,7 +1475,7 @@ class ComparisonAnalyzer:
         metadata_path = self._get_metadata_path(dataset_name)
         os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
         try:
-            with open(metadata_path, 'w') as f:
+            with open(metadata_path, 'w', encoding='utf-8') as f:
                 json.dump(metadata, f, indent=2, default=str)
             self._log(f"Saved metadata to: {metadata_path}")
         except Exception as e:
@@ -2432,7 +2432,7 @@ class ComparisonAnalyzer:
         
         # Save if path provided
         if output_path:
-            with open(output_path, 'w') as f:
+            with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(report_text)
             self._log(f"Report saved to: {output_path}")
         
@@ -2494,7 +2494,7 @@ class ComparisonAnalyzer:
         
         # Save parameters
         params_path = os.path.join(out_dir, "parameters.json")
-        with open(params_path, 'w') as f:
+        with open(params_path, 'w', encoding='utf-8') as f:
             import json
             json.dump(self.parameters.to_dict(), f, indent=2, default=str)
             
@@ -2711,7 +2711,7 @@ class ComparisonAnalyzer:
         }
 
         if output:
-            with open(filepath, 'w') as f:
+            with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(output, f, indent=2)
 
     def _export_cross_dataset_comparisons(self, comparison_results_dir: str):
@@ -5285,7 +5285,7 @@ class ComparisonAnalyzer:
 </body>
 </html>'''
         
-        with open(output_path, 'w') as f:
+        with open(output_path, 'w', encoding='utf-8') as f:
             f.write(html)
         self._log(f"Saved: {os.path.basename(output_path)}")
 
@@ -5433,7 +5433,7 @@ class ComparisonAnalyzer:
 </body>
 </html>'''
         
-        with open(output_path, 'w') as f:
+        with open(output_path, 'w', encoding='utf-8') as f:
             f.write(html)
         self._log(f"Saved: {os.path.basename(output_path)}")
 
@@ -5855,7 +5855,7 @@ class ComparisonAnalyzer:
             # HTML report
             try:
                 report_path = os.path.join(output_dir, f'comparison_report_{timestamp}.html')
-                with open(report_path, 'w') as f:
+                with open(report_path, 'w', encoding='utf-8') as f:
                     f.write("<html><head><title>Connectivity Profile Comparison</title>")
                     f.write("<style>body{font-family:sans-serif; margin:20px;} table{border-collapse:collapse; width:100%;} th,td{border:1px solid #ddd; padding:8px; text-align:left;} th{background-color:#f2f2f2;} img{max-width:100%; height:auto; margin-bottom:20px;}</style>")
                     f.write("</head><body>")

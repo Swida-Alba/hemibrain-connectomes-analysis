@@ -87,7 +87,7 @@ def _make_multi_comparer(**kwargs):
 
 def test_type_mapper_default_path_uses_male_cns_v1_0():
     mapper = CrossDatasetTypeMapper(verbose=False)
-    assert mapper._neuron_df_path.endswith(
+    assert Path(mapper._neuron_df_path).as_posix().endswith(
         "male-cns_v1_0/male-cns_v1_0_allneurons_neuron_df.csv"
     )
     assert mapper._normalize_dataset_name("male-cns:v0.9") == "male-cns:v0.9"

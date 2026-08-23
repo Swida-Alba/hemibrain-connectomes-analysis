@@ -315,7 +315,7 @@ class TestWarningBanners:
         fig = go.Figure(go.Scatter3d(x=[0, 1], y=[0, 1], z=[0, 1]))
         out = tmp_path / 'fig.html'
         vis._write_plotly_html(fig, str(out))
-        content = out.read_text()
+        content = out.read_text(encoding="utf-8")
         assert 'plotly' in content.lower()
         assert 'drocat-line-mode-export-warning' in content
 
@@ -1389,7 +1389,10 @@ class TestRealConstructor:
         # light background -> Category10 palette, first entry #1f77b4
         assert len(vis.neuron_colors) == 1
         assert vis.neuron_colors[0].startswith('rgba(31, 119, 180')
-        assert vis._base_neuron_colors == tuple(vis.neuron_colors)
+        # base palette keeps the full 10-entry Category10 palette; the
+        # neuron_colors slice used for layers is a prefix of it
+        assert len(vis._base_neuron_colors) == 10
+        assert tuple(vis._base_neuron_colors[:len(vis.neuron_colors)]) == tuple(vis.neuron_colors)
         assert len(hermetic_ctor) == 1
         assert isinstance(vis.fig_3d, go.Figure)
         assert os.path.isdir(vis.save_folder)
@@ -1436,6 +1439,7 @@ class TestRealConstructor:
     def test_empty_neuron_layers_mesh_only(self, tmp_path, hermetic_ctor):
         vis = VisualizeSkeleton(
             dataset='hemibrain:v1.2.1', neuron_layers='',
+            brain_mesh='template',
             **self.ctor_kwargs(tmp_path))
         assert vis.neuron_layers == []
         assert hermetic_ctor == []           # no layer fetches at all
