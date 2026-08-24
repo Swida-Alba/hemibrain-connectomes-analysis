@@ -168,7 +168,12 @@ def clear_dataset_cache():
         print(f'\n❌ No cache found')
         return
     
-    datasets = [d for d in os.listdir(cache_root) if os.path.isdir(os.path.join(cache_root, d))]
+    # os.listdir order is unspecified and differs across filesystems (NTFS vs
+    # APFS), so sort to keep the menu numbers stable on every platform.
+    datasets = sorted(
+        d for d in os.listdir(cache_root)
+        if os.path.isdir(os.path.join(cache_root, d))
+    )
     
     if not datasets:
         print(f'\n❌ No cached datasets found')

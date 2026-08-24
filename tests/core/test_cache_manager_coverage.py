@@ -235,9 +235,10 @@ def test_clear_dataset_cache_selects_dataset(tmp_path, monkeypatch, fake_fnc, ca
     monkeypatch.chdir(tmp_path)
     (tmp_path / "neuprint_cache" / "hemibrain_v1_2_1").mkdir(parents=True)
     (tmp_path / "neuprint_cache" / "manc_v1_0").mkdir(parents=True)
-    feed_inputs(monkeypatch, ["2"])
+    feed_inputs(monkeypatch, ["1"])
     cm.clear_dataset_cache()
     output = capsys.readouterr().out
+    assert "1. hemibrain:v1.2.1" in output  # menu is sorted, so hemibrain is first
     assert "hemibrain:v1.2.1" in output
     assert "manc:v1.0" in output
     assert len(FakeFNC.cleared) == 1
