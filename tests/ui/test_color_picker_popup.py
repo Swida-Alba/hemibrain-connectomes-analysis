@@ -130,7 +130,8 @@ class TestColorPickerPopup:
 
     def test_palette_selector_populates_swatches(self):
         _client, handle = build_popup()
-        # The default palette (Category10) is discrete (<=20 colors): shown as-is.
+        # Palettes with fewer than 40 stops (Category10, 10 colors) are discrete:
+        # shown exactly as configured.
         assert handle._swatch_row is not None
         slot = handle._swatch_row.default_slot
         swatches = [
@@ -143,7 +144,7 @@ class TestColorPickerPopup:
 
     def test_continuous_palette_sampled_to_forty_swatches(self):
         _client, handle = build_popup()
-        # A continuous (sequential, >20 colors) palette is sampled to 40 evenly.
+        # A palette with 40+ colors (Viridis colormap) is sampled to 40 evenly.
         handle._palette_select.value = "Viridis"
         handle._on_palette_change()
         slot = handle._swatch_row.default_slot

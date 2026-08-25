@@ -199,13 +199,14 @@ class ColorPickerPopupHandle:
         if self._swatch_row is not None:
             self._swatch_row.clear()
             with self._swatch_row:
-                # Discrete palettes (<=20 colors) are shown exactly as configured.
-                # Continuous palettes (>20, e.g. sequential/diverging colormaps)
-                # are sampled to 40 colors evenly across their full range, so the
-                # 10x4 grid spans the whole gradient instead of the first stops.
+                # The 10x4 swatch grid holds 40 colors. Palettes with fewer than
+                # 40 stops are discrete and shown exactly as configured; palettes
+                # with 40+ colors (e.g. sequential/diverging colormaps) are sampled
+                # to 40 evenly across their full range so the grid spans the whole
+                # gradient instead of just the first stops.
                 swatch_colors = (
                     _to_hex(chosen)
-                    if len(chosen) <= 20
+                    if len(chosen) < 40
                     else _to_hex(sample_palette(chosen, 40))
                 )
                 for hex_color in swatch_colors:
