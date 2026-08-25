@@ -310,12 +310,21 @@ def skeleton_visualization_settings(
                 SYNAPSE_SIZE_OPTIONS,
                 get_user_default("synapse_size") or "1",
                 hint=(
-                    "Marker size (1-12, default 1). Scatter markers use this "
-                    "as their pixel size; mesh modes use it as a size "
-                    "multiplier over the real pre→post distance. Type any "
-                    "integer 1-12."
+                    "Marker size (1-12). Defaults per mode: 1 px for scatter, "
+                    "3x real for mesh modes. Scatter uses it as a pixel size; "
+                    "mesh modes use it as a multiplier over the real pre→post "
+                    "distance. Type any integer 1-12."
                 ),
             )
+            # Follow the mode's size default (scatter 1 px, mesh 3x real) while the
+            # value is still at a known default; keep any custom value the user typed.
+            def _sync_synapse_size_default():
+                current = str(fields["synapse_size"].value or "").strip()
+                if current in {"1", "3"}:
+                    scatter = str(fields["synapse_mode"].value or "").strip().lower() == "scatter"
+                    fields["synapse_size"].set_value("1" if scatter else "3")
+            fields["synapse_mode"].on_value_change(lambda _e: _sync_synapse_size_default())
+            _sync_synapse_size_default()
             fields["uniform_synapse_size"] = checkbox_input(
                 "Uniform Synapse Size",
                 get_user_default("uniform_synapse_size"),

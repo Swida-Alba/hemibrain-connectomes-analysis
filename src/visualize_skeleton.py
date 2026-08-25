@@ -11786,7 +11786,7 @@ class VisualizeSkeleton:
                         legendgroup=legend_group,
                         showlegend=show_legend,
                         legendrank=legend_rank,
-                        marker=dict(size=max(2.0, scatter_size), color=opaque_color, symbol=symbol, opacity=opacity),
+                        marker=dict(size=scatter_size, color=opaque_color, symbol=symbol, opacity=opacity),
                         hovertemplate=hover,
                         hoverinfo='name',
                         meta={'drocat_scatter_size_role': 'pre_post_site'},

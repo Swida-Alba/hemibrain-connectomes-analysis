@@ -440,11 +440,11 @@ def create_skeleton_tab():
                         "Synapse Size", SYNAPSE_SIZE_OPTIONS,
                         get_user_default("synapse_size") or "1",
                         hint=(
-                            "Marker size (1-12, default 1). Scatter markers use "
-                            "this as their pixel size; mesh (sphere/cone/"
-                            "tetrahedron and solid pre/post) modes use it as a "
-                            "size multiplier over the real pre→post distance. "
-                            "Type any integer 1-12."
+                            "Marker size (1-12). Defaults per mode: 1 px for "
+                            "scatter, 3x real for mesh (sphere/cone/tetrahedron "
+                            "and solid pre/post). Scatter uses it as a pixel size; "
+                            "mesh modes use it as a multiplier over the real "
+                            "pre→post distance. Type any integer 1-12."
                         ),
                     )
                     uniform_synapse_size = checkbox_input(
@@ -467,11 +467,32 @@ def create_skeleton_tab():
                     )
 
             # Shape sub-selectors + warning follow the selected synapse mode.
+            def _synapse_mode_is_scatter() -> bool:
+                """True when the current synapse rendering uses px scatter markers."""
+                view = synapse_view_mode.value
+                if view == "pre-post sites":
+                    return str(pre_post_shape.value or "").startswith("scatter")
+                if view == "synapse":
+                    return str(synapse_shape.value or "").strip() == "scatter"
+                return False  # 'skip' -> cone mesh default
+
+            def _sync_synapse_size_default() -> None:
+                """Follow the mode's size default (scatter 1 px, mesh 3x real).
+
+                Only resets the value while it is still at a known mode default
+                (1 or 3); a value the user typed (e.g. 5) is left untouched so the
+                display reflects the mode switch without clobbering custom sizes.
+                """
+                current = str(synapse_size.value or "").strip()
+                if current in {"1", "3"}:
+                    synapse_size.set_value("1" if _synapse_mode_is_scatter() else "3")
+
             def _sync_synapse_view_mode():
                 view = synapse_view_mode.value
                 synapse_shape.set_visibility(view == "synapse")
                 pre_post_shape.set_visibility(view == "pre-post sites")
                 pre_post_warning.set_visibility(view == "pre-post sites")
+                _sync_synapse_size_default()
 
             def _sync_shape_defaults():
                 """Apply the mode defaults whenever the skeleton mode changes."""
@@ -480,14 +501,18 @@ def create_skeleton_tab():
                 )
                 synapse_shape.set_value(synapse_default)
                 pre_post_shape.set_value(pre_post_default)
+                _sync_synapse_size_default()
 
             synapse_view_mode.on_value_change(lambda _e: _sync_synapse_view_mode())
             skeleton_mode.on_value_change(lambda _e: _sync_shape_defaults())
+            synapse_shape.on_value_change(lambda _e: _sync_synapse_size_default())
+            pre_post_shape.on_value_change(lambda _e: _sync_synapse_size_default())
             # The Advanced Layer Editor's columns + CSV format follow the mode.
             synapse_view_mode.on_value_change(
                 lambda _e: layer_style.set_synapse_mode(synapse_view_mode.value)
             )
             _sync_synapse_view_mode()
+            _sync_synapse_size_default()
             layer_style.set_synapse_mode(synapse_view_mode.value)
 
             # ------------------------------------------------------------------
