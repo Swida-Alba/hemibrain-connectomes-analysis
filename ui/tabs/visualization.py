@@ -51,6 +51,52 @@ from ..roi_options import (
 )
 
 
+def _offer_layer_draft_recovery(layer_style) -> None:
+    """Offer to continue the most recent auto-saved (dirty) layer-style draft.
+
+    The draft store persists every edited table to ``local_data/layer_style_drafts/``
+    with a ``dirty`` flag cleared only on export/visualization. On a fresh load any
+    draft still marked dirty (unexported and unvisualized) is offered for recovery, so
+    a crash or quit does not silently lose edits. ``Continue`` loads it back into the
+    editor; ``Discard`` deletes it.
+    """
+    try:
+        pending = layer_style_store.pending_drafts()
+    except Exception:
+        return
+    if not pending:
+        return
+    draft = pending[0]
+    with ui.dialog() as dlg, ui.card().classes("w-96"):
+        ui.label("Continue auto-saved layer style?").classes("text-subtitle1")
+        ui.label(
+            f"Draft '{draft.get('name')}' (updated {draft.get('updated_at')}) has "
+            "unsaved changes that were not exported or visualized."
+        ).classes("text-caption drocat-muted")
+        with ui.row().classes("w-full justify-end gap-2"):
+
+            def _discard():
+                try:
+                    layer_style_store.delete_draft(draft["name"])
+                finally:
+                    dlg.close()
+
+            ui.button("Discard", on_click=_discard).props("flat outline dense")
+
+            def _continue():
+                try:
+                    rows = layer_style_store.load_draft(draft["name"])
+                    if rows:
+                        layer_style.set_rows(rows, name=draft["name"])
+                    if layer_style.expansion is not None:
+                        layer_style.expansion.set_value(True)
+                finally:
+                    dlg.close()
+
+            ui.button("Continue", on_click=_continue).props("color=primary dense")
+    dlg.open()
+
+
 def _flatten_neuron_layers(neuron_layers) -> list:
     """Flatten the nested layer model into one neuron per entry for the
     per-neuron palette counts (single-neuron layers are plain values)."""
@@ -197,6 +243,9 @@ def create_skeleton_tab():
                         search_columns.value if search_columns is not None else "auto"
                     ),
                 )
+            # On reopen, offer to continue any auto-saved (dirty, not-yet-exported
+            # or visualized) draft so a crash does not silently lose edits.
+            _offer_layer_draft_recovery(layer_style)
             with file_upload_panel:
                 with ui.card().classes("w-full drocat-card").props(
                     'id="card-skeleton-layer-upload-card"'
@@ -1048,6 +1097,10 @@ def create_skeleton_tab():
                     [str(n) for n in dict.fromkeys(raw_neurons)],
                     datasets=[dataset.value] if dataset.value else [],
                 )
+                # A completed visualization consumes the draft, so clear its dirty
+                # flag (a crash-recovery prompt should not re-offer a used draft).
+                if layer_style.current_name:
+                    layer_style_store.mark_exported(layer_style.current_name)
         finally:
             if transient_layer_csv:
                 layer_style.cleanup_transient_csv()
