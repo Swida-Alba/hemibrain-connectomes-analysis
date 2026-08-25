@@ -342,13 +342,18 @@ def create_skeleton_tab():
                     )
 
             def _default_synapse_shapes_for_skeleton_mode(mode=None):
-                """Return marker defaults that match the morphology renderer."""
+                """Return marker defaults that match the morphology renderer.
+
+                The pre/post shape defaults to scatter markers (not solid
+                meshes) so the exported HTML stays small; scatter is the
+                recommended shape for pre-post sites.
+                """
                 selected_mode = str(
                     skeleton_mode.value if mode is None else mode
                 ).strip().lower()
                 if selected_mode == "line":
-                    return "scatter", "scatter (circles + squares)"
-                return "cone", "solid (spheres + cones)"
+                    return "scatter", "scatter (circles + diamonds)"
+                return "cone", "scatter (circles + diamonds)"
 
             default_synapse_shape, default_pre_post_shape = (
                 _default_synapse_shapes_for_skeleton_mode()
@@ -427,21 +432,19 @@ def create_skeleton_tab():
                         "Pre/post shape", PRE_POST_SHAPES, default_pre_post_shape,
                         hint="'solid (spheres + cones)': post/input sites as solid "
                              "spheres, pre/output sites as cones. 'scatter (circles + "
-                             "squares)': post/input as circles, pre/output as squares.",
+                             "diamonds)': post/input as circles, pre/output as diamonds "
+                             "(lighter HTML; size adjustable via the figure slider).",
                     ).props("outlined")
                 with param_grid(3):
                     synapse_size = combo_input(
                         "Synapse Size", SYNAPSE_SIZE_OPTIONS,
-                        get_user_default("synapse_size"),
+                        get_user_default("synapse_size") or "1",
                         hint=(
-                            "Marker size as a fold of the real pre→post "
-                            "distance: 'real' = 1x. Any number (e.g. 2, 2.5) "
-                            "or 'Nx real' works — type your own value. "
-                            "Scatter mode maps the fold to a visible pixel size "
-                            "(1x ≈ 3 px; 3x ≈ 9 px). Pre/post site mode always "
-                            "uses one uniform pseudo-real size based on the mean "
-                            "real connector distance; one-layer views estimate it "
-                            "from upstream/downstream pairs."
+                            "Marker size (1-12, default 1). Scatter markers use "
+                            "this as their pixel size; mesh (sphere/cone/"
+                            "tetrahedron and solid pre/post) modes use it as a "
+                            "size multiplier over the real pre→post distance. "
+                            "Type any integer 1-12."
                         ),
                     )
                     uniform_synapse_size = checkbox_input(
@@ -908,18 +911,17 @@ def create_skeleton_tab():
         notify_empty_custom_palettes(*palettes)
 
         # Combo box free text; an emptied or unparseable value falls back to the
-        # application default. Keep the default at 3x real for both paired
-        # synapses and the uniform pre/post-site size estimate.
+        # default (1 px). Only a bare integer 1-12 is accepted.
         synapse_size_value = str(synapse_size.value or "").strip()
         if not synapse_size_value:
-            synapse_size_value = "3x real"
+            synapse_size_value = "1"
         elif not is_valid_synapse_size(synapse_size_value):
             ui.notify(
-                f"Invalid Synapse Size '{synapse_size_value}' — using "
-                "'3x real' instead.",
+                f"Invalid Synapse Size '{synapse_size_value}' — using '1' "
+                "pixels instead.",
                 type="warning",
             )
-            synapse_size_value = "3x real"
+            synapse_size_value = "1"
 
         # Map the top-level synapse view mode to backend fields.
         view = synapse_view_mode.value

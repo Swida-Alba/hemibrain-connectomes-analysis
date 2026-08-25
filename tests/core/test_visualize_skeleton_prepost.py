@@ -90,10 +90,11 @@ def test_pre_post_mode_accepted(tmp_path):
     assert vs.synapse_mode == "pre_post"
 
 
-def test_default_synapse_size_is_three_x_real(tmp_path):
+def test_default_synapse_size_is_one_px(tmp_path):
     vs = build_vs(tmp_path)
-    assert vs.synapse_size == 3
-    assert vs._synapse_size_fold() == pytest.approx(3.0)
+    assert vs.synapse_size == 1
+    assert vs._synapse_size_px() == 1.0
+    assert vs._synapse_size_fold() == pytest.approx(1.0)
 
 
 def test_pre_post_scatter_field_accepted(tmp_path):
@@ -247,7 +248,7 @@ def test_pre_post_plot_passes_one_uniform_size_to_every_site_group(tmp_path):
 
 
 def test_pre_post_scatter_renders_scatter_markers(tmp_path):
-    """With pre_post_scatter enabled, sites render as Scatter3d markers (square
+    """With pre_post_scatter enabled, sites render as Scatter3d markers (diamond
     for pre / circle for post) rather than solid meshes."""
     import plotly.graph_objects as go
     vs = build_vs(
@@ -273,7 +274,7 @@ def test_pre_post_scatter_renders_scatter_markers(tmp_path):
     assert vs.fig_3d.data
     assert all(trace.type == "scatter3d" for trace in vs.fig_3d.data)
     symbols = {trace.marker.symbol for trace in vs.fig_3d.data}
-    assert symbols == {"square", "circle"}
+    assert symbols == {"diamond", "circle"}
     assert len(vs.fig_3d.layout.sliders) == 1
     assert vs.fig_3d.layout.sliders[0].currentvalue.prefix == "Synapse size: "
 
@@ -391,10 +392,10 @@ def test_plotly_scatter_size_slider_targets_only_synapse_traces(tmp_path):
     vs._add_plotly_synapse_size_slider()
 
     slider = vs.fig_3d.layout.sliders[0]
-    assert len(slider.steps) == 20
-    assert slider.steps[slider.active].label == "3x real"
+    assert len(slider.steps) == 12
+    assert slider.steps[slider.active].label == "3 px"
     assert slider.steps[slider.active].args[1] == (1,)
-    assert slider.steps[slider.active].args[0]["marker.size"] == [9.0]
+    assert slider.steps[slider.active].args[0]["marker.size"] == [3.0]
 
 
 def test_pre_post_warning_banner(tmp_path):
@@ -718,10 +719,14 @@ class TestReusableLayerInfo:
         ]
 
 
-def test_scatter_size_keeps_three_x_real_visible(tmp_path):
-    vs = build_vs(tmp_path, synapse_mode="scatter", synapse_size="3x real")
+def test_scatter_size_uses_pixel_value_directly(tmp_path):
+    # The Synapse Size control is now a direct pixel size (1-12, default 3).
+    vs = build_vs(tmp_path, synapse_mode="scatter", synapse_size="3")
     assert vs.synapse_size == 3.0
-    assert vs._scatter_synapse_marker_size() == 9.0
+    assert vs._synapse_size_px() == 3.0
+    assert vs._scatter_synapse_marker_size() == 3.0
+    # Mesh modes keep the raw number as a size multiplier (3 = 3x).
+    assert vs._synapse_size_fold() == 3.0
 
 
 def test_individual_profiles_keep_each_owners_pre_post_site_traces(

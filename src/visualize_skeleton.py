@@ -2052,20 +2052,20 @@ class VisualizeSkeleton:
     (for connections between adjacent layers)
     '''
 
-    synapse_size: int | float | str = 3
+    synapse_size: int | float | str = 1
     '''
-    size of synapse\n
-    when synapse_mode='scatter': visible marker scale; one real-size fold is
-    mapped to approximately 3 pixels (the layered marker uses 3/2/1 of that
-    size).\n
-    when synapse_mode='sphere'/'cone'/'tetrahedron': fold of the real distance between pre- and post-synaptic sites.\n
-    when synapse_mode='pre_post': fold of one uniform pseudo-real site size,
-    based on the mean unfiltered real connector distance sampled for the
-    visualization (or a sampled upstream/downstream estimate for a one-layer
-    view). The display threshold only selects which sites are rendered.\n
-    Any number (int or float) or numeric string ('2', '2.5x', '2x real') is
-    interpreted as that fold of the real distance; 'real' (or 1) = exact
-    distance size, 2 = 2x distance size.\n
+    size of synapse (1-12, default 1).\n
+    when synapse_mode='scatter': this is the visible marker size in pixels.
+    In the exported figure the size slider offers 1-12 px (step 1).\n
+    when synapse_mode='sphere'/'cone'/'tetrahedron' or the solid pre/post
+    meshes: the number is used as a size multiplier over the real pre->post
+    distance (1 = 1x), so mesh sizing follows the same value.\n
+    when synapse_mode='pre_post': the same multiplier of one uniform
+    pseudo-real site size, based on the mean unfiltered real connector
+    distance sampled for the visualization (or a sampled upstream/downstream
+    estimate for a one-layer view). The display threshold only selects which
+    sites are rendered.\n
+    Only the integer values 1-12 are accepted (the UI offers 1,2,3,...).\n
     '''
 
     uniform_synapse_size: bool = False
@@ -2088,7 +2088,9 @@ class VisualizeSkeleton:
     'pre_post': plot every queried neuron's pre- and post-synaptic SITES (not
         the paired inter-layer synapses). Post-synaptic sites (inputs) render as
         spheres (circles in scatter) and pre-synaptic sites (outputs) as cones
-        (squares in scatter), colored by their neuron layer with separate legends.\n
+        (diamonds in scatter), colored by their neuron layer with separate legends.
+        Scatter markers are the default (``pre_post_scatter=True``) so the exported
+        HTML stays small.\n
     '''
     
     synapse_alpha: float = 0.6
@@ -2106,11 +2108,12 @@ class VisualizeSkeleton:
         synapse_colors = ['rgba(255,0,0,0.3)', 'rgba(0,255,0,0.7)']
     '''
 
-    pre_post_scatter: bool = False
+    pre_post_scatter: bool = True
     '''When ``synapse_mode='pre_post'``, render the pre/post-synaptic sites as
     flat scatter markers instead of solid meshes: post-synaptic (input) sites
-    as circles and pre-synaptic (output) sites as squares. Ignored for the
-    other synapse modes.
+    as circles and pre-synaptic (output) sites as diamonds. On by default
+    because scatter markers keep the exported HTML much smaller than solid
+    meshes. Ignored for the other synapse modes.
     '''
 
     mesh_roi: list | str = field(default_factory=list)
@@ -3038,7 +3041,24 @@ class VisualizeSkeleton:
             if match is None:
                 return
 
-            html = html[:match.end()] + '\n' + warning_html + html[match.end():]
+            # Wrap the banners in a flex-shrinking container and run the page as a
+            # full-height flex column so the plot (with its bottom size slider)
+            # fills the remaining viewport instead of pushing a scrollbar.
+            banner_block = (
+                '<div class="drocat-warning-container">'
+                + warning_html
+                + '</div>'
+                '<style>'
+                'html,body{height:100%;margin:0;overflow:hidden;}'
+                'body{display:flex;flex-direction:column;}'
+                '.drocat-warning-container{flex:0 0 auto;}'
+                'body > div:not(.drocat-warning-container)'
+                '{flex:1 1 auto;min-height:0;position:relative;}'
+                'body > div:not(.drocat-warning-container) .plotly-graph-div'
+                '{height:100% !important;width:100% !important;}'
+                '</style>'
+            )
+            html = html[:match.end()] + '\n' + banner_block + html[match.end():]
             with open(html_path, 'w', encoding='utf-8') as handle:
                 handle.write(html)
         except Exception as exc:
@@ -4536,15 +4556,16 @@ class VisualizeSkeleton:
                 errors.append(f"webdriver_render_wait must be non-negative, got {self.webdriver_render_wait}")
         
         # === Synapse size validation ===
-        # Accepts 'real', a number, or a fold-notation string ("2",
-        # "2.5x", "2x real"); numeric values are folds of the real
-        # pre->post distance. Unparseable strings are rejected.
+        # Accepts a pixel value (1-12, default 3); for backward compatibility the
+        # parser tolerates 'real' and legacy 'Nx real' fold notation, resolving
+        # them to their numeric fold (kept for mesh sizing). Unparseable strings
+        # are rejected.
         if isinstance(self.synapse_size, str):
             parsed = self._parse_synapse_size(self.synapse_size)
             if parsed is None:
                 errors.append(
-                    "synapse_size must be 'real', a number, or a fold of real "
-                    f"(e.g. '2x real'), got '{self.synapse_size}'"
+                    "synapse_size must be a number (or 'real' for the default), "
+                    f"got '{self.synapse_size}'"
                 )
             else:
                 self.synapse_size = parsed
@@ -4734,12 +4755,12 @@ class VisualizeSkeleton:
 
     @staticmethod
     def _parse_synapse_size(value: str):
-        """Parse a synapse_size string into 'real' or a float fold.
+        """Parse a synapse_size string into 'real' or a numeric value.
 
-        Accepts 'real' (any capitalization), plain numbers, and fold
-        notations such as "2", "2.5x", or "2 x real" — any numeric value
-        is interpreted as that fold of the real pre->post distance.
-        Returns None for anything unparseable.
+        The UI sends a bare pixel size (1-12, default 3). For backward
+        compatibility the parser also tolerates 'real' and legacy 'Nx real'
+        fold notation ("2", "2.5x", "2 x real"), resolving them to their
+        numeric fold. Returns None for anything unparseable.
         """
         text = value.strip().lower()
         if text == 'real':
@@ -10594,61 +10615,41 @@ class VisualizeSkeleton:
                 
                 if self.backend == 'plotly':
 
-                    # Create 3 layers for gradient effect (Outer -> Inner).
-                    # The layer color's alpha is already either explicit or
-                    # inherited from synapse_alpha.
+                    # A single scatter marker per synapse layer with the layer's
+                    # alpha applied uniformly. Scatter markers are screen-space
+                    # pixels — they have no physical radius — so rendering a
+                    # soft "center-surround" gradient would need several stacked
+                    # traces (inflating the HTML) while also producing a
+                    # non-uniform center/edge alpha. A plain marker keeps the
+                    # HTML small and applies the alpha once.
                     base_alpha = self._extract_alpha_from_color(self.synapse_colors[i])
-                    outer_alpha = base_alpha / 10.0
-                    layers = 3
-                    
-                    for l in range(layers):
-                        # Calculate size and alpha for this layer
-                        # l=0 (Outer): Size=100%, Alpha=Low
-                        # l=2 (Inner): Size=33%, Alpha=High
-                        
-                        # Size factor: 1.0 -> 0.33. Plotly's scatter sizes are
-                        # screen pixels, so map the user-facing real-distance
-                        # fold to a visible pixel baseline first. Without this
-                        # conversion the default ``3x real`` became markers of
-                        # only 3/2/1 px across the gradient and looked tiny.
-                        size_factor = (layers - l) / layers
-                        current_size = self._scatter_synapse_marker_size() * size_factor
-                        
-                        # Alpha interpolation: outer_alpha -> base_alpha
-                        if layers > 1:
-                            t = l / (layers - 1)
-                            current_alpha = outer_alpha + t * (base_alpha - outer_alpha)
-                        else:
-                            current_alpha = base_alpha
-                            
-                        # Only show legend for the inner-most layer (most representative color)
-                        show_legend = (l == layers - 1)
-                        
-                        sp = go.Scatter3d(
-                            x = xyz_df['x'],
-                            y = xyz_df['y'],
-                            z = xyz_df['z'],
-                            mode = 'markers',
-                            name = f'synapses {i} -> {i+1} ({len(conn_df)})',
-                            hoverinfo = 'name',
-                            hovertemplate = 'x: %{x}<br>y: %{y}<br>z: %{z}<br>name: %{fullData.name}<extra></extra>',
-                            legendgroup = f'synapses {i} -> {i+1} ({len(conn_df)})',
-                            showlegend = show_legend,
-                            marker = dict(
-                                size = current_size,
-                                color = plot_colors,
-                                symbol = 'circle',
-                                opacity = current_alpha
-                            ),
-                            # Private metadata lets the figure-level Plotly
-                            # slider target only synapse scatter traces, not
-                            # morphology or legend markers.
-                            meta = {
-                                'drocat_scatter_size_role': 'synapse',
-                                'drocat_scatter_size_factor': size_factor,
-                            },
-                        )
-                        self.fig_3d.add_trace(sp)
+                    current_size = self._scatter_synapse_marker_size()
+
+                    sp = go.Scatter3d(
+                        x = xyz_df['x'],
+                        y = xyz_df['y'],
+                        z = xyz_df['z'],
+                        mode = 'markers',
+                        name = f'synapses {i} -> {i+1} ({len(conn_df)})',
+                        hoverinfo = 'name',
+                        hovertemplate = 'x: %{x}<br>y: %{y}<br>z: %{z}<br>name: %{fullData.name}<extra></extra>',
+                        legendgroup = f'synapses {i} -> {i+1} ({len(conn_df)})',
+                        showlegend = True,
+                        marker = dict(
+                            size = current_size,
+                            color = plot_colors,
+                            symbol = 'circle',
+                            opacity = base_alpha,
+                        ),
+                        # Private metadata lets the figure-level Plotly
+                        # slider target only synapse scatter traces, not
+                        # morphology or legend markers.
+                        meta = {
+                            'drocat_scatter_size_role': 'synapse',
+                            'drocat_scatter_size_factor': 1.0,
+                        },
+                    )
+                    self.fig_3d.add_trace(sp)
                 elif self.backend == 'k3d':
                     try:
                         import k3d
@@ -10838,21 +10839,31 @@ class VisualizeSkeleton:
 
     # ------------------------------------------------------------------ pre/post sites
     def _scatter_synapse_marker_size(self):
-        """Return the visible Plotly/K3D scatter size for the selected fold.
+        """Return the visible Plotly/K3D scatter size in screen-space pixels."""
+        return max(1.0, self._synapse_size_px())
 
-        The Skeleton control is expressed as a fold of real synapse size, but
-        scatter markers are screen-space pixels. Three pixels per real-size
-        fold keeps the one-fold baseline visible and makes the ``3x real``
-        preset produce a clearly readable marker rather than a 3/2/1 px
-        gradient.
+    def _synapse_size_px(self):
+        """Return the requested synapse size as a pixel value (1-12, default 1).
+
+        The Synapse Size control is now expressed directly in pixels (the UI
+        offers 1-12, default 1), so scatter markers use this value as their
+        Plotly marker size.
         """
-        fold = self._synapse_size_fold()
-        return max(3.0, 3.0 * fold)
+        parsed = self._parse_synapse_size(str(self.synapse_size))
+        if parsed in (None, 'real'):
+            return 1.0
+        return max(1.0, min(12.0, float(parsed)))
 
     def _synapse_size_fold(self):
-        """Return the requested size as a non-negative real-size fold."""
+        """Return the requested size as a non-negative real-size multiplier.
+
+        Mesh (sphere/cone/tetrahedron / solid pre-post) markers are sized in
+        world units from the real pre->post distance; the numeric Synapse Size
+        value is used directly as that multiplier (3 = 3x the real distance), so
+        mesh sizing is unchanged by the px-based scatter control.
+        """
         parsed = self._parse_synapse_size(str(self.synapse_size))
-        if parsed == 'real' or parsed is None:
+        if parsed in (None, 'real'):
             return 1.0
         return max(0.0, float(parsed))
 
@@ -10862,9 +10873,9 @@ class VisualizeSkeleton:
         Solid cone/sphere/tetrahedron markers are sized from the real
         pre-to-post distance and remain intentionally static.  Scatter
         markers have no physical radius in Plotly, so the slider changes their
-        visible pixel size in the exported interactive figure.  In pre/post
-        mode the same control adjusts both the square pre-sites and circular
-        post-sites.
+        visible pixel size in the exported interactive figure (1-12 px, step 1,
+        default 3).  In pre/post mode the same control adjusts both the diamond
+        pre-sites and circular post-sites.
         """
         self._plotly_sliders = []
         if self.backend != 'plotly' or not hasattr(self.fig_3d, 'data'):
@@ -10896,40 +10907,28 @@ class VisualizeSkeleton:
         if not trace_specs:
             return
 
-        current_fold = self._synapse_size_fold()
-        # Half-fold increments cover small point clouds through large,
-        # presentation-friendly markers. Preserve an unusual user value by
-        # inserting it into the discrete Plotly step list.
-        folds = [round(index * 0.5, 2) for index in range(1, 21)]
-        current_fold = round(max(0.0, current_fold), 2)
-        if current_fold not in folds:
-            folds.append(current_fold)
-            folds.sort()
-
+        # Slider is a 1-12 px integer ruler, defaulting to the current size.
+        current_px = self._synapse_size_px()
+        px_values = [float(value) for value in range(1, 13)]
         trace_indices = [spec[0] for spec in trace_specs]
         steps = []
-        for fold in folds:
+        for px in px_values:
             sizes = []
             for _trace_index, role, size_factor in trace_specs:
                 if role == 'synapse':
-                    size = max(3.0, 3.0 * fold) * size_factor
+                    size = px * size_factor
                 else:
-                    # Scatter has no world-space radius, so keep the same
-                    # visible 3-pixel-per-real-fold convention as paired
-                    # synapses while applying it uniformly to every site.
-                    size = max(3.0, 3.0 * fold)
+                    # Scatter has no world-space radius, so apply the same
+                    # pixel size uniformly to every site.
+                    size = px
                 sizes.append(round(size, 4))
-            label = f"{int(fold)}x real" if fold.is_integer() else f"{fold:g}x real"
             steps.append({
-                'label': label,
+                'label': f"{px:g} px",
                 'method': 'restyle',
                 'args': [{'marker.size': sizes}, trace_indices],
             })
 
-        active = min(
-            range(len(folds)),
-            key=lambda index: abs(folds[index] - current_fold),
-        )
+        active = max(0, min(len(px_values) - 1, int(round(current_px)) - 1))
         self._plotly_sliders = [{
             'active': active,
             'currentvalue': {'prefix': 'Synapse size: '},
@@ -11775,8 +11774,10 @@ class VisualizeSkeleton:
             if self.backend == 'plotly':
                 if getattr(self, 'pre_post_scatter', False):
                     # Scatter markers: post/input sites as circles, pre/output
-                    # sites as squares (the scatter variant of pre_post mode).
-                    symbol = 'square' if site_type == 'pre' else 'circle'
+                    # sites as diamonds (the scatter variant of pre_post mode).
+                    # ``triangle`` is not available for Plotly Scatter3d, so a
+                    # diamond is the closest distinct, pointy marker.
+                    symbol = 'diamond' if site_type == 'pre' else 'circle'
                     scatter_size = self._scatter_synapse_marker_size()
                     self.fig_3d.add_trace(go.Scatter3d(
                         x=coords[:, 0], y=coords[:, 1], z=coords[:, 2],

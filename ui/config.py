@@ -360,7 +360,7 @@ DEFAULTS = {
     "legend_mode": "type",
     "background": "white",
     "brain_mesh": "template",
-    "synapse_size": "3x real",
+    "synapse_size": "1",
     "uniform_synapse_size": False,
     # Similarity / homolog search toggles
     "fast_search": True,
@@ -428,31 +428,33 @@ SYNAPSE_MODE_OPTIONS = ["cone", "scatter", "sphere", "tetrahedron", "pre_post"]
 # synapse_mode='pre_post' with its own shape selector.
 SYNAPSE_VIEW_MODES = ["synapse", "pre-post sites", "skip"]
 # Marker-shape choices for 'pre-post sites' mode (maps to pre_post_scatter).
-PRE_POST_SHAPES = ["solid (spheres + cones)", "scatter (circles + squares)"]
+# Scatter is the default (and the recommended choice) because it keeps the
+# exported HTML much smaller than solid cone/sphere meshes.
+PRE_POST_SHAPES = ["solid (spheres + cones)", "scatter (circles + diamonds)"]
 # Layer editor modes (Skeleton tab), shown as segmented buttons.
 LAYER_EDITOR_MODES = ["Standard", "Advanced", "File upload"]
 
 # Brain mesh options
 BRAIN_MESH_OPTIONS = ["template", "whole", "none"]
 
-# Synapse size presets (folds of the real pre->post distance); the UI
-# combo box additionally accepts any typed number or 'Nx real' value.
-SYNAPSE_SIZE_OPTIONS = ["real", "2x real", "3x real"]
+# Synapse size presets (screen-space pixels, 1-12, default 3); the UI combo
+# box additionally accepts any typed integer in that range.
+SYNAPSE_SIZE_OPTIONS = [str(value) for value in range(1, 13)]
 
-# Mirrors VisualizeSkeleton._parse_synapse_size: 'real' or any fold
-# notation ("2", "2.5x", "2 x real"). Used to validate free-typed combo
-# values before they reach the backend.
-_SYNAPSE_SIZE_RE = re.compile(
-    r'real|[0-9]*\.?[0-9]+\s*(?:x|\u00d7)?(?:\s*real)?',
-    re.IGNORECASE,
-)
+# The Synapse Size control is a pixel value (1-12, default 3); validate the
+# free-typed combo value before it reaches the backend. Only a bare integer in
+# that range is accepted (no 'real' / 'Nx real' notation).
+_SYNAPSE_SIZE_RE = re.compile(r'^([0-9]+)$')
 
 
 def is_valid_synapse_size(value) -> bool:
-    """Return True when *value* is an accepted synapse size string."""
+    """Return True when *value* is a valid synapse size (an integer 1-12)."""
     if not isinstance(value, str):
         return False
-    return bool(_SYNAPSE_SIZE_RE.fullmatch(value.strip()))
+    match = _SYNAPSE_SIZE_RE.match(value.strip())
+    if not match:
+        return False
+    return 1 <= int(match.group(1)) <= 12
 
 # Morphology similarity options (Find Similar tab)
 MORPH_LEVEL_OPTIONS = ["auto", "bodyid", "type"]
@@ -712,8 +714,8 @@ DEFAULT_SETTING_SPECS = {
         "group": "skeleton_render",
         "kind": "combo",
         "options": SYNAPSE_SIZE_OPTIONS,
-        "hint": "Marker size as a fold of the real pre→post distance "
-                "('real' = 1x). Any number or 'Nx real' can be typed.",
+        "hint": "Marker size in pixels (1-12, default 3); scatter uses it "
+                "directly, mesh modes map 3 px = 1x the real distance.",
     },
     "uniform_synapse_size": {
         "label": "Uniform Synapse Size",

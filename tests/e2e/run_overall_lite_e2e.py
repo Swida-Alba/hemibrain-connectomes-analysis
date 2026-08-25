@@ -265,7 +265,7 @@ def skeleton_specs() -> list:
         "background_color": "white",
         "skip_synapse": True,
         "min_synapse_num": 3,
-        "synapse_size": "real",
+        "synapse_size": "3",
         "synapse_alpha": 0.6,
         "synapse_mode": "cone",
         "mesh_roi": [],

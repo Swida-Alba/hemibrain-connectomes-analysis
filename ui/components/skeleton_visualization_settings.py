@@ -87,16 +87,16 @@ class SkeletonVisualizationSettings:
             values["min_synapse_num"] = int(values["min_synapse_num"] or 1)
         if "synapse_size" in values:
             # The combo box accepts free text; an emptied field falls back to
-            # the application default so pre/post sites retain the same fold.
+            # the default (3 px). Only a bare integer 1-12 is accepted.
             size = str(values["synapse_size"] or "").strip()
             if not size:
-                size = "3x real"
+                size = "3"
             elif not is_valid_synapse_size(size):
                 ui.notify(
-                    f"Invalid Synapse Size '{size}' — using '3x real' instead.",
+                    f"Invalid Synapse Size '{size}' — using '3' pixels instead.",
                     type="warning",
                 )
-                size = "3x real"
+                size = "3"
             values["synapse_size"] = size
         if "neuron_alpha" in values:
             values["neuron_alpha"] = float(values["neuron_alpha"] or 0)
@@ -308,11 +308,12 @@ def skeleton_visualization_settings(
             fields["synapse_size"] = combo_input(
                 "Synapse Size",
                 SYNAPSE_SIZE_OPTIONS,
-                get_user_default("synapse_size"),
+                get_user_default("synapse_size") or "1",
                 hint=(
-                    "Marker size as a fold of the real pre→post distance: "
-                    "'real' = 1x. Any number (e.g. 2, 2.5) or 'Nx real' "
-                    "works — type your own value. (Scatter mode: pixel size.)"
+                    "Marker size (1-12, default 1). Scatter markers use this "
+                    "as their pixel size; mesh modes use it as a size "
+                    "multiplier over the real pre→post distance. Type any "
+                    "integer 1-12."
                 ),
             )
             fields["uniform_synapse_size"] = checkbox_input(
