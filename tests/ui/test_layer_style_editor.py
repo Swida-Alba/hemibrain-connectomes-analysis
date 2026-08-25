@@ -144,6 +144,61 @@ class TestModeColumnsAndLayers:
         assert pp.splitlines()[0] == "layer,neuron,color,pre_synaptic_color,post_synaptic_color"
 
 
+class TestLogicalRows:
+    def test_logical_normalize_accepts_flat_and_logical(self):
+        flat = store.logical_normalize([{"layer": "0", "neuron": "aMe12"}])
+        assert flat == [{
+            "layer": "0", "neurons": ["aMe12"], "color": "",
+            "synapse_color": "", "pre_synaptic_color": "", "post_synaptic_color": "",
+        }]
+        logical = store.logical_normalize([{"layer": "1", "neurons": ["a", "b"]}])
+        assert logical[0]["neurons"] == ["a", "b"]
+
+    def test_flatten_rows_expands_chips_and_drops_empty_rows(self):
+        rows = store.flatten_rows([
+            {"layer": "1", "neurons": ["aMe12", "aMe13"], "color": "#111"},
+            {"layer": "", "neurons": [], "color": ""},  # scaffolding -> dropped
+        ])
+        assert [
+            (r["layer"], r["neuron"], r["color"]) for r in rows
+        ] == [("1", "aMe12", "#111"), ("1", "aMe13", "#111")]
+
+    def test_validate_ignores_only_fully_empty_rows(self):
+        assert store.validate_rows([
+            {"layer": "", "neurons": []},          # empty scaffolding -> ok
+            {"layer": "1", "neurons": []},          # layer only -> missing neuron
+            {"layer": "", "neurons": ["x"]},       # neuron only -> missing layer
+        ]) == ["Row 2: missing neuron", "Row 3: missing layer"]
+
+    def test_multi_chip_same_layer_is_not_a_gap(self):
+        # Two cells on the same layer with multiple chips must not look like a gap.
+        assert store.validate_rows([
+            {"layer": "1", "neurons": ["a"]},
+            {"layer": "1", "neurons": ["b", "c"]},
+        ]) == []
+
+    def test_rows_to_csv_for_mode_flattens_multi_chip_cell(self):
+        csv_text = store.rows_to_csv_for_mode(
+            [{"layer": "1", "neurons": ["a", "b"], "color": "#111"}], "synapse"
+        )
+        assert csv_text.splitlines() == [
+            "layer,neuron,color,synapse_color",
+            "1,a,#111,",
+            "1,b,#111,",
+        ]
+
+    def test_save_and_load_round_trips_flattened_rows(self):
+        slug = store.save_draft("multi", [
+            {"layer": "1", "neurons": ["a", "b"], "color": "#111"},
+            {"layer": "", "neurons": [], "color": ""},
+        ])
+        assert slug == "multi"
+        rows = store.load_draft("multi")
+        assert [(r["layer"], r["neuron"], r["color"]) for r in rows] == [
+            ("1", "a", "#111"), ("1", "b", "#111")
+        ]
+
+
 # =============================================================================
 # UI component: editor handle behavior
 # =============================================================================
@@ -177,12 +232,21 @@ class TestEditorHandle:
         ]
         assert "card-skeleton-layer-style-editor" in ids
         assert handle.table is not None and handle.status_label is not None
-        assert set(handle.edit_inputs) == set(LAYER_STYLE_COLUMNS)
+        assert handle.name_input is not None
+        assert handle._pick_popup is not None
+        # Suggestions are rendered in a plain overlay below the focused cell (no
+        # Quasar menu, so typing keeps focus).
+        assert handle._suggest_overlay is not None
+        # The fresh editor starts with 3 empty scaffolding rows.
+        assert len(handle.rows) == 3
+        assert all(store._logical_is_empty(row) for row in handle.rows)
 
     def test_add_neuron_control_omits_counter_and_clear_action(
         self, store_patch_for_component
     ):
         client, _handle = build_editor(store_patch_for_component)
+        # The pending add-form (with Clear / count badge) was removed in favour of
+        # direct in-table editing, so neither control should be present.
         assert not [
             element for element in client.elements.values()
             if getattr(element, "text", "") == "Clear"
@@ -193,16 +257,21 @@ class TestEditorHandle:
             and "neuron" in str(getattr(element, "text", "")).lower()
         ]
 
-    def test_add_row_uses_current_editor_values_and_autosaves(self, store_patch_for_component):
+    def test_add_empty_row_and_inline_edit_autosave(self, store_patch_for_component):
         client, handle = build_editor(store_patch_for_component)
         handle.name_input.value = "my layers"
-        for key, value in {
-            "layer": "0", "neuron": "aMe12", "color": "#123456",
-            "synapse_color": "rgba(1,2,3,0.3)", "pre_synaptic_color": "",
-            "post_synaptic_color": "",
-        }.items():
-            handle.edit_inputs[key].value = value
-        handle.add_row()
+        handle.add_empty_row()
+        # Edit the first cell as if the chip input committed a neuron list, with
+        # a layer and a color, then flush the debounced auto-save.
+        handle.on_inline_commit(SimpleNamespace(args={
+            "id": 0, "field": "neuron", "value": ["aMe12"],
+        }))
+        handle.on_inline_commit(SimpleNamespace(args={
+            "id": 0, "field": "layer", "value": "0",
+        }))
+        handle.on_inline_commit(SimpleNamespace(args={
+            "id": 0, "field": "color", "value": "#123456",
+        }))
         csv_path = handle.flush_autosave()
         assert csv_path and Path(csv_path).exists()
         rows = store.load_draft("my layers")
@@ -214,9 +283,9 @@ class TestEditorHandle:
         client, handle = build_editor(store_patch_for_component)
         handle.set_rows(ROWS)
         handle.on_inline_edit(
-            SimpleNamespace(args={"id": 1, "field": "neuron", "value": " aMe13 "})
+            SimpleNamespace(args={"id": 1, "field": "neuron", "value": [" aMe13 "]})
         )
-        assert handle.rows[1]["neuron"] == "aMe13"
+        assert handle.rows[1]["neurons"] == ["aMe13"]
 
     def test_inline_text_edit_does_not_rebuild_table(self, store_patch_for_component):
         client, handle = build_editor(store_patch_for_component)
@@ -224,9 +293,9 @@ class TestEditorHandle:
         table_updates = []
         handle.table.update = lambda: table_updates.append(True)
         handle.on_inline_edit(
-            SimpleNamespace(args={"id": 1, "field": "neuron", "value": "aMe13x"})
+            SimpleNamespace(args={"id": 1, "field": "neuron", "value": ["aMe13x"]})
         )
-        assert handle.rows[1]["neuron"] == "aMe13x"
+        assert handle.rows[1]["neurons"] == ["aMe13x"]
         assert table_updates == []
 
     def test_available_neurons_append_one_row_per_entry_to_one_batch_layer(
@@ -237,8 +306,8 @@ class TestEditorHandle:
         handle.begin_available_batch()
         assert handle.apply_available_neurons(["n1", "n2"]) == 2
         assert handle.available_query_values() == ["n1", "n2"]
-        assert [(row["layer"], row["neuron"]) for row in handle.rows] == [
-            ("1", "existing"), ("2", "n1"), ("2", "n2")
+        assert [(row["layer"], row["neurons"]) for row in handle.rows] == [
+            ("1", ["existing"]), ("2", ["n1"]), ("2", ["n2"])
         ]
         # The viewer reports its complete selection after every toggle; only
         # the new entry is appended, and it stays on the same batch layer.
@@ -254,7 +323,8 @@ class TestEditorHandle:
     ):
         client, handle = build_editor(store_patch_for_component)
         assert handle.apply_available_neurons(["n1", "n2"]) == 2
-        assert {row["layer"] for row in handle.rows} == {"1"}
+        # The pristine 3 scaffolding rows are replaced by the batch on layer 1.
+        assert {row["layer"] for row in handle.rows if row["neurons"]} == {"1"}
 
     def test_validation_panel_reports_and_clears_layer_gap(self, store_patch_for_component):
         client, handle = build_editor(store_patch_for_component)
@@ -262,21 +332,29 @@ class TestEditorHandle:
             {"layer": "1", "neuron": "a"},
             {"layer": "3", "neuron": "b"},
         ])
+        # Editing must NOT surface validation live (only run/export does).
+        assert handle.validation_panel.visible is False
+        errors = handle._update_validation()  # what run/export triggers
+        assert errors
         assert handle.validation_panel.visible is True
         assert "missing layer(s) 2" in handle.validation_label.text
         handle.on_inline_edit(
             SimpleNamespace(args={"id": 1, "field": "layer", "value": "2"})
         )
+        # A valid table clears the panel on the next run/export check.
+        assert handle._update_validation() == []
         assert handle.validation_panel.visible is False
 
-    def test_mode_switch_hides_picker_wrapper_with_input(self, store_patch_for_component):
+    def test_mode_switch_hides_prepost_color_column(self, store_patch_for_component):
         client, handle = build_editor(store_patch_for_component)
         handle.set_synapse_mode("pre-post sites")
-        assert handle._color_control_groups["synapse_color"].visible is False
-        assert handle._color_control_groups["pre_synaptic_color"].visible is True
+        assert [c["name"] for c in handle.table.columns] == [
+            "layer", "neuron", "color", "pre_synaptic_color", "post_synaptic_color"
+        ]
         handle.set_synapse_mode("synapse")
-        assert handle._color_control_groups["synapse_color"].visible is True
-        assert handle._color_control_groups["pre_synaptic_color"].visible is False
+        assert [c["name"] for c in handle.table.columns] == [
+            "layer", "neuron", "color", "synapse_color"
+        ]
 
     def test_advanced_neuron_input_uses_dataset_suggestions(
         self, store_patch_for_component, monkeypatch
@@ -300,6 +378,59 @@ class TestEditorHandle:
         assert handle._suggest_neurons("aMe") == [("aMe12", "type")]
         assert calls == [("aMe", "male-cns:v1.0", "type", None)]
 
+    def test_suggestion_commit_closes_and_suppresses_refocus(
+        self, store_patch_for_component, monkeypatch
+    ):
+        from ui.components import layer_style_editor as editor_module
+
+        client = Client(page(f"/layer-style-suggest-life-{uuid.uuid4().hex}"))
+        with client:
+            handle = editor_module.layer_style_editor(
+                dataset_provider=lambda: "male-cns:v1.0",
+                search_columns_provider=lambda: "type",
+            )
+        # Record which cell the overlay opened for (instead of rendering DOM).
+        showed = []
+        monkeypatch.setattr(
+            handle, "_show_neuron_suggestions",
+            lambda row_id, text: showed.append((row_id, text)),
+        )
+
+        # Focusing an empty cell opens suggestions for that cell.
+        handle.on_neuron_focus(SimpleNamespace(args={"id": 0}))
+        assert showed == [(0, "")]
+        assert handle._suggest_row == 0
+
+        # Committing a picked suggestion adds the chip and closes the overlay
+        # (suppress is armed so a synthetic re-focus cannot reopen it).
+        handle._commit_neuron_suggestion(0, "aMe12")
+        assert handle.rows[0]["neurons"] == ["aMe12"]
+        assert handle._suggest_suppress is True
+
+        # A synthetic re-focus of the SAME row right after commit stays closed.
+        showed.clear()
+        handle.on_neuron_focus(SimpleNamespace(args={"id": 0}))
+        assert showed == []
+        assert handle._suggest_suppress is True
+
+        # A reset empty input-value event on the same row also stays closed.
+        showed.clear()
+        handle.on_neuron_suggest(SimpleNamespace(args={"id": 0, "text": ""}))
+        assert showed == []
+        assert handle._suggest_suppress is True
+
+        # Typing a non-empty query clears the suppression and shows filtered results.
+        showed.clear()
+        handle.on_neuron_suggest(SimpleNamespace(args={"id": 0, "text": "aMe"}))
+        assert showed == [(0, "aMe")]
+        assert handle._suggest_suppress is False
+
+        # Switching to a different cell is a genuine action: it re-opens there.
+        showed.clear()
+        handle.on_neuron_focus(SimpleNamespace(args={"id": 1}))
+        assert showed == [(1, "")]
+        assert handle._suggest_suppress is False
+
     def test_delete_selected_rows(self, store_patch_for_component):
         client, handle = build_editor(store_patch_for_component)
         handle.name_input.value = "del"
@@ -307,39 +438,21 @@ class TestEditorHandle:
         handle._selected_ids = [1]
         handle.delete_selected()
         assert len(handle.rows) == 3
-        assert handle.rows[1]["neuron"] == "dn1"
+        assert handle.rows[1]["neurons"] == ["dn1"]
 
-    def test_add_row_color_inputs_have_picker_buttons(self, store_patch_for_component):
+    def test_color_cell_picker_opens_popup(self, store_patch_for_component):
         client, handle = build_editor(store_patch_for_component)
-        palette_buttons = [
-            el for el in client.elements.values()
-            if (getattr(el, "_props", None) or {}).get("icon") == "palette"
-        ]
-        # One picker button per colour field (Color, Synapse, Pre, Post).
-        assert len(palette_buttons) == 4
+        handle.set_rows(ROWS, name="c")
+        handle.on_color_pick(SimpleNamespace(args={"id": 0, "field": "color"}))
+        assert handle._pending_pick == {"row_id": 0, "field": "color"}
+        assert handle._pick_popup is not None
 
-    def test_pending_color_picker_becomes_a_fixed_square_preview(
-        self, store_patch_for_component
-    ):
+    def test_apply_picked_color_updates_table_cell(self, store_patch_for_component):
         client, handle = build_editor(store_patch_for_component)
-        button = handle._add_color_pickers["color"]
-        assert button.icon == "palette"
-        assert "round" in button._props
-
-        handle._open_picker_for_add("color")
-        handle._apply_picked_color("#2ca02c")
-
-        assert button.icon is None
-        assert "round" not in button._props
-        assert button.style["background-color"] == "#2ca02c"
-        assert "drocat-layer-add-color-picker-set" in button.classes
-
-    def test_apply_picked_color_to_form_input(self, store_patch_for_component):
-        client, handle = build_editor(store_patch_for_component)
-        handle._open_picker_for_add("color")
-        assert handle._pending_pick == {"field": "color"}
+        handle.set_rows(ROWS, name="c")
+        handle._pending_pick = {"row_id": 1, "field": "color"}
         handle._apply_picked_color("rgba(1, 2, 3, 0.4)")
-        assert handle.edit_inputs["color"].value == "rgba(1, 2, 3, 0.4)"
+        assert handle.rows[1]["color"] == "rgba(1, 2, 3, 0.4)"
 
     def test_set_synapse_mode_changes_columns(self, store_patch_for_component):
         client, handle = build_editor(store_patch_for_component)
@@ -350,22 +463,9 @@ class TestEditorHandle:
         assert [c["name"] for c in handle.table.columns] == [
             "layer", "neuron", "color", "pre_synaptic_color", "post_synaptic_color"
         ]
-        # Synapse colour input hidden in pre-post mode and vice versa.
-        assert handle.edit_inputs["synapse_color"].visible is False
-        assert handle.edit_inputs["pre_synaptic_color"].visible is True
         handle.set_synapse_mode("synapse")
-        assert handle.edit_inputs["synapse_color"].visible is True
-        assert handle.edit_inputs["pre_synaptic_color"].visible is False
-
-    def test_add_row_layer_is_selection_box(self, store_patch_for_component):
-        client, handle = build_editor(store_patch_for_component)
-        layer_el = handle.edit_inputs["layer"]
-        assert layer_el is handle._layer_add_select
-        assert handle._layer_add_select.options == ["1"]
-        handle.set_rows([{"layer": "1", "neuron": "a"}], name="x")
-        assert handle._layer_add_select.options == ["1", "2"]
-        assert [item["label"] for item in handle._layer_add_select._props["options"]] == [
-            "1", "2"
+        assert [c["name"] for c in handle.table.columns] == [
+            "layer", "neuron", "color", "synapse_color"
         ]
 
     def test_table_row_dicts_carry_layer_opts(self, store_patch_for_component):
@@ -533,15 +633,17 @@ class TestSkeletonTabIntegration:
 
         assert mode.value == "tube"
         assert synapse_shape.value == "cone"
-        assert pre_post_shape.value == "solid (spheres + cones)"
+        # Pre/post sites default to scatter markers so the HTML stays small,
+        # regardless of the skeleton/morphology mode.
+        assert pre_post_shape.value == "scatter (circles + diamonds)"
 
         mode.set_value("line")
         assert synapse_shape.value == "scatter"
-        assert pre_post_shape.value == "scatter (circles + squares)"
+        assert pre_post_shape.value == "scatter (circles + diamonds)"
 
         mode.set_value("tube")
         assert synapse_shape.value == "cone"
-        assert pre_post_shape.value == "solid (spheres + cones)"
+        assert pre_post_shape.value == "scatter (circles + diamonds)"
 
     def test_synapse_view_mode_toggles_shapes_and_warning(self, monkeypatch, tmp_path):
         self._patch_store(monkeypatch, tmp_path)

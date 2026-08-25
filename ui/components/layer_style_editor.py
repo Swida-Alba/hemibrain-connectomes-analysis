@@ -12,13 +12,14 @@ The table doubles as the in-page equivalent of uploading such a CSV: rows can
 be loaded from an uploaded CSV and exported back to CSV.
 """
 from datetime import datetime
+import json
 import tempfile
+import time
 from typing import Callable, List, Optional
 
 from nicegui import ui
 
 from .. import layer_style_store
-from ..components.common import neuron_list_input
 from ..type_suggestions import dataset_suggestions
 
 AUTOSAVE_DELAY = 0.6  # seconds between last edit and disk flush
@@ -40,6 +41,9 @@ def _columns_for_mode(mode: str) -> list:
     the ``pre_synaptic_color`` / ``post_synaptic_color`` columns instead.
     """
     def column(name: str, label: str, *, sortable: bool = False) -> dict:
+        # Column widths come from a per-column CSS variable (``--wc-<name>``) so the
+        # user can drag the header resizer to resize the column interactively. The
+        # width is applied to both the header and the body cells.
         return {
             "name": name,
             "label": label,
@@ -48,11 +52,17 @@ def _columns_for_mode(mode: str) -> list:
             "sortable": sortable,
             "classes": f"drocat-{name.replace('_', '-')}-column",
             "headerClasses": f"drocat-{name.replace('_', '-')}-column",
+            "style": f"width:var(--wc-{name})",
+            "headerStyle": f"width:var(--wc-{name})",
         }
 
     cols = [
-        column("layer", "Layer", sortable=True),
-        column("neuron", "Neuron", sortable=True),
+        # Layer is kept narrow (no sort icon) so the checkbox/layer columns stay
+        # slim, leaving the remaining width for Neuron and the colour columns.
+        column("layer", "Layer"),
+        # ``neuron`` is a chip list in the body slot (``props.row.neurons``);
+        # a list has no natural sort key, so disable sorting for that column.
+        column("neuron", "Neuron"),
         column("color", "Color"),
     ]
     if mode == "pre-post sites":
@@ -69,12 +79,13 @@ def _columns_for_mode(mode: str) -> list:
 
 _TABLE_HEADER_SLOT = r"""
 <q-tr :props="props" class="drocat-edge-header-row">
-  <q-th auto-width class="drocat-edge-select-cell">
+  <q-th class="drocat-edge-select-cell">
     <q-checkbox
       v-model="props.selected"
       :indeterminate="props.selected === null"
       dense
     />
+    <span class="drocat-col-resizer" data-col="select"></span>
   </q-th>
   <q-th
     v-for="col in props.cols"
@@ -84,8 +95,141 @@ _TABLE_HEADER_SLOT = r"""
     :class="[col.headerClasses || '', { 'drocat-edge-divider': col.name !== 'color' }]"
   >
     {{ col.label }}
+    <span class="drocat-col-resizer" :data-col="col.name"></span>
   </q-th>
 </q-tr>
+"""
+
+
+# Drag-to-resize helper for the table headers. It updates ``--wc-<col>`` on the
+# table element (driving each column's width), purely client-side so resizing never
+# rebuilds the table or steals focus from a cell being edited. Listeners are
+# attached to ``document`` (not ``window``) so a real mouse drag keeps firing even
+# when the pointer travels outside the header; pointer events cover both mice and
+# trackpads.
+_COL_RESIZE_JS = r"""
+if (!window.drocatStartColResize) {
+  // ``event`` is the real mousedown; the header cell is read from ``event.target``
+  // because the resizer span is the target of the delegated listener.
+  window.drocatStartColResize = function (event, col) {
+    event.preventDefault();
+    const span = event.target && event.target.closest
+      ? event.target.closest('.drocat-col-resizer')
+      : null;
+    const th = span ? span.closest('th') : null;
+    if (!th) return;
+    const table = th.closest('.q-table');
+    if (!table) return;
+    const startX = event.clientX;
+    const startW = th.getBoundingClientRect().width;
+    // Column cell class mirrors the Python ``_columns_for_mode`` ``classes`` value.
+    const colClass = 'drocat-' + String(col).replace(/_/g, '-') + '-column';
+    const onMove = function (ev) {
+      const w = Math.max(42, startW + (ev.clientX - startX));
+      table.style.setProperty('--wc-' + col, w + 'px');
+      // ``table-layout:auto`` treats ``width`` as a hint; force the rendered width
+      // by setting ``min-width`` on every cell of the column so the column actually
+      // grows (or shrinks) and the table (implicitly) widens around it.
+      const cells = table.querySelectorAll('.' + colClass);
+      for (let i = 0; i < cells.length; i++) {
+        cells[i].style.minWidth = w + 'px';
+      }
+    };
+    const onUp = function () {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+}
+// Delegate the mousedown to ``document`` in the capture phase: the resizer spans'
+// own Vue ``@mousedown`` binding does not fire in the table's compiled slot, but
+// a document-level capture listener always sees the press. The span carries the
+// column name in ``data-col`` so a single handler covers every header cell.
+if (!window.drocatResizeDelegated) {
+  window.drocatResizeDelegated = true;
+  document.addEventListener('mousedown', function (ev) {
+    const span = ev.target && ev.target.closest
+      ? ev.target.closest('.drocat-col-resizer')
+      : null;
+    if (!span) return;
+    const col = span.getAttribute('data-col');
+    if (!col) return;
+    // Swallow the press so the header's sort/click and text selection do not
+    // fire while the user is resizing (capture phase, before the th handles it).
+    ev.preventDefault();
+    ev.stopPropagation();
+    window.drocatStartColResize(ev, col);
+  }, true);
+}
+"""
+
+
+# Client-side suggestion overlay renderer. The overlay DIV is a single static NiceGUI
+# element; its items are pure DOM injected here (never NiceGUI elements) so typing or
+# focusing never re-renders the q-table body (which would remount the focused
+# q-select and wipe typed text). Clicking an item commits via a single ``pick``
+# listener emitted over the socket; ``__OVERLAY_ID__``/``__PICK_LID__`` are
+# substituted at build time with the overlay's element id + pick listener id.
+_SUGGESTION_JS = r"""
+window.drocatSuggest = {
+  render: function (rowId, items) {
+    var el = document.getElementById('neuron-cell-' + rowId);
+    var o = document.getElementById('drocat-suggest-overlay');
+    if (!el || !o) return;
+    var r = el.getBoundingClientRect();
+    o.style.top = (r.bottom + window.scrollY) + 'px';
+    o.style.left = (r.left + window.scrollX) + 'px';
+    o.style.width = Math.max(r.width, 180) + 'px';
+    var html = '';
+    for (var i = 0; i < items.length; i++) {
+      var value = items[i][0];
+      var hint = items[i][1] || '';
+      html += '<div class="drocat-suggest-item" data-value="' + value + '">';
+      html += '<span class="drocat-suggest-label">' + value + '</span>';
+      if (hint) html += '<span class="drocat-suggest-hint text-caption">' + hint + '</span>';
+      html += '</div>';
+    }
+    o.innerHTML = html;
+    o.style.display = 'block';
+  },
+  hide: function () {
+    var o = document.getElementById('drocat-suggest-overlay');
+    if (o) { o.style.display = 'none'; }
+  },
+  pick: function (value) {
+    if (window.socket && window.did_handshake) {
+      window.socket.emit('event', {
+        id: __OVERLAY_ID__,
+        client_id: window.clientId,
+        listener_id: '__PICK_LID__',
+        args: [JSON.stringify(value)]
+      });
+    }
+  }
+};
+// Delegated (capture) click listener: attached at page load so it persists even
+// though the overlay div is created later (a IIFE that runs in <head> would find
+// the overlay already gone/not-yet-rendered and skip binding, leaving the items
+// unclickable). A document-level listener catches every .drocat-suggest-item.
+if (!window.drocatSuggestDelegated) {
+  window.drocatSuggestDelegated = true;
+  document.addEventListener('click', function (ev) {
+    var t = ev.target && ev.target.closest ? ev.target.closest('.drocat-suggest-item') : null;
+    if (t) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      window.drocatSuggest.pick(t.getAttribute('data-value'));
+    }
+  }, true);
+}
 """
 
 
@@ -98,7 +242,7 @@ _BODY_SLOT = r"""
   :props="props"
   :class="props.rowIndex % 2 === 0 ? 'drocat-edge-row-even' : 'drocat-edge-row-odd'"
 >
-  <q-td auto-width class="drocat-edge-select-cell">
+  <q-td class="drocat-edge-select-cell">
     <q-checkbox v-model="props.selected" dense />
   </q-td>
   <q-td v-for="col in props.cols" :key="col.name" :props="props"
@@ -109,27 +253,30 @@ _BODY_SLOT = r"""
         @update:model-value="$parent.$emit('layer-cell-change', { id: props.row.id, field: 'layer', value: $event })" />
     </template>
     <template v-else-if="col.name === 'neuron'">
-      <q-input v-model="props.row.neuron" dense borderless hide-bottom-space placeholder="Neuron"
-        @update:model-value="$parent.$emit('layer-cell-change', { id: props.row.id, field: 'neuron', value: $event })"
-        @blur="$parent.$emit('layer-cell-commit', { id: props.row.id, field: 'neuron', value: props.row.neuron })"
-        @keydown.enter="$parent.$emit('layer-cell-commit', { id: props.row.id, field: 'neuron', value: props.row.neuron })"
-        @keydown.tab="$parent.$emit('layer-cell-commit', { id: props.row.id, field: 'neuron', value: props.row.neuron })" />
+      <div class="drocat-neuron-cell" :id="'neuron-cell-' + props.row.id">
+        <q-select v-model="props.row.neurons" :options="props.row.neuron_options"
+          multiple use-chips use-input new-value-mode="add-unique"
+          hide-dropdown-icon dense borderless hide-bottom-space
+          placeholder="Neuron"
+          @update:model-value="$parent.$emit('layer-cell-change', { id: props.row.id, field: 'neuron', value: $event })"
+          @focus="$parent.$emit('layer-cell-focus', { id: props.row.id })"
+          @input-value="(v) => $parent.$emit('layer-cell-suggest', { id: props.row.id, text: v })"
+          @blur="$parent.$emit('layer-cell-commit', { id: props.row.id, field: 'neuron', value: props.row.neurons })"
+          @keydown.enter="$parent.$emit('layer-cell-commit', { id: props.row.id, field: 'neuron', value: props.row.neurons })"
+          @keydown.tab="$parent.$emit('layer-cell-commit', { id: props.row.id, field: 'neuron', value: props.row.neurons })" />
+      </div>
     </template>
     <template v-else>
       <div class="row items-center no-wrap gap-1 drocat-color-cell">
         <q-btn
           :icon="props.row[col.name] ? null : 'palette'"
-          flat dense round size="xs"
+          :round="!props.row[col.name]"
+          :style="props.row[col.name] ? { backgroundColor: props.row[col.name] } : {}"
+          flat dense size="xs"
           :class="['drocat-color-cell-picker', { 'drocat-color-cell-picker-set': !!props.row[col.name] }]"
           @click.stop="$parent.$emit('layer-color-pick', { id: props.row.id, field: col.name })"
           title="Pick color"
-        >
-          <span
-            v-if="props.row[col.name]"
-            class="drocat-color-cell-preview"
-            :style="{ backgroundColor: props.row[col.name] }"
-          />
-        </q-btn>
+        />
         <q-input v-model="props.row[col.name]" dense borderless hide-bottom-space
           placeholder="(auto)"
           @update:model-value="$parent.$emit('layer-cell-change', { id: props.row.id, field: col.name, value: $event })"
@@ -152,7 +299,7 @@ class LayerStyleEditorHandle:
         dataset_provider: Optional[Callable[[], object]] = None,
         search_columns_provider: Optional[Callable[[], str]] = None,
     ):
-        self.rows: List[dict] = []
+        self.rows: List[dict] = self._scaffold_rows()
         self.current_name: str = ""
         self.export_dir_provider = export_dir_provider
         self._dataset_provider = dataset_provider or (lambda: "")
@@ -165,22 +312,53 @@ class LayerStyleEditorHandle:
         self.validation_panel: Optional[ui.element] = None
         self.validation_label: Optional[ui.label] = None
         self.available_neurons_link: Optional[ui.element] = None
-        self.edit_inputs: dict = {}
-        self._neuron_input = None
         self._selected_ids: List[int] = []
         self._timer = None
         self.expansion: Optional[ui.expansion] = None
         self._transient_csv_path: Optional[str] = None
         self.synapse_mode: str = "synapse"
-        self._color_fields: Optional[list] = None
-        self._color_control_groups: dict = {}
-        self._add_color_pickers: dict = {}
-        self._layer_add_select: Optional[ui.select] = None
         self._pick_popup: Optional[object] = None
         self._pending_pick: Optional[dict] = None
         self._available_batch_layer: Optional[int] = None
         self._available_query_values: List[str] = []
-        self._add_input_row: Optional[ui.element] = None
+        # In-table neuron-cell auto-suggestion is shown in a plain positioned overlay
+        # div (not a Quasar menu, so it never blurs the cell or clears typed text).
+        # The overlay DIV ITSELF is a single static NiceGUI element; its suggestion
+        # items are rendered on the CLIENT via ``run_javascript`` (never as NiceGUI
+        # elements). Creating NiceGUI elements for the items during typing would
+        # re-render the q-table body and remount the focused q-select, wiping the
+        # typed text — so the items are pure DOM and committed through a single
+        # ``pick`` listener emitted from JS. ``_suggest_suppress`` is armed on a
+        # commit/blur and keeps the overlay closed until the user genuinely types a
+        # query (non-empty ``input-value``) or focuses a different cell.
+        self._suggest_overlay: Optional[ui.element] = None
+        self._suggest_row: Optional[int] = None
+        self._suggest_suppress: bool = False
+        self._suggest_pick_listener_id: Optional[str] = None
+        # After a programmatic chip commit, the re-rendered q-select re-emits
+        # ``@update:model-value`` with a possibly-stale chip list; ignore those
+        # for a short window so they cannot overwrite the authoritative rows.
+        self._suppress_neuron_value_until: float = 0.0
+
+    def _empty_logical_row(self) -> dict:
+        """One empty scaffolding row (no layer / neuron / colour)."""
+        return {
+            "layer": "",
+            "neurons": [],
+            "color": "",
+            "synapse_color": "",
+            "pre_synaptic_color": "",
+            "post_synaptic_color": "",
+        }
+
+    def _scaffold_rows(self) -> List[dict]:
+        """Seed the editor with empty rows the user can type straight into."""
+        return [self._empty_logical_row() for _ in range(3)]
+
+    def _ensure_scaffolding(self) -> None:
+        """Keep at least 3 rows present so the table always has empty cells."""
+        while len(self.rows) < 3:
+            self.rows.append(self._empty_logical_row())
 
     def _dataset_value(self) -> str:
         """Resolve the current Skeleton dataset for viewer/suggestions."""
@@ -211,9 +389,19 @@ class LayerStyleEditorHandle:
     # ------------------------------------------------------------------ rows
     def _row_dicts(self) -> List[dict]:
         # Attach the available layer numbers so each row's layer cell can render
-        # a selection box (options computed from the whole table).
+        # a selection box (options computed from the whole table). Each cell keeps
+        # its ``neurons`` chip list and a stable id used as the table row_key.
         layer_opts = [str(x) for x in layer_style_store.available_layers(self.rows)]
-        return [{**row, "id": i, "layer_opts": layer_opts} for i, row in enumerate(self.rows)]
+        row_dicts = []
+        for i, row in enumerate(self.rows):
+            # The neuron cell's q-select options are its own chips (so they render);
+            # suggestions are shown in the separate overlay instead of the native
+            # dropdown, so typing never interrupts the q-select.
+            row_dicts.append({
+                **row, "id": i, "layer_opts": layer_opts,
+                "neuron_options": list(dict.fromkeys(list(row.get("neurons") or []))),
+            })
+        return row_dicts
 
     def refresh_table(self, *, preserve_selection: bool = False) -> None:
         """Refresh the table while keeping Python and QTable selection in sync."""
@@ -230,17 +418,6 @@ class LayerStyleEditorHandle:
         else:
             self._selected_ids = []
 
-        # Keep the Add-Row layer selection box options in sync with the table.
-        if self._layer_add_select is not None:
-            self._layer_add_select.options = [
-                str(x) for x in layer_style_store.available_layers(self.rows)
-            ]
-            # ``ui.select.options`` is a mutable ChoiceElement model.  Unlike
-            # the table, it does not push an options mutation until update(),
-            # which previously left the pending-row dropdown showing its
-            # initial one-item list after layer 1 was added.
-            self._layer_add_select.update()
-
         if self.table is not None:
             self.table.rows = row_dicts
             self.table.selected = [
@@ -249,14 +426,16 @@ class LayerStyleEditorHandle:
             self.table.update()
 
     def set_rows(self, rows: List[dict], name: Optional[str] = None) -> None:
-        self.rows = layer_style_store.normalize_rows(rows)
+        # Loading real rows replaces the working set as-is (no scaffolding), so a
+        # CSV round-trips to exactly its rows; the fresh-editor 3 empty rows are
+        # seeded only in ``__init__`` (and restored by ``delete_selected``).
+        self.rows = layer_style_store.logical_normalize(rows)
         self._available_batch_layer = None
         if name is not None:
             self.current_name = name
             if self.name_input is not None:
                 self.name_input.value = name
         self.refresh_table()
-        self._update_validation()
 
     def set_synapse_mode(self, mode: str) -> None:
         """Switch to a synapse mode (updates table columns + CSV format)."""
@@ -265,18 +444,22 @@ class LayerStyleEditorHandle:
             self.table.columns = _columns_for_mode(self.synapse_mode)
             self.table.update()
         self.refresh_table()
-        self._sync_add_form_visibility()
 
     def render(self) -> None:
         """Create the table once; the columns are updated in place on mode change."""
         if self.table_container is None:
             return
-        self._color_fields = (
-            [("pre_synaptic_color", "Pre-synaptic color"), ("post_synaptic_color", "Post-synaptic color")]
-            if self.synapse_mode == "pre-post sites"
-            else [("synapse_color", "Synapse color")]
-        )
         self.table_container.clear()
+        # Per-column widths are controlled by these CSS variables (the header
+        # resizers update them drag-to-resize). Column definitions reference them as
+        # ``width:var(--wc-<name>)``. The defaults are deliberately modest so the
+        # whole table (up to 6 columns in pre-post mode) fits inside the card; the
+        # checkbox/layer stay capped narrow while Neuron/colors take the rest.
+        _col_width_vars = (
+            "--wc-select:44px; --wc-layer:68px; --wc-neuron:400px; --wc-color:280px; "
+            "--wc-synapse_color:280px; --wc-pre_synaptic_color:280px; "
+            "--wc-post_synaptic_color:280px"
+        )
         with self.table_container:
             self.table = ui.table(
                 columns=_columns_for_mode(self.synapse_mode),
@@ -284,44 +467,15 @@ class LayerStyleEditorHandle:
                 row_key="id",
                 selection="multiple",
                 on_select=self.on_select,
-            ).classes("w-full drocat-edge-table").props("dense flat bordered")
+            ).classes("w-full drocat-edge-table").props("dense flat bordered").style(_col_width_vars)
             self.table.add_slot("header", _TABLE_HEADER_SLOT)
             self.table.add_slot("body", _BODY_SLOT)
             self.table.on("layer-cell-change", self.on_inline_edit)
             self.table.on("layer-cell-commit", self.on_inline_commit)
             self.table.on("layer-color-pick", self.on_color_pick)
+            self.table.on("layer-cell-focus", self.on_neuron_focus)
+            self.table.on("layer-cell-suggest", self.on_neuron_suggest)
         self.refresh_table()
-
-    def _sync_add_form_visibility(self) -> None:
-        """Show each mode-specific colour input together with its picker."""
-        visible_fields = {"color"}
-        if self.synapse_mode == "pre-post sites":
-            visible_fields.update({"pre_synaptic_color", "post_synaptic_color"})
-        else:
-            visible_fields.add("synapse_color")
-        if self._add_input_row is not None:
-            self._add_input_row.classes(
-                add=(
-                    "drocat-layer-add-input-row-pre-post"
-                    if self.synapse_mode == "pre-post sites"
-                    else "drocat-layer-add-input-row-synapse"
-                ),
-                remove=(
-                    "drocat-layer-add-input-row-synapse"
-                    if self.synapse_mode == "pre-post sites"
-                    else "drocat-layer-add-input-row-pre-post"
-                ),
-            )
-        for key, element in self.edit_inputs.items():
-            if key not in layer_style_store.COLOR_FIELDS:
-                continue
-            visible = key in visible_fields
-            # Hide the complete wrapper so no picker icon remains when its
-            # associated input is not part of the active mode.
-            group = self._color_control_groups.get(key)
-            if group is not None:
-                group.set_visibility(visible)
-            element.set_visibility(visible)
 
     def _update_validation(self) -> list:
         """Render the persistent in-page validation panel and return errors."""
@@ -393,41 +547,48 @@ class LayerStyleEditorHandle:
         # entries.
         self._available_query_values = list(cleaned)
 
-        if self._update_validation():
-            _notify(
-                "Fix the layer editor errors before applying available neurons",
-                type="warning",
-            )
-            return 0
-
         if self._available_batch_layer is None:
             self._available_batch_layer = layer_style_store.next_layer_number(self.rows)
 
         existing = {
-            str(row.get("neuron", "") or "").strip()
+            neuron
             for row in self.rows
-            if str(row.get("neuron", "") or "").strip()
+            for neuron in row.get("neurons", [])
+            if str(neuron).strip()
         }
+        # Fill the existing empty (scaffolding) rows first — one neuron per empty
+        # row — then append new rows for any remaining neurons, so a selection
+        # uses the rows already waiting on screen before growing the table.
+        empty_indices = [
+            i for i, row in enumerate(self.rows)
+            if layer_style_store._logical_is_empty(row)
+        ]
+        batch_layer = str(self._available_batch_layer)
         added_ids = []
+        fill_pos = 0
         for value in cleaned:
             if value in existing:
                 continue
-            self.rows.append(
-                layer_style_store.normalize_rows([{
-                    "layer": str(self._available_batch_layer),
-                    "neuron": value,
-                }])[0]
-            )
+            new_row = layer_style_store.logical_normalize([{
+                "layer": batch_layer,
+                "neurons": [value],
+            }])[0]
+            if fill_pos < len(empty_indices):
+                idx = empty_indices[fill_pos]
+                self.rows[idx] = new_row
+                fill_pos += 1
+                added_ids.append(idx)
+            else:
+                self.rows.append(new_row)
+                added_ids.append(len(self.rows) - 1)
             existing.add(value)
-            added_ids.append(len(self.rows) - 1)
 
         if not added_ids:
             return 0
 
+        self._ensure_scaffolding()
         self._selected_ids = added_ids
         self.refresh_table(preserve_selection=True)
-        self._sync_edit_inputs()
-        self._update_validation()
         self._update_status(
             f"Added {len(added_ids)} neuron{'s' if len(added_ids) != 1 else ''} "
             f"to layer {self._available_batch_layer}"
@@ -443,15 +604,16 @@ class LayerStyleEditorHandle:
             self.table.selected = [
                 row for row in row_dicts if row["id"] in self._selected_ids
             ]
-        self._sync_edit_inputs()
 
     def on_inline_edit(self, event) -> None:
-        """Persist one value changed in a table cell.
+        """Update the in-memory logical row from a table-cell change.
 
-        The body slot keeps the live QInput/QSelect model on the client and
-        sends only this small payload to Python. Do not replace the table rows
-        or call ``table.update()`` here: doing so would recreate the active
-        input and move the cursor after every keystroke.
+        The body slot keeps the live QSelect/QInput model on the client and sends
+        only this small payload to Python. On every keystroke we mutate just the
+        row model — never the table rows, validation panel or autosave timer — so
+        the active input keeps its cursor and focus. Validation and auto-save are
+        deferred to ``on_inline_commit`` (blur / Enter / Tab) and to the discrete
+        layer-select change.
         """
         args = getattr(event, "args", event)
         if not isinstance(args, dict):
@@ -466,21 +628,170 @@ class LayerStyleEditorHandle:
         if not 0 <= row_id < len(self.rows):
             return
 
-        value = str(args.get("value") or "").strip()
-        self.rows[row_id][field] = value
-        self._update_validation()
+        value = args.get("value")
+        if field == "neuron":
+            # A programmatic commit re-renders the cell and the q-select re-emits
+            # a (possibly stale) chip list; ignore it briefly so it cannot
+            # overwrite the authoritative rows.
+            if time.time() < self._suppress_neuron_value_until:
+                return
+            # The chip cell reports its whole list; a plain string (tests) is
+            # treated as a single chip.
+            if isinstance(value, str):
+                neurons = [value] if value.strip() else []
+            else:
+                neurons = [
+                    str(v).strip()
+                    for v in (value or [])
+                    if str(v).strip()
+                ]
+            self.rows[row_id]["neurons"] = neurons
+            return
+
+        scalar = str(value or "").strip()
+        self.rows[row_id][field] = scalar
         if field == "layer":
-            # Layer options depend on the set of used layers. A layer select
-            # has no text cursor to preserve, so refresh its options after the
-            # selection changes; neuron/color inputs deliberately skip this
-            # refresh to keep their active cursor and selection intact.
+            # A layer select has no text cursor, so refreshing its options after a
+            # discrete selection change is safe. Validation is intentionally NOT
+            # run here: incomplete fields only surface when the user runs/exports.
             self.refresh_table(preserve_selection=True)
-        self.schedule_autosave()
+            self.schedule_autosave()
 
     def on_inline_commit(self, event) -> None:
-        """Synchronize the compact Add-Row controls after focus leaves a cell."""
+        """Auto-save once focus leaves a cell (blur / Enter / Tab).
+
+        Validation is deliberately left to run/export, so a half-typed row never
+        flashes a red error while the user is still editing. Leaving the cell also
+        dismisses the suggestion overlay.
+        """
+        self._close_suggest_overlay()
         self.on_inline_edit(event)
-        self._sync_edit_inputs()
+        self.schedule_autosave()
+
+    # ------------------------------------------------- neuron-cell suggestions
+    def on_neuron_suggest(self, event) -> None:
+        """Compute dataset-aware suggestions for the focused neuron cell.
+
+        The suggestions are shown in the pointing overlay (``_suggest_overlay``)
+        below the focused cell, so typing inside the cell keeps its focus and text
+        (the overlay is a plain div, not a Quasar menu).
+        """
+        args = getattr(event, "args", event)
+        if not isinstance(args, dict):
+            return
+        try:
+            row_id = int(args.get("id"))
+        except (TypeError, ValueError):
+            return
+        text = str(args.get("text") or "").strip()
+        if not 0 <= row_id < len(self.rows):
+            return
+        # A commit/blur closes the overlay and stays closed until the user actually
+        # types a non-empty query (or focuses a different cell), so the re-render's
+        # reset ``input-value`` event cannot re-open it.
+        if self._suggest_suppress and not text:
+            return
+        self._suggest_suppress = False
+        self._show_neuron_suggestions(row_id, text)
+
+    def on_neuron_focus(self, event) -> None:
+        """Record the focused cell and open history for an empty field."""
+        args = getattr(event, "args", event)
+        if not isinstance(args, dict):
+            return
+        try:
+            row_id = int(args.get("id"))
+        except (TypeError, ValueError):
+            return
+        if self._suggest_row is not None and self._suggest_row != row_id:
+            # Genuine switch to a different cell: close the old overlay and let the
+            # new cell open its own history/suggestions.
+            self._close_suggest_overlay()
+            self._suggest_suppress = False
+        elif self._suggest_suppress:
+            # Same cell re-focused right after a commit/blur: stay closed until the
+            # user types a query or switches cells (a genuine refocus of the same
+            # cell after a commit intentionally waits for typing).
+            return
+        self._suggest_row = row_id
+        self._show_neuron_suggestions(row_id, "")
+
+    def _show_neuron_suggestions(self, row_id: int, text: str) -> None:
+        """Fill the non-focus-stealing overlay below the focused neuron cell.
+
+        The overlay div is populated entirely on the CLIENT via ``run_javascript``
+        (pure DOM, never NiceGUI elements) — creating NiceGUI items here would
+        re-render the q-table body and remount the focused q-select, wiping typed
+        text. Clicking an item commits through the registered ``pick`` listener.
+        """
+        if self._suggest_overlay is None:
+            return
+        suggestions = self._suggest_neurons(text) if text else self._recent_neuron_history()
+        if not suggestions:
+            self._close_suggest_overlay()
+            return
+        self._suggest_suppress = False
+        items = [[str(value), str(hint or "")] for value, hint in suggestions[:30]]
+        js = (
+            f"window.drocatSuggest && window.drocatSuggest.render({int(row_id)}, "
+            f"{json.dumps(items)});"
+        )
+        try:
+            self.table.client.run_javascript(js)
+        except Exception:
+            self._close_suggest_overlay()
+
+    def _on_suggest_pick(self, event) -> None:
+        """Commit a clicked suggestion to the currently focused cell."""
+        value = getattr(event, "args", None)
+        self._commit_neuron_suggestion(self._suggest_row, value)
+
+    def _recent_neuron_history(self):
+        """Recent + frequent neuron query history, limited to the dataset(s)."""
+        try:
+            from ..history_store import frequent, recent
+            dataset = self._dataset_value()
+            scope = [dataset] if dataset else None
+            seen = set()
+            entries = []
+            for value in list(recent(datasets=scope)) + list(frequent(datasets=scope)):
+                item = str(value).strip()
+                if item and item not in seen:
+                    seen.add(item)
+                    entries.append((item, "history"))
+            return entries
+        except Exception:
+            return []
+
+    def _close_suggest_overlay(self) -> None:
+        # Closing (commit / blur / no matches) suppresses re-opening from the cell's
+        # reset events; re-enabled only when the user types a query or switches
+        # cells (see ``on_neuron_suggest``/``on_neuron_focus``). The client-side
+        # renderer hides the overlay so no NiceGUI elements are rebuilt.
+        self._suggest_suppress = True
+        if self._suggest_overlay is not None:
+            try:
+                self._suggest_overlay.client.run_javascript(
+                    "window.drocatSuggest && window.drocatSuggest.hide();"
+                )
+            except Exception:
+                pass
+
+    def _commit_neuron_suggestion(self, row_id: int, value: str) -> None:
+        """Append a picked suggestion as a chip in the owning cell."""
+        self._close_suggest_overlay()
+        if not 0 <= row_id < len(self.rows):
+            return
+        value = str(value or "").strip()
+        neurons = list(self.rows[row_id]["neurons"])
+        if value and value not in neurons:
+            neurons.append(value)
+            self.rows[row_id]["neurons"] = neurons
+            # Refresh the table, but ignore the re-render's stale re-emit for a
+            # moment so the q-select cannot clobber the chips we just committed.
+            self._suppress_neuron_value_until = time.time() + 0.6
+            self.refresh_table(preserve_selection=True)
+            self.schedule_autosave()
 
     def on_color_pick(self, event) -> None:
         """Open the single-color picker popup for a color cell.
@@ -507,117 +818,26 @@ class LayerStyleEditorHandle:
         initial = self.rows[row_id].get(field) or "#145cff"
         self._pick_popup.open(initial)
 
-    def _sync_add_color_picker(self, field: str, value=None) -> None:
-        """Show either the palette glyph or the current pending-row color.
-
-        The picker is part of the input's append slot, so updating the button
-        in place keeps the form width stable while still making a configured
-        color immediately recognizable.  A color is intentionally kept as
-        the browser's CSS value here (hex, rgb(a), named colors, etc. are all
-        accepted by the backend and by CSS).
-        """
-        button = self._add_color_pickers.get(field)
-        if button is None:
-            return
-        if value is None:
-            element = self.edit_inputs.get(field)
-            value = getattr(element, "value", "") if element is not None else ""
-        color = str(value or "").strip()
-        if color:
-            # A square swatch replaces the round palette button once a value
-            # exists.  Keep the fixed button dimensions so the input never
-            # changes width when a color is selected.
-            button.icon = None
-            button.props(remove="round")
-            safe_color = color.replace(";", "").replace("{", "").replace("}", "")
-            button.style(
-                replace=(
-                    f"background-color:{safe_color}; border-radius:4px;"
-                )
-            )
-            button.classes(add="drocat-layer-add-color-picker-set")
-        else:
-            button.icon = "palette"
-            button.props("round")
-            button.style(replace="")
-            button.classes(remove="drocat-layer-add-color-picker-set")
-
-    def _on_add_color_change(self, field: str, event=None) -> None:
-        """Refresh a pending-row swatch after direct text editing."""
-        value = getattr(event, "value", None) if event is not None else None
-        if value is None:
-            element = self.edit_inputs.get(field)
-            value = getattr(element, "value", "") if element is not None else ""
-        self._sync_add_color_picker(field, value)
-
     def _apply_picked_color(self, value: str) -> None:
-        """Apply a committed color from the popup to the pending target.
-
-        The pending target is either a table cell (``{"row_id", "field"}``)
-        or an Add-Row form input (``{"field"}`` only).
-        """
+        """Apply a committed color from the popup back to the table cell."""
         pending = self._pending_pick
         self._pending_pick = None
         if not pending:
             return
         field = pending.get("field")
-        if "row_id" in pending:
-            row_id = pending["row_id"]
-            if 0 <= row_id < len(self.rows):
-                self.rows[row_id][field] = value
-                self.refresh_table(preserve_selection=True)
-                self.schedule_autosave()
-        elif field in self.edit_inputs:
-            self.edit_inputs[field].value = value
-            self._sync_add_color_picker(field, value)
-
-    def _open_picker_for_add(self, field: str) -> None:
-        """Open the popup to pick a color for an Add-Row form input."""
-        if field not in self.edit_inputs or self._pick_popup is None:
+        row_id = pending.get("row_id")
+        if row_id is None or not 0 <= row_id < len(self.rows):
             return
-        self._pending_pick = {"field": field}
-        self._pick_popup.open(self.edit_inputs[field].value or "#145cff")
-
-    def _sync_edit_inputs(self) -> None:
-        row = self.rows[self._selected_ids[0]] if (
-            self._selected_ids and 0 <= self._selected_ids[0] < len(self.rows)
-        ) else {col: "" for col in layer_style_store.LAYER_STYLE_COLUMNS}
-        for key, element in self.edit_inputs.items():
-            value = row.get(key, "")
-            if key == "neuron" and self._neuron_input is not None:
-                self._neuron_input.chip_input.set_value([value] if value else [])
-            else:
-                element.value = value
-                if key in layer_style_store.COLOR_FIELDS:
-                    self._sync_add_color_picker(key, value)
+        self.rows[row_id][field] = value
+        self.refresh_table(preserve_selection=True)
+        self.schedule_autosave()
 
     # --------------------------------------------------------------- editing
-    def _current_edit_values(self) -> dict:
-        values = {}
-        for key, element in self.edit_inputs.items():
-            if key == "neuron":
-                # Keep the wrapper in ``edit_inputs`` so callers that used the
-                # former single-value editor can still assign ``.value`` in
-                # tests/integrations. In the live chip editor the value lives
-                # on its child QSelect.
-                raw = getattr(element, "value", None)
-                if not raw and self._neuron_input is not None:
-                    raw = self._neuron_input.chip_input.value
-                if isinstance(raw, (list, tuple)):
-                    raw = raw[0] if raw else ""
-            else:
-                raw = element.value
-            values[key] = str(raw or "").strip()
-        return values
-
-    def add_row(self) -> None:
-        """Append the row currently entered in the editor controls."""
-        values = self._current_edit_values()
-        self.rows.append(layer_style_store.normalize_rows([values])[0])
+    def add_empty_row(self) -> None:
+        """Append an empty scaffolding row for direct in-table editing."""
+        self.rows.append(self._empty_logical_row())
         self._selected_ids = [len(self.rows) - 1]
         self.refresh_table(preserve_selection=True)
-        self._sync_edit_inputs()
-        self._update_validation()
         self.schedule_autosave()
 
     def delete_selected(self) -> None:
@@ -628,9 +848,8 @@ class LayerStyleEditorHandle:
             if 0 <= idx < len(self.rows):
                 del self.rows[idx]
         self._selected_ids = []
+        self._ensure_scaffolding()
         self.refresh_table()
-        self._sync_edit_inputs()
-        self._update_validation()
         self.schedule_autosave()
 
     # ------------------------------------------------------------- auto-save
@@ -787,6 +1006,28 @@ def layer_style_editor(
         if getattr(event, "value", False) and on_expand:
             on_expand()
 
+    # Auto-suggestion overlay for the in-table neuron chip cells: a plain positioned
+    # div (not a Quasar menu) that shows server-computed suggestions below the
+    # focused cell without stealing its focus or clearing text. It is created as a
+    # SIBLING of the expansion panel (not inside it) so that populating it never
+    # re-renders the expansion's content slot (the table), which would otherwise
+    # remount the focused q-select and wipe any typed text.
+    handle._suggest_overlay = ui.element("div").props(
+        'id="drocat-suggest-overlay"'
+    ).classes("drocat-suggest-overlay").style("display: none;")
+    # Register the commit listener (a clicked suggestion commits to the focused cell)
+    # and capture its id so the client JS can emit directly over the socket.
+    handle._suggest_overlay.on("pick", handle._on_suggest_pick)
+    for _listener in handle._suggest_overlay._event_listeners.values():
+        if _listener.type == "pick":
+            handle._suggest_pick_listener_id = _listener.id
+            break
+    _suggest_js = (
+        _SUGGESTION_JS.replace("__OVERLAY_ID__", str(handle._suggest_overlay.id))
+        .replace("__PICK_LID__", str(handle._suggest_pick_listener_id))
+    )
+    ui.add_head_html(f"<script>{_suggest_js}</script>")
+
     with ui.expansion(
         "Advanced Layer Editor",
         icon="edit_note",
@@ -796,9 +1037,10 @@ def layer_style_editor(
         handle.expansion = panel
         ui.label(
             "Edit the Skeleton layers and per-neuron colors directly (the in-page "
-            "equivalent of the custom-layer CSV). Each row is one neuron; layer "
-            "numbers may start at 0 or 1 but must remain continuous. Every change is auto-saved to disk, so "
-            "edits survive an app/port shutdown."
+            "equivalent of the custom-layer CSV). One row is one layer/color group; "
+            "add several neurons as chips in a cell and they are written as separate "
+            "rows on that layer at export. Layer numbers may start at 0 or 1 but must "
+            "remain continuous. Changes are auto-saved, so edits survive a shutdown."
         ).classes("text-caption drocat-muted")
 
         with ui.row().classes("w-full items-end gap-2 flex-wrap"):
@@ -811,6 +1053,14 @@ def layer_style_editor(
         # ``layer_opts``.
         handle.table_container = ui.column().classes("w-full")
         handle.render()
+
+        # The header resizers call this client-side helper (injected once per page).
+        try:
+            if not getattr(handle.table.client, "_drocat_col_resize_added", False):
+                ui.add_head_html(f"<script>{_COL_RESIZE_JS}</script>")
+                handle.table.client._drocat_col_resize_added = True
+        except Exception:
+            pass
 
         with ui.card().classes("w-full drocat-layer-validation").props(
             f'id="{card_id}-validation"'
@@ -840,97 +1090,13 @@ def layer_style_editor(
             query_label="Advanced layer selection",
         )
 
-        color_keys = {"color", "synapse_color", "pre_synaptic_color", "post_synaptic_color"}
-        # Keep the editor fields on one consistent baseline.  The action
-        # buttons intentionally live in their own row so the mode-specific
-        # Pre/Post fields never get pushed below the first input row.
-        with ui.column().classes("w-full gap-2 drocat-layer-add-form"):
-            with ui.row().classes(
-                "w-full items-stretch gap-2 drocat-layer-add-input-row"
-            ) as add_input_row:
-                handle._add_input_row = add_input_row
-                for key, label in (
-                    ("layer", "Layer"), ("neuron", "Neuron"), ("color", "Color"),
-                    ("synapse_color", "Synapse"), ("pre_synaptic_color", "Pre"),
-                    ("post_synaptic_color", "Post"),
-                ):
-                    if key == "layer":
-                        # Layer is a selection box starting at 1; its options are the
-                        # currently available layers (refreshed on every table change).
-                        layer_select = ui.select(
-                            [str(x) for x in layer_style_store.available_layers(handle.rows)],
-                            value="1",
-                            label="Layer",
-                        ).props("outlined dense").classes(
-                            "drocat-layer-add-field drocat-layer-add-control "
-                            "drocat-layer-add-layer"
-                        )
-                        handle.edit_inputs[key] = layer_select
-                        handle._layer_add_select = layer_select
-                    elif key == "neuron":
-                        handle._neuron_input = neuron_list_input(
-                            label="Neuron",
-                            placeholder="Type or select a neuron",
-                            hint=(
-                                "Type a neuron type, instance, or bodyId. Dataset-aware "
-                                "suggestions appear while typing; Enter or Tab commits it."
-                            ),
-                            unit_label="neuron",
-                            show_filter=False,
-                            show_upload=False,
-                            show_count=False,
-                            show_clear=False,
-                            max_items=1,
-                            suggestions=handle._suggest_neurons,
-                        ).classes(
-                            "drocat-layer-add-field drocat-layer-add-control "
-                            "drocat-layer-add-neuron-input"
-                        )
-                        handle._neuron_input.chip_input.classes(
-                            "drocat-layer-add-field-control"
-                        )
-                        handle.edit_inputs[key] = handle._neuron_input
-                    elif key in color_keys:
-                        # Keep the input and picker in one visibility-managed group;
-                        # mode switches must never leave an orphan picker icon. The
-                        # picker lives in the q-input append slot so it occupies the
-                        # field rather than adding another horizontal column.
-                        with ui.row().classes(
-                            "items-center gap-1 no-wrap drocat-layer-color-control "
-                            "drocat-layer-add-field drocat-layer-add-control "
-                            "drocat-layer-add-color-control"
-                        ) as color_group:
-                            color_input = ui.input(label).props(
-                                "outlined dense"
-                            ).classes("drocat-layer-add-color-input")
-                            with color_input.add_slot("append"):
-                                picker_button = ui.button(icon="palette").props(
-                                    "flat dense round size=xs"
-                                ).classes("drocat-layer-add-color-picker").tooltip(
-                                    "Pick this colour (alpha + Bokeh palette)"
-                                ).on_click(
-                                    lambda _e, k=key: handle._open_picker_for_add(k)
-                                )
-                            handle._add_color_pickers[key] = picker_button
-                            color_input.on_value_change(
-                                lambda event, k=key: handle._on_add_color_change(k, event)
-                            )
-                            handle.edit_inputs[key] = color_input
-                            handle._color_control_groups[key] = color_group
-                    else:
-                        handle.edit_inputs[key] = ui.input(label).props(
-                            "outlined dense"
-                        ).classes("drocat-layer-add-field")
-
-            # Initial visibility of the mode-specific colour inputs.
-            handle._sync_add_form_visibility()
-            with ui.row().classes(
-                "w-full items-center gap-2 drocat-layer-add-actions"
-            ):
-                ui.button("Add Row", icon="add").props("dense").on_click(handle.add_row)
-                ui.button(
-                    "Delete Selected", icon="delete"
-                ).props("dense outline").on_click(handle.delete_selected)
+        with ui.row().classes(
+            "w-full items-center gap-2 drocat-layer-add-actions"
+        ):
+            ui.button("Add Row", icon="add").props("dense").on_click(handle.add_empty_row)
+            ui.button(
+                "Delete Selected", icon="delete"
+            ).props("dense outline").on_click(handle.delete_selected)
 
         with ui.row().classes("w-full items-center gap-3"):
             handle.status_label = ui.label("Empty draft").classes(

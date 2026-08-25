@@ -47,6 +47,87 @@ MODE_COLUMNS = {
 }
 COLOR_FIELDS = {"color", "synapse_color", "pre_synaptic_color", "post_synaptic_color"}
 
+# The editor works on *logical* rows: one table row per layer/colour group with a
+# list of neuron chips. A logical row is flattened to one CSV row per chip at every
+# backend/export boundary, so a single visual cell with several neurons expands to
+# several CSV rows that all share the cell's layer and colours.
+LOGICAL_KEYS = ("layer", "neurons", "color", "synapse_color", "pre_synaptic_color", "post_synaptic_color")
+
+
+def _logical_is_empty(row: dict) -> bool:
+    """True when a logical row has no layer, no neuron and no colour at all.
+
+    Such rows are pure scaffolding placeholders and must be ignored by
+    validation / export so the 3 seeded empty rows never raise an error or
+    produce a blank CSV line.
+    """
+    return (
+        not str(row.get("layer", "") or "").strip()
+        and not row.get("neurons")
+        and not any(str(row.get(col, "") or "").strip() for col in COLOR_FIELDS)
+    )
+
+
+def logical_normalize(rows: List[dict]) -> List[dict]:
+    """Coerce flat CSV rows or logical rows into canonical logical rows.
+
+    ``neuron`` (a string) and ``neurons`` (a list) are both accepted as the
+    neuron source, so the editor, CSV upload and legacy callers all feed the
+    same flattening helpers. Empty strings / empty lists become ``[]``.
+    """
+    normalized = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        layer = str(row.get("layer", "") or "").strip()
+        raw_neurons = row.get("neurons")
+        if raw_neurons is None:
+            raw_neurons = row.get("neuron", "") or ""
+        if isinstance(raw_neurons, str):
+            neurons = [raw_neurons.strip()] if raw_neurons.strip() else []
+        else:
+            try:
+                items = list(raw_neurons)
+            except TypeError:
+                items = [raw_neurons]
+            neurons = [str(x).strip() for x in items if str(x).strip()]
+        normalized.append(
+            {
+                "layer": layer,
+                "neurons": neurons,
+                "color": str(row.get("color", "") or "").strip(),
+                "synapse_color": str(row.get("synapse_color", "") or "").strip(),
+                "pre_synaptic_color": str(row.get("pre_synaptic_color", "") or "").strip(),
+                "post_synaptic_color": str(row.get("post_synaptic_color", "") or "").strip(),
+            }
+        )
+    return normalized
+
+
+def flatten_rows(rows: List[dict]) -> List[dict]:
+    """Expand logical rows into flat layer-map CSV row dicts.
+
+    Each logical row with ``n`` neuron chips yields ``n`` flat rows, all sharing
+    the cell's layer and colours. Fully empty scaffolding rows are dropped.
+    """
+    flat = []
+    for row in logical_normalize(rows):
+        if _logical_is_empty(row):
+            continue
+        neurons = row["neurons"] or [""]
+        for neuron in neurons:
+            flat.append(
+                {
+                    "layer": row["layer"],
+                    "neuron": neuron,
+                    "color": row["color"],
+                    "synapse_color": row["synapse_color"],
+                    "pre_synaptic_color": row["pre_synaptic_color"],
+                    "post_synaptic_color": row["post_synaptic_color"],
+                }
+            )
+    return flat
+
 
 # ---------------------------------------------------------------------------
 # Layer options (selection box) & mode-aware column helpers
@@ -134,18 +215,19 @@ def normalize_rows(rows: List[dict]) -> List[dict]:
 def validate_rows(rows: List[dict]) -> List[str]:
     """Return human-readable errors (empty list when the table is usable).
 
-    Half-filled rows are reported by 1-based index. A row with no neuron and
-    no color is ignored as an empty scaffolding row.
+    Rows are validated at the *logical* level (one row per cell). A row that is
+    completely empty (no layer, no neuron, no colour) is ignored as scaffolding;
+    any row with at least one field filled is validated, so a partial row raises
+    the missing-layer / missing-neuron error. Layer continuity is checked on the
+    flattened layer set so a cell with several neurons on the same layer never
+    looks like a gap.
     """
     errors = []
     numeric_layers = []
-    for i, row in enumerate(rows or [], start=1):
-        if not isinstance(row, dict):
-            errors.append(f"Row {i}: not a mapping")
-            continue
-        layer = str(row.get("layer", "") or "").strip()
-        neuron = str(row.get("neuron", "") or "").strip()
-        if not layer and not neuron:
+    for i, row in enumerate(logical_normalize(rows), start=1):
+        layer = row["layer"]
+        neurons = row["neurons"]
+        if _logical_is_empty(row):
             continue  # completely empty rows are ignored, not invalid
         if not layer:
             errors.append(f"Row {i}: missing layer")
@@ -154,10 +236,12 @@ def validate_rows(rows: List[dict]) -> List[str]:
                 parsed = float(layer)
                 if not math.isfinite(parsed) or not parsed.is_integer():
                     raise ValueError
+                # Each chip expands to a row, but the layer appears once; the
+                # set keeps continuity checks correct when a cell has many chips.
                 numeric_layers.append(int(parsed))
             except (TypeError, ValueError, OverflowError):
                 errors.append(f"Row {i}: layer '{layer}' is not a number")
-        if not neuron:
+        if not neurons:
             errors.append(f"Row {i}: missing neuron")
 
     if numeric_layers:
@@ -179,11 +263,17 @@ def validate_rows(rows: List[dict]) -> List[str]:
 
 
 def complete_rows(rows: List[dict]) -> List[dict]:
-    """Rows usable as a layer-map input (layer + neuron filled)."""
-    return [
-        row for row in normalize_rows(rows)
-        if all(row[col] for col in REQUIRED_COLUMNS)
-    ]
+    """Flatten a logical table into rows usable as a layer-map input.
+
+    Every logical row with a layer and at least one neuron chip is expanded to
+    one flat row per chip (all sharing the cell's layer and colours); rows that
+    are missing a layer or have no neurons are dropped.
+    """
+    complete = []
+    for row in flatten_rows(rows):
+        if all(row[col] for col in REQUIRED_COLUMNS):
+            complete.append(row)
+    return complete
 
 
 def next_layer_number(rows: List[dict]) -> int:
@@ -236,7 +326,7 @@ def save_draft(name: str, rows: List[dict], dirty: bool = True) -> Optional[str]
     slug = sanitize_name(name)
     if not slug:
         return None
-    rows = normalize_rows(rows)
+    rows = flatten_rows(rows)
     with _lock:
         existing = _read_meta(slug)
         now = _now_iso()
@@ -272,9 +362,11 @@ def rows_to_csv_for_mode(rows: List[dict], mode: str, columns=None) -> str:
 
     For 'synapse' the output keeps ``layer, neuron, color, synapse_color``; for
     'pre-post sites' it keeps ``layer, neuron, color, pre_synaptic_color,
-    post_synaptic_color``, so exported/uploaded CSVs match the mode.
+    post_synaptic_color``, so exported/uploaded CSVs match the mode. Logical
+    rows are flattened first, so a cell with several chips produces one CSV row
+    per chip and empty scaffolding rows are dropped.
     """
-    normalized = normalize_rows(rows)
+    normalized = flatten_rows(rows)
     if columns is None:
         columns = mode_columns(mode)
     lines = [",".join(columns)]
