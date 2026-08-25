@@ -185,10 +185,15 @@ window.drocatSuggest = {
     var o = document.getElementById('drocat-suggest-overlay');
     if (!el || !o) return;
     var r = el.getBoundingClientRect();
-    o.style.top = (r.bottom + window.scrollY) + 'px';
-    o.style.left = (r.left + window.scrollX) + 'px';
+    // The overlay is position:fixed, so it uses viewport coords (no scroll)
+    // to stay anchored to the cell regardless of the surrounding layout.
+    o.style.top = r.bottom + 'px';
+    o.style.left = r.left + 'px';
     o.style.width = Math.max(r.width, 180) + 'px';
-    var html = '';
+    // A transparent click-through spacer spans the next row so its cell stays
+    // visible and clickable (clicking it focuses it instead of being swallowed by
+    // a suggestion item); the item list starts below that row.
+    var html = '<div class="drocat-suggest-spacer"></div>';
     for (var i = 0; i < items.length; i++) {
       var value = items[i][0];
       var hint = items[i][1] || '';

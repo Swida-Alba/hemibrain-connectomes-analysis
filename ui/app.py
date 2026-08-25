@@ -1336,22 +1336,37 @@ html, body {
 /* In-table neuron auto-suggestion overlay: a plain positioned div below the cell.
    It is not a Quasar menu, so opening it never blurs the cell's q-select. */
 .drocat-suggest-overlay {
-    position: absolute;
+    /* Fixed (viewport) positioning anchors the overlay to the focused cell
+       regardless of any positioned/scrollable ancestor it is nested in. */
+    position: fixed;
     z-index: 7000;
     display: none;
-    background: var(--drocat-surface, #ffffff);
-    border: 1px solid var(--drocat-line, #c8d4e4);
-    border-radius: 6px;
-    box-shadow: 0 6px 18px rgba(11, 31, 58, .18);
-    overflow: hidden;
     max-height: 240px;
     overflow-y: auto;
+    overflow-x: hidden;
+    /* Click-through everywhere except the items: the transparent spacer over
+       the next row lets clicking that cell focus it (no stray commit); only the
+       suggestion items (pointer-events:auto) capture a click to commit. */
+    pointer-events: none;
+}
+.drocat-suggest-spacer {
+    pointer-events: none;
+    /* Spans the row below the focused cell (48px table rows) so that cell stays
+       visible + clickable instead of being covered by the suggestion items. */
+    height: 48px;
 }
 .drocat-suggest-item {
     padding: 5px 10px;
     cursor: pointer;
     gap: 8px;
     white-space: nowrap;
+    pointer-events: auto;
+    background: var(--drocat-surface, #ffffff);
+    border: 1px solid var(--drocat-line, #c8d4e4);
+    border-top: none;
+}
+.drocat-suggest-item:first-of-type {
+    border-radius: 0 0 6px 6px;
 }
 .drocat-suggest-item:hover {
     background: var(--drocat-cobalt-soft, #e9f0f9);
