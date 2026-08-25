@@ -130,14 +130,28 @@ class TestColorPickerPopup:
 
     def test_palette_selector_populates_swatches(self):
         _client, handle = build_popup()
-        # The default palette (Category10) should populate a swatch grid.
+        # The default palette (Category10) is discrete (<=20 colors): shown as-is.
         assert handle._swatch_row is not None
         slot = handle._swatch_row.default_slot
-        # Each swatch is a wrapper div plus an inner colour div, so at least
-        # 10 children for a 10-colour palette.
-        assert len(slot.children) >= 10
+        swatches = [
+            child for child in slot.children
+            if "drocat-swatch" in (getattr(child, "_classes", None) or [])
+        ]
+        assert len(swatches) == 10
         # The swatch row is a 10-column grid so every palette shows ten per row.
         assert "drocat-swatch-grid" in handle._swatch_row._classes
+
+    def test_continuous_palette_sampled_to_forty_swatches(self):
+        _client, handle = build_popup()
+        # A continuous (sequential, >20 colors) palette is sampled to 40 evenly.
+        handle._palette_select.value = "Viridis"
+        handle._on_palette_change()
+        slot = handle._swatch_row.default_slot
+        swatches = [
+            child for child in slot.children
+            if "drocat-swatch" in (getattr(child, "_classes", None) or [])
+        ]
+        assert len(swatches) == 40
 
     def test_palette_selector_embeds_horizontal_strip_previews(self):
         _client, handle = build_popup()

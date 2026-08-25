@@ -26,7 +26,7 @@ try:
 except ModuleNotFoundError:  # Allow importing the UI package directly from the repo.
     from src.utils.color_utils import color_to_rgba_string, color_has_explicit_alpha, extract_rgba_tuple
 
-from .palette_picker import _embed_palette_strips, get_palette_catalog
+from .palette_picker import _embed_palette_strips, get_palette_catalog, sample_palette
 
 
 def _to_hex(colors: List[str]) -> List[str]:
@@ -199,7 +199,16 @@ class ColorPickerPopupHandle:
         if self._swatch_row is not None:
             self._swatch_row.clear()
             with self._swatch_row:
-                for hex_color in _to_hex(chosen)[:40]:
+                # Discrete palettes (<=20 colors) are shown exactly as configured.
+                # Continuous palettes (>20, e.g. sequential/diverging colormaps)
+                # are sampled to 40 colors evenly across their full range, so the
+                # 10x4 grid spans the whole gradient instead of the first stops.
+                swatch_colors = (
+                    _to_hex(chosen)
+                    if len(chosen) <= 20
+                    else _to_hex(sample_palette(chosen, 40))
+                )
+                for hex_color in swatch_colors:
                     swatch = ui.element("div").classes("drocat-swatch").tooltip(hex_color).on(
                         "click", lambda v=hex_color: self._set_from_swatch(v)
                     )
