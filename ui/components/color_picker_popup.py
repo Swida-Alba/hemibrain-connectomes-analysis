@@ -9,10 +9,12 @@ single click — no nested popup. It is augmented with:
 - a live ``rgba()`` preview.
 
 The handle exposes ``open(initial)``, ``get_value()`` (the chosen color, with an
-explicit alpha when one is set), and ``on_submit(callback)``. With alpha == 1.0
-the raw picked color is returned; with alpha < 1.0 a ``rgba(...)`` string with
-the explicit alpha is returned only when ``Override alpha`` is checked, matching
-the rest of the custom-color flow while keeping the default opaque.
+explicit alpha when one is set), and ``on_submit(callback)``. When ``Override
+alpha`` is unchecked the raw picked color is returned (so it inherits the
+visualization's global opacity); when it is checked a ``rgba(...)`` string that
+carries the alpha channel is returned even for alpha == 1.0, so an explicit
+"opaque" override is not mistaken for "no override" by the backend's
+``color_has_explicit_alpha``.
 """
 
 from typing import Callable, List, Optional, Tuple
@@ -20,9 +22,9 @@ from typing import Callable, List, Optional, Tuple
 from nicegui import ui
 
 try:
-    from utils.color_utils import color_to_rgba_string, extract_rgba_tuple
+    from utils.color_utils import color_to_rgba_string, color_has_explicit_alpha, extract_rgba_tuple
 except ModuleNotFoundError:  # Allow importing the UI package directly from the repo.
-    from src.utils.color_utils import color_to_rgba_string, extract_rgba_tuple
+    from src.utils.color_utils import color_to_rgba_string, color_has_explicit_alpha, extract_rgba_tuple
 
 from .palette_picker import _embed_palette_strips, get_palette_catalog
 
@@ -71,8 +73,11 @@ class ColorPickerPopupHandle:
         alpha = self._normalize_alpha(
             self.alpha.value if self.alpha is not None else self._last_alpha
         )
-        if not self.apply_alpha or not bool(self.apply_alpha.value) or alpha >= 1.0:
+        if not self.apply_alpha or not bool(self.apply_alpha.value):
             return color
+        # Always carry the alpha channel when the user opts in, even for 1.0:
+        # a bare '#rrggbb' has no alpha, so the backend treats it as "no override"
+        # and falls back to the global opacity instead of forcing opaque.
         return color_to_rgba_string(color, alpha=alpha)
 
     @staticmethod
@@ -129,10 +134,12 @@ class ColorPickerPopupHandle:
         self._current = f"#{int(r):02x}{int(g):02x}{int(b):02x}"
         self._set_picker_color(self._current)
         self._set_alpha_value(a, refresh=False)
-        # Preserve an explicit alpha when editing an existing RGBA color, but
-        # keep the new/default picker opaque unless the user opts in.
+        # Reflect an existing alpha channel: when the opened color carries an
+        # explicit alpha (rgba(...), #RGBA/#RRGGBBAA …) opt into "Override alpha"
+        # and show that alpha; a bare hex keeps the override unchecked so it
+        # inherits the renderer's global opacity.
         if self.apply_alpha is not None:
-            self.apply_alpha.value = bool(a < 1.0)
+            self.apply_alpha.value = color_has_explicit_alpha(initial or "#145cff")
         self._refresh_preview()
         if self.dialog is not None:
             self.dialog.open()
@@ -165,13 +172,19 @@ class ColorPickerPopupHandle:
         value = getattr(_event, "value", None) if _event is not None else None
         if value is None and self.alpha is not None:
             value = self.alpha.value
-        self._set_alpha_value(value)
+        # Moving the alpha control implies the user wants to apply it, so opt in.
+        if self.apply_alpha is not None:
+            self.apply_alpha.value = True
+        self._set_alpha_value(value, refresh=True)
 
     def _on_alpha_slider_change(self, _event=None) -> None:
         value = getattr(_event, "value", None) if _event is not None else None
         if value is None and self.alpha_slider is not None:
             value = self.alpha_slider.value
-        self._set_alpha_value(value)
+        # Moving the slider implies the user wants to apply it, so opt in.
+        if self.apply_alpha is not None:
+            self.apply_alpha.value = True
+        self._set_alpha_value(value, refresh=True)
 
     def _on_apply_alpha_change(self, _event=None) -> None:
         """Refresh the preview when the explicit-alpha opt-in changes."""
@@ -191,9 +204,9 @@ class ColorPickerPopupHandle:
                         "click", lambda v=hex_color: self._set_from_swatch(v)
                     )
                     with swatch:
-                        # Circular swatch matching the custom-color panel.
+                        # Circular swatch sized to fit the 10-column grid.
                         ui.element("div").style(
-                            f"background:{hex_color}; width:22px; height:22px; "
+                            f"background:{hex_color}; width:20px; height:20px; "
                             "border-radius:50%; border:2px solid rgba(11,31,58,.15);"
                         )
 
@@ -282,7 +295,9 @@ def color_picker_popup(
                     dict(catalog),
                 )
                 handle._palette_select.on_value_change(handle._on_palette_change)
-                handle._swatch_row = ui.row().classes("w-full gap-1 flex-wrap")
+                # A 10-column CSS grid so every candidate palette shows ten swatches
+                # per row regardless of the palette width.
+                handle._swatch_row = ui.row().classes("w-full drocat-swatch-grid")
                 handle._on_palette_change()
             with ui.row().classes("w-full items-center gap-1"):
                 handle.apply_alpha = ui.checkbox(

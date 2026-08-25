@@ -26,16 +26,29 @@ class TestColorPickerPopup:
         _client, handle = build_popup()
         handle._current = "#145cff"
         handle.alpha.value = 1.0
+        # With the override opt-in OFF, the base color is returned unchanged so it
+        # inherits the visualization's global opacity.
         assert handle.get_value() == "#145cff"
+
+    def test_override_alpha_one_still_carries_alpha_channel(self):
+        _client, handle = build_popup()
+        handle._current = "#145cff"
+        handle.alpha.value = 1.0
+        handle.apply_alpha.value = True
+        # An explicit "opaque" override must not be mistaken for "no override":
+        # the backend's ``color_has_explicit_alpha`` only sees the alpha channel,
+        # so alpha=1.0 must still emit an rgba(...) string.
+        value = handle.get_value()
+        assert value.startswith("rgba(")
+        assert "1" in value.split(",")[-1]
 
     def test_value_embeds_alpha_when_below_one(self):
         _client, handle = build_popup()
         handle._current = "#145cff"
         handle.alpha.value = 0.5
-        # Alpha is opt-in so the default remains compatible with global
-        # visualization opacity.
-        assert handle.get_value() == "#145cff"
-        handle.apply_alpha.value = True
+        # Changing the alpha auto-checks "Override alpha", so the value carries
+        # the rgba channel instead of staying a bare hex.
+        assert handle.apply_alpha.value is True
         assert handle.get_value() == "rgba(20, 92, 255, 0.5)"
 
     def test_open_seeds_from_initial_rgba(self):
@@ -53,8 +66,10 @@ class TestColorPickerPopup:
             str(getattr(element, "text", ""))
             for element in client.elements.values()
         }
+        # A direct value change auto-checks the override opt-in.
         handle.alpha.value = 0.4
-        assert handle.get_value() == "#145cff"
+        assert handle.apply_alpha.value is True
+        assert handle.get_value() == "rgba(20, 92, 255, 0.4)"
 
     def test_alpha_uses_a_plain_input_and_a_005_step_slider(self):
         _client, handle = build_popup()
@@ -121,6 +136,8 @@ class TestColorPickerPopup:
         # Each swatch is a wrapper div plus an inner colour div, so at least
         # 10 children for a 10-colour palette.
         assert len(slot.children) >= 10
+        # The swatch row is a 10-column grid so every palette shows ten per row.
+        assert "drocat-swatch-grid" in handle._swatch_row._classes
 
     def test_palette_selector_embeds_horizontal_strip_previews(self):
         _client, handle = build_popup()
