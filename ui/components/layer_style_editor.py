@@ -329,11 +329,13 @@ class LayerStyleEditorHandle:
         # re-render the q-table body and remount the focused q-select, wiping the
         # typed text — so the items are pure DOM and committed through a single
         # ``pick`` listener emitted from JS. ``_suggest_suppress`` is armed on a
-        # commit/blur and keeps the overlay closed until the user genuinely types a
-        # query (non-empty ``input-value``) or focuses a different cell.
+        # commit/blur; the re-render's synthetic focus/reset is ignored only for a
+        # short window (``_suggest_suppress_until``), after which a genuine
+        # refocus/typing clears it and re-opens the overlay.
         self._suggest_overlay: Optional[ui.element] = None
         self._suggest_row: Optional[int] = None
         self._suggest_suppress: bool = False
+        self._suggest_suppress_until: float = 0.0
         self._suggest_pick_listener_id: Optional[str] = None
         # After a programmatic chip commit, the re-rendered q-select re-emits
         # ``@update:model-value`` with a possibly-stale chip list; ignore those
@@ -686,10 +688,14 @@ class LayerStyleEditorHandle:
         text = str(args.get("text") or "").strip()
         if not 0 <= row_id < len(self.rows):
             return
-        # A commit/blur closes the overlay and stays closed until the user actually
-        # types a non-empty query (or focuses a different cell), so the re-render's
-        # reset ``input-value`` event cannot re-open it.
-        if self._suggest_suppress and not text:
+        # A commit/blur closes the overlay. Ignore the re-render's empty reset
+        # ``input-value`` only while it arrives inside the suppression window; a
+        # non-empty query (or a later empty reset) clears suppression and re-opens.
+        if (
+            self._suggest_suppress
+            and not text
+            and time.time() < self._suggest_suppress_until
+        ):
             return
         self._suggest_suppress = False
         self._show_neuron_suggestions(row_id, text)
@@ -709,10 +715,12 @@ class LayerStyleEditorHandle:
             self._close_suggest_overlay()
             self._suggest_suppress = False
         elif self._suggest_suppress:
-            # Same cell re-focused right after a commit/blur: stay closed until the
-            # user types a query or switches cells (a genuine refocus of the same
-            # cell after a commit intentionally waits for typing).
-            return
+            # Same cell re-focused. Only the re-render's synthetic focus (which
+            # arrives inside the suppression window) is ignored; a genuine later
+            # refocus clears suppression and re-opens the history overlay.
+            if time.time() < self._suggest_suppress_until:
+                return
+            self._suggest_suppress = False
         self._suggest_row = row_id
         self._show_neuron_suggestions(row_id, "")
 
@@ -765,10 +773,12 @@ class LayerStyleEditorHandle:
 
     def _close_suggest_overlay(self) -> None:
         # Closing (commit / blur / no matches) suppresses re-opening from the cell's
-        # reset events; re-enabled only when the user types a query or switches
-        # cells (see ``on_neuron_suggest``/``on_neuron_focus``). The client-side
-        # renderer hides the overlay so no NiceGUI elements are rebuilt.
+        # reset events only for a short window; after it a genuine refocus or a
+        # non-empty query clears suppression (see ``on_neuron_suggest``/
+        # ``on_neuron_focus``). The client-side renderer hides the overlay so no
+        # NiceGUI elements are rebuilt.
         self._suggest_suppress = True
+        self._suggest_suppress_until = time.time() + 0.4
         if self._suggest_overlay is not None:
             try:
                 self._suggest_overlay.client.run_javascript(

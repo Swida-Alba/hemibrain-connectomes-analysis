@@ -9,6 +9,7 @@ Covers:
 """
 import re
 import sys
+import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -418,6 +419,14 @@ class TestEditorHandle:
         handle.on_neuron_suggest(SimpleNamespace(args={"id": 0, "text": ""}))
         assert showed == []
         assert handle._suggest_suppress is True
+
+        # Once the suppression window has elapsed, a genuine same-cell refocus
+        # clears suppression and re-opens the history overlay (not "gone").
+        showed.clear()
+        handle._suggest_suppress_until = time.time() - 1
+        handle.on_neuron_focus(SimpleNamespace(args={"id": 0}))
+        assert showed == [(0, "")]
+        assert handle._suggest_suppress is False
 
         # Typing a non-empty query clears the suppression and shows filtered results.
         showed.clear()
