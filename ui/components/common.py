@@ -615,6 +615,8 @@ def neuron_list_input(
     show_history_datasets: bool = False,
     suggestion_min_chars: int = 1,
     suggestion_limit: int = 50,
+    show_count: bool = True,
+    show_clear: bool = True,
 ) -> ui.element:
     """
     Create a chip-based list input for neurons or driver lines.
@@ -626,10 +628,12 @@ def neuron_list_input(
     - ``initial`` seeds the chip list with pre-existing values.
     - ``max_items`` caps the list (used for single-input tabs); additional
       values are rejected once the cap is reached.
-    - A live count badge and a Clear button keep the list manageable. The
-      badge names items with ``unit_label`` ("neuron" by default; pass e.g.
-      "threshold" for non-neuron chip inputs so the counter reads
-      "3 thresholds" instead of "3 neurons").
+    - A live count badge and a Clear button keep the list manageable. Both can
+      be hidden independently with ``show_count=False`` and
+      ``show_clear=False`` for compact one-row editors. The badge names items
+      with ``unit_label`` ("neuron" by default; pass e.g. "threshold" for
+      non-neuron chip inputs so the counter reads "3 thresholds" instead of
+      "3 neurons").
     - ``suggestions``: optional provider ``typed_text -> [(value, hint)]``
       powering the auto-suggest dropdown (dataset type/instance/bodyId names
       with the searched column as a gray hint). The provider is prefiltered
@@ -684,15 +688,18 @@ def neuron_list_input(
             loaded = parse_neuron_upload(filename, raw)
             # Mutate in place so container.uploaded_neurons remains current.
             uploaded_neurons[:] = loaded
-            upload_label.text = (
-                f"✓ {len(uploaded_neurons)} {_unit(len(uploaded_neurons))} loaded from {filename}"
-            )
-            upload_label.classes(replace="text-caption drocat-ok")
+            if upload_label is not None:
+                upload_label.text = (
+                    f"✓ {len(uploaded_neurons)} {_unit(len(uploaded_neurons))} loaded from {filename}"
+                )
+                upload_label.classes(replace="text-caption drocat-ok")
         except Exception as exc:
             uploaded_neurons.clear()
-            upload_label.text = f"Error: {exc}"
-            upload_label.classes(replace="text-caption drocat-err")
-        upload_label.set_visibility(True)
+            if upload_label is not None:
+                upload_label.text = f"Error: {exc}"
+                upload_label.classes(replace="text-caption drocat-err")
+        if upload_label is not None:
+            upload_label.set_visibility(True)
         update_status()
         upload_menu.close()
 
@@ -856,35 +863,46 @@ def neuron_list_input(
                 chip_input.set_value(remaining)
             update_status()
 
-        # Status row: live count + upload status + clear
-        with ui.row().classes("w-full items-center gap-2"):
-            count_badge = ui.badge(f"0 {_unit(0)}", color="grey-6").props("outline")
-            upload_label = ui.label("").classes("text-caption drocat-muted")
-            upload_label.set_visibility(False)
-            # Keep this action text-only across every neuron input.  The
-            # label is already short and the icon made the status row look
-            # different from the other Clear actions in the UI.
-            clear_button = ui.button("Clear").props(
-                "flat dense"
-            ).classes("drocat-clear-btn")
-            viewer_link = None
-            if available_neurons is not None:
-                # Import lazily to keep the common input component independent
-                # from the optional viewer's Polars-backed data layer.
-                from .neuron_index_viewer import create_neuron_index_viewer_link
+        # Status row: optional live count + upload status + clear. Compact
+        # callers can omit the entire row; the advanced layer editor uses its
+        # table selection/deletion controls instead.
+        count_badge = None
+        upload_label = None
+        clear_button = None
+        viewer_link = None
+        if show_count or show_upload or show_clear or available_neurons is not None:
+            with ui.row().classes("w-full items-center gap-2"):
+                if show_count:
+                    count_badge = ui.badge(
+                        f"0 {_unit(0)}", color="grey-6"
+                    ).props("outline")
+                if show_upload:
+                    upload_label = ui.label("").classes("text-caption drocat-muted")
+                    upload_label.set_visibility(False)
+                if show_clear:
+                    # Keep this action text-only across every neuron input. The
+                    # label is already short and the icon made the status row
+                    # look different from the other Clear actions in the UI.
+                    clear_button = ui.button("Clear").props(
+                        "flat dense"
+                    ).classes("drocat-clear-btn")
+                if available_neurons is not None:
+                    # Import lazily to keep the common input component independent
+                    # from the optional viewer's Polars-backed data layer.
+                    from .neuron_index_viewer import create_neuron_index_viewer_link
 
-                viewer_link = create_neuron_index_viewer_link(
-                    available_neurons,
-                    query_values_getter=lambda: [
-                        *uploaded_neurons,
-                        *(chip_input.value or []),
-                    ],
-                    query_selection=sync_viewer_selection,
-                    query_resolution=sync_viewer_body_selection,
-                    query_remove=remove_viewer_query_value,
-                    query_edit=lambda value: start_edit_value(value),
-                    query_label=label,
-                )
+                    viewer_link = create_neuron_index_viewer_link(
+                        available_neurons,
+                        query_values_getter=lambda: [
+                            *uploaded_neurons,
+                            *(chip_input.value or []),
+                        ],
+                        query_selection=sync_viewer_selection,
+                        query_resolution=sync_viewer_body_selection,
+                        query_remove=remove_viewer_query_value,
+                        query_edit=lambda value: start_edit_value(value),
+                        query_label=label,
+                    )
 
     pending_input = {"value": ""}
     viewer_owned_values = set()
@@ -913,8 +931,9 @@ def neuron_list_input(
         combined = [normalize_neuron(item) for item in uploaded_neurons]
         combined.extend(normalize_neuron(item) for item in (chip_input.value or []))
         count = len(dict.fromkeys(combined))
-        count_badge.text = f"{count} {_unit(count)}"
-        count_badge.props(f"color={'primary' if count else 'grey-6'}")
+        if count_badge is not None:
+            count_badge.text = f"{count} {_unit(count)}"
+            count_badge.props(f"color={'primary' if count else 'grey-6'}")
         expand_button.set_visibility(bool(chip_input.value))
         for callback in list(value_change_callbacks):
             try:
@@ -989,8 +1008,9 @@ def neuron_list_input(
             )
             expand_button.text = "Expand"
             expand_button.update()
-        upload_label.text = ""
-        upload_label.set_visibility(False)
+        if upload_label is not None:
+            upload_label.text = ""
+            upload_label.set_visibility(False)
         update_status()
 
     def remember_user_input(event):
@@ -1669,7 +1689,8 @@ def neuron_list_input(
             "}"
         ),
     )
-    clear_button.on_click(clear_all)
+    if clear_button is not None:
+        clear_button.on_click(clear_all)
     update_status()
 
     def get_value():

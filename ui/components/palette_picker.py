@@ -7,14 +7,14 @@ Visual color palette tools for DROCAT.
   reset button beside the preview (the current state is the only preview).
   Preset palettes are picked from a name dropdown with the full-palette
   preview strip beside it - the same selector layout as the custom mode's
-  Bokeh palette picker. Custom colors (mode toggle) are added via the
-  native color picker, a Bokeh-palette swatch picker (choose any catalog
-  palette and click a swatch), or a free-form color string, with an
-  optional per-entry opacity override, and reordered by dragging the list
-  rows.
+  Bokeh palette picker. Custom colors (mode toggle) are added via the shared
+  single-color popup, a Bokeh-palette swatch picker, or a free-form color
+  string. Custom entries are reordered and removed directly in the horizontal
+  preview row.
 - ``color_swatch_picker``: single-color swatches with a custom color input.
 """
 
+import re
 from typing import Callable, List, Optional, Tuple
 
 from nicegui import ui
@@ -399,18 +399,36 @@ def _render_draggable_swatches(
     colors: List[str],
     height: int = 20,
     on_drop: Optional[Callable] = None,
+    on_remove: Optional[Callable[[int], None]] = None,
 ) -> None:
-    """Render individual draggable swatches for drag-and-drop reordering."""
+    """Render individual draggable swatches for drag-and-drop reordering.
+
+    ``on_remove`` is used by the custom palette preview.  Keeping the remove
+    action on the swatch itself makes the preview the complete custom-palette
+    editor; preset palette previews remain plain, non-removable swatches.
+    """
     with ui.row().classes(
         "gap-0 w-full drocat-palette-swatches"
     ).on("dragover", None, js_handler=_DRAG_OVER_JS) as row:
         for index, color in enumerate(colors):
             sw = ui.element("div").style(
-                f"background:{color}; flex:1; min-width:5px; height:{height}px;"
+                f"background:{color}; position:relative; flex:1; "
+                f"min-width:5px; height:{height}px;"
             ).tooltip("Drag to reorder")
             sw._props["draggable"] = "true"
             sw._props["data-index"] = str(index)
             sw.on("dragstart", None, js_handler=_DRAG_START_JS)
+            if on_remove is not None:
+                with sw:
+                    ui.button(
+                        icon="close",
+                        on_click=lambda _e, i=index: on_remove(i),
+                    ).props(
+                        'flat dense round size="xs" color="negative" '
+                        'aria-label="Remove custom color"'
+                    ).classes("drocat-palette-remove").tooltip(
+                        "Remove color"
+                    )
     row.on("drop", on_drop, js_handler=_drop_js("x"))
 
 
@@ -499,11 +517,10 @@ def palette_editor(
       the palette live, and hit reset (beside the preview) to restore the
       original order and the full range.
     - Custom colors: the palette starts empty (no preset fallback) and
-      gains single colors via the native picker, a Bokeh palette swatch
-      grid (choose any catalog palette and click a swatch), or a
-      free-form color string; an optional opacity override is stored per
-      entry. Entries without an explicit opacity channel inherit the
-      renderer's global opacity.
+      gains single colors via the shared popup, a Bokeh palette swatch grid,
+      or a free-form color string. Entries without an explicit opacity
+      channel inherit the renderer's global opacity. Custom swatches are
+      reordered and removed directly in the horizontal preview row.
 
     ``on_change`` fires when the user manually edits the palette state
     (picking a palette in the dropdown, drag-reordering, adjusting the
@@ -605,7 +622,14 @@ def palette_editor(
             with swatch_area:
                 if draggable:
                     _render_draggable_swatches(
-                        colors, height=20, on_drop=handle_drop
+                        colors,
+                        height=20,
+                        on_drop=handle_drop,
+                        on_remove=(
+                            remove_custom
+                            if state["mode"] == "custom"
+                            else None
+                        ),
                     )
                 elif colors:
                     _render_color_strip(
@@ -614,7 +638,7 @@ def palette_editor(
                 else:
                     # Custom mode starts empty: show a placeholder instead
                     # of the preset palette until colors are added.
-                    ui.label("No custom colors yet — add colors below.").classes(
+                    ui.label("No custom colors yet — use Add color below.").classes(
                         "text-caption drocat-muted"
                     )
             if state["mode"] == "custom" and state["custom"]:
@@ -642,7 +666,6 @@ def palette_editor(
                     to_idx - 1 if from_idx < to_idx else to_idx, item
                 )
                 state["custom"] = colors
-                render_custom_list()
             else:
                 colors = palette_colors()
                 offset = slice_start_index(colors)
@@ -722,15 +745,24 @@ def palette_editor(
 
         # ---------------- Custom panel ----------------
         with ui.column().classes("w-full gap-1") as custom_panel:
-            with ui.row().classes("w-full items-center gap-2"):
-                color_input = ui.color_input(value="#145cff").props("dense").tooltip(
-                    "Quick opaque color picker; use Color format for RGBA, hex-alpha, HSL, or tuple syntax."
+            with ui.row().classes(
+                "w-full items-center gap-2 flex-wrap drocat-custom-color-input-row"
+            ):
+                # The shared popup is created just after these controls so the
+                # palette's own Color format field remains the first editable
+                # format field in the page.
+                pick_button = ui.button(
+                    "Pick color",
+                    icon="palette",
+                    on_click=lambda: pick_popup.open(current_raw_color()),
+                ).props("outline dense").classes("shrink-0").tooltip(
+                    "Open the shared color picker with alpha and Bokeh palettes."
                 )
                 format_input = ui.input(
                     label="Color format",
                     value="#145cff",
                     placeholder="rgba(255, 0, 0, 0.5)",
-                ).props("dense outlined").classes("flex-grow").tooltip(
+                ).props("dense outlined").classes("flex-grow min-w-[180px]").tooltip(
                     COLOR_FORMAT_HINT
                 )
                 color_preview = ui.element("div").classes(
@@ -738,34 +770,17 @@ def palette_editor(
                 ).style(
                     "width:24px; height:24px; border-radius:6px; "
                     "border:1px solid rgba(11,31,58,.15); flex:none;"
-                ).tooltip(
-                    "Live preview of the current color with the Opacity "
-                    "override applied."
-                )
-                opacity_override = ui.checkbox(
-                    "Opacity override", value=False
-                ).tooltip(
-                    "When enabled, the Opacity value is embedded in this color and overrides the global opacity."
-                )
-                opacity_value = ui.number(
-                    label="Opacity (0–1)",
-                    value=1.0,
-                    min=0,
-                    max=1,
-                    step=0.05,
-                ).classes("w-28").tooltip(
-                    "Per-entry opacity override. Leave the checkbox off to inherit the global opacity."
-                )
-                opacity_value.disable()
+                ).tooltip("Live preview of the color that will be added.")
                 ui.button(
                     "Add color", icon="add", on_click=lambda: add_custom_color()
-                ).props("flat dense color=primary")
+                ).props("flat dense color=primary").classes("shrink-0")
+
             ui.label(
-                "Pick a color, click a Bokeh-palette swatch, or type a format and "
-                "press Add. Supported: named colors; #RGB/#RGBA/#RRGGBB/#RRGGBBAA; "
-                "RGB(A) 0–255 or normalized 0–1; rgb()/rgba(); hsl()/hsla(). "
-                "An explicit opacity channel overrides the global opacity, while "
-                "colors without opacity inherit it. Drag rows to reorder."
+                "Pick a color with the popup, click a Bokeh-palette swatch, or "
+                "type a format and press Add. Supported: named colors; "
+                "#RGB/#RGBA/#RRGGBB/#RRGGBBAA; RGB(A) 0–255 or normalized 0–1; "
+                "rgb()/rgba(); hsl()/hsla(). Explicit alpha is kept only when "
+                "it is part of the color value or Override alpha is checked."
             ).classes("text-caption drocat-muted")
 
             # Bokeh-palette source: pick individual colors from any catalog
@@ -808,38 +823,44 @@ def palette_editor(
             palette_select.on_value_change(on_palette_select_change)
             render_picker_grid()
 
+            # Build the shared popup after the custom panel's Bokeh selector so
+            # the selector used to add colors remains the first matching field
+            # in the page and the two palettes do not intercept each other's
+            # changes.
+            from .color_picker_popup import color_picker_popup
+
+            picker_id = "card-palette-editor-picker-" + re.sub(
+                r"[^a-z0-9]+", "-", str(label).lower()
+            ).strip("-")
+            pick_popup = color_picker_popup(
+                card_id=picker_id or "card-palette-editor-picker"
+            )
+            container.custom_color_popup = pick_popup
+            container.custom_color_picker_button = pick_button
+
             def current_raw_color():
                 """The color value of the active input source."""
                 source = state["custom_input_source"]
                 if source == "palette":
                     return state["picked_color"] or format_input.value or "#145cff"
-                return (
-                    format_input.value
-                    if source == "text"
-                    else color_input.value
-                ) or "#145cff"
+                return format_input.value or "#145cff"
 
             def render_color_preview():
-                """Show the current color in the square preview, with the
-                Opacity override applied when enabled."""
+                """Show the current color in the square preview."""
                 raw = current_raw_color()
                 display = "transparent"
                 try:
-                    if bool(opacity_override.value):
-                        display = color_to_rgba_string(
-                            raw, alpha=float(opacity_value.value or 1.0)
-                        )
-                    else:
-                        standardize_color(raw)
-                        display = raw
+                    standardize_color(raw)
+                    display = raw
                 except (TypeError, ValueError):
                     pass
                 color_preview.style(f"background:{display}")
 
-            def on_picker_change(event):
+            def on_popup_color(value: str):
                 state["custom_input_source"] = "picker"
+                state["picked_color"] = value
                 state["syncing_custom_input"] = True
-                format_input.set_value(event.value or color_input.value)
+                format_input.set_value(value)
                 state["syncing_custom_input"] = False
                 render_color_preview()
 
@@ -848,64 +869,23 @@ def palette_editor(
                     state["custom_input_source"] = "text"
                 render_color_preview()
 
-            def on_opacity_override_change(event):
-                opacity_value.set_enabled(bool(event.value))
-                render_color_preview()
-
-            color_input.on_value_change(on_picker_change)
             format_input.on_value_change(on_format_change)
-            opacity_override.on_value_change(on_opacity_override_change)
-            opacity_value.on_value_change(lambda _e: render_color_preview())
+            pick_popup.on_submit(on_popup_color)
             render_color_preview()
-
-            # Draggable custom-color rows: same drag-and-drop mechanism as
-            # the preset preview row, but along the vertical list axis.
-            custom_list = ui.column().classes("w-full gap-1").on(
-                "dragover", None, js_handler=_DRAG_OVER_JS
-            ).on("drop", handle_drop, js_handler=_drop_js("y"))
-
-            def render_custom_list():
-                custom_list.clear()
-                with custom_list:
-                    if not state["custom"]:
-                        ui.label("No custom colors yet.").classes(
-                            "text-caption drocat-muted"
-                        )
-                        return
-                    for index, color in enumerate(state["custom"]):
-                        with ui.row().classes(
-                            "items-center gap-2 w-full drocat-custom-color-row"
-                        ) as row:
-                            row._props["draggable"] = "true"
-                            row._props["data-index"] = str(index)
-                            row.on("dragstart", None, js_handler=_DRAG_START_JS)
-                            ui.element("div").style(
-                                f"background:{color}; width:24px; height:24px;"
-                                "border-radius:6px; border:1px solid rgba(11,31,58,.15);"
-                            )
-                            ui.label(color).classes(
-                                "text-caption font-mono drocat-muted drocat-truncate"
-                            ).classes("flex-grow")
-                            ui.button(
-                                "✕", on_click=lambda i=index: remove_custom(i)
-                            ).props(
-                                'flat dense round color=negative '
-                                'aria-label="Remove custom color"'
-                            ).tooltip("Remove color")
 
             def add_single_color(color: str):
                 if color and color not in state["custom"]:
                     state["custom"].append(color)
-                    render_custom_list()
                     render_preview()
+                    if on_change:
+                        on_change()
 
             def add_custom_color():
                 raw = current_raw_color()
                 try:
                     color = _prepare_custom_color(
                         raw,
-                        opacity_override=bool(opacity_override.value),
-                        opacity_value=float(opacity_value.value or 1.0),
+                        opacity_override=False,
                     )
                 except (TypeError, ValueError) as exc:
                     ui.notify(str(exc), type="warning")
@@ -913,11 +893,12 @@ def palette_editor(
                 add_single_color(color)
 
             def remove_custom(index: int):
+                if not 0 <= index < len(state["custom"]):
+                    return
                 del state["custom"][index]
-                render_custom_list()
                 render_preview()
-
-            render_custom_list()
+                if on_change:
+                    on_change()
 
         def apply_palette(name: str, notify: bool = False):
             state["palette"] = name
@@ -936,7 +917,6 @@ def palette_editor(
             """Restore the original palette order/range (or clear custom colors)."""
             if state["mode"] == "custom":
                 state["custom"] = []
-                render_custom_list()
             else:
                 state["preset_orders"].pop(state["palette"], None)
                 state["start"], state["end"] = 0, 100
@@ -1038,6 +1018,18 @@ def color_swatch_picker(
             ui.button(
                 "Use custom color", on_click=lambda: select_custom_color()
             ).props("flat dense color=primary")
+            # Advanced single-color picker popup (alpha + Bokeh palette).
+            from .color_picker_popup import color_picker_popup
+
+            pick_popup = color_picker_popup(card_id="card-color-swatch-picker-popup")
+            ui.button(
+                "Pick with picker",
+                on_click=lambda: pick_popup.open(
+                    format_input.value if state["input_source"] == "text" else custom_input.value
+                ),
+            ).props("flat dense outline").tooltip(
+                "Open the single-color picker (hex/rgb + alpha + Bokeh palette)."
+            )
 
         ui.label(
             "Accepted: named colors; #RGB/#RGBA/#RRGGBB/#RRGGBBAA; RGB(A) "
@@ -1090,6 +1082,11 @@ def color_swatch_picker(
 
         for element, option_value in swatches:
             element.on("click", lambda v=option_value: select(v))
+
+        # Wire the advanced single-color picker popup (defined above) once
+        # ``select`` exists, and expose the popup for tests.
+        pick_popup.on_submit(select)
+        container.pick_popup = pick_popup
 
     container.value = state["value"]
     container.get_value = lambda: state["value"]

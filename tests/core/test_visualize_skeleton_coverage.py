@@ -1420,7 +1420,9 @@ class TestRealConstructor:
             **self.ctor_kwargs(tmp_path, verbose=True))
         assert vis.client_type == 'flywire'          # auto-detected
         assert vis.version == 783                    # parsed from dataset
-        assert vis.cache_synapses is False           # disabled for FAFB
+        # FlyWire/FAFB uses its dataset-native coordinate-bearing synapse
+        # table as the shared connector/site cache source.
+        assert vis.cache_synapses is True
         assert vis.verbose == 'full'                 # True normalized
         pipeline = vis._resolved_fafb_pipeline()
         expected = 0.90 if pipeline in {'fast', 'direct'} else 0.95

@@ -1,4 +1,5 @@
 import gzip
+import os
 import shutil
 import pandas as pd
 from pathlib import Path
@@ -235,6 +236,12 @@ def get_fafb_skeleton_parquet(data_dir):
 # dotprops building) follows the same behavior.
 
 EXTRUSION_CHECK_FILENAME = "extrusion_check_results.parquet"
+EXTRUSION_CACHE_SCHEMA_VERSION = 2
+# Bump this whenever the detector's mesh construction, decimation, or edge
+# thresholds change.  A body-ID-only cache is unsafe because the same row can
+# otherwise silently represent a result from a different detector contract.
+EXTRUSION_DETECTOR_VERSION = "edge-v2-tube6-fine"
+EXTRUSION_DETECTOR_TUBE_POINTS = 6
 
 # ``has_extrusion`` is the detection result and must never be overwritten by
 # the outcome of a repair attempt.  The status column is deliberately kept in
@@ -252,8 +259,15 @@ def extrusion_check_cache_path(project_root, dataset_folder):
     return Path(project_root) / "cache" / dataset_folder / EXTRUSION_CHECK_FILENAME
 
 
-def load_extrusion_check_cache(project_root, dataset_folder):
-    """Cached extrusion results: {bodyId(str): has_extrusion(bool)}."""
+def load_extrusion_check_cache(project_root, dataset_folder,
+                               simplification=None, tube_points=None):
+    """Load detector results that match the current detector contract.
+
+    Legacy boolean-only files are deliberately treated as stale detection
+    results.  They remain readable by :func:`load_extrusion_repair_status` so
+    an in-progress repair is not forgotten, but they cannot suppress a fresh
+    detector run.
+    """
     path = extrusion_check_cache_path(project_root, dataset_folder)
     if not path.exists():
         return {}
@@ -261,7 +275,26 @@ def load_extrusion_check_cache(project_root, dataset_folder):
         import pandas as pd
 
         df = pd.read_parquet(path)
-        return dict(zip(df["bodyId"].astype(str), df["has_extrusion"]))
+        required = {
+            "bodyId", "has_extrusion", "cache_schema_version",
+            "detector_version", "simplification", "tube_points",
+        }
+        if not required.issubset(df.columns):
+            return {}
+        if (df["cache_schema_version"] != EXTRUSION_CACHE_SCHEMA_VERSION).any():
+            return {}
+        if (df["detector_version"] != EXTRUSION_DETECTOR_VERSION).any():
+            return {}
+        if simplification is not None and not (
+                pd.to_numeric(df["simplification"], errors="coerce")
+                .sub(float(simplification)).abs() < 1e-12).all():
+            return {}
+        if tube_points is not None and not (
+                pd.to_numeric(df["tube_points"], errors="coerce")
+                == int(tube_points)).all():
+            return {}
+        return dict(zip(df["bodyId"].astype(str),
+                        df["has_extrusion"].astype(bool)))
     except Exception:
         return {}
 
@@ -298,7 +331,9 @@ def load_extrusion_repair_status(project_root, dataset_folder):
         return {}
 
 
-def _write_extrusion_cache(project_root, dataset_folder, results, statuses):
+def _write_extrusion_cache(project_root, dataset_folder, results, statuses,
+                           simplification=0.95,
+                           tube_points=EXTRUSION_DETECTOR_TUBE_POINTS):
     """Write the complete merged extrusion cache (best effort)."""
     if not results:
         return
@@ -309,6 +344,10 @@ def _write_extrusion_cache(project_root, dataset_folder, results, statuses):
             {
                 "bodyId": str(body_id),
                 "has_extrusion": bool(results[body_id]),
+                "cache_schema_version": EXTRUSION_CACHE_SCHEMA_VERSION,
+                "detector_version": EXTRUSION_DETECTOR_VERSION,
+                "simplification": float(simplification),
+                "tube_points": int(tube_points),
                 "repair_status": str(
                     statuses.get(
                         body_id,
@@ -320,12 +359,23 @@ def _write_extrusion_cache(project_root, dataset_folder, results, statuses):
             }
             for body_id in sorted(results, key=str)
         ]
-        pd.DataFrame(rows).to_parquet(path, index=False)
+        frame = pd.DataFrame(rows)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            frame.to_parquet(temporary, index=False)
+            os.replace(temporary, path)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
     except Exception:
         pass
 
 
-def save_extrusion_check_cache(project_root, dataset_folder, results):
+def save_extrusion_check_cache(project_root, dataset_folder, results,
+                               simplification=0.95,
+                               tube_points=EXTRUSION_DETECTOR_TUBE_POINTS):
     """Merge and persist extrusion check results (best-effort).
 
     A run may inspect only a subset of a large healed bundle.  Merge-on-write
@@ -334,7 +384,9 @@ def save_extrusion_check_cache(project_root, dataset_folder, results):
     """
     if not results:
         return
-    existing = load_extrusion_check_cache(project_root, dataset_folder)
+    existing = load_extrusion_check_cache(
+        project_root, dataset_folder,
+        simplification=simplification, tube_points=tube_points)
     statuses = load_extrusion_repair_status(project_root, dataset_folder)
     for body_id, value in results.items():
         key = str(body_id)
@@ -354,10 +406,14 @@ def save_extrusion_check_cache(project_root, dataset_folder, results):
             # a status belonging to an already-cached row unless this result
             # is genuinely new.
             statuses.setdefault(key, EXTRUSION_REPAIR_PENDING)
-    _write_extrusion_cache(project_root, dataset_folder, existing, statuses)
+    _write_extrusion_cache(
+        project_root, dataset_folder, existing, statuses,
+        simplification=simplification, tube_points=tube_points)
 
 
-def set_extrusion_repair_status(project_root, dataset_folder, statuses):
+def set_extrusion_repair_status(project_root, dataset_folder, statuses,
+                                simplification=0.95,
+                                tube_points=EXTRUSION_DETECTOR_TUBE_POINTS):
     """Persist repair outcomes without changing cached detection results.
 
     ``statuses`` maps body IDs to one of the ``EXTRUSION_REPAIR_*`` values.
@@ -366,7 +422,9 @@ def set_extrusion_repair_status(project_root, dataset_folder, statuses):
     """
     if not statuses:
         return
-    results = load_extrusion_check_cache(project_root, dataset_folder)
+    results = load_extrusion_check_cache(
+        project_root, dataset_folder,
+        simplification=simplification, tube_points=tube_points)
     current_statuses = load_extrusion_repair_status(
         project_root, dataset_folder)
     for body_id, status in statuses.items():
@@ -374,7 +432,8 @@ def set_extrusion_repair_status(project_root, dataset_folder, statuses):
         results.setdefault(key, True)
         current_statuses[key] = str(status)
     _write_extrusion_cache(
-        project_root, dataset_folder, results, current_statuses)
+        project_root, dataset_folder, results, current_statuses,
+        simplification=simplification, tube_points=tube_points)
 
 
 def diagnose_extrusion_nodes(neuron, ratio_threshold=10.0,
@@ -696,7 +755,10 @@ def flag_extrusions(project_root, dataset_folder, skeletons, verbose=False,
     }
     skeletons = normalized_skeletons
 
-    cache = (load_extrusion_check_cache(project_root, dataset_folder)
+    cache = (load_extrusion_check_cache(
+                 project_root, dataset_folder,
+                 simplification=simplification,
+                 tube_points=EXTRUSION_DETECTOR_TUBE_POINTS)
              if use_cache else {})
     flagged = [int(b) for b in skeletons if cache.get(str(b), False)]
     to_check = [int(b) for b in skeletons if str(b) not in cache]
@@ -770,7 +832,10 @@ def flag_extrusions(project_root, dataset_folder, skeletons, verbose=False,
 
     pbar.close()
     if use_cache:
-        save_extrusion_check_cache(project_root, dataset_folder, new_results)
+        save_extrusion_check_cache(
+            project_root, dataset_folder, new_results,
+            simplification=simplification,
+            tube_points=EXTRUSION_DETECTOR_TUBE_POINTS)
     if flagged:
         _report(f"Extrusion check: {len(flagged)} neuron(s) flagged for "
                 "API replacement.")

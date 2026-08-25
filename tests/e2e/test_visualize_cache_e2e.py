@@ -9,9 +9,9 @@ network is unavailable) and verifies the Mission-1 contract:
     returns every neuron.
   * Every render simplification level reuses the raw cache; ``fast`` only
     controls in-memory mesh decimation.
-  * ``morphology.fetch_skeleton_on_demand`` serves the shared simplified
-    cache (no network), even when the compatibility ``level="simp90"``
-    argument is supplied.
+  * ``morphology.fetch_skeleton_on_demand`` serves the shared raw cache (no
+    network), and re-levels the returned copy when the compatibility
+    ``level="simp90"`` argument is supplied.
   * The FlyWire path keeps its own cache (no marker written).
 """
 
@@ -96,7 +96,7 @@ def _vs(tmp_path, simplification=0.9):
 
 
 class TestSimplifiedCacheE2E:
-    def test_fetch_writes_simplified_swc_cache_only(self, tmp_path, probe_neurons):
+    def test_fetch_writes_raw_swc_cache_only(self, tmp_path, probe_neurons):
         vs = _vs(tmp_path)
         cache_dir = Path(tmp_path) / "cache" / FOLDER / "skeletons"
         neuron_df = pd.DataFrame({"bodyId": PROBE_IDS})
@@ -108,9 +108,10 @@ class TestSimplifiedCacheE2E:
             assert (raw_dir / f"{bid}.swc.zst").exists()
             cached = morph._load_cached_skeleton_file(
                 raw_dir / f"{bid}.swc.zst")
-            # shared pipeline default: 90% simplified, level in the header
-            assert cached._drocat_simplification == 90
-            assert len(cached.nodes) < len(probe_neurons[i].nodes)
+            # Visualization persistence is raw level 0; render-time mesh
+            # simplification is applied once from this common source.
+            assert cached._drocat_simplification == 0
+            assert len(cached.nodes) == len(probe_neurons[i].nodes)
         assert not (cache_dir / ".level").exists()
         assert not list(cache_dir.glob("*.pkl"))
 
@@ -155,9 +156,8 @@ class TestSimplifiedCacheE2E:
         vs = _vs(tmp_path)
         vs._save_cached_neurons(pd.DataFrame({"bodyId": PROBE_IDS}), probe_neurons)
 
-        # The compatibility level still serves the shared cache (no
-        # network): the stored file is 90% simplified, so the served neuron
-        # has fewer nodes than the raw fetch.
+        # The compatibility level still serves the shared raw cache (no
+        # network), then returns a level-90 view of the raw fetch.
         nrn = morph.fetch_skeleton_on_demand(
             DATASET, PROBE_IDS[0], project_root=str(tmp_path), level="simp90")
         assert nrn is not None

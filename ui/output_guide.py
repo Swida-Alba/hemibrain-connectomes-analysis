@@ -40,6 +40,14 @@ NO_WARNINGS_TEXT = "No warnings were recorded for this run."
 COLUMN_GLOSSARY = {
     # --- Identifiers ---------------------------------------------------------
     "bodyId": ("Unique numeric neuron identifier.", "integer"),
+    "layer": ("One-based visualization layer assignment used by the reusable layer map.", "integer or text"),
+    "neuron": ("Neuron identifier resolved by the Skeleton layer-map parser.", "text or integer"),
+    "color": ("Effective neuron display color.", "CSS color"),
+    "synapse_color": ("Effective connector color for synapses whose pre-neuron is this row.", "CSS color"),
+    "pre_synaptic_color": ("Effective color for this neuron's pre-synaptic sites.", "CSS color"),
+    "post_synaptic_color": ("Effective color for this neuron's post-synaptic sites.", "CSS color"),
+    "bodyId_pre": ("Pre-synaptic (source) neuron body id of a synapse.", "integer"),
+    "bodyId_post": ("Post-synaptic (target) neuron body id of a synapse.", "integer"),
     "instance": ("Instance (individual) name of the neuron.", "text"),
     "type": ("Neuron type name.", "text"),
     "type_pre": ("Presynaptic (source) neuron type of the edge.", "text"),
@@ -622,6 +630,18 @@ TOOL_GUIDE_SPECS = {
                             "Key columns: viz_layer, bodyId, instance, type, "
                             "pre, post — " + _NEURON_TABLE_NOTE,
              "columns": ["viz_layer"]},
+            {"pattern": "viz_layer_info.csv",
+             "description": "Reusable layer-map CSV with one-based layers, "
+                            "resolved neuron identifiers, and effective neuron, "
+                            "synapse, pre-site, and post-site colors.",
+             "columns": ["layer", "neuron", "color"]},
+            {"pattern": "*_synapses.*",
+             "description": "Merged synapse data. In paired (connector) mode "
+                            "the viz_layer column reads e.g. 0->1; in pre/post "
+                            "site mode (synapse_mode=pre_post) it reads e.g. "
+                            "0:pre / 0:post and holds the rendered input/output "
+                            "sites of the queried neurons.",
+             "columns": ["viz_layer", "bodyId_pre", "bodyId_post"]},
             {"pattern": "parameters.txt",
              "description": "Visualization parameters (colors, alphas, "
                             "modes, backend, ...)."},

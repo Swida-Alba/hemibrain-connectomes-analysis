@@ -17,6 +17,10 @@ from ..config import (
     NETWORK_LAYOUTS,
     SEARCH_COLUMNS,
     SYNAPSE_SIZE_OPTIONS,
+    SYNAPSE_MODE_OPTIONS,
+    SYNAPSE_VIEW_MODES,
+    PRE_POST_SHAPES,
+    LAYER_EDITOR_MODES,
     get_user_default,
     has_user_default,
     is_valid_synapse_size,
@@ -29,6 +33,7 @@ from ..components.common import (
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
 from ..components.layer_tree_editor import layer_tree_editor
+from ..components.layer_style_editor import layer_style_editor
 from ..components.palette_picker import (
     palette_picker,
     palette_editor,
@@ -38,6 +43,7 @@ from ..components.palette_picker import (
 )
 from ..components.edge_list_editor import edge_list_editor
 from ..dataset_service import is_banc_dataset, is_flywire_dataset
+from .. import layer_style_store
 from visualization_options import default_skeleton_tab_simplification
 from ..roi_options import (
     load_roi_catalog,
@@ -116,14 +122,172 @@ def create_skeleton_tab():
 
         # ================= 3D Skeleton panel =================
         with ui.card().classes("w-full drocat-card").props('id="card-3d"'):
-            section_header("3D Skeleton · plot3dSkeleton", "view_in_ar")
-            ui.label(
-                "Render neuron morphology, synapses, and independent brain-region meshes."
-            ).classes("text-caption drocat-muted")
             section_header("Neuron Selection (3D)", "hub")
-            layer_tree = layer_tree_editor(
-                dataset_provider=lambda: dataset.value if dataset is not None else ""
+            # The three layer/color input modes are mutually exclusive and are
+            # chosen with segmented buttons (mirroring the Similar Neurons tab).
+            layer_editor_mode = {"value": "Standard"}
+            color_editor_refs = {"neuron": None, "synapse": None, "roi": None}
+            file_upload_path = {"path": None}
+            # The Advanced editor is constructed before the shared Search
+            # Columns control below; initialize the closure so suggestion
+            # requests during page construction safely use the auto scope.
+            search_columns = None
+            with ui.row().classes(
+                "w-full items-center justify-between gap-4 px-2 flex-nowrap"
+            ):
+                mode_buttons = {}
+                for _mode in LAYER_EDITOR_MODES:
+                    _btn = ui.button(_mode).props("outline no-caps").classes("w-1/3")
+                    _btn.style(
+                        "min-height: 3rem; font-size: 1.05rem; font-weight: 700;"
+                    )
+                    mode_buttons[_mode] = _btn
+
+            # Synapse mode + threshold sit directly below the layer-input
+            # selection buttons (synapse mode on the left, threshold on the
+            # right). The marker-shape sub-selectors live in the Synapse Colors
+            # panel further down.
+            with ui.row().classes("w-full items-center gap-4 flex-nowrap") as synapse_mode_row:
+                synapse_view_mode = select_input(
+                    "Synapse Mode", SYNAPSE_VIEW_MODES, "synapse",
+                    hint="'synapse': paired synapses between adjacent layers. "
+                         "'pre-post sites': the pre- and post-synaptic SITES of the "
+                         "queried neurons (post/input as spheres, pre/output as cones, "
+                         "or circle/square scatter markers). 'skip': hide synapse markers.",
+                ).props("outlined").classes("flex-1 min-w-[240px]")
+                synapse_threshold = number_input(
+                    "Synapse Threshold", get_user_default("min_synapse_num"), 1, 100,
+                    hint="Minimum synapse weight for a marker to be shown. In pre-post site "
+                         "mode, only sites whose connection with a neighbour meets this "
+                         "threshold are shown.",
+                ).classes("w-44")
+
+            # Keep the interpretation warning attached to the mode selector:
+            # it describes what "pre-post sites" means, not how those sites
+            # are shaped. This also keeps it visible above the mode-specific
+            # controls when the Synapse Colors card is scrolled.
+            pre_post_warning = ui.label(
+                "⚠️ Pre/post site mode: this shows the pre- and post-synaptic SITES "
+                "of the queried neurons, not the paired synapses between adjacent "
+                "layers. Every queried neuron's sites are shown regardless of which "
+                "other neuron they connect to, with a separate legend for pre and "
+                "post sites per layer. This affects visualization only."
+            ).classes("w-full text-amber-8").style("font-size:14px").props(
+                'id="card-skeleton-pre-post-warning"'
+            ).set_visibility(False)
+
+            standard_editor_panel = ui.column().classes("w-full").props(
+                'id="card-skeleton-layers"'
             )
+            advanced_editor_panel = ui.column().classes("w-full").props(
+                'id="card-skeleton-layer-style"'
+            ).set_visibility(False)
+            file_upload_panel = ui.column().classes("w-full").props(
+                'id="card-skeleton-layer-upload"'
+            ).set_visibility(False)
+            with standard_editor_panel:
+                layer_tree = layer_tree_editor(
+                    dataset_provider=lambda: dataset.value if dataset is not None else ""
+                )
+            with advanced_editor_panel:
+                layer_style = layer_style_editor(
+                    export_dir_provider=lambda: output_dir.value if output_dir.value else None,
+                    dataset_provider=lambda: dataset.value if dataset is not None else "",
+                    search_columns_provider=lambda: (
+                        search_columns.value if search_columns is not None else "auto"
+                    ),
+                )
+            with file_upload_panel:
+                with ui.card().classes("w-full drocat-card").props(
+                    'id="card-skeleton-layer-upload-card"'
+                ):
+                    section_header("Custom-layer CSV (file upload)", "upload_file")
+                    ui.label(
+                        "Upload a CSV of layer assignments and per-neuron colors. "
+                        "Colors are read from the file (no separate color editors). "
+                        "Columns: layer, neuron, color, synapse_color, "
+                        "pre_synaptic_color, post_synaptic_color."
+                    ).classes("text-caption drocat-muted")
+                    with ui.row().classes("w-full items-center gap-2") as upload_row:
+                        with ui.button(icon="upload_file").props("flat dense round").classes(
+                            "drocat-upload-trigger"
+                        ).tooltip("Upload a custom-layer CSV"):
+                            with ui.menu() as layer_upload_menu:
+                                ui.label("Custom-layer CSV").classes(
+                                    "text-caption drocat-muted px-3 pt-2"
+                                )
+                                ui.label(
+                                    "layer, neuron, color, synapse_color, "
+                                    "pre_synaptic_color, post_synaptic_color; "
+                                    "layer may start at 0 or 1."
+                                ).classes("text-caption drocat-muted px-3 pb-1")
+                                ui.upload(
+                                    label="Choose CSV",
+                                    on_upload=lambda e: _handle_layer_upload(
+                                        e, layer_upload_menu
+                                    ),
+                                    auto_upload=True,
+                                ).props('accept=".csv" flat dense').classes("w-72")
+                        ui.link(
+                            "File format",
+                            "docs/ui_guides/skeleton.html#layer-editor-modes",
+                        ).classes("drocat-doc-link")
+                    file_upload_label = ui.label("No CSV loaded.").classes(
+                        "text-caption drocat-muted drocat-truncate"
+                    )
+
+            def _sync_layer_editor_mode():
+                active = layer_editor_mode["value"]
+                standard_editor_panel.set_visibility(active == "Standard")
+                advanced_editor_panel.set_visibility(active == "Advanced")
+                file_upload_panel.set_visibility(active == "File upload")
+                for _mode, _btn in mode_buttons.items():
+                    _btn.props("color=primary" if _mode == active else "color=grey-7")
+                # Show the Advanced Layer Editor table directly (do not leave it
+                # collapsed behind its expansion header) when Advanced is active.
+                if active == "Advanced" and layer_style.expansion is not None:
+                    layer_style.expansion.set_value(True)
+                # The color palette editors are only used by the Standard mode;
+                # the Advanced table / uploaded CSV supply their own color columns.
+                show_colors = active == "Standard"
+                for _handle in color_editor_refs.values():
+                    if _handle is not None:
+                        _handle.set_visibility(show_colors)
+
+            def _set_layer_editor_mode(value: str):
+                layer_editor_mode["value"] = value
+                _sync_layer_editor_mode()
+
+            for _mode, _btn in mode_buttons.items():
+                _btn.on_click(lambda _e, m=_mode: _set_layer_editor_mode(m))
+
+            async def _handle_layer_upload(e, _menu):
+                """Read an uploaded custom-layer CSV and remember its path."""
+                temporary_path = None
+                previous_path = file_upload_path.get("path")
+                try:
+                    filename, data = await read_upload_event(e)
+                    with tempfile.NamedTemporaryFile(
+                        suffix=".csv", prefix="drocat_layers_", delete=False
+                    ) as temporary:
+                        temporary.write(data)
+                        temporary_path = temporary.name
+                    file_upload_path["path"] = temporary_path
+                    if previous_path and previous_path != temporary_path:
+                        Path(previous_path).unlink(missing_ok=True)
+                    file_upload_label.text = f"Loaded: {filename} ({len(data) / 1024:.1f} KB)"
+                    file_upload_label.classes(replace="text-caption drocat-ok")
+                except Exception as ex:
+                    if temporary_path:
+                        Path(temporary_path).unlink(missing_ok=True)
+                    if previous_path:
+                        Path(previous_path).unlink(missing_ok=True)
+                    file_upload_path["path"] = None
+                    file_upload_label.text = f"Error: {ex}"
+                    file_upload_label.classes(replace="text-caption drocat-err")
+                _menu.close()
+
+            _sync_layer_editor_mode()
             with param_grid(3):
                 filter_mode = select_input(
                     "Match by",
@@ -177,6 +341,19 @@ def create_skeleton_tab():
                         hint="Show the ventral nerve cord mesh (male-cns / manc datasets).",
                     )
 
+            def _default_synapse_shapes_for_skeleton_mode(mode=None):
+                """Return marker defaults that match the morphology renderer."""
+                selected_mode = str(
+                    skeleton_mode.value if mode is None else mode
+                ).strip().lower()
+                if selected_mode == "line":
+                    return "scatter", "scatter (circles + squares)"
+                return "cone", "solid (spheres + cones)"
+
+            default_synapse_shape, default_pre_post_shape = (
+                _default_synapse_shapes_for_skeleton_mode()
+            )
+
             # ------------------------------------------------------------------
             # Neuron Colors (independent block)
             # ------------------------------------------------------------------
@@ -202,6 +379,8 @@ def create_skeleton_tab():
                     include_auto=False,
                     on_change=lambda: palette_locked.__setitem__("locked", True),
                 )
+                neuron_palette.props('id="card-skeleton-neuron-palette"')
+                color_editor_refs["neuron"] = neuron_palette
                 neuron_alpha = number_input(
                     "Neuron Opacity", 0.2, 0, 1, 0.1,
                     hint=(
@@ -227,21 +406,30 @@ def create_skeleton_tab():
                     value="Dark2",
                     include_auto=False,
                 )
+                synapse_palette.props('id="card-skeleton-synapse-palette"')
+                color_editor_refs["synapse"] = synapse_palette
                 ui.label(
                     "Colors are assigned per connection between consecutive layers "
                     "(one fewer than the number of neuron layers). Custom opacity "
                     "overrides Synapse Opacity per connection layer."
                 ).classes("text-caption drocat-muted")
                 ui.label("Synapse options").classes("drocat-mini-label")
+                # Marker-shape sub-selectors (shown for the chosen mode).
+                with ui.row().classes("w-full items-center gap-4 flex-wrap"):
+                    synapse_shape = select_input(
+                        "Synapse Shape",
+                        [m for m in SYNAPSE_MODE_OPTIONS if m != "pre_post"],
+                        default_synapse_shape,
+                        hint="'cone'/'sphere'/'tetrahedron': solid markers. 'scatter': "
+                             "simple points.",
+                    ).props("outlined")
+                    pre_post_shape = select_input(
+                        "Pre/post shape", PRE_POST_SHAPES, default_pre_post_shape,
+                        hint="'solid (spheres + cones)': post/input sites as solid "
+                             "spheres, pre/output sites as cones. 'scatter (circles + "
+                             "squares)': post/input as circles, pre/output as squares.",
+                    ).props("outlined")
                 with param_grid(3):
-                    skip_synapse = checkbox_input(
-                        "Skip Synapses", False,
-                        hint="Hide synapse markers for a cleaner view.",
-                    )
-                    min_synapse_num = number_input(
-                        "Min Synapse Count", get_user_default("min_synapse_num"), 1, 100,
-                        hint="Minimum synapses for a connection marker to be shown.",
-                    )
                     synapse_size = combo_input(
                         "Synapse Size", SYNAPSE_SIZE_OPTIONS,
                         get_user_default("synapse_size"),
@@ -249,7 +437,11 @@ def create_skeleton_tab():
                             "Marker size as a fold of the real pre→post "
                             "distance: 'real' = 1x. Any number (e.g. 2, 2.5) "
                             "or 'Nx real' works — type your own value. "
-                            "(Scatter mode: pixel size.)"
+                            "Scatter mode maps the fold to a visible pixel size "
+                            "(1x ≈ 3 px; 3x ≈ 9 px). Pre/post site mode always "
+                            "uses one uniform pseudo-real size based on the mean "
+                            "real connector distance; one-layer views estimate it "
+                            "from upstream/downstream pairs."
                         ),
                     )
                     uniform_synapse_size = checkbox_input(
@@ -257,7 +449,9 @@ def create_skeleton_tab():
                         get_user_default("uniform_synapse_size"),
                         hint=(
                             "Use the median pre→post distance for every "
-                            "synapse marker so all markers share one size."
+                            "synapse marker so all paired markers share one size. "
+                            "Pre/post site mode is always uniform and uses its "
+                            "mean real-distance estimate."
                         ),
                     )
                     synapse_alpha = number_input(
@@ -268,10 +462,30 @@ def create_skeleton_tab():
                             "opacity inherit it."
                         ),
                     )
-                    synapse_mode = select_input(
-                        "Synapse Mode", ["cone", "scatter"], "cone",
-                        hint="'cone': directional cone markers. 'scatter': simple points.",
-                    )
+
+            # Shape sub-selectors + warning follow the selected synapse mode.
+            def _sync_synapse_view_mode():
+                view = synapse_view_mode.value
+                synapse_shape.set_visibility(view == "synapse")
+                pre_post_shape.set_visibility(view == "pre-post sites")
+                pre_post_warning.set_visibility(view == "pre-post sites")
+
+            def _sync_shape_defaults():
+                """Apply the mode defaults whenever the skeleton mode changes."""
+                synapse_default, pre_post_default = (
+                    _default_synapse_shapes_for_skeleton_mode()
+                )
+                synapse_shape.set_value(synapse_default)
+                pre_post_shape.set_value(pre_post_default)
+
+            synapse_view_mode.on_value_change(lambda _e: _sync_synapse_view_mode())
+            skeleton_mode.on_value_change(lambda _e: _sync_shape_defaults())
+            # The Advanced Layer Editor's columns + CSV format follow the mode.
+            synapse_view_mode.on_value_change(
+                lambda _e: layer_style.set_synapse_mode(synapse_view_mode.value)
+            )
+            _sync_synapse_view_mode()
+            layer_style.set_synapse_mode(synapse_view_mode.value)
 
             # ------------------------------------------------------------------
             # Brain Region ROIs + ROI Colors (independent block)
@@ -323,6 +537,8 @@ def create_skeleton_tab():
                     value="Cool",
                     include_auto=True,
                 )
+                roi_palette.props('id="card-skeleton-roi-palette"')
+                color_editor_refs["roi"] = roi_palette
                 ui.label(
                     "Colors are assigned in the displayed order; every resolved ROI mesh "
                     "has its own legend entry. Use Custom colors for per-ROI opacity overrides."
@@ -365,15 +581,16 @@ def create_skeleton_tab():
                         ["fast", "fine", "artistic"],
                         get_user_default("simplification_method"),
                         hint=(
-                            "NeuPrint tube rendering: 'fast' (default) uses "
-                            "direct simp90 simplification plus the FAFB fast "
-                            "node-reduction stage; 'fine' smooths/resamples "
-                            "with the accelerated FAFB radius profile; "
-                            "'artistic' uses vertex-cluster mesh decimation. "
-                            "All methods use batched parallel online "
-                            "fetching and are available for NeuPrint and "
-                            "FlyWire/FAFB tube renders; line mode bypasses "
-                            "the method."
+                            "NeuPrint tube rendering: 'fast' (default) reads "
+                            "the shared raw level-0 skeleton source, then "
+                            "applies direct mesh decimation in memory plus "
+                            "the FAFB fast node-reduction stage; 'fine' "
+                            "smooths/resamples with the accelerated FAFB "
+                            "radius profile; 'artistic' uses vertex-cluster "
+                            "mesh decimation. All methods use batched "
+                            "parallel online fetching and are available for "
+                            "NeuPrint and FlyWire/FAFB tube renders; line "
+                            "mode bypasses the method."
                         ),
                     )
                     default_simplification = checkbox_input(
@@ -586,41 +803,90 @@ def create_skeleton_tab():
                 type="warning",
             )
             return
-        # The layer tree maps 1:1 to the backend's nested-list model:
-        # neuron_layers[i] = layer i's neurons, custom_layer_names partial.
-        neuron_layers = layer_tree.get_neuron_layers()
-        if not neuron_layers:
-            ui.notify("Add at least one neuron to a layer", type="warning")
-            return
-        # Raw chips (pre-pattern) for the query history: the filter-mode
-        # conversion below rewrites them into regex patterns, which are not
-        # useful history entries.
-        raw_neurons = _flatten_neuron_layers(neuron_layers)
-        # Same search semantics as pathfinding: the filter mode converts
-        # every neuron into the regex pattern resolved by statvis.getNeurons.
-        mode = filter_mode.value
-        if mode and mode != "exact":
-            converted = []
-            for layer in neuron_layers:
-                as_list = layer if isinstance(layer, list) else [layer]
-                filtered = apply_filter_mode(as_list, mode)
-                converted.append(
-                    filtered if isinstance(layer, list) else filtered[0]
-                )
-            neuron_layers = converted
-        custom_names = layer_tree.get_custom_layer_names()
+        editor_mode = layer_editor_mode["value"]
         rois = roi_select.value or []
 
-        # Flatten the (filter-converted) layers for the per-neuron palette:
-        # one neuron color per neuron; synapse colors span the gaps between
-        # consecutive neurons (same counts as the old flat chip list).
-        neurons = _flatten_neuron_layers(neuron_layers)
+        def _distinct_layer_count(rows) -> int:
+            complete = layer_style_store.complete_rows(rows)
+            layers = sorted(
+                {str(r["layer"]).strip() for r in complete if str(r["layer"]).strip()},
+                key=lambda v: float(v),
+            )
+            return len(layers)
+
+        if editor_mode == "Advanced":
+            # The Advanced Layer Editor supplies the layer list + per-neuron
+            # colors as a layer_map CSV; the backend parses it into layers and
+            # color overrides (so the tree-derived lists are unused here).
+            layer_map_csv = layer_style.runnable_csv_path()
+            if not layer_map_csv:
+                ui.notify(
+                    "Add at least one row with a layer and a neuron in the "
+                    "Advanced Layer Editor",
+                    type="warning",
+                )
+                return
+            neuron_layers = []
+            custom_names = []
+            raw_neurons = [
+                str(row["neuron"]).strip()
+                for row in layer_style_store.complete_rows(layer_style.rows)
+            ]
+            # Distinct layer count drives the fallback palette sizing.
+            n_layer_colors = _distinct_layer_count(layer_style.rows)
+        elif editor_mode == "File upload":
+            # The uploaded CSV supplies the layer list + per-neuron colors
+            # directly (in-file colors; no palette editors are used).
+            layer_map_csv = file_upload_path.get("path")
+            if not layer_map_csv:
+                ui.notify("Upload a custom-layer CSV first", type="warning")
+                return
+            neuron_layers = []
+            custom_names = []
+            rows = layer_style_store.load_rows_from_csv_text(
+                Path(layer_map_csv).read_text(encoding="utf-8")
+            )
+            raw_neurons = [
+                str(r["neuron"]).strip()
+                for r in layer_style_store.complete_rows(rows)
+            ]
+            n_layer_colors = _distinct_layer_count(rows)
+        else:
+            # The layer tree maps 1:1 to the backend's nested-list model:
+            # neuron_layers[i] = layer i's neurons, custom_layer_names partial.
+            layer_map_csv = None
+            neuron_layers = layer_tree.get_neuron_layers()
+            if not neuron_layers:
+                ui.notify("Add at least one neuron to a layer", type="warning")
+                return
+            # Raw chips (pre-pattern) for the query history: the filter-mode
+            # conversion below rewrites them into regex patterns, which are not
+            # useful history entries.
+            raw_neurons = _flatten_neuron_layers(neuron_layers)
+            # Same search semantics as pathfinding: the filter mode converts
+            # every neuron into the regex pattern resolved by statvis.getNeurons.
+            mode = filter_mode.value
+            if mode and mode != "exact":
+                converted = []
+                for layer in neuron_layers:
+                    as_list = layer if isinstance(layer, list) else [layer]
+                    filtered = apply_filter_mode(as_list, mode)
+                    converted.append(
+                        filtered if isinstance(layer, list) else filtered[0]
+                    )
+                neuron_layers = converted
+            custom_names = layer_tree.get_custom_layer_names()
+            n_layer_colors = len(_flatten_neuron_layers(neuron_layers))
 
         # Assign the exact displayed palette order (including custom reordering).
-        neuron_colors = _palette_colors_for_count(neuron_palette, len(neurons))
+        # In the advanced editor the count is the distinct layer count (fallback
+        # layer colors; per-neuron CSV colors override them); otherwise it is the
+        # flattened neuron count used before. Neuron colors in the backend are
+        # applied per layer, so an over-long list is harmless.
+        neuron_colors = _palette_colors_for_count(neuron_palette, max(1, n_layer_colors))
         # One color per connection between consecutive layers (n_layers - 1).
         synapse_colors = _palette_colors_for_count(
-            synapse_palette, max(0, len(neurons) - 1)
+            synapse_palette, max(0, n_layer_colors - 1)
         )
 
         # Auto is a one-color gray palette; custom mode must not be gated by
@@ -641,20 +907,39 @@ def create_skeleton_tab():
             palettes.append((roi_palette, "ROI Colors"))
         notify_empty_custom_palettes(*palettes)
 
-        custom_names = layer_tree.get_custom_layer_names()
-
-        # Combo box free text; an emptied or unparseable value falls back
-        # to 'real' so the backend never receives an invalid string.
+        # Combo box free text; an emptied or unparseable value falls back to the
+        # application default. Keep the default at 3x real for both paired
+        # synapses and the uniform pre/post-site size estimate.
         synapse_size_value = str(synapse_size.value or "").strip()
         if not synapse_size_value:
-            synapse_size_value = "real"
+            synapse_size_value = "3x real"
         elif not is_valid_synapse_size(synapse_size_value):
             ui.notify(
                 f"Invalid Synapse Size '{synapse_size_value}' — using "
-                "'real' instead.",
+                "'3x real' instead.",
                 type="warning",
             )
-            synapse_size_value = "real"
+            synapse_size_value = "3x real"
+
+        # Map the top-level synapse view mode to backend fields.
+        view = synapse_view_mode.value
+        if view == "skip":
+            skip_synapses = True
+            synapse_mode_value = "cone"
+            pre_post_scatter_on = False
+        elif view == "pre-post sites":
+            skip_synapses = False
+            synapse_mode_value = "pre_post"
+            pre_post_scatter_on = pre_post_shape.value.startswith("scatter")
+        else:  # 'synapse'
+            skip_synapses = False
+            # Keep the renderer contract explicit: the visible shape selector
+            # is the source of truth for paired-synapse geometry, and only the
+            # four backend-supported values may reach the generated script.
+            synapse_mode_value = str(synapse_shape.value or "cone").strip().lower()
+            if synapse_mode_value not in {"cone", "scatter", "sphere", "tetrahedron"}:
+                synapse_mode_value = "cone"
+            pre_post_scatter_on = False
 
         constructor_params = {
             "dataset": dataset.value,
@@ -662,6 +947,7 @@ def create_skeleton_tab():
             "search_columns": search_columns.value,
             "hemisphere": hemisphere.value,
             "custom_layer_names": custom_names,
+            "layer_map_csv": layer_map_csv,
             "output_dir": output_dir.value,
             "output_format": get_user_default("output_format"),
             "skeleton_mode": skeleton_mode.value,
@@ -672,12 +958,13 @@ def create_skeleton_tab():
             "neuron_colors": neuron_colors,
             "synapse_colors": synapse_colors,
             "background_color": bg_color.value,
-            "skip_synapse": skip_synapse.value,
-            "min_synapse_num": int(min_synapse_num.value),
+            "skip_synapse": skip_synapses,
+            "min_synapse_num": int(synapse_threshold.value),
             "synapse_size": synapse_size_value,
             "uniform_synapse_size": uniform_synapse_size.value,
             "synapse_alpha": float(synapse_alpha.value),
-            "synapse_mode": synapse_mode.value,
+            "synapse_mode": synapse_mode_value,
+            "pre_post_scatter": pre_post_scatter_on,
             "mesh_roi": rois,
             "mesh_color": mesh_color,
             "mesh_alpha": float(mesh_alpha.value),
@@ -714,22 +1001,29 @@ def create_skeleton_tab():
             "export_gif": export_gif.value,
             "gif_scale": float(gif_scale.value),
         }
-        result = await run_panel(
-            skeleton_output,
-            skeleton_runner,
-            "plot3d_skeleton",
-            constructor_params,
-            output_dir.value,
-            method_params,
+        transient_layer_csv = (
+            layer_map_csv if layer_map_csv == layer_style.transient_csv_path else None
         )
-        # A completed render means the layer neurons resolved in the dataset;
-        # keep the raw chips in the query history like the pathfinding tabs.
-        if result["returncode"] == 0:
-            from ..history_store import record as _record_history
-            _record_history(
-                [str(n) for n in dict.fromkeys(raw_neurons)],
-                datasets=[dataset.value] if dataset.value else [],
+        try:
+            result = await run_panel(
+                skeleton_output,
+                skeleton_runner,
+                "plot3d_skeleton",
+                constructor_params,
+                output_dir.value,
+                method_params,
             )
+            # A completed render means the layer neurons resolved in the dataset;
+            # keep the raw chips in the query history like the pathfinding tabs.
+            if result["returncode"] == 0:
+                from ..history_store import record as _record_history
+                _record_history(
+                    [str(n) for n in dict.fromkeys(raw_neurons)],
+                    datasets=[dataset.value] if dataset.value else [],
+                )
+        finally:
+            if transient_layer_csv:
+                layer_style.cleanup_transient_csv()
 
     skeleton_output.run_button.on_click(run_skeleton)
     skeleton_output.cancel_button.on_click(skeleton_runner.cancel)

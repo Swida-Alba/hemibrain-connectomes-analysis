@@ -185,6 +185,16 @@ Example: `plot-3d_MCNS_aMe12_SMP238_PPL101_20260815_151243/` (layer names joined
     all visualization layers. The numeric `viz_layer` column records the
     layer index for each row and sits directly before `bodyId`; ROI-count
     data is not exported.
+*   **`viz_layer_info.csv`**: A reusable layer-map CSV that preserves the
+    input layer/neuron labels and colors for readability. The active synapse
+    color family is exclusive: connector mode fills `synapse_color`, pre/post
+    mode fills `pre_synaptic_color`/`post_synaptic_color`, and skipped-synapse
+    mode leaves all three synapse-specific columns empty. It can be uploaded
+    back into the Skeleton tab or passed to `VisualizeSkeleton(layer_map_csv=...)`.
+*   **`{layer_names}_synapses.csv`**: The merged synapse export. By default it
+    holds the paired inter-layer connections (`viz_layer` like `0->1`); in
+    pre/post-site mode (`synapse_mode=pre_post`) it instead holds the per-site
+    rows (`viz_layer` like `0:pre` / `0:post`) rendered by that mode.
 *   **`parameters.txt`**: Visualization parameters (colors, alphas, modes, backend, etc.)
 *   **`user_warning_notes.txt`**: Notes/warnings collected during rendering
 *   When `export_views=True` (or a view list) or `export_video=True` is requested, PNG screenshots and/or videos/GIFs are written into the same folder.

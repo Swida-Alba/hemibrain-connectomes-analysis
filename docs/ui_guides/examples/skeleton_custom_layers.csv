@@ -1,0 +1,6 @@
+layer,neuron,color,synapse_color,pre_synaptic_color,post_synaptic_color
+0,DA1_lPN,#4A90E2,rgba(74,144,226,0.3),rgba(74,144,226,0.8),rgba(74,144,226,0.6)
+0,DA1_lPN_R,rgb(255,0,0),rgb(255,0,0),rgb(255,0,0),rgb(255,0,0)
+1,vPN,green,#50E3C2,rgba(80,227,194,0.8),rgba(80,227,194,0.6)
+1,vPN_L,#B8E986,rgba(184,233,134,0.3),rgba(184,233,134,0.8),rgba(184,233,134,0.6)
+2,KC.*,purple,#9C27B0,rgba(156,39,176,0.8),rgba(156,39,176,0.6)

@@ -189,6 +189,11 @@ except ImportError:
         simplify_skeleton_nodes,
     )
 
+try:
+    from synapse_cache import SynapseCache
+except ImportError:
+    from .synapse_cache import SynapseCache
+
 
 def _configure_roi_mesh_traces(mesh_traces, roi_name):
     """Give one resolved ROI its own Plotly legend entry and trace group."""
@@ -2047,11 +2052,17 @@ class VisualizeSkeleton:
     (for connections between adjacent layers)
     '''
 
-    synapse_size: int | float | str = 1
+    synapse_size: int | float | str = 3
     '''
     size of synapse\n
-    when synapse_mode='scatter': size in pixels (1–3 recommended)\n
+    when synapse_mode='scatter': visible marker scale; one real-size fold is
+    mapped to approximately 3 pixels (the layered marker uses 3/2/1 of that
+    size).\n
     when synapse_mode='sphere'/'cone'/'tetrahedron': fold of the real distance between pre- and post-synaptic sites.\n
+    when synapse_mode='pre_post': fold of one uniform pseudo-real site size,
+    based on the mean unfiltered real connector distance sampled for the
+    visualization (or a sampled upstream/downstream estimate for a one-layer
+    view). The display threshold only selects which sites are rendered.\n
     Any number (int or float) or numeric string ('2', '2.5x', '2x real') is
     interpreted as that fold of the real distance; 'real' (or 1) = exact
     distance size, 2 = 2x distance size.\n
@@ -2069,11 +2080,15 @@ class VisualizeSkeleton:
 
     synapse_mode: str = 'scatter'
     '''
-    mode to plot synapses, 'scatter', 'sphere', 'cone', or 'tetrahedron'\n
-    'scatter': plot synapses as scatter points, relative size to the view\n
+    mode to plot synapses, 'scatter', 'sphere', 'cone', 'tetrahedron', or 'pre_post'\n
+    'scatter': plot synapses as scatter points using a visible pixel scale\n
     'sphere': plot synapses as spheres, absolute size in the figure \n
     'cone': plot synapses as cones pointing from pre to post\n
     'tetrahedron': plot synapses as tetrahedrons pointing from pre to post\n
+    'pre_post': plot every queried neuron's pre- and post-synaptic SITES (not
+        the paired inter-layer synapses). Post-synaptic sites (inputs) render as
+        spheres (circles in scatter) and pre-synaptic sites (outputs) as cones
+        (squares in scatter), colored by their neuron layer with separate legends.\n
     '''
     
     synapse_alpha: float = 0.6
@@ -2089,6 +2104,13 @@ class VisualizeSkeleton:
     **Per-Layer Alpha**: Use embedded alpha to set different transparencies
     per synapse layer while leaving alpha-less colors on the global fallback:
         synapse_colors = ['rgba(255,0,0,0.3)', 'rgba(0,255,0,0.7)']
+    '''
+
+    pre_post_scatter: bool = False
+    '''When ``synapse_mode='pre_post'``, render the pre/post-synaptic sites as
+    flat scatter markers instead of solid meshes: post-synaptic (input) sites
+    as circles and pre-synaptic (output) sites as squares. Ignored for the
+    other synapse modes.
     '''
 
     mesh_roi: list | str = field(default_factory=list)
@@ -2343,15 +2365,15 @@ class VisualizeSkeleton:
     neuprint_skeleton_pipeline: str = 'fast'
     '''
     NeuPrint tube-mode skeleton pipeline (also selects the FAFB tube path).\n
-    - ``'fast'`` (default): the original direct simplification path. Read/write
-      the fixed ``simp90`` skeleton cache and apply direct mesh decimation at
-      render time. For FAFB, applies the fast node-reduction stage before
-      tube meshing.
+    - ``'fast'`` (default): the original direct simplification path. Read the
+      shared raw level-0 ``.swc.zst`` cache and apply direct mesh decimation in
+      memory at render time. For FAFB, applies the fast node-reduction stage
+      before tube meshing.
     - ``'fine'``: smooth and resample raw NeuPrint skeletons,
       synthesize a FAFB-style radius profile, then build and simplify a tube
       mesh transiently at the 0.95 fine-render target using the accelerated
-      implementation. The cached source is the shared simplified ``.swc.zst``
-      (90% default).
+      implementation. The cached source is the same shared raw level-0
+      ``.swc.zst`` used by the fast path.
     - ``'artistic'``: the same cached-source contract as ``fine``, using Open3D
       vertex clustering for accelerated transient mesh decimation. It is
       retained as an explicit method name while all NeuPrint methods use the
@@ -2891,9 +2913,9 @@ class VisualizeSkeleton:
                 )
             else:
                 pipeline_note = (
-                    ' Fast NeuPrint renders may start from the fixed simp90 '
-                    'skeleton cache; values above 0.90 then decimate that '
-                    'cached surface again.'
+                    ' Fast NeuPrint renders start from the shared raw level-0 '
+                    '.swc.zst source; the selected value is applied once to '
+                    'the in-memory tube mesh.'
                 )
         else:
             pipeline_note = (
@@ -2955,6 +2977,37 @@ class VisualizeSkeleton:
             '</div>'
         )
 
+    def _pre_post_mode_warning_html(self):
+        """Build the in-page warning banner for pre/post-site synapse mode.
+
+        Pre/post-site mode shows the input/output SITES of the queried neurons
+        rather than the paired inter-layer synapses; the banner makes that
+        distinction explicit so exported artifacts are not mis-read as paired
+        connector view.
+        """
+        if str(getattr(self, 'synapse_mode', '') or '').lower() != 'pre_post':
+            return ''
+        from html import escape
+        dataset = escape(str(getattr(self, 'dataset', '') or ''))
+        return (
+            '<div id="drocat-pre-post-sites-warning" role="alert" '
+            'style="box-sizing:border-box;width:100%;padding:10px 14px;'
+            'margin:0 0 8px 0;border:1px solid #d99a2b;border-left:5px solid '
+            '#d97706;border-radius:6px;background:#fff8e6;color:#5b4300;'
+            'font:14px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">'
+            '<strong>Pre/post-synaptic site mode.</strong> '
+            f'<code>{dataset}</code> is plotted with <code>synapse_mode=pre_post</code>: '
+            'this shows the pre- and post-synaptic SITES of the queried neurons '
+            '(post-synaptic/input sites as spheres, pre-synaptic/output sites as '
+            'cones) - or as circle/square scatter markers when '
+            '<code>pre_post_scatter</code> is enabled - not the paired synapses '
+            'between adjacent layers. The sites of every queried neuron are shown '
+            'regardless of which other neuron they connect to, with a separate '
+            'legend for pre and post sites per layer. This affects visualization '
+            'only; analysis graphs and query results are unchanged.'
+            '</div>'
+        )
+
     def _inject_skeleton_simplification_warning(self, html_path):
         """Insert the in-page warning banner(s) at the top of a full HTML page."""
         warning_html = '\n'.join(
@@ -2962,6 +3015,7 @@ class VisualizeSkeleton:
             for banner in (
                 self._skeleton_simplification_warning_html(),
                 self._line_mode_export_warning_html(),
+                self._pre_post_mode_warning_html(),
             )
             if banner
         )
@@ -2975,7 +3029,8 @@ class VisualizeSkeleton:
             # Avoid duplicate banners when an existing file is decorated by a
             # retry/export path more than once.
             if ('drocat-skeleton-simplification-warning' in html
-                    or 'drocat-line-mode-export-warning' in html):
+                    or 'drocat-line-mode-export-warning' in html
+                    or 'drocat-pre-post-sites-warning' in html):
                 return
 
             import re
@@ -3835,74 +3890,218 @@ class VisualizeSkeleton:
             rdf = rdf[rdf.index.isin(df['bodyId'].astype(str))].copy() if rdf.index.name == 'bodyId' else rdf
         return df, rdf
 
+    def _read_layer_csv_tolerant(self, csv_path):
+        """Read a layer-map CSV, tolerating unquoted CSS color functions.
+
+        Color values such as ``rgba(74,144,226,0.3)`` contain commas. Pandas and
+        the CSV dialect would normally split them across columns unless quoted;
+        this helper re-quotes any ``rgba/rgb/hsla/hsl(...)`` token that is not
+        already quoted, then parses with ``pandas.read_csv``.
+        """
+        import io
+        import re
+        import pandas as pd
+        with open(csv_path, 'r', encoding='utf-8') as handle:
+            raw = handle.read()
+        # Lookbehind avoids re-quoting an already-quoted value; only color
+        # functions that begin a field (after a comma/newline) are wrapped.
+        raw = re.sub(
+            r'(?<![\"\w])(rgba|rgb|hsla|hsl)\s*\([^)]*\)',
+            lambda m: '"' + m.group(0) + '"',
+            raw,
+        )
+        return pd.read_csv(io.StringIO(raw))
+
     def _parse_layer_map_csv(self):
         """
         Parse layer_map_csv file to construct neuron_layers and custom_layer_names.
-        
-        The CSV must have columns 'layer' and 'id_type_instance'.
-        Optionally can have a 'color' column for per-neuron color overrides.
-        Rows with the same 'layer' value are grouped together into a single layer.
-        
-        This method overrides self.neuron_layers and self.custom_layer_names.
-        If 'color' column exists, populates self._neuron_color_overrides.
+
+        The CSV must have a 'layer' column and a neuron column named 'neuron'
+        (the legacy 'id_type_instance' name is accepted as an alias). Rows with
+        the same 'layer' value are grouped together into a single layer. The
+        layer column may be numeric, in which case the base is auto-detected
+        (minimum 0 => 0-based, minimum 1 => 1-based and shifted to 0
+        internally), or it may hold group-name labels which are used verbatim.
+
+        Optional color columns:
+        - 'color': per-neuron display color (alpha overrides neuron_alpha).
+        - 'synapse_color': per-neuron color for the inter-layer (connector)
+          synapse whose pre is this neuron; alpha overrides synapse_alpha.
+        - 'pre_synaptic_color': per-neuron color for this neuron's pre sites.
+        - 'post_synaptic_color': per-neuron color for this neuron's post sites.
+
+        This method overrides self.neuron_layers and self.custom_layer_names and
+        populates the per-neuron color override dicts used during rendering.
         """
+        import io
+        import re
         import pandas as pd
         # standardize_color already imported at module level from utils.color_utils
-        
+
         csv_path = self.layer_map_csv
         if not os.path.exists(csv_path):
             raise FileNotFoundError(f"layer_map_csv not found: {csv_path}")
-        
+
         self._vprint(f"Loading layer map from: {csv_path}", level='full')
-        
-        df = pd.read_csv(csv_path)
-        
-        # Validate columns
-        required_cols = ['layer', 'id_type_instance']
-        for col in required_cols:
-            if col not in df.columns:
-                raise ValueError(f"layer_map_csv must have column '{col}'. Found: {list(df.columns)}")
-        
-        # Check for optional color column
-        has_color_col = 'color' in df.columns
-        if has_color_col:
-            self._vprint(f"  Found 'color' column - will apply per-neuron colors", level='simple')
-        
-        # Build per-neuron color overrides if color column exists
-        self._neuron_color_overrides = {}  # bodyId/type -> rgba_string
-        if has_color_col:
+
+        # Color values like ``rgba(74,144,226,0.3)`` contain commas; pandas would
+        # split them into extra columns unless they are quoted. Quote any CSS color
+        # function in the raw text so hand-written CSVs with unquoted colors parse
+        # correctly. Already-quoted values are left alone.
+        df = self._read_layer_csv_tolerant(csv_path)
+
+        # Validate columns: a 'layer' column plus a neuron column ('neuron' or
+        # the legacy 'id_type_instance' alias).
+        if 'layer' not in df.columns:
+            raise ValueError(f"layer_map_csv must have column 'layer'. Found: {list(df.columns)}")
+        neuron_col = next(
+            (c for c in ('neuron', 'id_type_instance') if c in df.columns), None
+        )
+        if neuron_col is None:
+            raise ValueError(
+                "layer_map_csv must have a 'neuron' (or legacy 'id_type_instance') "
+                f"column. Found: {list(df.columns)}"
+            )
+
+        # Preserve the source rows before numeric layer normalization and
+        # neuron resolution.  This is the human-readable/reusable form that
+        # the export writer should round-trip; the resolved DataFrames below
+        # remain the canonical form for rendering and connector queries.
+        self._viz_layer_info_input_rows = []
+        for record in df.to_dict('records'):
+            self._viz_layer_info_input_rows.append({
+                'layer': record.get('layer', ''),
+                'neuron': record.get(neuron_col, ''),
+                'color': record.get('color', ''),
+                'synapse_color': record.get('synapse_color', ''),
+                'pre_synaptic_color': record.get('pre_synaptic_color', ''),
+                'post_synaptic_color': record.get('post_synaptic_color', ''),
+            })
+
+        # The layer column is either numeric (base auto-detect for 0/1) or a
+        # set of group-name labels (legacy behavior: group by the label).
+        layer_values = df['layer'].dropna().tolist()
+        numeric_layers = bool(layer_values)
+        for value in layer_values:
+            try:
+                float(value)
+            except (TypeError, ValueError):
+                numeric_layers = False
+                break
+        if numeric_layers:
+            self._layer_map_numeric_layers = True
+            # Base-0/1 auto-detect: subtract the lowest layer value so the
+            # first layer becomes index 0 internally, keeping the original
+            # label only as the source index. Numeric indices are not useful
+            # display names and must not produce folders such as
+            # ``plot-3d_MCNS_1_<timestamp>``.
+            layer_offset = int(min(float(v) for v in layer_values))
+            df['_layer_idx'] = (
+                df['layer'].astype(float).round().astype(int) - layer_offset
+            )
+        else:
+            self._layer_map_numeric_layers = False
+            layer_offset = None
+            df['_layer_idx'] = [str(v) for v in df['layer'].fillna('')]
+
+        # Keep the CSV's layer identity alongside each override.  The public
+        # resolver still has a global fallback for legacy callers, but a
+        # layer-aware map is necessary when the same type/body label appears
+        # in more than one editor row with different site colors.
+        layer_groups = df.groupby('_layer_idx', sort=True)[neuron_col].apply(list).to_dict()
+        self._layer_map_layer_indices = {
+            layer_key: index for index, layer_key in enumerate(layer_groups)
+        }
+
+        # Optional color columns.
+        color_col = 'color' if 'color' in df.columns else None
+        synapse_color_col = 'synapse_color' if 'synapse_color' in df.columns else None
+        pre_color_col = 'pre_synaptic_color' if 'pre_synaptic_color' in df.columns else None
+        post_color_col = 'post_synaptic_color' if 'post_synaptic_color' in df.columns else None
+        optional_cols = [
+            c for c in (color_col, synapse_color_col, pre_color_col, post_color_col) if c
+        ]
+        if optional_cols:
+            self._vprint(
+                f"  Found color columns {optional_cols} - will apply per-neuron colors",
+                level='simple',
+            )
+
+        # Build per-neuron color overrides for each present color column.
+        self._neuron_color_overrides = {}
+        self._neuron_synapse_color_overrides = {}
+        self._neuron_pre_color_overrides = {}
+        self._neuron_post_color_overrides = {}
+        self._neuron_color_overrides_by_layer = {}
+        self._neuron_synapse_color_overrides_by_layer = {}
+        self._neuron_pre_color_overrides_by_layer = {}
+        self._neuron_post_color_overrides_by_layer = {}
+        override_targets = [
+            (
+                color_col, self._neuron_color_overrides,
+                self._neuron_color_overrides_by_layer,
+                self.neuron_alpha, 'color',
+            ),
+            (
+                synapse_color_col, self._neuron_synapse_color_overrides,
+                self._neuron_synapse_color_overrides_by_layer,
+                self.synapse_alpha, 'synapse_color',
+            ),
+            (
+                pre_color_col, self._neuron_pre_color_overrides,
+                self._neuron_pre_color_overrides_by_layer,
+                self.synapse_alpha, 'pre_synaptic_color',
+            ),
+            (
+                post_color_col, self._neuron_post_color_overrides,
+                self._neuron_post_color_overrides_by_layer,
+                self.synapse_alpha, 'post_synaptic_color',
+            ),
+        ]
+        for col, store, layered_store, default_alpha, label in override_targets:
+            if col is None:
+                continue
             for _, row in df.iterrows():
-                id_val = row['id_type_instance']
-                color_val = row['color']
-                if pd.notna(color_val) and str(color_val).strip():
-                    # Normalize id
-                    id_str = str(id_val).strip()
-                    id_key = (
-                        normalize_flywire_body_id(id_str)
-                        if is_flywire_dataset(self.dataset) and id_str.isdigit()
-                        else (int(id_str) if id_str.isdigit() else id_str)
+                id_val = row[neuron_col]
+                color_val = row[col]
+                if pd.isna(color_val) or not str(color_val).strip():
+                    continue
+                id_str = str(id_val).strip()
+                id_key = (
+                    normalize_flywire_body_id(id_str)
+                    if is_flywire_dataset(self.dataset) and id_str.isdigit()
+                    else (int(id_str) if id_str.isdigit() else id_str)
+                )
+                try:
+                    rgba_str = standardize_color(str(color_val).strip(), default_alpha=default_alpha)
+                    # Store every safe alias, including the ``15832.0`` ->
+                    # ``15832`` normalization used by connector readers.
+                    lookup_keys = self._normalize_neuron_lookup_keys(id_val)
+                    if id_key not in lookup_keys:
+                        lookup_keys.insert(0, id_key)
+                    if str(id_key) not in lookup_keys:
+                        lookup_keys.append(str(id_key))
+                    layer_index = self._layer_map_layer_indices.get(row['_layer_idx'])
+                    layer_values = layered_store.setdefault(layer_index, {})
+                    for key in lookup_keys:
+                        store[key] = rgba_str
+                        layer_values[key] = rgba_str
+                except Exception as e:
+                    self._vprint(
+                        f"  ⚠️ Failed to parse {label} '{color_val}' for {id_val}: {e}",
+                        level='full',
                     )
-                    # Standardize color
-                    try:
-                        rgba_str = standardize_color(str(color_val).strip(), default_alpha=self.neuron_alpha)
-                        self._neuron_color_overrides[id_key] = rgba_str
-                        # Also store string version for lookup flexibility
-                        self._neuron_color_overrides[str(id_key)] = rgba_str
-                    except Exception as e:
-                        self._vprint(f"  ⚠️ Failed to parse color '{color_val}' for {id_val}: {e}", level='full')
-            
-            if self._neuron_color_overrides:
-                self._vprint(f"  Loaded {len(self._neuron_color_overrides) // 2} per-neuron color overrides", level='simple')
-        
-        # Group by layer name to create neuron_layers
-        layer_groups = df.groupby('layer', sort=False)['id_type_instance'].apply(list).to_dict()
-        
-        # Construct neuron_layers and custom_layer_names
+            if store:
+                self._vprint(
+                    f"  Loaded {len(store) // 2} per-neuron {label} overrides",
+                    level='simple',
+                )
+
+        # Construct neuron_layers and custom_layer_names.
         self.neuron_layers = []
         self.custom_layer_names = []
-        
-        for layer_name, identifiers in layer_groups.items():
-            # Convert identifiers: if it looks like a bodyId (all digits), convert to int
+        for layer_idx in sorted(layer_groups):
+            identifiers = layer_groups[layer_idx]
             processed_ids = []
             for id_val in identifiers:
                 id_str = str(id_val).strip()
@@ -3914,15 +4113,13 @@ class VisualizeSkeleton:
                     )
                 else:
                     processed_ids.append(id_str)
-            
-            # If single item, use it directly; if multiple, keep as list
             if len(processed_ids) == 1:
                 self.neuron_layers.append(processed_ids[0])
             else:
                 self.neuron_layers.append(processed_ids)
-            
-            self.custom_layer_names.append(str(layer_name))
-        
+            label = layer_idx + layer_offset if layer_offset is not None else str(layer_idx)
+            self.custom_layer_names.append(str(label))
+
         self._vprint(f"  Loaded {len(self.neuron_layers)} layers from CSV:")
         for i, (name, neurons) in enumerate(zip(self.custom_layer_names, self.neuron_layers)):
             n_count = len(neurons) if isinstance(neurons, list) else 1
@@ -4464,6 +4661,7 @@ class VisualizeSkeleton:
             ('show_connectors', self.show_connectors),
             ('FAFB_template_correction', self.FAFB_template_correction),
             ('uniform_synapse_size', self.uniform_synapse_size),
+            ('pre_post_scatter', self.pre_post_scatter),
         ]
         for name, value in additional_bools:
             if not isinstance(value, bool):
@@ -4678,6 +4876,20 @@ class VisualizeSkeleton:
             self.background_color = standardize_color('white')
 
     def __post_init__(self):
+        # Keep the local binding available before auto-generated output names
+        # are sanitized below (a later compatibility branch also imports re).
+        import re
+        import copy
+
+        # Keep the editor-facing inputs for the reusable layer-map export.
+        # Resolution below intentionally converts names to body IDs for data
+        # access, but the exported ``viz_layer_info.csv`` should remain a
+        # readable representation of what the user entered.
+        self._viz_input_neuron_layers = copy.deepcopy(self.neuron_layers)
+        self._viz_input_custom_layer_names = copy.deepcopy(self.custom_layer_names)
+        self._viz_input_neuron_colors = copy.deepcopy(self.neuron_colors)
+        self._viz_input_synapse_colors = copy.deepcopy(self.synapse_colors)
+
         # Empty or invalid color inputs fall back to their default palettes
         # (with warnings) instead of failing validation.
         self._normalize_color_inputs()
@@ -4769,14 +4981,14 @@ class VisualizeSkeleton:
             self.client_type = 'flywire'
             self._vprint(f"Auto-detected client_type='flywire' from dataset '{self.dataset}'", level='full')
 
-        # For FlyWire/FAFB: Enable mesh caching (transformed+meshed), disable raw skeleton caching
+        # For FlyWire/FAFB: enable the representation-specific mesh cache for
+        # morphology.  Synapse caching remains enabled when requested: the
+        # local master connection table is the dataset's canonical synapse
+        # cache and is also the source for pre/post connector sites.
         if self.client_type == 'flywire' or 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
             # Raw skeleton pkl caching is disabled (files too large and need transformation anyway)
             if self.cache_neurons:
                 self._vprint("  ℹ️  FlyWire/FAFB: Using mesh cache (simplified) instead of raw skeletons", level='full')
-            if self.cache_synapses:
-                self._vprint("  ℹ️  Disabling synapse caching for FlyWire/FAFB (files too large)", level='full')
-                self.cache_synapses = False
         
         # Set the default mesh level based on the selected pipeline if it was
         # not specified. Fast/direct renders use 90% removal; fine/artistic
@@ -4887,8 +5099,8 @@ class VisualizeSkeleton:
                 sys.exit(1)
             
 
-        if self.synapse_mode not in ['scatter', 'sphere', 'cone', 'tetrahedron']:
-            raise ValueError('synapse_mode can only be "scatter", "sphere", "cone", or "tetrahedron"')
+        if self.synapse_mode not in ['scatter', 'sphere', 'cone', 'tetrahedron', 'pre_post']:
+            raise ValueError('synapse_mode can only be "scatter", "sphere", "cone", "tetrahedron", or "pre_post"')
         
         # Validate legend_mode
         if self.legend_mode not in ['single', 'type', 'layer']:
@@ -5146,6 +5358,12 @@ class VisualizeSkeleton:
             
             # Update postfix with neuron count
             layer_iter.set_postfix(neurons=n_neurons, total=total_neurons)
+
+        # A custom layer CSV may identify a neuron by type or instance while
+        # the renderer later asks for its bodyId (or the reverse). Expand the
+        # parsed color maps with all identifiers present in the resolved
+        # neuron frames before any skeleton/synapse rendering starts.
+        self._link_layer_map_color_overrides_to_neuron_dfs()
         
         # Print summary
         self._vprint(f'✓ Loaded {total_neurons:,} neurons across {n_layers} layers')
@@ -5166,7 +5384,8 @@ class VisualizeSkeleton:
                     self._vprint(f'    [{i}] {name}: {n} neurons')
 
         # Generate smart layer names based on types (if not using custom names)
-        if not self.custom_layer_names:
+        if (not self.custom_layer_names
+                or getattr(self, '_layer_map_numeric_layers', False)):
             self.layer_names = self._generate_smart_layer_names()
         else:
             # Support partial custom_layer_names - merge with auto-generated names
@@ -5240,7 +5459,12 @@ class VisualizeSkeleton:
         
         # Create output subfolder (with or without timestamp based on include_timestamp)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        base_folder_name = f'plot-3d_{dataset_abbrev}_' + self.saveas.split('.')[0]
+        folder_stem = re.sub(
+            r'[^A-Za-z0-9._-]+',
+            '-',
+            str(self.saveas).split('.')[0],
+        ).strip('._-') or 'skeleton'
+        base_folder_name = f'plot-3d_{dataset_abbrev}_{folder_stem}'
         if self.include_timestamp:
             self.save_folder = os.path.join(self.output_dir, base_folder_name + '_' + timestamp)
         else:
@@ -5341,10 +5565,19 @@ class VisualizeSkeleton:
                 self._vprint("   Falling back to plotly backend")
                 self.backend = 'plotly'
                 self.fig_3d = go.Figure()
+
+        # Plotly sliders are assembled after the synapse/site traces exist and
+        # are restored by save_figure() for the interactive HTML export.
+        self._plotly_sliders = []
         
         # Save one compact neuron-info table.  ROI counts are fetched for
         # internal query/filtering needs, but are not part of this export.
         self._save_neuron_info_csv()
+        # Always leave a small, directly reusable layer-map beside the
+        # visualization. It preserves the readable source layer/neuron/color
+        # entries when they are available, while remaining uploadable for a
+        # later rerun.
+        self._save_viz_layer_info_csv()
 
     def _save_neuron_info_csv(self):
         """Save all resolved neuron metadata in one CSV file.
@@ -5390,6 +5623,168 @@ class VisualizeSkeleton:
             self.save_folder, self.saveas + '_neuron_info.csv'
         )
         neuron_info.to_csv(file_path, index=False)
+        return file_path
+
+    def _save_viz_layer_info_csv(self):
+        """Write a reusable ``viz_layer_info.csv`` for this visualization.
+
+        The file intentionally follows the ``layer_map_csv`` contract rather
+        than the wider neuron metadata export.  When the visualization came
+        from a layer-map CSV, retain those source layer/neuron/color entries
+        instead of replacing readable labels with resolved body IDs.  Direct
+        layer inputs use the same original entries as a fallback.
+
+        Synapse colors and pre/post-site colors are mutually exclusive in this
+        artifact: connector mode exports ``synapse_color`` only, pre/post mode
+        exports the two site columns only, and skipped synapses export none of
+        them.  This prevents a later CSV upload from carrying contradictory
+        styling instructions.
+
+        A header is written even for a mesh-only/empty run so every Skeleton
+        export has the same reusable artifact.
+        """
+        columns = [
+            "layer",
+            "neuron",
+            "color",
+            "synapse_color",
+            "pre_synaptic_color",
+            "post_synaptic_color",
+        ]
+
+        def _csv_text(value):
+            if value is None:
+                return ""
+            try:
+                if pd.isna(value):
+                    return ""
+            except (TypeError, ValueError):
+                pass
+            return str(value).strip()
+
+        mode = str(getattr(self, "synapse_mode", "") or "").strip().lower()
+        skip_synapses = bool(getattr(self, "skip_synapse", False))
+
+        def _apply_mode_exclusivity(row):
+            """Blank the color family that is not active for this render."""
+            if skip_synapses:
+                row["synapse_color"] = ""
+                row["pre_synaptic_color"] = ""
+                row["post_synaptic_color"] = ""
+            elif mode == "pre_post":
+                row["synapse_color"] = ""
+            else:
+                row["pre_synaptic_color"] = ""
+                row["post_synaptic_color"] = ""
+            return row
+
+        def _raw_palette_value(values, index):
+            """Return one readable value from a direct palette input."""
+            if values is None:
+                return None
+            if isinstance(values, str):
+                return values
+            if isinstance(values, (list, tuple)):
+                if not values:
+                    return None
+                # A numeric RGB(A) tuple is one color, not a palette of three
+                # scalar entries.
+                if len(values) in (3, 4) and all(
+                    isinstance(item, (int, float)) for item in values
+                ):
+                    return values
+                return values[index] if index < len(values) else values[-1]
+            return values
+
+        def _export_color_value(value, fallback, default_alpha):
+            if value is None:
+                return fallback
+            if isinstance(value, str):
+                return value
+            try:
+                return standardize_color(value, default_alpha=default_alpha)
+            except (TypeError, ValueError):
+                return fallback
+
+        rows = []
+        source_rows = getattr(self, "_viz_layer_info_input_rows", None)
+        if source_rows is not None:
+            # A CSV (including an empty CSV) is authoritative.  Do not fall
+            # back to resolved neuron_dfs: doing so would lose the user's
+            # labels and could add rows that were not in the editor input.
+            for source in source_rows:
+                row = {
+                    column: _csv_text(source.get(column, ""))
+                    for column in columns
+                }
+                rows.append(_apply_mode_exclusivity(row))
+        else:
+            # Direct constructor input has no source table to round-trip.
+            # Preserve its layer entries and use the effective resolved colors
+            # for the corresponding input identifier.
+            raw_layers = getattr(self, "_viz_input_neuron_layers", None)
+            if isinstance(raw_layers, str):
+                raw_layers = (
+                    raw_layers.replace(' ', '').split('->')
+                    if raw_layers.strip() else []
+                )
+            elif raw_layers is None:
+                raw_layers = []
+            else:
+                raw_layers = list(raw_layers)
+
+            raw_names = getattr(self, "_viz_input_custom_layer_names", None) or []
+            raw_neuron_colors = getattr(self, "_viz_input_neuron_colors", None)
+            raw_synapse_colors = getattr(self, "_viz_input_synapse_colors", None)
+            entry_index = 0
+            for layer_index, layer_input in enumerate(raw_layers):
+                if isinstance(layer_input, (list, tuple, set)):
+                    identifiers = list(layer_input)
+                else:
+                    identifiers = [layer_input]
+                layer_label = (
+                    raw_names[layer_index]
+                    if layer_index < len(raw_names)
+                    and _csv_text(raw_names[layer_index])
+                    else layer_index + 1
+                )
+                for identifier in identifiers:
+                    identifier_text = _csv_text(identifier)
+                    if not identifier_text:
+                        continue
+                    neuron_color_input = _raw_palette_value(
+                        raw_neuron_colors,
+                        entry_index if getattr(self, "color_mode", "per_layer") == "per_neuron"
+                        else layer_index,
+                    )
+                    synapse_color_input = _raw_palette_value(
+                        raw_synapse_colors, layer_index,
+                    )
+                    row = {
+                        "layer": _csv_text(layer_label),
+                        "neuron": identifier_text,
+                        "color": _export_color_value(
+                            neuron_color_input,
+                            self._resolve_neuron_color(identifier, layer_index),
+                            getattr(self, "neuron_alpha", 1.0),
+                        ),
+                        "synapse_color": _export_color_value(
+                            synapse_color_input,
+                            self._resolve_synapse_color(identifier, layer_index),
+                            getattr(self, "synapse_alpha", 1.0),
+                        ),
+                        "pre_synaptic_color": self._resolve_pre_color(
+                            identifier, layer_index,
+                        ),
+                        "post_synaptic_color": self._resolve_post_color(
+                            identifier, layer_index,
+                        ),
+                    }
+                    rows.append(_apply_mode_exclusivity(row))
+                    entry_index += 1
+
+        file_path = os.path.join(self.save_folder, "viz_layer_info.csv")
+        pd.DataFrame(rows, columns=columns).to_csv(file_path, index=False)
         return file_path
 
     def _save_synapse_data(self, synapse_frames):
@@ -5468,6 +5863,16 @@ class VisualizeSkeleton:
             pipeline_note = f"neuprint_skeleton_pipeline={pipeline}"
         else:
             pipeline_note = f"neuprint_skeleton_pipeline={pipeline}"
+        synapse_mode = str(getattr(self, "synapse_mode", "") or "").strip().lower()
+        pre_post_note = ""
+        if synapse_mode == "pre_post":
+            pre_post_note = (
+                f"- [pre/post-synaptic site mode] dataset={self.dataset}; "
+                "shows the pre- and post-synaptic SITES of the queried neurons "
+                "(post/input sites as spheres, pre/output sites as cones), not the "
+                "paired inter-layer synapses; there is a separate legend for pre and "
+                "post sites per layer.\n"
+            )
         note_path = os.path.join(self.save_folder, "user_warning_notes.txt")
         text = (
             "DROCAT user warning notes\n"
@@ -5479,6 +5884,7 @@ class VisualizeSkeleton:
               f"{pipeline_note}; skeleton_mode={skeleton_mode}; "
               f"skeleton_mesh_simplification={value_text} ({scope}; "
               f"{warning_note}).\n"
+            + pre_post_note
         )
         try:
             with open(note_path, "w", encoding="utf-8") as f:
@@ -5957,15 +6363,112 @@ class VisualizeSkeleton:
         """
         return self.skeleton_mesh_simplification
 
+    @staticmethod
+    def _cached_skeleton_level(neuron) -> int:
+        """Read the simplification level carried by a cached TreeNeuron."""
+        try:
+            return max(0, int(getattr(neuron, '_drocat_simplification', 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _relevel_cached_skeleton(neuron, target_level: int):
+        """Return a cached skeleton at *target_level* without mutating it."""
+        stored = VisualizeSkeleton._cached_skeleton_level(neuron)
+        target = max(0, int(target_level))
+        if target <= stored or not hasattr(neuron, 'nodes'):
+            return neuron
+        try:
+            from morphology import _relevel_for_target
+            result = _relevel_for_target(neuron, stored, target)
+            try:
+                result._drocat_simplification = target
+            except Exception:
+                pass
+            return result
+        except Exception:
+            return neuron
+
+    def _resolve_neuprint_render_cache(self, raw_cache, body_ids):
+        """Resolve a common source level for NeuPrint render skeletons.
+
+        Older visualization runs persisted the shared ``raw_skeletons`` files
+        at simplification level 90, while other files are truly raw. Mixing
+        those files in one scene makes a neuron look as if it used a different
+        simplification setting. Raw level-0 files are preferred. Coarser legacy
+        files are marked stale and are refreshed online when possible; if the
+        refresh is unavailable, the fallback re-levels every available cached
+        source to the same coarsest stored level instead of mixing resolutions.
+
+        Returns ``(preferred, stale, missing)`` mappings/lists. The caller can
+        add ``stale`` to its online fetch set and use ``fallback`` after a
+        failed fetch through :meth:`_normalize_neuprint_cache_fallback`.
+        """
+        preferred = {}
+        stale = {}
+        missing = []
+        for body_id in body_ids:
+            try:
+                neuron = raw_cache.load_skeleton(body_id)
+            except Exception:
+                neuron = None
+            if neuron is None:
+                missing.append(body_id)
+                continue
+            level = self._cached_skeleton_level(neuron)
+            if level == self.NEUPRINT_RENDER_CACHE_SIMPLIFICATION:
+                preferred[body_id] = neuron
+            else:
+                stale[body_id] = (neuron, level)
+        return preferred, stale, missing
+
+    def _normalize_neuprint_cache_fallback(self, preferred, stale, fetched):
+        """Merge an offline legacy-cache fallback at one common level."""
+        if not stale:
+            return dict(fetched)
+        fallback_level = max(level for _neuron, level in stale.values())
+        available = dict(preferred)
+        available.update(fetched)
+        for body_id, (neuron, _level) in stale.items():
+            available.setdefault(body_id, neuron)
+        normalized = {
+            body_id: self._relevel_cached_skeleton(neuron, fallback_level)
+            for body_id, neuron in available.items()
+        }
+        self._vprint(
+            f'  ⚠️ Using legacy NeuPrint skeleton cache fallback at '
+            f'simplification level {fallback_level}; all available neurons '
+            'were normalized to that level',
+            level='simple',
+        )
+        return normalized
+
+    def _persist_neuprint_render_skeletons(self, raw_cache, raw_items):
+        """Persist visualization sources at raw level 0.
+
+        A small compatibility fallback keeps older cache adapters usable when
+        they do not expose the newer ``simplification`` keyword.
+        """
+        try:
+            return raw_cache.persist_skeletons(
+                raw_items,
+                simplification=self.NEUPRINT_RENDER_CACHE_SIMPLIFICATION,
+            )
+        except TypeError as exc:
+            if 'simplification' not in str(exc):
+                raise
+            return raw_cache.persist_skeletons(raw_items)
+
     def _load_cached_neurons(self, neuron_df, transformed_target=None,
                              ignore_cache=False):
         """Load NeuPrint skeletons from the shared SWC cache.
 
         The shared cache is the single source for every visualization
-        simplification mode; files are stored at the pipeline's
-        simplification level (90% default, recorded in the header). Legacy
-        ``skeletons/{bodyId}.pkl`` files are not read because their
-        representation level is ambiguous.
+        simplification mode; visualization writes use raw level 0 (recorded
+        in the header) so render-time mesh simplification is applied exactly
+        once. Legacy simp90 files are treated as stale and are only an
+        normalized offline fallback. Legacy ``skeletons/{bodyId}.pkl`` files
+        are not read because their representation level is ambiguous.
         """
         body_ids = [int(bid) for bid in neuron_df['bodyId'].tolist()]
         if ignore_cache:
@@ -5986,14 +6489,13 @@ class VisualizeSkeleton:
                 f'  ⚠ Raw skeleton cache unavailable: {exc}', level='full')
             return None, body_ids
 
-        neurons = []
-        missing_ids = []
-        for bid in body_ids:
-            neuron = raw_cache.load_skeleton(bid)
-            if neuron is None:
-                missing_ids.append(bid)
-            else:
-                neurons.append(neuron)
+        preferred, stale, missing_ids = self._resolve_neuprint_render_cache(
+            raw_cache, body_ids,
+        )
+        # Legacy non-aggregate callers may still fetch their own misses. Do
+        # not silently render a mixture of raw and simp90 files here.
+        missing_ids.extend(stale)
+        neurons = list(preferred.values())
 
         if neurons:
             self._vprint(
@@ -6013,10 +6515,8 @@ class VisualizeSkeleton:
 
         The method name is retained for compatibility with older callers,
         but it no longer writes visualization pickles or a simplification
-        marker. Persistence goes through the shared simplify + compress
-        pipeline (90% simplified ``.swc.zst`` by default); render-time
-        ``fast``/``fine`` decimation always starts from these cached
-        skeletons.
+        marker. Persistence uses raw level-0 ``.swc.zst`` files; render-time
+        ``fast``/``fine`` decimation always starts from the same source level.
         """
         is_neuprint = not (self.client_type == 'flywire'
                            or 'flywire' in self.dataset.lower()
@@ -6042,10 +6542,12 @@ class VisualizeSkeleton:
             raw_cache = find_similar_raw_cache(
                 self.dataset, project_root=self.script_path, verbose=False,
             )
-            saved_count = raw_cache.persist_skeletons(raw_items)
+            saved_count = self._persist_neuprint_render_skeletons(
+                raw_cache, raw_items,
+            )
             self._vprint(
                 f'  💾 Saved {saved_count}/{len(raw_items)} '
-                f'.swc.zst skeletons (90% simplified)',
+                f'.swc.zst skeletons (raw level 0)',
                 level='full',
             )
         except Exception as exc:
@@ -6084,8 +6586,11 @@ class VisualizeSkeleton:
     FAFB_MESH_CACHE_SOMA_SIMPLIFICATION = FLYWIRE_MESH_CACHE_SOMA_SIMPLIFICATION
 
     # Compatibility threshold retained as the direct/fast default render
-    # target. It is not an on-disk skeleton-cache level.
+    # target. It is not an on-disk skeleton-cache level. New visualization
+    # writes explicitly use level 0 (raw) so the render decimator is applied
+    # exactly once and every neuron starts from the same source resolution.
     NEUPRINT_SKELETON_CACHE_LEVEL = 0.9
+    NEUPRINT_RENDER_CACHE_SIMPLIFICATION = 0
     NEUPRINT_SKELETON_DOWNSAMPLE = 10  # deprecated helper compatibility
     FAFB_MESH_CACHE_SOMA_RADIUS = FLYWIRE_MESH_CACHE_SOMA_RADIUS
     
@@ -6505,10 +7010,12 @@ class VisualizeSkeleton:
                     level='simple',
                     use_tqdm=True,
                 )
-                written = raw_cache.persist_skeletons(raw_items)
+                written = self._persist_neuprint_render_skeletons(
+                    raw_cache, raw_items,
+                )
                 self._vprint(
                     f'  ✓ Raw skeleton cache complete: {written}/'
-                    f'{len(raw_items)} .swc.zst files (90% simplified)',
+                    f'{len(raw_items)} .swc.zst files (raw level 0)',
                     level='simple',
                     use_tqdm=True,
                 )
@@ -6605,6 +7112,7 @@ class VisualizeSkeleton:
         target_simp = float(self.skeleton_mesh_simplification or 0.0)
         prepared = {}
         raw_cached_skeletons = {}
+        legacy_cached_skeletons = {}
 
         def _id_key(value):
             try:
@@ -6616,7 +7124,9 @@ class VisualizeSkeleton:
         # pipeline, but the strict ``cache_neurons=False`` policy disables
         # all local reads: every body is fetched online and nothing is
         # persisted. Legacy root skeleton pickles are intentionally not
-        # considered raw sources.
+        # considered raw sources. Older shared SWC files can be simp90 even
+        # though the directory is named raw_skeletons; keep them out of the
+        # preferred source mapping so a render never mixes source levels.
         if self.cache_neurons:
             try:
                 from morphology import find_similar_raw_cache
@@ -6624,15 +7134,16 @@ class VisualizeSkeleton:
                     self.dataset, project_root=self.script_path,
                     n_workers=self.NEUPRINT_FETCH_MAX_THREADS, verbose=False,
                 )
-                for body_id in body_ids:
-                    neuron = raw_cache.load_skeleton(body_id)
-                    if neuron is not None:
-                        raw_cached_skeletons[body_id] = neuron
+                (raw_cached_skeletons, legacy_cached_skeletons,
+                 missing_cached_ids) = self._resolve_neuprint_render_cache(
+                    raw_cache, body_ids,
+                )
             except Exception as exc:
                 self._vprint(
                     f'  ⚠️ Shared raw-cache check failed: {exc}',
                     level='full',
                 )
+                missing_cached_ids = list(body_ids)
 
         # Stage 2: every visualization mode consumes the same raw source.
         # ``fast`` only changes the in-memory mesh decimation below; it never
@@ -6751,6 +7262,21 @@ class VisualizeSkeleton:
 
         for key in list(fetched):
             fetched[key] = _scale_manc(fetched[key])
+        # If an old simp90 file could not be refreshed, use it only as a
+        # consistent fallback. Re-leveling every available source to the same
+        # legacy level prevents one neuron from silently using raw geometry
+        # while another uses a pre-simplified cache file.
+        unresolved_legacy = {
+            body_id: entry for body_id, entry in legacy_cached_skeletons.items()
+            if body_id not in online_fetched
+        }
+        if unresolved_legacy:
+            fetched = self._normalize_neuprint_cache_fallback(
+                raw_cached_skeletons,
+                unresolved_legacy,
+                fetched,
+            )
+
         # Online fetches are persisted by the shared batched fetcher. Keep
         # this phase render-only; no simplified skeleton pickle is written.
 
@@ -7206,18 +7732,18 @@ class VisualizeSkeleton:
         """Ignore historical NeuPrint fine-mesh directories.
 
         This compatibility seam intentionally returns no mesh hits. Fine and
-        artistic rendering must load the standalone simplified ``.swc.zst``
-        source (90% default) and rebuild the tube mesh for the current
-        visualization settings.
+        artistic rendering must load the standalone raw level-0 ``.swc.zst``
+        source and rebuild the tube mesh for the current visualization
+        settings.
         """
         return {}, list(body_ids)
 
     def _save_cached_neuprint_meshes(self, mesh_neurons_dict):
         """Ignore historical NeuPrint fine-mesh save requests.
 
-        Simplified ``.swc.zst`` persistence is handled by the batched fetch
-        phase; mesh objects are render-time products and must not become a
-        second cache representation.
+        Raw ``.swc.zst`` persistence is handled by the batched fetch phase;
+        mesh objects are render-time products and must not become a second
+        cache representation.
         """
         if mesh_neurons_dict:
             self._vprint(
@@ -7264,6 +7790,15 @@ class VisualizeSkeleton:
         for bid in requested_ids:
             neuron = raw_cache.load_skeleton(bid) if raw_cache is not None else None
             if neuron is not None:
+                # The shared raw directory historically also contains files
+                # written by the old visualization path at simp90.  They are
+                # not valid raw render inputs: leave them for the refresh or
+                # prepared-mesh fallback instead of mixing them with level-0
+                # sources in the same scene.
+                if self._cached_skeleton_level(neuron) != (
+                        self.NEUPRINT_RENDER_CACHE_SIMPLIFICATION):
+                    missing.append(bid)
+                    continue
                 key = (
                     normalize_flywire_body_id(bid)
                     if is_flywire_dataset(self.dataset)
@@ -7284,7 +7819,9 @@ class VisualizeSkeleton:
                     with open(legacy_file, 'rb') as f:
                         neuron = pickle.load(f)
                     if raw_cache is not None:
-                        raw_cache.persist_skeletons({bid: neuron})
+                        self._persist_neuprint_render_skeletons(
+                            raw_cache, {bid: neuron},
+                        )
                     key = (
                         normalize_flywire_body_id(bid)
                         if is_flywire_dataset(self.dataset)
@@ -8629,10 +9166,9 @@ class VisualizeSkeleton:
 
         
         # NeuPrint fine/artistic rendering never loads or writes a transformed
-        # mesh cache.  It always starts from the standalone simplified
-        # ``.swc.zst`` cache (90% default) and applies the FAFB transform, tube
-        # conversion, and requested simplification in the aggregate
-        # preprocessing phase below.
+        # mesh cache. It starts from the shared raw ``.swc.zst`` source when
+        # available and applies the FAFB transform, tube conversion, and
+        # requested simplification in the aggregate preprocessing phase below.
         neuprint_mesh_cache = {}
         use_neuprint_mesh_cache = False
 
@@ -8662,6 +9198,11 @@ class VisualizeSkeleton:
         # Note: For legend_mode='type', neurons keep their layer colors but get separate legend entries
         # Per-neuron colors from CSV are stored in self._neuron_color_overrides (bodyId -> color)
         self._type_color_map = {}  # Not used anymore - types keep layer colors
+        # Pre/post site traces are appended after morphology traces.  These
+        # maps let their legend labels and ranks mirror the exact skeleton
+        # grouping chosen above instead of relying on connector-row order.
+        self._neuron_legend_labels_by_layer = {}
+        self._neuron_legend_ranks = {}
         
         # One render-wide bar is more useful than a layer counter: a single
         # layer can contain hundreds of neurons and otherwise remains at 0%
@@ -9357,7 +9898,15 @@ class VisualizeSkeleton:
             
             if self.backend == 'plotly':
                 trace_entries = []
-                if self.color_mode == 'per_neuron' and not isinstance(neuron_vols, navis.Volume):
+                # Custom layer-map colors are per-neuron even when the global
+                # color mode is ``per_layer``. Plot those neurons separately so
+                # navis cannot collapse differently colored rows into one
+                # pre-colored layer trace before the override is applied.
+                render_per_neuron = (
+                    self.color_mode == 'per_neuron'
+                    or bool(getattr(self, '_neuron_color_overrides', None))
+                ) and not isinstance(neuron_vols, navis.Volume)
+                if render_per_neuron and neuron_vols is not None:
                     for unit_index, neuron in enumerate(neuron_vols):
                         neuron_id = str(getattr(neuron, 'id', f'neuron_{unit_index}'))
                         neuron_color = self._resolve_neuron_color(neuron_id, i)
@@ -9417,7 +9966,7 @@ class VisualizeSkeleton:
                     if type_col and 'bodyId' in ndf.columns:
                         for _, row in ndf.iterrows():
                             body_id = str(row['bodyId'])
-                            neuron_type = str(row[type_col]) if pd.notna(row[type_col]) else None
+                            neuron_type = self._clean_pre_post_type_label(row[type_col])
                             if neuron_type:
                                 neuron_type_map[body_id] = neuron_type
                                 # Also map neuron name/instance to type if available (helpful when trace name != bodyId)
@@ -9435,15 +9984,25 @@ class VisualizeSkeleton:
                     if self.skeleton_mode == 'line':
                         trace.opacity = self._extract_alpha_from_color(neuron_color)
 
-                    neuron_color = self._resolve_neuron_color(neuron_id, i)
+                    # When custom colors forced one-neuron-at-a-time plotting,
+                    # ``neuron_color`` is already the bodyId-resolved value
+                    # passed to navis. Re-resolving from a generic trace name
+                    # can otherwise fall back to the layer color and overwrite
+                    # the correctly colored trace.
+                    if not render_per_neuron:
+                        neuron_color = self._resolve_neuron_color(neuron_id, i)
                     if neuron_color != self.neuron_colors[i]:
                         self._apply_plotly_trace_color(trace, neuron_color)
 
                     if self.legend_mode == 'layer':
                         # Group all neurons in layer under one legend entry
                         legend_group = self.layer_names[i]
+                        legend_rank = self._neuron_legend_ranks.setdefault(
+                            legend_group, len(self._neuron_legend_ranks) * 100,
+                        )
                         trace.name = legend_group
                         trace.legendgroup = legend_group
+                        trace.legendrank = legend_rank
                         should_show = legend_group not in shown_legend_groups
                         trace.showlegend = should_show
                         if should_show:
@@ -9479,9 +10038,12 @@ class VisualizeSkeleton:
                         else:
                             # Fallback to layer name if type unknown
                             legend_group = self.layer_names[i]
-                        
+                        legend_rank = self._neuron_legend_ranks.setdefault(
+                            legend_group, len(self._neuron_legend_ranks) * 100,
+                        )
                         trace.name = legend_group
                         trace.legendgroup = legend_group  # Same type shares legend group
+                        trace.legendrank = legend_rank
                         should_show = legend_group not in shown_legend_groups
                         trace.showlegend = should_show
                         if should_show:
@@ -9494,9 +10056,13 @@ class VisualizeSkeleton:
                     elif self.legend_mode == 'single':
                         # Each neuron gets its own legend entry with layer color
                         new_trace_name = f"{neuron_id}_{self.layer_names[i]}"
-                        
+                        legend_group = new_trace_name
+                        legend_rank = self._neuron_legend_ranks.setdefault(
+                            legend_group, len(self._neuron_legend_ranks) * 100,
+                        )
                         trace.name = new_trace_name
-                        trace.legendgroup = new_trace_name
+                        trace.legendgroup = legend_group
+                        trace.legendrank = legend_rank
                         trace.showlegend = True
                         legend_color_map[new_trace_name] = (neuron_color, True)
                         trace.hoverinfo = 'name'
@@ -9504,6 +10070,31 @@ class VisualizeSkeleton:
                         self.fig_3d.add_trace(trace)
                     else:
                         raise ValueError(f'legend_mode {self.legend_mode} not supported')
+
+                    # Connector site rows normally identify the owner by
+                    # bodyId while navis may identify the skeleton trace by
+                    # name/type.  Register every identifier available on the
+                    # resolved row so pre/post sites can recover this exact
+                    # skeleton legend label later.
+                    aliases = list(self._normalize_neuron_lookup_keys(neuron_id))
+                    if (
+                        self.neuron_dfs[i] is not None
+                        and source_index < len(self.neuron_dfs[i])
+                    ):
+                        source_row = self.neuron_dfs[i].iloc[source_index]
+                        for column in (
+                            'bodyId', 'name', 'type', 'instance', 'roi',
+                            'flywireType', 'hemibrainType', 'mancType',
+                        ):
+                            if column in source_row.index:
+                                aliases.extend(
+                                    self._normalize_neuron_lookup_keys(
+                                        source_row[column]
+                                    )
+                                )
+                    label_map = self._neuron_legend_labels_by_layer.setdefault(i, {})
+                    for alias in aliases:
+                        label_map[alias] = str(legend_group)
                 
                 # Fix legend opacity: Add invisible marker traces with full opacity for legend display
                 # Needed when alpha < 1.0 (either from neuron_alpha or explicit alpha in colors)
@@ -9524,6 +10115,9 @@ class VisualizeSkeleton:
                             showlegend=True,
                             hoverinfo='skip',
                         )
+                        legend_trace.legendrank = self._neuron_legend_ranks.get(
+                            legend_group, 1000,
+                        )
                         # Hide original traces from legend (but keep them visible in plot)
                         for existing_trace in self.fig_3d.data:
                             if getattr(existing_trace, 'legendgroup', None) == legend_group:
@@ -9533,7 +10127,11 @@ class VisualizeSkeleton:
             
             elif self.backend == 'k3d':
                 try:
-                    if self.color_mode == 'per_neuron' and not isinstance(neuron_vols, navis.Volume):
+                    render_per_neuron = (
+                        self.color_mode == 'per_neuron'
+                        or bool(getattr(self, '_neuron_color_overrides', None))
+                    ) and not isinstance(neuron_vols, navis.Volume)
+                    if render_per_neuron and neuron_vols is not None:
                         for unit_index, neuron in enumerate(neuron_vols):
                             neuron_id = str(getattr(neuron, 'id', f'neuron_{unit_index}'))
                             neuron_color = self._resolve_neuron_color(neuron_id, i)
@@ -9609,9 +10207,132 @@ class VisualizeSkeleton:
         2. Layer indices are arbitrary and session-specific
         3. Avoids duplicate storage of the same synaptic connections
         """
-        cache_dir = self._get_cache_path('synapses')  # Note: 'synapses' not 'synapse'
-        return os.path.join(cache_dir, f'{pre_id}_{post_id}.parquet')
-    
+        return str(self._get_synapse_cache().pair_path(pre_id, post_id))
+
+    def _get_synapse_cache(self):
+        """Return the run-scoped dataset synapse cache backend.
+
+        The backend is deliberately independent from morphology/SWC caches.
+        It owns pair files, broad connector-query files, and their metadata;
+        all three are reusable synapse artifacts.
+        """
+        root = getattr(self, 'script_path', os.path.dirname(os.path.dirname(__file__)))
+        enabled = bool(getattr(self, 'cache_synapses', False))
+        cache = getattr(self, '_synapse_cache_backend', None)
+        if (
+            cache is None
+            or cache.dataset != str(self.dataset)
+            or str(cache.project_root) != str(root)
+            or cache.enabled != enabled
+        ):
+            cache = SynapseCache(str(self.dataset), str(root), enabled=enabled)
+            self._synapse_cache_backend = cache
+        return cache
+
+    def _synapse_query_spec(self, source_criteria=None, target_criteria=None,
+                            source_ids=None, target_ids=None,
+                            source_kind='neuprint', source_signature=None,
+                            min_total_weight=None):
+        """Build the complete cache contract for one synapse query."""
+        threshold = (
+            int(getattr(self, 'min_synapse_num', 0) or 0)
+            if min_total_weight is None else int(min_total_weight or 0)
+        )
+        return {
+            'dataset': str(self.dataset),
+            'source_kind': str(source_kind),
+            'source_endpoint': getattr(self, 'server', None),
+            'source_version': getattr(self, 'version', None),
+            'source_criteria': source_criteria,
+            'target_criteria': target_criteria,
+            'source_ids': sorted({str(value) for value in (source_ids or [])}),
+            'target_ids': sorted({str(value) for value in (target_ids or [])}),
+            'min_total_weight': threshold,
+            'synapse_criteria': getattr(self, 'synapse_criteria', None),
+            'source_signature': source_signature,
+        }
+
+    def _get_or_fetch_synapse_query(
+            self, source_criteria=None, target_criteria=None,
+            source_ids=None, target_ids=None, source_kind='neuprint',
+            source_signature=None, fetcher=None, min_total_weight=None):
+        """Load one broad synapse query from memory/disk or fetch it once.
+
+        This is the connector/site path.  It intentionally does not consult
+        neuron skeleton caches.  A single visualization run also gets an
+        in-memory query memo, so size estimation and site rendering do not
+        issue the same upstream/downstream request twice.
+        """
+        cache = self._get_synapse_cache()
+        threshold = (
+            int(getattr(self, 'min_synapse_num', 0) or 0)
+            if min_total_weight is None else int(min_total_weight or 0)
+        )
+        spec = self._synapse_query_spec(
+            source_criteria=source_criteria,
+            target_criteria=target_criteria,
+            source_ids=source_ids,
+            target_ids=target_ids,
+            source_kind=source_kind,
+            source_signature=source_signature,
+            min_total_weight=threshold,
+        )
+        key = cache.query_key(spec)
+        memory = getattr(self, '_synapse_query_memory', None)
+        if memory is None:
+            memory = {}
+            self._synapse_query_memory = memory
+        if key in memory:
+            return memory[key].copy()
+
+        if cache.enabled:
+            cached = cache.load_query(spec)
+            if cached is not None:
+                memory[key] = cached.copy()
+                self._vprint(
+                    f'  ✓ Loaded synapse query {key[:8]} from cache '
+                    f'({len(cached)} rows)', level='full')
+                return cached.copy()
+
+        if fetcher is None:
+            fetcher = lambda: fetch_synapse_connections(
+                source_criteria=source_criteria,
+                target_criteria=target_criteria,
+                min_total_weight=threshold,
+                synapse_criteria=self.synapse_criteria,
+                client=self.client,
+            )
+        try:
+            frame = fetcher()
+        except Exception as exc:
+            self._vprint(
+                f'  ⚠️ Synapse query failed ({source_kind}): {exc}',
+                level='full')
+            return None
+        if frame is None:
+            return None
+        if not isinstance(frame, pd.DataFrame):
+            try:
+                frame = pd.DataFrame(frame)
+            except Exception:
+                return None
+        frame = frame.copy()
+        # A criteria query can be broader than the selected table rows.  The
+        # body-ID sets are part of the cache key, so enforce them on the rows
+        # before memoizing/persisting; this keeps exact layer/site queries from
+        # leaking connectors belonging to another selection.
+        source_set = {str(value) for value in (source_ids or [])}
+        target_set = {str(value) for value in (target_ids or [])}
+        if source_set and 'bodyId_pre' in frame.columns:
+            frame = frame[frame['bodyId_pre'].astype(str).isin(source_set)]
+        if target_set and 'bodyId_post' in frame.columns:
+            frame = frame[frame['bodyId_post'].astype(str).isin(target_set)]
+        frame = frame.reset_index(drop=True)
+        memory[key] = frame.copy()
+        if cache.enabled:
+            cache.save_query(spec, frame, source=source_kind)
+        return frame
+
     def _load_cached_synapses(self, source_ids, target_ids):
         """Load cached synapse connections for given source/target neuron pairs.
         
@@ -9639,66 +10360,27 @@ class VisualizeSkeleton:
         source_ids = set(str(s) for s in source_ids)
         target_ids = set(str(t) for t in target_ids)
         
-        # For FlyWire/FAFB, use the master synapse table from datasets folder
+        # FlyWire/FAFB have one dataset-native paired synapse table.  It is
+        # the synapse cache source, not a skeleton/mesh cache, and the reader
+        # applies the same column/coordinate normalization used everywhere.
         if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
-            synapse_table_path = self._get_synapse_table_path()
-            if os.path.exists(synapse_table_path):
-                try:
-                    # Load master synapse table
-                    synapse_df = pd.read_parquet(synapse_table_path)
-                    self._vprint(f'  ✓ Loaded synapse table from {synapse_table_path}', level='full')
-                    
-                    # Determine column names (may vary by dataset)
-                    pre_col = 'pre_pt_root_id' if 'pre_pt_root_id' in synapse_df.columns else 'bodyId_pre'
-                    post_col = 'post_pt_root_id' if 'post_pt_root_id' in synapse_df.columns else 'bodyId_post'
-                    
-                    # Convert to string for matching
-                    synapse_df[pre_col] = synapse_df[pre_col].astype(str)
-                    synapse_df[post_col] = synapse_df[post_col].astype(str)
-                    
-                    filtered_df = synapse_df[
-                        (synapse_df[pre_col].isin(source_ids)) & 
-                        (synapse_df[post_col].isin(target_ids))
-                    ]
-                    self._vprint(f'  ✓ Filtered to {len(filtered_df)} synapses between {len(source_ids)} sources and {len(target_ids)} targets', level='full')
-                    # For FlyWire, master table has all data - no missing pairs
-                    return filtered_df, []
-                except Exception as e:
-                    self._vprint(f'  ⚠ Failed to load synapse table: {e}', level='full')
-                    all_pairs = [(s, t) for s in source_ids for t in target_ids]
-                    return None, all_pairs
-            else:
-                self._vprint(f'  ⚠ Synapse table not found at {synapse_table_path}', level='full')
-                all_pairs = [(s, t) for s in source_ids for t in target_ids]
-                return None, all_pairs
-        
-        # For other datasets, load from individual cache files per neuron pair
-        cached_dfs = []
-        missing_pairs = []
-        
-        for pre_id in source_ids:
-            for post_id in target_ids:
-                cache_file = self._get_synapse_cache_path(pre_id, post_id)
-                if os.path.exists(cache_file):
-                    try:
-                        df = pd.read_parquet(cache_file)
-                        if not df.empty:
-                            cached_dfs.append(df)
-                    except Exception as e:
-                        self._vprint(f'  ⚠ Cache load failed for {pre_id}→{post_id}: {e}', level='full')
-                        missing_pairs.append((pre_id, post_id))
-                else:
-                    missing_pairs.append((pre_id, post_id))
-        
-        if cached_dfs:
-            cached_df = pd.concat(cached_dfs, ignore_index=True)
-            self._vprint(f'  ✓ Loaded {len(cached_df)} synapses from cache ({len(cached_dfs)} pairs cached, {len(missing_pairs)} pairs missing)', level='full')
-        else:
-            cached_df = None
-            
+            frame = self._read_flywire_connection_frame(
+                source_ids=source_ids, target_ids=target_ids)
+            return (
+                frame,
+                [] if frame is not None else all_pairs,
+            )
+
+        cached_df, missing_pairs = self._get_synapse_cache().load_pairs(
+            source_ids, target_ids)
+        if cached_df is not None:
+            self._vprint(
+                f'  ✓ Loaded {len(cached_df)} synapses from cache '
+                f'({len(missing_pairs)} pairs missing)', level='full')
         return cached_df, missing_pairs
     
-    def _save_cached_synapses(self, conn_df, attempted_pairs=None):
+    def _save_cached_synapses(self, conn_df, attempted_pairs=None,
+                              persist_pairs=True):
         """Save synapse connections to cache, organized by pre/post neuron pairs.
         
         Each unique (pre_id, post_id) pair gets its own cache file at:
@@ -9713,65 +10395,44 @@ class VisualizeSkeleton:
             conn_df: DataFrame containing synapse data
             attempted_pairs: Optional list of (pre_id, post_id) tuples that were queried.
                              Used to cache empty results for pairs with no synapses.
+            persist_pairs: Keep the legacy pair index/files for callers that
+                           explicitly need pair-level resume.  Broad
+                           visualization queries are already persisted once in
+                           the query cache and set this to ``False`` to avoid
+                           duplicating every row across a query file and one
+                           file per neuron pair.
         """
         if not self.cache_synapses:
             return
-            
-        # Do not cache for FlyWire/FAFB - they use the master synapse table
         if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
+            # The dataset-native master table is already the canonical
+            # FlyWire synapse cache; do not duplicate it into pair files.
             return
-        
-        # Track which pairs we have saved
-        saved_pairs = set()
-        
-        if conn_df is not None and not conn_df.empty:
-            # Determine column names for pre/post body IDs
-            pre_col = 'bodyId_pre' if 'bodyId_pre' in conn_df.columns else 'pre_pt_root_id'
-            post_col = 'bodyId_post' if 'bodyId_post' in conn_df.columns else 'post_pt_root_id'
-            
-            if pre_col not in conn_df.columns or post_col not in conn_df.columns:
-                self._vprint(f'  ⚠ Cannot cache synapses: missing {pre_col} or {post_col} columns', level='full')
-                return
-            
-            # Group by pre/post pairs and save each group
-            saved_count = 0
-            for (pre_id, post_id), group_df in conn_df.groupby([pre_col, post_col]):
-                pre_id_str = str(pre_id)
-                post_id_str = str(post_id)
-                cache_file = self._get_synapse_cache_path(pre_id_str, post_id_str)
-                
-                try:
-                    group_df.to_parquet(cache_file, index=False)
-                    saved_count += 1
-                    saved_pairs.add((pre_id_str, post_id_str))
-                except Exception as e:
-                    self._vprint(f'  ⚠ Cache save failed for {pre_id}→{post_id}: {e}', level='full')
-            
-            self._vprint(f'  💾 Saved synapses to cache ({saved_count} neuron pairs)', level='full')
-
-        # Handle empty results for attempted pairs
-        if attempted_pairs:
-            empty_saved_count = 0
-            for pre_id, post_id in attempted_pairs:
-                pre_id_str = str(pre_id)
-                post_id_str = str(post_id)
-                if (pre_id_str, post_id_str) not in saved_pairs:
-                    # Save empty dataframe
-                    cache_file = self._get_synapse_cache_path(pre_id_str, post_id_str)
-                    try:
-                        # Create empty DF
-                        pd.DataFrame().to_parquet(cache_file)
-                        empty_saved_count += 1
-                    except Exception as e:
-                        self._vprint(f'  ⚠ Cache save failed for empty {pre_id}→{post_id}: {e}', level='full')
-            
-            if empty_saved_count > 0:
-                self._vprint(f'  💾 Cached {empty_saved_count} empty synapse pairs', level='full')
+        if not persist_pairs:
+            # _get_or_fetch_synapse_query has already stored this broad query
+            # (when caching is enabled).  Keeping only that file prevents a
+            # layer query from exploding into a cartesian set of pair files.
+            return
+        backend = self._get_synapse_cache()
+        before = len(backend._read_manifest().get('pairs', {}))
+        backend.save_pairs(conn_df, attempted_pairs)
+        after = len(backend._read_manifest().get('pairs', {}))
+        self._vprint(
+            f'  💾 Synapse pair cache updated ({max(0, after - before)} new index entries)',
+            level='full')
     
     def plot_synapses(self):
+        if self.backend == 'plotly':
+            self._plotly_sliders = []
         if self.skip_synapse:
             self._vprint('Skipping synapse plotting as requested.', level='full')
             return
+
+        # Pre/post-site mode renders every queried neuron's input/output sites
+        # rather than the paired inter-layer synapses; it bypasses the adjacent
+        # layer loop and returns its own export.
+        if self.synapse_mode == 'pre_post':
+            return self._plot_pre_post_sites()
 
         synapse_frames = []
         for i in range(len(self.neuron_layers) - 1):
@@ -9783,122 +10444,35 @@ class VisualizeSkeleton:
 
             # --- Begin FlyWire/NeuPrint synapse loading logic ---
             if self.client_type == 'flywire':
-                # Try loading from local file first
-                # Find dataset folder and synapse file dynamically
-                dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
-                dataset_dir = os.path.join(self.script_path, 'datasets', dataset_normalized)
-                
-                # Explicitly look for the file generated by FAFB_file_converter
-                parquet_file = os.path.join(dataset_dir, f"{dataset_normalized}_synapse_table.parquet")
-                
-                # Use Parquet if available
-                if os.path.exists(parquet_file):
-                    try:
-                        self._vprint(f'  Reading synapses from {parquet_file} (Parquet)...', level='full')
-                        source_ids = set(self.neuron_dfs[i]['bodyId'].astype(str))
-                        target_ids = set(self.neuron_dfs[i+1]['bodyId'].astype(str))
-                        
-                        # Read parquet with filters (requires pyarrow)
-                        import pyarrow.parquet as pq
-                        schema = pq.read_schema(parquet_file)
-                        pre_col = next((c for c in schema.names if c.startswith('pre_root_id')), None)
-                        post_col = next((c for c in schema.names if c.startswith('post_root_id')), None)
-                        
-                        if pre_col and post_col:
-                            # Check for coordinate columns
-                            coord_cols = ['pre_x', 'pre_y', 'pre_z', 'post_x', 'post_y', 'post_z']
-                            available_cols = schema.names
-                            missing_coords = [c for c in coord_cols if c not in available_cols]
-                            
-                            if missing_coords:
-                                self._vprint(f"  ⚠ Missing coordinate columns in Parquet: {missing_coords}", level='full')
-                                # Try to find alternatives (e.g. x_pre vs pre_x)
-                                alt_map = {
-                                    'pre_x': ['x_pre', 'pre_pt_x'],
-                                    'pre_y': ['y_pre', 'pre_pt_y'],
-                                    'pre_z': ['z_pre', 'pre_pt_z'],
-                                    'post_x': ['x_post', 'post_pt_x'],
-                                    'post_y': ['y_post', 'post_pt_y'],
-                                    'post_z': ['z_post', 'post_pt_z']
-                                }
-                                found_map = {}
-                                for target, alts in alt_map.items():
-                                    if target in available_cols:
-                                        found_map[target] = target
-                                    else:
-                                        for alt in alts:
-                                            if alt in available_cols:
-                                                found_map[target] = alt
-                                                break
-                                
-                                if len(found_map) == 6:
-                                    self._vprint("  ✓ Found alternative coordinate columns", level='full')
-                                    columns = list(found_map.values()) + [pre_col, post_col]
-                                    df = pd.read_parquet(parquet_file, columns=columns)
-                                    # Rename to standard
-                                    inv_map = {v: k for k, v in found_map.items()}
-                                    df = df.rename(columns=inv_map)
-                                else:
-                                    self._vprint("  ❌ Could not resolve all coordinate columns. Skipping.", level='full')
-                                    conn_df = None
-                            else:
-                                columns = coord_cols + [pre_col, post_col]
-                                df = pd.read_parquet(parquet_file, columns=columns)
-
-                            if conn_df is None and 'df' in locals():
-                                df[pre_col] = df[pre_col].astype(str)
-                                df[post_col] = df[post_col].astype(str)
-                                
-                                mask = (df[pre_col].isin(source_ids)) & (df[post_col].isin(target_ids))
-                                conn_df = df[mask].copy()
-                                
-                                if not conn_df.empty:
-                                    rename_map = {
-                                        'pre_x': 'x_pre', 'pre_y': 'y_pre', 'pre_z': 'z_pre',
-                                        'post_x': 'x_post', 'post_y': 'y_post', 'post_z': 'z_post',
-                                        pre_col: 'bodyId_pre',
-                                        post_col: 'bodyId_post'
-                                    }
-                                    conn_df = conn_df.rename(columns=rename_map)
-                                    
-                                    # Check coordinate scale
-                                    # If Z > 10000, assume nm and DO NOT scale
-                                    if conn_df['z_pre'].max() > 10000:
-                                        self._vprint('  ✓ Detected coordinates in nanometers (no scaling applied)', level='full')
-                                    else:
-                                        self._vprint('  ✓ Detected coordinates in voxels (scaling 4x4x40)', level='full')
-                                        conn_df['x_pre'] = conn_df['x_pre'] * 4
-                                        conn_df['y_pre'] = conn_df['y_pre'] * 4
-                                        conn_df['z_pre'] = conn_df['z_pre'] * 40
-                                        conn_df['x_post'] = conn_df['x_post'] * 4
-                                        conn_df['y_post'] = conn_df['y_post'] * 4
-                                        conn_df['z_post'] = conn_df['z_post'] * 40
-
-                                    self._vprint(f'  ✓ Found {len(conn_df)} synapses in Parquet file', level='full')
-                                else:
-                                    self._vprint('  No matching synapses found in Parquet file', level='full')
-                                    conn_df = None
-                        else:
-                            self._vprint("  ⚠️ Could not find root_id columns in Parquet schema", level='full')
-                            conn_df = None
-                    except Exception as e:
-                        self._vprint(f'  ⚠️ Failed to read Parquet file: {e}', level='full')
-                        conn_df = None
-                else:
-                    # Fallback or warning
-                    self._vprint(f"  ℹ️  Synapse table not found: {parquet_file}", level='full')
-                    self._vprint("     If you have the raw CSV, please ensure FAFB_file_converter has run successfully.", level='full')
-                    conn_df = None
-
-                
-                # Fallback to client if local failed or returned nothing
-                if conn_df is None and self.client_flywire:
-                    self._vprint(f"\\n  ⚠️  Local synapse file not found for dataset '{self.dataset}'.", level='full')
+                source_ids = set(self.neuron_dfs[i]['bodyId'].astype(str))
+                target_ids = set(self.neuron_dfs[i + 1]['bodyId'].astype(str))
+                # All FlyWire/FAFB connector consumers use this one
+                # coordinate-normalizing synapse-table reader.  In addition to
+                # keeping rendering, site mode, and size estimation identical,
+                # it applies Parquet predicate pushdown and a run-scoped memo.
+                conn_df = self._read_flywire_connection_frame(
+                    source_ids=source_ids, target_ids=target_ids)
+                if conn_df is None:
+                    dataset_dir = os.path.join(
+                        self.script_path, 'datasets',
+                        self.dataset.replace(':', '_').replace('.', '_'))
+                    self._vprint(
+                        f"  ⚠️ Synapse table not found or unreadable for "
+                        f"dataset '{self.dataset}'.",
+                        level='full')
                     if 'fafb' in self.dataset.lower():
-                        self._vprint("  Please download the synapse table from: https://codex.flywire.ai/api/download?dataset=fafb", level='full')
+                        self._vprint(
+                            "  Please download the synapse table from: "
+                            "https://codex.flywire.ai/api/download?dataset=fafb",
+                            level='full')
                     self._vprint(f"  Save the file to: {dataset_dir}", level='full')
-                    self._vprint("  Skipping synapse plotting for this layer.", level='full')
+                    self._vprint(
+                        "  Skipping synapse plotting for this layer.",
+                        level='full')
                     continue
+                self._vprint(
+                    f'  ✓ Found {len(conn_df)} synapses in the shared '
+                    'synapse cache/table', level='full')
             else:
                 # Fetch from NeuPrint - use new caching strategy
                 source_ids = set(self.neuron_dfs[i]['bodyId'].astype(str))
@@ -9913,33 +10487,44 @@ class VisualizeSkeleton:
                 elif cached_df is not None and len(missing_pairs) < len(source_ids) * len(target_ids):
                     # Partial cache - fetch missing and combine
                     self._vprint(f'  Fetching {len(missing_pairs)} missing neuron pairs from NeuPrint...')
-                    fetched_df = fetch_synapse_connections(
+                    fetched_df = self._get_or_fetch_synapse_query(
                         source_criteria=source_criteria,
                         target_criteria=target_criteria,
-                        min_total_weight=self.min_synapse_num,
-                        synapse_criteria=self.synapse_criteria,
-                        client=self.client,
+                        source_ids=source_ids,
+                        target_ids=target_ids,
+                        source_kind='neuprint',
                     )
                     if fetched_df is not None and not fetched_df.empty:
                         conn_df = pd.concat([cached_df, fetched_df], ignore_index=True)
+                        # The broad query may include rows already recovered
+                        # from pair files.  Deduplicate before plotting and
+                        # exporting so cache granularity never changes the
+                        # visible connector count.
+                        conn_df = conn_df.drop_duplicates().reset_index(drop=True)
                         # Save newly fetched data to cache
-                        self._save_cached_synapses(fetched_df, attempted_pairs=missing_pairs)
+                        self._save_cached_synapses(
+                            fetched_df, attempted_pairs=missing_pairs,
+                            persist_pairs=False)
                     else:
                         conn_df = cached_df
                         # Also save empty results for missing pairs
-                        self._save_cached_synapses(None, attempted_pairs=missing_pairs)
+                        self._save_cached_synapses(
+                            None, attempted_pairs=missing_pairs,
+                            persist_pairs=False)
                 else:
                     # No cache - fetch all
-                    conn_df = fetch_synapse_connections(
+                    conn_df = self._get_or_fetch_synapse_query(
                         source_criteria=source_criteria,
                         target_criteria=target_criteria,
-                        min_total_weight=self.min_synapse_num,
-                        synapse_criteria=self.synapse_criteria,
-                        client=self.client,
+                        source_ids=source_ids,
+                        target_ids=target_ids,
+                        source_kind='neuprint',
                     )
                     # Save to cache
                     all_pairs = [(s, t) for s in source_ids for t in target_ids]
-                    self._save_cached_synapses(conn_df, attempted_pairs=all_pairs)
+                    self._save_cached_synapses(
+                        conn_df, attempted_pairs=all_pairs,
+                        persist_pairs=False)
         
             if conn_df is None or conn_df.empty:
                 self._vprint('  No synapses found.', level='full')
@@ -9960,10 +10545,21 @@ class VisualizeSkeleton:
                 # Ensure coordinates are float to avoid dtype warnings during transform
                 xyz_df = xyz_df.astype(float)
 
-                # Attach colors to dataframe to preserve order during transform
+                # Attach colors to dataframe to preserve order during transform.
+                # When per-neuron synapse-color overrides exist (custom CSV), each
+                # point takes the set color of its pre neuron; otherwise the layer's
+                # connection color is used (possibly as a per-point array when the
+                # palette already varies per connection).
                 c_val = self.synapse_colors[i]
                 is_color_array = False
-                if isinstance(c_val, (list, np.ndarray)) and len(c_val) == len(xyz_df):
+                per_neuron_synapse_colors = getattr(self, '_neuron_synapse_color_overrides', None)
+                if per_neuron_synapse_colors and 'bodyId_pre' in conn_df.columns:
+                    xyz_df['__color'] = [
+                        self._resolve_synapse_color(pre_id, i)
+                        for pre_id in conn_df['bodyId_pre']
+                    ]
+                    is_color_array = True
+                elif isinstance(c_val, (list, np.ndarray)) and len(c_val) == len(xyz_df):
                      # Check if it's not just a single RGB tuple
                      if len(xyz_df) != 3 or (isinstance(c_val[0], (str, list, tuple, np.ndarray))):
                          xyz_df['__color'] = c_val
@@ -10010,9 +10606,13 @@ class VisualizeSkeleton:
                         # l=0 (Outer): Size=100%, Alpha=Low
                         # l=2 (Inner): Size=33%, Alpha=High
                         
-                        # Size factor: 1.0 -> 0.33
-                        size_factor = (layers - l) / layers 
-                        current_size = self.synapse_size * size_factor
+                        # Size factor: 1.0 -> 0.33. Plotly's scatter sizes are
+                        # screen pixels, so map the user-facing real-distance
+                        # fold to a visible pixel baseline first. Without this
+                        # conversion the default ``3x real`` became markers of
+                        # only 3/2/1 px across the gradient and looked tiny.
+                        size_factor = (layers - l) / layers
+                        current_size = self._scatter_synapse_marker_size() * size_factor
                         
                         # Alpha interpolation: outer_alpha -> base_alpha
                         if layers > 1:
@@ -10040,6 +10640,13 @@ class VisualizeSkeleton:
                                 symbol = 'circle',
                                 opacity = current_alpha
                             ),
+                            # Private metadata lets the figure-level Plotly
+                            # slider target only synapse scatter traces, not
+                            # morphology or legend markers.
+                            meta = {
+                                'drocat_scatter_size_role': 'synapse',
+                                'drocat_scatter_size_factor': size_factor,
+                            },
                         )
                         self.fig_3d.add_trace(sp)
                 elif self.backend == 'k3d':
@@ -10094,7 +10701,11 @@ class VisualizeSkeleton:
 
                         pts = k3d.points(
                             positions=xyz_df[['x', 'y', 'z']].values.astype(np.float32),
-                            point_size=float(self.synapse_size) if self.synapse_mode == 'scatter' else float(self.synapse_size)/10.0,
+                            point_size=(
+                                self._scatter_synapse_marker_size()
+                                if self.synapse_mode == 'scatter'
+                                else float(self.synapse_size) / 10.0
+                            ),
                             color=colors_to_pass,
                             opacity=k3d_synapse_opacity,
                             name=f'synapses {i} -> {i+1} ({len(conn_df)})'
@@ -10154,41 +10765,63 @@ class VisualizeSkeleton:
                 
                 # Standardized colors carry either their explicit alpha or the
                 # global synapse_alpha fallback.
-                synapse_opacity = self._extract_alpha_from_color(
-                    self.synapse_colors[i]
-                )
-                
-                mesh = sv.build_synapse_mesh(
-                    pre_coords, 
-                    post_coords, 
-                    mode=self.synapse_mode, 
-                    size=current_size, 
-                    # Mesh3d also combines color alpha with opacity; keep
-                    # the color opaque and apply the resolved alpha once.
-                    color=self._get_opaque_color(self.synapse_colors[i]),
-                    opacity=synapse_opacity,
-                    name=f'synapses {i} -> {i+1} ({len(conn_df)})'
-                )
-                mesh.hoverinfo = 'name'
-                mesh.legendgroup = f'synapses {i} -> {i+1} ({len(conn_df)})'
-                mesh.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
-                mesh.showlegend = False
-                self.fig_3d.add_trace(mesh)
-                self._append_exportable_mesh(
-                    mesh,
-                    color=self.synapse_colors[i],
-                    alpha=synapse_opacity,
-                    name=f'synapses {i} -> {i+1} ({len(conn_df)})',
-                    role='synapse',
-                )
+                # A custom layer map may assign connector colors per pre
+                # neuron. Mesh3d accepts one color per trace, so split the
+                # connections into color groups instead of silently using the
+                # fallback layer color for every solid synapse.
+                resolved_synapse_colors = [
+                    self._resolve_synapse_color(pre_id, i)
+                    for pre_id in conn_df['bodyId_pre']
+                ] if (
+                    'bodyId_pre' in conn_df.columns
+                    and getattr(self, '_neuron_synapse_color_overrides', None)
+                ) else [self.synapse_colors[i]] * len(conn_df)
+                color_groups = {}
+                for position, color in enumerate(resolved_synapse_colors):
+                    color_groups.setdefault(str(color), []).append(position)
+
+                synapse_name = f'synapses {i} -> {i+1} ({len(conn_df)})'
+                legend_group = f'synapses {i} -> {i+1}'
+                for color_key, positions in color_groups.items():
+                    group_positions = np.asarray(positions, dtype=int)
+                    group_pre = pre_coords.iloc[group_positions]
+                    group_post = post_coords.iloc[group_positions]
+                    group_size = current_size[group_positions]
+                    group_opacity = self._extract_alpha_from_color(color_key)
+
+                    mesh = sv.build_synapse_mesh(
+                        group_pre,
+                        group_post,
+                        mode=self.synapse_mode,
+                        size=group_size,
+                        # Mesh3d also combines color alpha with opacity; keep
+                        # the color opaque and apply the resolved alpha once.
+                        color=self._get_opaque_color(color_key),
+                        opacity=group_opacity,
+                        name=synapse_name,
+                    )
+                    mesh.hoverinfo = 'name'
+                    mesh.legendgroup = legend_group
+                    mesh.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
+                    mesh.showlegend = False
+                    self.fig_3d.add_trace(mesh)
+                    self._append_exportable_mesh(
+                        mesh,
+                        color=color_key,
+                        alpha=group_opacity,
+                        name=synapse_name,
+                        role='synapse',
+                    )
 
                 # Add dummy scatter trace for legend with opaque color for visibility
-                opaque_synapse_color = self._get_opaque_color(self.synapse_colors[i])
+                opaque_synapse_color = self._get_opaque_color(
+                    resolved_synapse_colors[0]
+                )
                 dummy_legend = go.Scatter3d(
                     x=[None], y=[None], z=[None],
                     mode='markers',
-                    name=f'synapses {i} -> {i+1} ({len(conn_df)})',
-                    legendgroup=f'synapses {i} -> {i+1} ({len(conn_df)})',
+                    name=synapse_name,
+                    legendgroup=legend_group,
                     showlegend=True,
                     marker=dict(
                         size=10,
@@ -10199,9 +10832,1001 @@ class VisualizeSkeleton:
                 self.fig_3d.add_trace(dummy_legend)
             self._vprint('Done', level='full')
 
+        self._add_plotly_synapse_size_slider()
         self._save_synapse_data(synapse_frames)
         return 0
-    
+
+    # ------------------------------------------------------------------ pre/post sites
+    def _scatter_synapse_marker_size(self):
+        """Return the visible Plotly/K3D scatter size for the selected fold.
+
+        The Skeleton control is expressed as a fold of real synapse size, but
+        scatter markers are screen-space pixels. Three pixels per real-size
+        fold keeps the one-fold baseline visible and makes the ``3x real``
+        preset produce a clearly readable marker rather than a 3/2/1 px
+        gradient.
+        """
+        fold = self._synapse_size_fold()
+        return max(3.0, 3.0 * fold)
+
+    def _synapse_size_fold(self):
+        """Return the requested size as a non-negative real-size fold."""
+        parsed = self._parse_synapse_size(str(self.synapse_size))
+        if parsed == 'real' or parsed is None:
+            return 1.0
+        return max(0.0, float(parsed))
+
+    def _add_plotly_synapse_size_slider(self):
+        """Add a Plotly slider for screen-space scatter synapse/site sizes.
+
+        Solid cone/sphere/tetrahedron markers are sized from the real
+        pre-to-post distance and remain intentionally static.  Scatter
+        markers have no physical radius in Plotly, so the slider changes their
+        visible pixel size in the exported interactive figure.  In pre/post
+        mode the same control adjusts both the square pre-sites and circular
+        post-sites.
+        """
+        self._plotly_sliders = []
+        if self.backend != 'plotly' or not hasattr(self.fig_3d, 'data'):
+            return
+        if not (
+            self.synapse_mode == 'scatter'
+            or (
+                self.synapse_mode == 'pre_post'
+                and getattr(self, 'pre_post_scatter', False)
+            )
+        ):
+            return
+
+        trace_specs = []
+        for trace_index, trace in enumerate(self.fig_3d.data):
+            meta = getattr(trace, 'meta', None)
+            if not isinstance(meta, dict):
+                continue
+            role = meta.get('drocat_scatter_size_role')
+            if role not in {'synapse', 'pre_post_site'}:
+                continue
+            trace_specs.append(
+                (
+                    trace_index,
+                    role,
+                    float(meta.get('drocat_scatter_size_factor', 1.0)),
+                )
+            )
+        if not trace_specs:
+            return
+
+        current_fold = self._synapse_size_fold()
+        # Half-fold increments cover small point clouds through large,
+        # presentation-friendly markers. Preserve an unusual user value by
+        # inserting it into the discrete Plotly step list.
+        folds = [round(index * 0.5, 2) for index in range(1, 21)]
+        current_fold = round(max(0.0, current_fold), 2)
+        if current_fold not in folds:
+            folds.append(current_fold)
+            folds.sort()
+
+        trace_indices = [spec[0] for spec in trace_specs]
+        steps = []
+        for fold in folds:
+            sizes = []
+            for _trace_index, role, size_factor in trace_specs:
+                if role == 'synapse':
+                    size = max(3.0, 3.0 * fold) * size_factor
+                else:
+                    # Scatter has no world-space radius, so keep the same
+                    # visible 3-pixel-per-real-fold convention as paired
+                    # synapses while applying it uniformly to every site.
+                    size = max(3.0, 3.0 * fold)
+                sizes.append(round(size, 4))
+            label = f"{int(fold)}x real" if fold.is_integer() else f"{fold:g}x real"
+            steps.append({
+                'label': label,
+                'method': 'restyle',
+                'args': [{'marker.size': sizes}, trace_indices],
+            })
+
+        active = min(
+            range(len(folds)),
+            key=lambda index: abs(folds[index] - current_fold),
+        )
+        self._plotly_sliders = [{
+            'active': active,
+            'currentvalue': {'prefix': 'Synapse size: '},
+            'pad': {'t': 24},
+            'x': 0.12,
+            'len': 0.76,
+            'steps': steps,
+        }]
+        self.fig_3d.update_layout(sliders=self._plotly_sliders)
+
+    def _pre_post_site_scale(self):
+        """Return one uniform pre/post site size for this visualization.
+
+        Paired synapse markers are centered between their pre/post endpoints,
+        so their mesh scale is normalized differently.  A pre/post-site marker
+        is centered directly on its own pre- or post-synaptic coordinate; use
+        the full mean real connector distance as its visual size and apply the
+        requested ``synapse_size`` fold uniformly to every site.
+        """
+        mean_distance = self._estimate_pre_post_real_synapse_distance()
+        return mean_distance * self._synapse_size_fold()
+
+    @staticmethod
+    def _sample_size_estimation_frame(frame, max_rows=10000):
+        """Keep size estimation bounded while retaining a deterministic sample."""
+        import pandas as pd
+        if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+            return None
+        required = {
+            'bodyId_pre', 'bodyId_post',
+            'x_pre', 'y_pre', 'z_pre',
+            'x_post', 'y_post', 'z_post',
+        }
+        if not required.issubset(frame.columns):
+            return None
+        sampled = frame.dropna(subset=list(required)).copy()
+        if sampled.empty:
+            return None
+        if len(sampled) > max_rows:
+            sampled = sampled.sample(n=max_rows, random_state=0)
+        return sampled
+
+    def _connection_distance_values(self, frame):
+        """Return transformed real connector distances from a paired frame."""
+        import numpy as np
+        sampled = self._sample_size_estimation_frame(frame)
+        if sampled is None:
+            return np.array([], dtype=float)
+        pre = sampled[['x_pre', 'y_pre', 'z_pre']].rename(
+            columns={'x_pre': 'x', 'y_pre': 'y', 'z_pre': 'z'}
+        )
+        post = sampled[['x_post', 'y_post', 'z_post']].rename(
+            columns={'x_post': 'x', 'y_post': 'y', 'z_post': 'z'}
+        )
+        # Match plot_synapses: estimate size in the same transformed coordinate
+        # space in which the final markers are rendered.
+        pre = self._transform_site_df(pre)
+        post = self._transform_site_df(post)
+        distances = np.linalg.norm(
+            pre[['x', 'y', 'z']].to_numpy(dtype=float)
+            - post[['x', 'y', 'z']].to_numpy(dtype=float),
+            axis=1,
+        )
+        return distances[np.isfinite(distances) & (distances > 0)]
+
+    def _read_flywire_connection_frame(
+            self, source_ids=None, target_ids=None, touching_ids=None,
+            min_synapse_num=None):
+        """Read a standardized paired FlyWire synapse-cache frame.
+
+        ``source_ids``/``target_ids``/``touching_ids`` are pushed into the
+        Parquet reader when supported, then applied again in pandas as a
+        correctness guard.  This keeps pre/post size estimation and site
+        rendering from loading the entire connection table for every layer.
+        ``min_synapse_num`` is an explicit cache/query threshold override used
+        by the pre/post size estimator so its real-size baseline does not
+        change with the display cutoff.
+        """
+        import pandas as pd
+        threshold = (
+            int(getattr(self, 'min_synapse_num', 0) or 0)
+            if min_synapse_num is None else int(min_synapse_num or 0)
+        )
+        parquet_file = self._get_synapse_table_path()
+        if parquet_file is None:
+            dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
+            dataset_dir = os.path.join(self.script_path, 'datasets', dataset_normalized)
+            candidate = os.path.join(
+                dataset_dir, f"{dataset_normalized}_synapse_table.parquet")
+            parquet_file = candidate if os.path.exists(candidate) else None
+        if parquet_file is None or not os.path.exists(parquet_file):
+            return None
+        import pyarrow.parquet as pq
+        try:
+            source_set = {str(value) for value in (source_ids or [])}
+            target_set = {str(value) for value in (target_ids or [])}
+            touching_set = {str(value) for value in (touching_ids or [])}
+            stat = os.stat(parquet_file)
+            memory_key = (
+                str(parquet_file), stat.st_size, stat.st_mtime_ns,
+                tuple(sorted(source_set)), tuple(sorted(target_set)),
+                tuple(sorted(touching_set)), threshold,
+            )
+            memory = getattr(self, '_flywire_synapse_frame_memory', None)
+            if memory is None:
+                memory = {}
+                self._flywire_synapse_frame_memory = memory
+            if memory_key in memory:
+                return memory[memory_key].copy()
+
+            schema = pq.read_schema(parquet_file)
+            pre_col = next((c for c in schema.names
+                            if c.startswith(('pre_root_id', 'pre_pt_root_id'))), None)
+            post_col = next((c for c in schema.names
+                             if c.startswith(('post_root_id', 'post_pt_root_id'))), None)
+            if not (pre_col and post_col):
+                return None
+            coord_cols = ['x_pre', 'y_pre', 'z_pre', 'x_post', 'y_post', 'z_post']
+            alt_map = {
+                'x_pre': ['pre_x', 'pre_pt_x'], 'y_pre': ['pre_y', 'pre_pt_y'],
+                'z_pre': ['pre_z', 'pre_pt_z'], 'x_post': ['post_x', 'post_pt_x'],
+                'y_post': ['post_y', 'post_pt_y'], 'z_post': ['post_z', 'post_pt_z'],
+            }
+            use = {}
+            for target in coord_cols:
+                if target in schema.names:
+                    use[target] = target
+                else:
+                    for alt in alt_map[target]:
+                        if alt in schema.names:
+                            use[target] = alt
+                            break
+            if len(use) != len(coord_cols):
+                return None
+            # Infer voxel-vs-nanometre units from row-group statistics before
+            # filtering.  Looking only at the selected rows can misclassify a
+            # perfectly valid nanometre subset whose z range happens to be
+            # below the historical 10,000 threshold.
+            coordinate_scale = None
+            try:
+                parquet = pq.ParquetFile(parquet_file)
+                z_index = schema.names.index(use['z_pre'])
+                maxima = []
+                for row_index in range(parquet.metadata.num_row_groups):
+                    stats = parquet.metadata.row_group(row_index).column(
+                        z_index).statistics
+                    has_max = bool(
+                        getattr(stats, 'has_max',
+                                getattr(stats, 'has_min_max', False))
+                    ) if stats is not None else False
+                    if has_max:
+                        maxima.append(float(stats.max))
+                if maxima:
+                    coordinate_scale = (
+                        (1.0, 1.0, 1.0)
+                        if max(maxima) > 10000
+                        else (4.0, 4.0, 40.0)
+                    )
+            except Exception:
+                # Older writers may omit statistics; use the selected frame
+                # as a conservative fallback after the filtered read.
+                coordinate_scale = None
+            weight_col = next(
+                (c for c in schema.names if c in ('weight', 'syn_count', 'synapses')),
+                None,
+            )
+            read_cols = list(use.values()) + [pre_col, post_col]
+            if weight_col is not None:
+                read_cols.append(weight_col)
+            # Match filter literal types to the Parquet schema.  Passing
+            # stringified FlyWire root IDs to an integer column makes pandas
+            # abandon predicate pushdown and scan the complete table.
+            try:
+                import pyarrow as pa
+
+                def _filter_ids(column, values):
+                    arrow_type = schema.field(column).type
+                    if pa.types.is_integer(arrow_type):
+                        try:
+                            return [int(value) for value in values]
+                        except (TypeError, ValueError):
+                            # Let the read fallback handle an unusual mixed
+                            # identifier column rather than dropping all site
+                            # data because one filter literal is non-numeric.
+                            return list(values)
+                    return list(values)
+            except Exception:
+                def _filter_ids(column, values):
+                    return list(values)
+
+            filters = None
+            if source_set and target_set:
+                filters = [[
+                    (pre_col, 'in', _filter_ids(pre_col, source_set)),
+                    (post_col, 'in', _filter_ids(post_col, target_set)),
+                ]]
+            elif source_set:
+                filters = [[(pre_col, 'in', _filter_ids(pre_col, source_set))]]
+            elif target_set:
+                filters = [[(post_col, 'in', _filter_ids(post_col, target_set))]]
+            elif touching_set:
+                filters = [
+                    [(pre_col, 'in', _filter_ids(pre_col, touching_set))],
+                    [(post_col, 'in', _filter_ids(post_col, touching_set))],
+                ]
+            if weight_col is not None and threshold > 0:
+                weight_filter = (weight_col, '>=', threshold)
+                if filters is None:
+                    filters = [[weight_filter]]
+                else:
+                    for clause in filters:
+                        clause.append(weight_filter)
+            try:
+                frame = pd.read_parquet(
+                    parquet_file, columns=read_cols, filters=filters)
+            except Exception:
+                # Some Parquet writers store root IDs as uint64 while the
+                # caller's IDs are strings; retry without predicate pushdown
+                # and apply the exact string filter below.
+                frame = pd.read_parquet(parquet_file, columns=read_cols)
+            frame = frame.rename(columns={value: key for key, value in use.items()})
+            if weight_col is not None:
+                frame = frame[frame[weight_col] >= threshold]
+            frame[pre_col] = frame[pre_col].astype(str)
+            frame[post_col] = frame[post_col].astype(str)
+            if coordinate_scale is None and not frame.empty:
+                coordinate_scale = (
+                    (1.0, 1.0, 1.0)
+                    if float(frame['z_pre'].max()) > 10000
+                    else (4.0, 4.0, 40.0)
+                )
+            if coordinate_scale is not None and coordinate_scale != (1.0, 1.0, 1.0):
+                for column in coord_cols:
+                    frame[column] = frame[column] * (
+                        coordinate_scale[2]
+                        if column.startswith('z_') else coordinate_scale[0]
+                    )
+            frame = frame.rename(columns={pre_col: 'bodyId_pre', post_col: 'bodyId_post'})
+            if source_set:
+                frame = frame[frame['bodyId_pre'].isin(source_set)]
+            if target_set:
+                frame = frame[frame['bodyId_post'].isin(target_set)]
+            if touching_set:
+                frame = frame[
+                    frame['bodyId_pre'].isin(touching_set)
+                    | frame['bodyId_post'].isin(touching_set)
+                ]
+            memory[memory_key] = frame.copy()
+            return frame
+        except Exception as exc:
+            self._vprint(
+                f'  ⚠️ Failed to read FlyWire synapse table for size estimation: {exc}',
+                level='full',
+            )
+            return None
+
+    def _fetch_pre_post_size_frame(
+            self, source_criteria, target_criteria,
+            source_ids=None, target_ids=None, min_total_weight=None):
+        """Fetch a paired frame for sizing without making pre/post rendering fragile."""
+        if source_criteria is None and target_criteria is None:
+            return None
+        return self._get_or_fetch_synapse_query(
+            source_criteria=source_criteria,
+            target_criteria=target_criteria,
+            source_ids=source_ids,
+            target_ids=target_ids,
+            source_kind='neuprint',
+            min_total_weight=min_total_weight,
+        )
+
+    def _pre_post_size_criteria(self, layer_index):
+        """Return the layer query or an exact body-id fallback for sizing."""
+        if layer_index < len(self.layer_criteria):
+            criteria = self.layer_criteria[layer_index]
+            if criteria is not None:
+                return criteria
+        if layer_index >= len(self.neuron_dfs):
+            return None
+        frame = self.neuron_dfs[layer_index]
+        if frame is None or 'bodyId' not in frame.columns or frame.empty:
+            return None
+        body_ids = [value for value in frame['bodyId'].tolist() if value is not None]
+        if not body_ids:
+            return None
+        try:
+            from neuprint import NeuronCriteria
+            return NeuronCriteria(bodyId=body_ids)
+        except Exception as exc:
+            self._vprint(
+                f'  ⚠️ Could not build body-id criteria for pre/post sizing: {exc}',
+                level='full',
+            )
+            return None
+
+    def _estimate_pre_post_real_synapse_distance(self):
+        """Estimate the universal real synapse distance for pre/post sites.
+
+        With adjacent layers, use their actual inter-layer connector pairs.
+        With one layer, query both downstream and upstream connectors so the
+        estimate still comes from real pair distances rather than a hard-coded
+        glyph size.  Only a bounded deterministic sample is used per query.
+        """
+        import numpy as np
+        cached = getattr(self, '_pre_post_real_synapse_distance', None)
+        if cached is not None:
+            return cached
+
+        frames = []
+        layer_count = len(self.neuron_layers)
+        if self.client_type == 'flywire':
+            if layer_count > 1:
+                for index in range(layer_count - 1):
+                    source_ids = {
+                        str(value) for value in self.neuron_dfs[index]['bodyId'].tolist()
+                    }
+                    target_ids = {
+                        str(value) for value in self.neuron_dfs[index + 1]['bodyId'].tolist()
+                    }
+                    frame = self._read_flywire_connection_frame(
+                        source_ids=source_ids, target_ids=target_ids,
+                        min_synapse_num=0,
+                    )
+                    if frame is not None:
+                        frames.append(frame)
+            elif layer_count == 1:
+                layer_ids = {
+                    str(value) for value in self.neuron_dfs[0]['bodyId'].tolist()
+                }
+                # Query both directions; pre/post mode deliberately shows
+                # every site owned by the queried neurons, including partners
+                # outside the displayed layer.
+                for kwargs in (
+                    {'source_ids': layer_ids},
+                    {'target_ids': layer_ids},
+                ):
+                    frame = self._read_flywire_connection_frame(
+                        **kwargs, min_synapse_num=0,
+                    )
+                    if frame is not None:
+                        frames.append(frame)
+        else:
+            if layer_count > 1:
+                for index in range(layer_count - 1):
+                    source_criteria = self._pre_post_size_criteria(index)
+                    target_criteria = self._pre_post_size_criteria(index + 1)
+                    source_frame = (
+                        self.neuron_dfs[index]
+                        if index < len(self.neuron_dfs) else None
+                    )
+                    target_frame = (
+                        self.neuron_dfs[index + 1]
+                        if index + 1 < len(self.neuron_dfs) else None
+                    )
+                    source_ids = (
+                        source_frame['bodyId'].tolist()
+                        if source_frame is not None
+                        and 'bodyId' in source_frame.columns else None
+                    )
+                    target_ids = (
+                        target_frame['bodyId'].tolist()
+                        if target_frame is not None
+                        and 'bodyId' in target_frame.columns else None
+                    )
+                    frame = self._fetch_pre_post_size_frame(
+                        source_criteria, target_criteria,
+                        source_ids=source_ids, target_ids=target_ids,
+                        min_total_weight=0,
+                    )
+                    if frame is not None:
+                        frames.append(frame)
+            elif layer_count == 1:
+                layer_criteria = self._pre_post_size_criteria(0)
+                if layer_criteria is not None:
+                    layer_ids = self.neuron_dfs[0]['bodyId'].tolist()
+                    for source_criteria, target_criteria in (
+                        (layer_criteria, None),
+                        (None, layer_criteria),
+                    ):
+                        source_ids = layer_ids if target_criteria is None else None
+                        target_ids = layer_ids if source_criteria is None else None
+                        frame = self._fetch_pre_post_size_frame(
+                            source_criteria, target_criteria,
+                            source_ids=source_ids, target_ids=target_ids,
+                            min_total_weight=0,
+                        )
+                        if frame is not None:
+                            frames.append(frame)
+
+        if frames:
+            import pandas as pd
+            required_columns = {
+                'bodyId_pre', 'bodyId_post',
+                'x_pre', 'y_pre', 'z_pre',
+                'x_post', 'y_post', 'z_post',
+            }
+            frames = [
+                frame for frame in frames
+                if isinstance(frame, pd.DataFrame)
+                and required_columns.issubset(frame.columns)
+            ]
+        if frames:
+            combined = pd.concat(frames, ignore_index=True)
+            combined = combined.drop_duplicates(subset=[
+                'bodyId_pre', 'bodyId_post',
+                'x_pre', 'y_pre', 'z_pre',
+                'x_post', 'y_post', 'z_post',
+            ])
+            distances = self._connection_distance_values(combined)
+        else:
+            distances = np.array([], dtype=float)
+        if distances.size:
+            mean_distance = float(np.mean(distances))
+            if np.isfinite(mean_distance) and mean_distance > 0:
+                self._pre_post_real_synapse_distance = mean_distance
+                self._pre_post_real_synapse_distance_sample_count = len(distances)
+                self._vprint(
+                    f'  Pre/post site size baseline: mean real synapse distance '
+                    f'{mean_distance:.3f} from {len(distances)} sampled pairs',
+                    level='simple',
+                )
+                return mean_distance
+
+        # Preserve the previous nominal baseline size when no connector source
+        # is available (e.g. an offline empty dataset), but make the fallback
+        # explicit so normal runs always use real pair distances.
+        fallback_distance = 40.0
+        self._pre_post_real_synapse_distance = fallback_distance
+        self._pre_post_real_synapse_distance_sample_count = 0
+        self._vprint(
+            '  ⚠️ No real connector pairs available for pre/post site sizing; '
+            f'using fallback distance {fallback_distance:.1f}',
+            level='simple',
+        )
+        return fallback_distance
+
+    def _collect_layer_sites(self, layer_idx):
+        """Return (pre_sites, post_sites) long-form DataFrames for a layer.
+
+        Each frame has columns ``x``/``y``/``z`` (the site coordinate) and
+        ``neuron_id`` (the owning neuron). Returns ``(None, None)`` when the
+        layer has no resolvable neurons or no available synapse source.
+        """
+        ndf = self.neuron_dfs[layer_idx] if layer_idx < len(self.neuron_dfs) else None
+        if ndf is None or 'bodyId' not in ndf.columns or ndf.empty:
+            return None, None
+        layer_ids = set(str(b) for b in ndf['bodyId'].tolist())
+
+        if self.client_type == 'flywire':
+            site_df = self._read_flywire_site_frame(layer_ids)
+        else:
+            site_df = self._fetch_neuprint_site_frame(layer_idx, layer_ids)
+        if site_df is None or site_df.empty:
+            return None, None
+
+        pre = site_df[site_df['role'] == 'pre'][['x', 'y', 'z', 'neuron_id']]
+        post = site_df[site_df['role'] == 'post'][['x', 'y', 'z', 'neuron_id']]
+        return pre, post
+
+    def _read_flywire_site_frame(self, layer_ids):
+        """Read all synapses touching *layer_ids* from the FlyWire parquet table.
+
+        Returns a long-form frame (role in {pre, post}), or ``None``.
+        """
+        import pandas as pd
+        standardized = self._read_flywire_connection_frame(
+            touching_ids=layer_ids)
+        if standardized is not None:
+            pre_mask = standardized['bodyId_pre'].isin(layer_ids)
+            post_mask = standardized['bodyId_post'].isin(layer_ids)
+            long_pre = standardized[pre_mask][
+                ['x_pre', 'y_pre', 'z_pre', 'bodyId_pre']
+            ].rename(columns={
+                'x_pre': 'x', 'y_pre': 'y', 'z_pre': 'z',
+                'bodyId_pre': 'neuron_id',
+            })
+            long_pre['role'] = 'pre'
+            long_post = standardized[post_mask][
+                ['x_post', 'y_post', 'z_post', 'bodyId_post']
+            ].rename(columns={
+                'x_post': 'x', 'y_post': 'y', 'z_post': 'z',
+                'bodyId_post': 'neuron_id',
+            })
+            long_post['role'] = 'post'
+            return pd.concat([long_pre, long_post], ignore_index=True)
+        # The standardized paired reader is the only FlyWire/FAFB source of
+        # site rows.  Keeping a second schema/scale implementation here would
+        # allow plotting and pre/post mode to disagree and would defeat its
+        # filtered-read memoization.
+        return None
+
+    def _fetch_neuprint_site_frame(self, layer_idx, layer_ids):
+        """Fetch all synapses where a layer neuron is pre or post (NeuPrint).
+
+        Returns a long-form frame (role in {pre, post}), or ``None``.
+        """
+        import pandas as pd
+        source_criteria = self.layer_criteria[layer_idx]
+        rows = []
+        try:
+            pre_df = self._get_or_fetch_synapse_query(
+                source_criteria=source_criteria,
+                target_criteria=None,
+                source_ids=layer_ids,
+                source_kind='neuprint',
+            )
+            if pre_df is not None and not pre_df.empty and 'bodyId_pre' in pre_df.columns:
+                pre_pdf = pre_df[['x_pre', 'y_pre', 'z_pre', 'bodyId_pre']].rename(
+                    columns={'x_pre': 'x', 'y_pre': 'y', 'z_pre': 'z', 'bodyId_pre': 'neuron_id'}
+                )
+                pre_pdf['role'] = 'pre'
+                rows.append(pre_pdf)
+            post_df = self._get_or_fetch_synapse_query(
+                source_criteria=None,
+                target_criteria=source_criteria,
+                target_ids=layer_ids,
+                source_kind='neuprint',
+            )
+            if post_df is not None and not post_df.empty and 'bodyId_post' in post_df.columns:
+                post_pdf = post_df[['x_post', 'y_post', 'z_post', 'bodyId_post']].rename(
+                    columns={'x_post': 'x', 'y_post': 'y', 'z_post': 'z', 'bodyId_post': 'neuron_id'}
+                )
+                post_pdf['role'] = 'post'
+                rows.append(post_pdf)
+        except Exception as exc:
+            self._vprint(f'  ⚠️ Failed to fetch pre/post sites for layer {layer_idx}: {exc}', level='full')
+            return None
+        if not rows:
+            return None
+        return pd.concat(rows, ignore_index=True)
+
+    def _transform_site_df(self, site_df):
+        """Apply the same transform + FAFB tilt correction used for synapse data."""
+        if site_df is None or site_df.empty:
+            return site_df
+        coords = site_df[['x', 'y', 'z']].astype(float)
+        if self._needs_skeleton_transform():
+            template_info = self._get_template_info()
+            with self._suppress_output():
+                coords = navis.xform_brain(coords, source=template_info['source'], target=template_info['target'])
+        is_fafb = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
+        if is_fafb and self.brain_mesh == 'template':
+            coords = self._apply_fafb_tilt_correction(coords)
+        return site_df.assign(x=coords['x'], y=coords['y'], z=coords['z'])
+
+    def _plot_pre_post_sites(self):
+        """Render pre- and post-synaptic SITES of every queried neuron.
+
+        Unlike connector (inter-layer) mode, this plots the actual input/output
+        sites of all queried neurons across every layer: post-synaptic sites
+        (inputs) render as spheres (circles in scatter) and pre-synaptic sites
+        (outputs) as cones (squares in scatter). Each site is colored by its
+        neuron's layer color (or a per-neuron override) and follows the same
+        ``legend_mode`` contract as morphology traces. It is not a
+        paired-synapse view: the partner is not restricted to the adjacent
+        layer.
+        """
+        import pandas as pd
+        if self.backend == 'plotly':
+            self._plotly_sliders = []
+            self._pre_post_seen_legend_groups = set()
+            self._pre_post_dynamic_legend_ranks = {}
+        site_frames = []
+        layer_site_groups = []
+        site_scale = self._pre_post_site_scale()
+
+        for i in range(len(self.neuron_layers)):
+            layer_name = self.layer_names[i] if i < len(self.layer_names) else f'layer_{i}'
+            pre_df, post_df = self._collect_layer_sites(i)
+            if pre_df is None and post_df is None:
+                self._vprint(f'  No connector data for layer {i} ({layer_name})', level='full')
+                continue
+            pre_df = self._transform_site_df(pre_df)
+            post_df = self._transform_site_df(post_df)
+
+            if pre_df is not None and not pre_df.empty:
+                export = pre_df.copy()
+                export['viz_layer'] = f'{i}:pre'
+                site_frames.append(export)
+            if post_df is not None and not post_df.empty:
+                export = post_df.copy()
+                export['viz_layer'] = f'{i}:post'
+                site_frames.append(export)
+
+            layer_site_groups.append((i, layer_name, pre_df, post_df))
+
+        # ``plot_skeleton`` has already emitted the morphology traces.  In
+        # single-neuron mode, keep each owner's pre/post pair adjacent in the
+        # legend (and in trace insertion order for standalone callers) instead
+        # of emitting every pre site followed by every post site.  Layer/type
+        # modes intentionally stay merged at their requested legend level.
+        if str(getattr(self, 'legend_mode', 'layer') or 'layer').lower() == 'single':
+            for layer_idx, layer_name, pre_df, post_df in layer_site_groups:
+                owner_values = []
+                frame = (
+                    self.neuron_dfs[layer_idx]
+                    if layer_idx < len(getattr(self, 'neuron_dfs', []))
+                    else None
+                )
+                if frame is not None and 'bodyId' in frame.columns:
+                    owner_values.extend(frame['bodyId'].tolist())
+                # Include any connector owner that was not present in the
+                # metadata frame as a deterministic tail rather than dropping
+                # its sites.
+                for site_df in (pre_df, post_df):
+                    if site_df is None or site_df.empty:
+                        continue
+                    for value in site_df['neuron_id'].tolist():
+                        if not any(
+                            set(self._normalize_neuron_lookup_keys(value))
+                            & set(self._normalize_neuron_lookup_keys(existing))
+                            for existing in owner_values
+                        ):
+                            owner_values.append(value)
+                for owner in owner_values:
+                    for site_df, site_type in (
+                        (pre_df, 'pre'), (post_df, 'post')
+                    ):
+                        owned = self._site_rows_for_owner(site_df, owner)
+                        if owned is None or owned.empty:
+                            continue
+                        self._plot_site_group(
+                            owned, site_type, layer_idx, layer_name,
+                            site_scale=site_scale,
+                        )
+        else:
+            for layer_idx, layer_name, pre_df, post_df in layer_site_groups:
+                for site_df, site_type in (
+                    (pre_df, 'pre'), (post_df, 'post')
+                ):
+                    if site_df is None or site_df.empty:
+                        continue
+                    self._plot_site_group(
+                        site_df, site_type, layer_idx, layer_name,
+                        site_scale=site_scale,
+                    )
+
+        self._add_plotly_synapse_size_slider()
+        self._save_synapse_data(site_frames)
+        return 0
+
+    @staticmethod
+    def _clean_pre_post_type_label(value):
+        """Normalize metadata to the same type-level label used by morphology."""
+        try:
+            if pd.isna(value):
+                return ""
+        except (TypeError, ValueError):
+            pass
+        label = str(value or "").strip()
+        if not label or label.lower() in {"nan", "none"}:
+            return ""
+        # Some NeuPrint/MCNS metadata paths expose a type-like value with the
+        # instance/body suffix attached (for example ``s-LNv_15832.0``).  The
+        # morphology legend is type-level, so remove only that terminal numeric
+        # suffix and preserve meaningful digits inside the type name.
+        return re.sub(r"_[0-9]+(?:\.0+)?$", "", label)
+
+    def _pre_post_site_metadata_row(self, neuron_id, layer_idx):
+        """Find one site's owner row using numeric-safe body-ID matching."""
+        frame = (
+            self.neuron_dfs[layer_idx]
+            if layer_idx < len(getattr(self, 'neuron_dfs', []))
+            else None
+        )
+        if frame is None or frame.empty or 'bodyId' not in frame.columns:
+            return None
+
+        target_keys = {
+            str(key).strip()
+            for key in self._normalize_neuron_lookup_keys(neuron_id)
+            if str(key).strip()
+        }
+        try:
+            numeric_value = float(str(neuron_id).strip())
+            if numeric_value.is_integer():
+                target_keys.add(str(int(numeric_value)))
+        except (TypeError, ValueError):
+            pass
+
+        for _, row in frame.iterrows():
+            row_keys = {
+                str(key).strip()
+                for key in self._normalize_neuron_lookup_keys(row.get('bodyId'))
+                if str(key).strip()
+            }
+            if target_keys.intersection(row_keys):
+                return row
+        return None
+
+    def _pre_post_site_owner_label(self, neuron_id, layer_idx):
+        """Return the best stable type/name label for a site owner."""
+        row = self._pre_post_site_metadata_row(neuron_id, layer_idx)
+        if row is None:
+            return str(neuron_id)
+        for column in ('type', 'cell_type', 'neuronType', 'instance', 'name'):
+            if column not in row.index:
+                continue
+            value = self._clean_pre_post_type_label(row[column])
+            if value:
+                return value
+        return str(neuron_id)
+
+    def _pre_post_site_type_label(self, neuron_id, layer_idx):
+        """Resolve the exact type-level owner label used by skeleton legends."""
+        row = self._pre_post_site_metadata_row(neuron_id, layer_idx)
+        if row is not None:
+            for column in ('type', 'cell_type', 'neuronType'):
+                if column not in row.index:
+                    continue
+                value = self._clean_pre_post_type_label(row[column])
+                if value:
+                    return value
+
+        # If the source table has no explicit type column, retain a useful
+        # type-like fallback without leaking a body/instance numeric suffix into
+        # a type-level legend entry.
+        return self._clean_pre_post_type_label(
+            self._pre_post_site_owner_label(neuron_id, layer_idx)
+        ) or str(neuron_id)
+
+    def _pre_post_site_owner_identity(self, neuron_id, layer_idx, layer_name):
+        """Return the morphology legend identity for one site owner.
+
+        Site data is keyed by connector body IDs, while a skeleton trace may
+        be named by a type/instance.  ``plot_skeleton`` records aliases for
+        the actual legend group; using that map keeps site labels synchronized
+        with the visible skeleton legend at every level.
+        """
+        mode = str(getattr(self, 'legend_mode', 'layer') or 'layer').lower()
+        layer = str(layer_name).strip() or f'layer_{layer_idx}'
+        label_map = getattr(self, '_neuron_legend_labels_by_layer', {}).get(
+            layer_idx, {}
+        )
+        aliases = list(self._normalize_neuron_lookup_keys(neuron_id))
+        row = self._pre_post_site_metadata_row(neuron_id, layer_idx)
+        if row is not None:
+            for column in (
+                'bodyId', 'name', 'type', 'instance', 'roi',
+                'flywireType', 'hemibrainType', 'mancType',
+            ):
+                if column in row.index:
+                    aliases.extend(
+                        self._normalize_neuron_lookup_keys(row[column])
+                    )
+        for alias in aliases:
+            if alias in label_map:
+                return str(label_map[alias])
+
+        # Standalone site rendering (or a caller that did not run
+        # plot_skeleton first) still follows the documented legend levels.
+        if mode == 'layer':
+            return layer
+        if mode == 'type':
+            return self._pre_post_site_type_label(neuron_id, layer_idx)
+        owner = self._pre_post_site_owner_label(neuron_id, layer_idx)
+        return f'{owner}_{layer}'
+
+    def _pre_post_site_legend_rank(self, owner_identity, site_type):
+        """Place an owner's pre/post entries immediately after its skeleton."""
+        skeleton_ranks = getattr(self, '_neuron_legend_ranks', {}) or {}
+        base_rank = skeleton_ranks.get(owner_identity)
+        if base_rank is None:
+            dynamic = getattr(self, '_pre_post_dynamic_legend_ranks', {})
+            if owner_identity not in dynamic:
+                dynamic[owner_identity] = (
+                    len(skeleton_ranks) + len(dynamic)
+                ) * 100
+                self._pre_post_dynamic_legend_ranks = dynamic
+            base_rank = dynamic[owner_identity]
+        return base_rank + (1 if str(site_type).lower() == 'pre' else 2)
+
+    def _site_rows_for_owner(self, site_df, owner):
+        """Filter a long-form site frame to one owner, preserving row order."""
+        if site_df is None or site_df.empty or 'neuron_id' not in site_df.columns:
+            return None
+        owner_keys = set(self._normalize_neuron_lookup_keys(owner))
+        if not owner_keys:
+            return site_df.iloc[0:0].copy()
+        mask = site_df['neuron_id'].map(
+            lambda value: bool(
+                owner_keys.intersection(
+                    self._normalize_neuron_lookup_keys(value)
+                )
+            )
+        )
+        return site_df[mask].copy()
+
+    def _pre_post_site_legend(self, site_type, layer_idx, layer_name,
+                              neuron_id):
+        """Return a legend group and display name for one site owner.
+
+        The site label is the matching skeleton legend label plus ``_pre`` or
+        ``_post``. Layer mode therefore produces ``{layer_name}_{role}``, type
+        mode merges by the same type identity as morphology, and single mode
+        keeps each skeleton entry distinct. The role is part of every key so
+        pre and post sites can never collapse into one legend entry.
+        """
+        role = str(site_type).strip().lower()
+        owner_identity = self._pre_post_site_owner_identity(
+            neuron_id, layer_idx, layer_name,
+        )
+        label = f'{owner_identity}_{role}'
+        group = f'pre_post:{role}:{owner_identity}'
+        rank = self._pre_post_site_legend_rank(owner_identity, role)
+        return group, label, rank
+
+    def _plot_site_group(self, site_df, site_type, layer_idx, layer_name,
+                         site_scale):
+        """Render one layer's pre (or post) site group as trace(s)."""
+        import numpy as np
+        # Group by resolved color and legend identity so each Mesh3d (single
+        # color) stays valid while all legend levels remain distinct.
+        color_groups = {}
+        for _, row in site_df.iterrows():
+            neuron_id = row['neuron_id']
+            if site_type == 'pre':
+                color = self._resolve_pre_color(neuron_id, layer_idx)
+            else:
+                color = self._resolve_post_color(neuron_id, layer_idx)
+            legend_group, legend_name, legend_rank = self._pre_post_site_legend(
+                site_type, layer_idx, layer_name, neuron_id,
+            )
+            color_groups.setdefault(
+                (str(color), legend_group, legend_name, legend_rank), []
+            ).append((row['x'], row['y'], row['z']))
+
+        for (
+            color_key, legend_group, legend_name, legend_rank
+        ), pts in color_groups.items():
+            coords = np.array(pts, dtype=float)
+            base_color = color_key
+            base_alpha = self._extract_alpha_from_color(base_color)
+            opaque_color = self._get_opaque_color(base_color)
+            opacity = min(1.0, max(0.0, base_alpha))
+            hover = f'<b>{site_type} site</b><extra></extra>'
+            show_legend = legend_group not in getattr(
+                self, '_pre_post_seen_legend_groups', set()
+            )
+            if show_legend:
+                self._pre_post_seen_legend_groups.add(legend_group)
+
+            if self.backend == 'plotly':
+                if getattr(self, 'pre_post_scatter', False):
+                    # Scatter markers: post/input sites as circles, pre/output
+                    # sites as squares (the scatter variant of pre_post mode).
+                    symbol = 'square' if site_type == 'pre' else 'circle'
+                    scatter_size = self._scatter_synapse_marker_size()
+                    self.fig_3d.add_trace(go.Scatter3d(
+                        x=coords[:, 0], y=coords[:, 1], z=coords[:, 2],
+                        mode='markers',
+                        name=legend_name,
+                        legendgroup=legend_group,
+                        showlegend=show_legend,
+                        legendrank=legend_rank,
+                        marker=dict(size=max(2.0, scatter_size), color=opaque_color, symbol=symbol, opacity=opacity),
+                        hovertemplate=hover,
+                        hoverinfo='name',
+                        meta={'drocat_scatter_size_role': 'pre_post_site'},
+                    ))
+                    continue
+
+                # Solid sphere (post) / cone (pre) site markers.
+                shape = 'cone' if site_type == 'pre' else 'sphere'
+                mesh = sv.build_site_mesh(
+                    coords, mode=shape, size=site_scale, color=opaque_color, opacity=opacity,
+                    name=legend_name,
+                )
+                mesh.legendgroup = legend_group
+                mesh.showlegend = show_legend
+                mesh.legendrank = legend_rank
+                mesh.hovertemplate = hover
+                mesh.hoverinfo = 'name'
+                self.fig_3d.add_trace(mesh)
+                self._append_exportable_mesh(
+                    mesh, color=base_color, alpha=opacity,
+                    name=legend_name, role='synapse',
+                )
+            elif self.backend == 'k3d':
+                try:
+                    import k3d
+                    color_bytes = extract_rgba_tuple(base_color, default_alpha=opacity)
+                    int_color = (int(color_bytes[0]) << 16) + (int(color_bytes[1]) << 8) + int(color_bytes[2])
+                    pts_obj = k3d.points(
+                        positions=coords.astype(np.float32),
+                        point_size=(
+                            self._scatter_synapse_marker_size()
+                            if getattr(self, 'pre_post_scatter', False)
+                            else float(site_scale) / 10.0
+                        ),
+                        color=int_color, opacity=opacity,
+                        name=legend_name,
+                    )
+                    self.fig_3d += pts_obj
+                except Exception as exc:
+                    self._vprint(f'⚠️  k3d pre/post site plotting failed: {exc}', level='full')
+
     def _get_dataset_mesh_dir(self):
         """Get dataset-specific mesh directory path.
         
@@ -10757,10 +12382,106 @@ class VisualizeSkeleton:
         if not value_str or value_str.lower() == 'nan':
             return []
 
+        # Connector tables and CSV round-trips commonly turn integral body IDs
+        # into strings such as ``"15832.0"``.  The old lookup only recognized
+        # digit-only strings, so a pre/post site could miss the exact per-entry
+        # color override even though the same body ID was present in the layer
+        # map.  Normalize a *decimal-zero* suffix without converting through a
+        # float: FlyWire IDs can exceed JavaScript/float integer precision and
+        # must retain their original decimal digits.
         keys = [value_str]
-        if value_str.isdigit():
-            keys.insert(0, int(value_str))
+        decimal_match = re.fullmatch(r'([+-]?\d+)(?:\.0+)?', value_str)
+        if decimal_match:
+            integer_text = decimal_match.group(1)
+            try:
+                integer_value = int(integer_text)
+            except ValueError:
+                integer_value = None
+            if integer_value is not None:
+                keys.insert(0, integer_value)
+                canonical_text = str(integer_value)
+                if canonical_text not in keys:
+                    keys.append(canonical_text)
         return keys
+
+    def _link_layer_map_color_overrides_to_neuron_dfs(self):
+        """Make custom layer-map colors resolvable by every neuron identifier.
+
+        ``layer_map_csv`` rows commonly use a type or instance name because
+        that is what the UI displays.  Skeleton objects and connector tables
+        generally expose ``bodyId`` instead.  Keep the original override
+        values, then add aliases for each matching resolved neuron so all
+        renderers (morphology, paired synapses, and pre/post sites) see the
+        same color.
+        """
+        override_attrs = (
+            "_neuron_color_overrides",
+            "_neuron_synapse_color_overrides",
+            "_neuron_pre_color_overrides",
+            "_neuron_post_color_overrides",
+        )
+        identifier_columns = (
+            "bodyId",
+            "name",
+            "type",
+            "instance",
+            "roi",
+            "flywireType",
+            "hemibrainType",
+            "mancType",
+        )
+
+        for attr in override_attrs:
+            overrides = getattr(self, attr, None)
+            if not overrides:
+                continue
+            expanded = dict(overrides)
+            layered_attr = f"{attr}_by_layer"
+            layered_overrides = getattr(self, layered_attr, {}) or {}
+            expanded_layered = {
+                layer_index: dict(values)
+                for layer_index, values in layered_overrides.items()
+            }
+            for layer_index, neuron_df in enumerate(
+                getattr(self, "neuron_dfs", []) or []
+            ):
+                if neuron_df is None or neuron_df.empty:
+                    continue
+                for _, row in neuron_df.iterrows():
+                    row_keys = []
+                    for column in identifier_columns:
+                        if column in row.index:
+                            row_keys.extend(
+                                self._normalize_neuron_lookup_keys(row[column])
+                            )
+                    if not row_keys:
+                        continue
+                    layer_values = layered_overrides.get(layer_index, {})
+                    matched_color = next(
+                        (
+                            layer_values[key]
+                            for key in row_keys
+                            if key in layer_values
+                        ),
+                        None,
+                    )
+                    if matched_color is None:
+                        matched_color = next(
+                            (
+                                overrides[key]
+                                for key in row_keys
+                                if key in overrides
+                            ),
+                            None,
+                        )
+                    if matched_color is None:
+                        continue
+                    for key in row_keys:
+                        expanded[key] = matched_color
+                        expanded_layered.setdefault(layer_index, {})[key] = matched_color
+            setattr(self, attr, expanded)
+            if layered_overrides:
+                setattr(self, layered_attr, expanded_layered)
 
     def _build_per_neuron_color_map(self):
         """Build a lookup of neuron identifiers to per-neuron colors."""
@@ -10791,9 +12512,49 @@ class VisualizeSkeleton:
 
         return neuron_color_map
 
+    def _resolve_neuron_override(self, attr, neuron_id, layer_index):
+        """Resolve one custom-layer color, preferring the exact layer row.
+
+        A layer-map CSV is a table of ``(layer, neuron)`` entries, not a
+        global neuron-name dictionary.  Keep the old global lookup as a
+        compatibility fallback, but consult the layer-aware aliases first so
+        duplicate type/instance labels do not make one row inherit another
+        row's pre/post color.
+        """
+        lookup_keys = self._normalize_neuron_lookup_keys(neuron_id)
+        if not lookup_keys:
+            return None
+
+        layered = getattr(self, f"{attr}_by_layer", {}) or {}
+        layer_candidates = [layer_index]
+        try:
+            numeric_layer = int(layer_index)
+        except (TypeError, ValueError):
+            numeric_layer = None
+        if numeric_layer is not None and numeric_layer not in layer_candidates:
+            layer_candidates.append(numeric_layer)
+        for candidate in layer_candidates:
+            layer_values = layered.get(candidate, {})
+            for key in lookup_keys:
+                if key in layer_values:
+                    return layer_values[key]
+
+        overrides = getattr(self, attr, {}) or {}
+        for key in lookup_keys:
+            if key in overrides:
+                return overrides[key]
+        return None
+
     def _resolve_neuron_color(self, neuron_id, layer_index):
         """Resolve the display color for a neuron trace, including overrides."""
-        neuron_color = self.neuron_colors[layer_index]
+        if self.neuron_colors:
+            neuron_color = (
+                self.neuron_colors[layer_index]
+                if layer_index < len(self.neuron_colors)
+                else self.neuron_colors[-1]
+            )
+        else:
+            neuron_color = "rgba(0, 0, 0, 0.2)"
         lookup_keys = self._normalize_neuron_lookup_keys(neuron_id)
 
         if self.color_mode == 'per_neuron' and hasattr(self, '_per_neuron_colors'):
@@ -10802,12 +12563,58 @@ class VisualizeSkeleton:
                     neuron_color = self._per_neuron_colors[key]
                     break
 
-        if hasattr(self, '_neuron_color_overrides') and self._neuron_color_overrides:
-            for key in lookup_keys:
-                if key in self._neuron_color_overrides:
-                    return self._neuron_color_overrides[key]
+        override = self._resolve_neuron_override(
+            '_neuron_color_overrides', neuron_id, layer_index,
+        )
+        if override is not None:
+            return override
 
         return neuron_color
+
+    def _resolve_synapse_color(self, neuron_id, layer_index):
+        """Resolve the inter-layer (connector) synapse color for a pre neuron.
+
+        Falls back to the layer's connection color (``synapse_colors[layer_index]``)
+        when no per-neuron override exists.
+        """
+        if self.synapse_colors and layer_index < len(self.synapse_colors):
+            color = self.synapse_colors[layer_index]
+        elif self.synapse_colors:
+            color = self.synapse_colors[0]
+        else:
+            color = "rgba(0, 0, 0, 0.6)"
+        override = self._resolve_neuron_override(
+            '_neuron_synapse_color_overrides', neuron_id, layer_index,
+        )
+        if override is not None:
+            return override
+        return color
+
+    def _resolve_pre_color(self, neuron_id, layer_index):
+        """Resolve the color for a neuron's pre-synaptic SITES (pre_post mode).
+
+        Defaults to the neuron's display color; a per-neuron override wins.
+        """
+        color = self._resolve_neuron_color(neuron_id, layer_index)
+        override = self._resolve_neuron_override(
+            '_neuron_pre_color_overrides', neuron_id, layer_index,
+        )
+        if override is not None:
+            return override
+        return color
+
+    def _resolve_post_color(self, neuron_id, layer_index):
+        """Resolve the color for a neuron's post-synaptic SITES (pre_post mode).
+
+        Defaults to the neuron's display color; a per-neuron override wins.
+        """
+        color = self._resolve_neuron_color(neuron_id, layer_index)
+        override = self._resolve_neuron_override(
+            '_neuron_post_color_overrides', neuron_id, layer_index,
+        )
+        if override is not None:
+            return override
+        return color
 
     def _apply_plotly_trace_color(self, trace, neuron_color):
         """Apply a resolved neuron color to a Plotly trace."""
@@ -12744,8 +14551,9 @@ class VisualizeSkeleton:
     
     def save_figure(self):
         if self.backend == 'plotly':
-            # No sliders currently used
-            sliders = []
+            # Scatter synapse/pre-post-site modes expose a size slider in the
+            # interactive HTML; solid marker modes leave this empty.
+            sliders = getattr(self, '_plotly_sliders', [])
             
             # set layout
             # Always use frontal view camera regardless of brain_mesh setting
@@ -12795,6 +14603,7 @@ class VisualizeSkeleton:
                 # Legend settings: use constant sizing so alpha doesn't affect legend swatches
                 legend=dict(
                     itemsizing='constant',  # Fixed legend swatch size regardless of trace properties
+                    traceorder='normal',  # Respect the explicit legendrank sequence
                     font=dict(color='white' if self._is_dark_background() else 'black'),
                     bgcolor='rgba(0,0,0,0)',  # Transparent legend background
                 ),
@@ -13345,6 +15154,7 @@ class VisualizeSkeleton:
         # Identify unique legend entries (excluding hidden legends and mesh/synapse traces)
         legend_entries = {}  # {legend_name: [trace_indices]}
         background_indices = []  # mesh/synapse traces to always show
+        pre_post_site_entries = []  # [(trace_index, owning_skeleton_legend)]
         
         # Get mesh_roi names for matching
         mesh_roi_names = [r.lower() for r in self.mesh_roi] if self.mesh_roi else []
@@ -13377,6 +15187,19 @@ class VisualizeSkeleton:
             if is_background:
                 background_indices.append(idx)
                 continue
+
+            # Pre/post site traces intentionally use a distinct legend group
+            # (``pre_post:{role}:{owner}``) so their pre/post entries remain
+            # separate in the main figure.  For individual profiles they
+            # belong with the owning morphology trace, rather than being
+            # treated as global synapse background or dropped as hidden
+            # legend entries.
+            site_group = str(legend_group or '')
+            if site_group.startswith('pre_post:'):
+                parts = site_group.split(':', 2)
+                owner = parts[2] if len(parts) == 3 else ''
+                pre_post_site_entries.append((idx, owner))
+                continue
                 
             # Identify synapse traces (keep visible as background)
             if trace_name and ('synapse' in trace_name_lower or 'pre-syn' in trace_name_lower or 'post-syn' in trace_name_lower):
@@ -13394,6 +15217,18 @@ class VisualizeSkeleton:
                 if key not in legend_entries:
                     legend_entries[key] = []
                 legend_entries[key].append(idx)
+
+        # Attach each pre/post site trace to the same profile as its owner.
+        # Exact matching is expected because the site renderer resolves its
+        # owner identity from ``_neuron_legend_labels_by_layer``.  Keep an
+        # unmatched site visible as background as a defensive fallback for a
+        # partially rendered skeleton, rather than silently omitting it from
+        # every exported profile.
+        for trace_index, owner in pre_post_site_entries:
+            if owner in legend_entries:
+                legend_entries[owner].append(trace_index)
+            else:
+                background_indices.append(trace_index)
         
         if not legend_entries:
             self._vprint('⚠️  No legend entries found to plot individually.')

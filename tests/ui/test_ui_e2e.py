@@ -1320,8 +1320,8 @@ class TestRunner:
         assert not any("Full palette preview" in text for text in texts)
 
     def test_palette_editor_custom_colors_drag_reorder(self):
-        """Custom colors are added via the color input/picker and reordered
-        by dragging the list rows (no template palette strip, no arrows)."""
+        """Custom colors are added via the shared picker/text field and
+        reordered in the horizontal preview row."""
         from nicegui import Client
         from nicegui.page import page
         from ui.components.palette_picker import palette_editor
@@ -1338,10 +1338,10 @@ class TestRunner:
         )
         toggle.value = "Custom colors"
 
-        # Add three colors via the input + Add button
+        # Add three colors via the format input + Add button.
         color_input = next(
             el for el in client.elements.values()
-            if getattr(el, "tag", "") == "q-input"
+            if getattr(el, "_props", {}).get("label") == "Color format"
         )
         add_button = next(
             el for el in client.elements.values()
@@ -1354,19 +1354,19 @@ class TestRunner:
         assert editor.get_custom_colors() == ["#ff0000", "#00ff00", "#0000ff"]
         assert editor.get_colors() == editor.get_custom_colors()  # preview = current state
 
-        # Drag the first row to the third row's position (vertical list)
+        # Drag the first swatch to the third swatch's position (horizontal bar).
         drop_lists = [
             el for el in client.elements.values()
             if any(
-                l.type == "drop" and "clientY" in (l.js_handler or "")
+                l.type == "drop" and "clientX" in (l.js_handler or "")
                 for l in el._event_listeners.values()
             )
         ]
-        assert len(drop_lists) == 1, "expected exactly one vertical drag target list"
-        drop_list = drop_lists[0]
+        assert drop_lists, "expected a horizontal drag target list"
+        drop_list = drop_lists[-1]
         drop_listener = next(
             l for l in drop_list._event_listeners.values()
-            if l.type == "drop" and "clientY" in (l.js_handler or "")
+            if l.type == "drop" and "clientX" in (l.js_handler or "")
         )
         drop_list._handle_event({
             "listener_id": drop_listener.id,
@@ -1382,9 +1382,15 @@ class TestRunner:
         ]
         assert "Reverse list" not in texts
         assert not any("Click the selected palette strip" in t for t in texts)
-        # Removal still works per row
-        assert any(
-            getattr(el, "_props", {}).get("aria-label") == "Remove custom color"
+        # Removal is now attached to each horizontal swatch; no vertical list
+        # of custom-color rows remains.
+        remove_buttons = [
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("aria-label") == "Remove custom color"
+        ]
+        assert len(remove_buttons) >= 3
+        assert not any(
+            "drocat-custom-color-row" in getattr(el, "_classes", [])
             for el in client.elements.values()
         )
 
@@ -1420,7 +1426,7 @@ class TestRunner:
             if getattr(el, "text", "")
         ]
         assert any(
-            "No custom colors yet — add colors below." in text
+            "No custom colors yet — use Add color below." in text
             for text in texts
         )
 
@@ -1505,7 +1511,7 @@ class TestRunner:
         assert empty_custom_palette_names(*palettes) == []
 
     def test_palette_editor_supports_free_form_alpha_overrides(self):
-        """Custom palette entries accept mixed syntax and optional per-entry alpha."""
+        """Custom entries keep typed alpha and popup alpha only when opted in."""
         from nicegui import Client
         from nicegui.page import page
         from ui.components.palette_picker import COLOR_FORMAT_HINT, palette_editor
@@ -1524,14 +1530,9 @@ class TestRunner:
             el for el in client.elements.values()
             if getattr(el, "_props", {}).get("label") == "Color format"
         )
-        alpha_input = next(
-            el for el in client.elements.values()
-            if getattr(el, "_props", {}).get("label") == "Opacity (0–1)"
-        )
-        alpha_toggle = next(
-            el for el in client.elements.values()
-            if getattr(el, "tag", "") == "q-checkbox"
-        )
+        popup = editor.custom_color_popup
+        alpha_input = popup.alpha
+        alpha_toggle = popup.apply_alpha
         add_button = next(
             el for el in client.elements.values()
             if getattr(el, "text", "") == "Add color"
@@ -1540,19 +1541,19 @@ class TestRunner:
 
         assert "#RRGGBBAA" in COLOR_FORMAT_HINT
         assert "global opacity" in COLOR_FORMAT_HINT
-        assert alpha_input._props.get("disable") is True
+        assert alpha_toggle.value is False
 
         # Explicit alpha in the typed format is kept as-is.
         format_input.value = "rgba(10, 20, 30, 0.25)"
         add_handler(None)
-        # A color without alpha gets a separate per-entry override only when
-        # the checkbox is enabled; otherwise it remains eligible for the
-        # renderer's global opacity fallback.
+        # A color without alpha remains eligible for the renderer's global
+        # opacity fallback until the popup's Apply alpha switch is checked.
         format_input.value = "#abcdef"
         add_handler(None)
         alpha_toggle.value = True
         alpha_input.value = 0.35
-        format_input.value = "rgb(255, 0, 0)"
+        popup._current = "#ff0000"
+        popup._commit()
         add_handler(None)
 
         assert editor.get_custom_colors() == [
@@ -1611,21 +1612,19 @@ class TestRunner:
         assert len(highlighted) == 1
         assert "#1b9e77" in getattr(highlighted[0], "_style", {}).get("background", "")
 
-        # The per-entry alpha override applies to the picked color on Add.
-        alpha_toggle = next(
-            el for el in client.elements.values()
-            if getattr(el, "tag", "") == "q-checkbox"
-        )
-        alpha_input = next(
-            el for el in client.elements.values()
-            if getattr(el, "_props", {}).get("label") == "Opacity (0–1)"
-        )
+        # The popup's explicit alpha applies to the picked color on Add.
+        popup = editor.custom_color_popup
+        alpha_toggle = popup.apply_alpha
+        alpha_input = popup.alpha
         add_button = next(
             el for el in client.elements.values()
             if getattr(el, "text", "") == "Add color"
         )
+        assert alpha_toggle.value is False
         alpha_toggle.value = True
         alpha_input.value = 0.5
+        popup._current = "#1b9e77"
+        popup._commit()
         next(iter(add_button._event_listeners.values())).handler(None)
 
         assert editor.get_custom_colors() == ["rgba(27, 158, 119, 0.5)"]
@@ -1642,15 +1641,14 @@ class TestRunner:
         )
 
     def test_palette_editor_custom_color_preview_applies_alpha(self):
-        """A square preview beside the custom color input shows the current
-        color live, with the Opacity override applied when enabled."""
+        """The custom palette preview follows the shared picker result."""
         from nicegui import Client
         from nicegui.page import page
         from ui.components.palette_picker import palette_editor
 
         client = Client(page("/palette-editor-color-preview"))
         with client:
-            palette_editor("Neuron Colors", value="Category10")
+            editor = palette_editor("Neuron Colors", value="Category10")
 
         toggle = next(
             el for el in client.elements.values()
@@ -1662,14 +1660,9 @@ class TestRunner:
             el for el in client.elements.values()
             if getattr(el, "_props", {}).get("label") == "Color format"
         )
-        alpha_toggle = next(
-            el for el in client.elements.values()
-            if getattr(el, "tag", "") == "q-checkbox"
-        )
-        alpha_input = next(
-            el for el in client.elements.values()
-            if getattr(el, "_props", {}).get("label") == "Opacity (0–1)"
-        )
+        popup = editor.custom_color_popup
+        alpha_toggle = popup.apply_alpha
+        alpha_input = popup.alpha
         preview_square = next(
             el for el in client.elements.values()
             if "drocat-custom-color-preview" in getattr(el, "_classes", [])
@@ -1679,17 +1672,18 @@ class TestRunner:
         format_input.value = "#ff0000"
         assert "#ff0000" in preview_square._style.get("background", "")
 
-        # Enabling the override embeds the alpha value into the preview.
+        # Committing the popup with Apply alpha embeds the alpha value into the
+        # format field and the live preview.
+        popup._current = "#ff0000"
         alpha_toggle.value = True
         alpha_input.value = 0.5
+        popup._commit()
         assert "rgba(255, 0, 0, 0.5)" in preview_square._style.get("background", "")
 
-        # Changing the alpha value updates the preview live.
+        # A second commit with Apply alpha off restores the raw color.
         alpha_input.value = 0.25
-        assert "rgba(255, 0, 0, 0.25)" in preview_square._style.get("background", "")
-
-        # Disabling the override restores the raw color.
         alpha_toggle.value = False
+        popup._commit()
         assert "#ff0000" in preview_square._style.get("background", "")
 
         # An unparseable value leaves the preview transparent (border only).

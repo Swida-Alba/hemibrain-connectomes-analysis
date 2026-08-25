@@ -1497,6 +1497,13 @@ class TestSimplificationPipeline:
             cache.skeleton_dir / "101.swc.zst")
         assert loaded._drocat_simplification == 0
         assert len(loaded.nodes) == len(nrn.nodes)
+        manifest = json.loads(
+            (cache.skeleton_dir / "raw_skeleton_manifest.json").read_text()
+        )
+        assert manifest["cache_schema_version"] == morph.RAW_SKELETON_CACHE_VERSION
+        assert manifest["vector_basis"] == morph.VECTOR_BASIS_RAW
+        assert manifest["files"]["101"]["simplification"] == 0
+        assert manifest["files"]["101"]["representation"] == "skeleton"
 
     def test_relevel_stored50_to_target90(self, tmp_path):
         """Stored 50% -> target 90% re-simplifies by factor 5 (keeps 20% of

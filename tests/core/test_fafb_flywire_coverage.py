@@ -201,6 +201,19 @@ class TestExtrusionCache:
         assert statuses == {'1': fau.EXTRUSION_REPAIR_PENDING,
                             '2': fau.EXTRUSION_REPAIR_CLEAN}
 
+    def test_detector_metadata_invalidates_old_results_but_keeps_statuses(
+            self, tmp_path):
+        fau.save_extrusion_check_cache(str(tmp_path), self.FOLDER, {1: True})
+        path = fau.extrusion_check_cache_path(str(tmp_path), self.FOLDER)
+        frame = pd.read_parquet(path)
+        frame.loc[0, 'detector_version'] = 'old-detector'
+        frame.to_parquet(path, index=False)
+
+        assert fau.load_extrusion_check_cache(
+            str(tmp_path), self.FOLDER) == {}
+        assert fau.load_extrusion_repair_status(
+            str(tmp_path), self.FOLDER)['1'] == fau.EXTRUSION_REPAIR_PENDING
+
     def test_repair_status_with_na_values_and_wrong_schema(self, tmp_path):
         path = fau.extrusion_check_cache_path(str(tmp_path), self.FOLDER)
         path.parent.mkdir(parents=True)

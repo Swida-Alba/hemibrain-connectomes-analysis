@@ -7229,6 +7229,122 @@ def build_synapse_mesh(pre_coords, post_coords, mode='sphere', size=100, color='
     )
 
 
+def build_site_mesh(coords, mode='sphere', size=20.0, color='red', opacity=1.0, name='sites'):
+    """Build a single Mesh3d containing site glyphs (spheres/cones) at *coords*.
+
+    Unlike :func:`build_synapse_mesh`, which draws a glyph from a pre- to a
+    post-synaptic site along a direction vector, this helper places a glyph
+    centered on each coordinate. Cones point along +z (a fixed orientation),
+    so it is used for the pre/post-site markers of ``pre_post`` synapse mode.
+
+    Parameters
+    ----------
+    coords : pd.DataFrame or np.ndarray
+        (N, 3) array of site coordinates (x, y, z).
+    mode : str
+        'sphere' or 'cone'.
+    size : float
+        Glyph size (radius/scale).
+    color : str
+        Color of the mesh.
+    opacity : float
+        Opacity of the mesh.
+    name : str
+        Name for the trace.
+
+    Returns
+    -------
+    go.Mesh3d
+        Plotly Mesh3d trace (an empty Mesh3d when there are no points).
+    """
+    import numpy as np
+    import plotly.graph_objects as go
+
+    if hasattr(coords, 'values'):
+        coords = coords.values
+    coords = np.asarray(coords, dtype=float)
+    if coords.ndim == 1:
+        coords = coords.reshape(1, 3)
+    n_sites = coords.shape[0]
+    if n_sites == 0:
+        return go.Mesh3d()
+
+    template_size = 1.0
+    if mode == 'sphere':
+        # UV sphere (8 segments, 4 rings), same topology as build_synapse_mesh.
+        N = 8
+        M = 4
+        verts = [[0, 0, template_size]]
+        for i in range(1, M):
+            phi = np.pi * i / M
+            z = template_size * np.cos(phi)
+            r_ring = template_size * np.sin(phi)
+            for j in range(N):
+                theta = 2 * np.pi * j / N
+                verts.append([r_ring * np.cos(theta), r_ring * np.sin(theta), z])
+        verts.append([0, 0, -template_size])
+        verts_template = np.array(verts)
+        faces = []
+        for j in range(N):
+            faces.append([0, 1 + j, 1 + (j + 1) % N])
+        for i in range(M - 2):
+            start_curr = 1 + i * N
+            start_next = 1 + (i + 1) * N
+            for j in range(N):
+                curr1 = start_curr + j
+                curr2 = start_curr + (j + 1) % N
+                next1 = start_next + j
+                next2 = start_next + (j + 1) % N
+                faces.append([curr1, next1, curr2])
+                faces.append([next1, next2, curr2])
+        last_idx = len(verts) - 1
+        start_last = 1 + (M - 2) * N
+        for j in range(N):
+            faces.append([last_idx, start_last + (j + 1) % N, start_last + j])
+        faces_template = np.array(faces)
+    elif mode == 'cone':
+        # Cone (24 segments) pointing along +z.
+        s = template_size
+        N = 24
+        verts = [[0, 0, s], [0, 0, -s]]
+        for i in range(N):
+            theta = 2 * np.pi * i / N
+            verts.append([s * np.cos(theta), s * np.sin(theta), -s])
+        verts_template = np.array(verts)
+        faces = []
+        for i in range(N):
+            faces.append([0, 2 + i, 2 + (i + 1) % N])
+        for i in range(N):
+            faces.append([1, 2 + (i + 1) % N, 2 + i])
+        faces_template = np.array(faces)
+    else:
+        raise ValueError(f"Unknown site mode: {mode}")
+
+    n_v = len(verts_template)
+    n_f = len(faces_template)
+    # Scale each template instance, then translate to its site coordinate.
+    scaled = verts_template * size
+    all_verts = scaled[np.newaxis, :, :] + coords[:, np.newaxis, :]
+    all_verts = all_verts.reshape(-1, 3)
+    offsets = np.arange(n_sites) * n_v
+    all_faces = faces_template[np.newaxis, :, :] + offsets[:, np.newaxis, np.newaxis]
+    all_faces = all_faces.reshape(-1, 3)
+
+    return go.Mesh3d(
+        x=all_verts[:, 0],
+        y=all_verts[:, 1],
+        z=all_verts[:, 2],
+        i=all_faces[:, 0],
+        j=all_faces[:, 1],
+        k=all_faces[:, 2],
+        color=color,
+        opacity=opacity,
+        name=name,
+        lighting=dict(ambient=0.5, diffuse=0.8, roughness=0.1, specular=0.1),
+        lightposition=dict(x=1000, y=1000, z=2000),
+    )
+
+
 
 # =============================================================================
 # Module-level cache for the Polars engine neuron table (moved from

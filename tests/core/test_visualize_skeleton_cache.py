@@ -2,9 +2,9 @@
 
 Covers `VisualizeSkeleton._save_cached_neurons` / `_load_cached_neurons` /
 `_skeleton_cache_is_simplified`:
-- NeuPrint caches hold the simplified skeleton (90% default) in the shared
-  compressed-SWC namespace (.swc.zst, level recorded in the header)
-- every visualization simplification level reuses that cached source
+- NeuPrint visualization caches hold raw skeletons in the shared compressed-SWC
+  namespace (.swc.zst, level 0 recorded in the header)
+- every visualization simplification level applies to that common source
 - no visualization fetch writes a `.pkl` skeleton or `.level` marker
 """
 
@@ -86,9 +86,10 @@ class TestNeuPrintSimplifiedCache:
             pd.DataFrame({"bodyId": [101]}))
         assert missing == []
         assert cached is not None and len(cached) == 1
-        # shared pipeline default: 90% simplified, level recorded in header
-        assert cached[0]._drocat_simplification == 90
-        assert len(cached[0].nodes) < len(neuron.nodes)
+        # Visualization persistence overrides the morphology helper's simp90
+        # default so render-time mesh decimation is applied exactly once.
+        assert cached[0]._drocat_simplification == 0
+        assert len(cached[0].nodes) == len(neuron.nodes)
 
     def test_save_is_independent_of_render_simplification(self, tmp_path):
         vs = build_vs(tmp_path)
@@ -111,8 +112,8 @@ class TestNeuPrintSimplifiedCache:
         neurons, missing = vs._load_cached_neurons(pd.DataFrame({"bodyId": [101, 202]}))
         assert missing == [202]
         assert neurons is not None and len(neurons) == 1
-        assert neurons[0]._drocat_simplification == 90
-        assert len(neurons[0].nodes) < len(neuron.nodes)
+        assert neurons[0]._drocat_simplification == 0
+        assert len(neurons[0].nodes) == len(neuron.nodes)
         assert vs._skeleton_cache_is_simplified() is False
 
     def test_ignore_cache_reports_all_missing(self, tmp_path):
@@ -148,6 +149,36 @@ class TestNeuPrintSimplifiedCache:
         assert vs._effective_render_simplification(
             is_fafb=False, using_simplified_cache=True
         ) == pytest.approx(0.95)
+
+    def test_mixed_legacy_cache_levels_are_marked_stale_and_normalized(
+            self, tmp_path):
+        vs = build_vs(tmp_path)
+        raw = make_neuron(120)
+        raw.id = 101
+        raw._drocat_simplification = 0
+        legacy = make_neuron(120)
+        legacy.id = 202
+        legacy._drocat_simplification = 90
+
+        class MixedCache:
+            def load_skeleton(self, body_id):
+                return {101: raw, 202: legacy}.get(body_id)
+
+        preferred, stale, missing = vs._resolve_neuprint_render_cache(
+            MixedCache(), [101, 202, 303]
+        )
+        assert set(preferred) == {101}
+        assert set(stale) == {202}
+        assert missing == [303]
+
+        normalized = vs._normalize_neuprint_cache_fallback(
+            preferred, stale, {101: raw}
+        )
+        assert set(normalized) == {101, 202}
+        assert {
+            vs._cached_skeleton_level(neuron)
+            for neuron in normalized.values()
+        } == {90}
 
 
 class TestFlywireCacheUntouched:

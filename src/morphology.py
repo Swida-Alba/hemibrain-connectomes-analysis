@@ -127,6 +127,7 @@ PERSISTENCE_DIM = 100
 VECTOR_DIM = len(MORPHOMETRIC_FEATURES) + PERSISTENCE_DIM
 
 VECTOR_CACHE_VERSION = 1
+RAW_SKELETON_CACHE_VERSION = 2
 
 # Step-progress totals reported to the web UI during a similarity run
 # (see the [DROCAT][progress] event protocol in ui/components/output_panel.py).
@@ -1279,6 +1280,13 @@ class SkeletonVectorCache:
             "mesh_vectors_pending.parquet" if self.mesh_only
             else "skeleton_vectors_pending.parquet"
         )
+        # Raw NeuPrint SWCs are the shared morphology/render source.  Keep a
+        # small provenance manifest beside them so a cleared/rebuilt cache is
+        # self-describing and cannot be mistaken for a render-time mesh cache.
+        self.skeleton_manifest_path = self.skeleton_dir / (
+            "raw_skeleton_manifest.json" if self.raw_only
+            else "skeleton_manifest.json"
+        )
 
     def _canonical_body_id(self, body_id):
         """Canonical cache key: exact strings for FlyWire, ints for NeuPrint."""
@@ -1293,6 +1301,59 @@ class SkeletonVectorCache:
         # merged are real data (a crash must never make them invisible or
         # trigger a rebuild that would drop them).
         return self.parquet_path.exists() or self.pending_path.exists()
+
+    def _load_skeleton_manifest(self) -> dict:
+        """Load the optional raw-skeleton provenance manifest."""
+        if not self.raw_only or not self.skeleton_manifest_path.exists():
+            return {
+                "cache_schema_version": RAW_SKELETON_CACHE_VERSION,
+                "dataset": self.dataset,
+                "representation": "skeleton",
+                "source": "neuprint.fetch_skeleton",
+                "coordinate_units": "nm",
+                "vector_basis": VECTOR_BASIS_RAW,
+                "files": {},
+            }
+        try:
+            manifest = json.loads(self.skeleton_manifest_path.read_text())
+            if (
+                manifest.get("cache_schema_version")
+                != RAW_SKELETON_CACHE_VERSION
+                or manifest.get("dataset") != self.dataset
+                or manifest.get("representation") != "skeleton"
+                or not isinstance(manifest.get("files", {}), dict)
+            ):
+                raise ValueError("raw skeleton manifest has incompatible provenance")
+            manifest.setdefault("files", {})
+            return manifest
+        except Exception:
+            # A malformed/old manifest must not make otherwise valid SWCs
+            # unreadable; the next successful write repairs the metadata.
+            return {
+                "cache_schema_version": RAW_SKELETON_CACHE_VERSION,
+                "dataset": self.dataset,
+                "representation": "skeleton",
+                "source": "neuprint.fetch_skeleton",
+                "coordinate_units": "nm",
+                "vector_basis": VECTOR_BASIS_RAW,
+                "files": {},
+            }
+
+    def _write_skeleton_manifest(self, manifest: dict) -> None:
+        """Atomically persist raw-skeleton provenance metadata."""
+        if not self.raw_only:
+            return
+        self.skeleton_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.skeleton_manifest_path.with_name(
+            f".{self.skeleton_manifest_path.name}.{os.getpid()}.tmp")
+        try:
+            temporary.write_text(json.dumps(manifest, indent=2, sort_keys=True))
+            os.replace(temporary, self.skeleton_manifest_path)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     # -------------------------------------------------- pending (append-only)
     @staticmethod
@@ -1652,6 +1713,8 @@ class SkeletonVectorCache:
             return 0
         self.skeleton_dir.mkdir(parents=True, exist_ok=True)
         written = 0
+        manifest = self._load_skeleton_manifest() if self.raw_only else None
+        manifest_changed = False
         mesh_cache = None
         if self.mesh_only:
             mesh_cache = FlyWireMeshCache(
@@ -1671,20 +1734,43 @@ class SkeletonVectorCache:
                 if self.mesh_only:
                     written += mesh_cache.save({body_id: neuron})
                 elif self.raw_only and self.raw_format == "swc.zst":
+                    path = self.skeleton_dir / f"{body_id}.swc.zst"
                     _write_compressed_skeleton(
-                        self.skeleton_dir / f"{body_id}.swc.zst", neuron,
+                        path, neuron,
                         simplification=simplification)
                     written += 1
+                    stored_level = (
+                        getattr(neuron, "_drocat_simplification", 0)
+                        if simplification is None else simplification
+                    ) or 0
                 elif self.raw_only and self.raw_format == "swc.gz":
+                    path = self.skeleton_dir / f"{body_id}.swc.gz"
                     _write_compressed_swc(
-                        self.skeleton_dir / f"{body_id}.swc.gz", neuron)
+                        path, neuron)
                     written += 1
+                    stored_level = 0
                 else:
-                    with open(self.skeleton_dir / f"{body_id}.pkl", "wb") as handle:
+                    path = self.skeleton_dir / f"{body_id}.pkl"
+                    with open(path, "wb") as handle:
                         pickle.dump(neuron, handle)
                     written += 1
+                    stored_level = getattr(neuron, "_drocat_simplification", 0) or 0
+                if self.raw_only and manifest is not None:
+                    manifest["files"][str(body_id)] = {
+                        "file": path.name,
+                        "simplification": int(stored_level),
+                        "representation": "skeleton",
+                        "source": "neuprint.fetch_skeleton",
+                        "coordinate_units": "nm",
+                        "vector_basis": VECTOR_BASIS_RAW,
+                        "updated_at": datetime.now().isoformat(
+                            timespec="seconds"),
+                    }
+                    manifest_changed = True
             except Exception:
                 continue
+        if manifest_changed and manifest is not None:
+            self._write_skeleton_manifest(manifest)
         return written
 
     def _log(self, msg: str):

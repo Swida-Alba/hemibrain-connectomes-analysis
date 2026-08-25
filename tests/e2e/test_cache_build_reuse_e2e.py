@@ -143,9 +143,9 @@ def built_cache(tmp_path_factory, neuprint_client):
 # ---------------------------------------------------------------------------
 
 class TestVisualizationCacheBuildReuse:
-    def test_first_render_builds_shared_simplified_cache(
+    def test_first_render_builds_shared_raw_cache(
             self, built_cache, neuprint_client):
-        """The BUILD render persists simplified (90%) SWC only."""
+        """The BUILD render persists raw level-0 SWC only."""
         work = built_cache
         cache_dir = Path(work) / "cache" / FOLDER / "skeletons"
         raw_dir = cache_dir / "raw_skeletons"
@@ -155,15 +155,15 @@ class TestVisualizationCacheBuildReuse:
         html = Path(work) / "plot-3d_HEMI_e2e_probe" / "e2e_probe.html"
         assert html.exists() and html.stat().st_size > 100_000
 
-        # Every cached file holds the simplified skeleton (level recorded in
-        # the header); the render decimates from that source.
+        # Every cached file holds the raw source (level recorded in the
+        # header); the render applies mesh decimation from that source.
         for bid in PROBE_IDS:
             cached = morph._load_cached_skeleton_file(
                 raw_dir / f"{bid}.swc.zst")
-            assert cached._drocat_simplification == 90
+            assert cached._drocat_simplification == 0
             raw = neuprint_client.fetch_skeleton(bid)
             raw_n = len(navis.TreeNeuron(raw).nodes)
-            assert len(cached.nodes) < raw_n
+            assert len(cached.nodes) == raw_n
 
     def test_second_render_reuses_cache_without_fetching(self, built_cache,
                                                          neuprint_client,

@@ -1137,14 +1137,32 @@ html, body {
     text-align: center;
 }
 .drocat-edge-cell {
-    min-width: 142px;
     padding: 4px 10px !important;
 }
-.drocat-edge-cell:nth-child(4) {
-    min-width: 105px;
+.drocat-edge-table .drocat-layer-column {
+    width: 58px;
+    min-width: 58px;
+    max-width: 68px;
 }
-.drocat-edge-cell:nth-child(5) {
-    min-width: 180px;
+.drocat-edge-table .drocat-neuron-column {
+    width: 24%;
+    min-width: 220px;
+    max-width: 360px;
+}
+.drocat-edge-table .drocat-color-column,
+.drocat-edge-table .drocat-synapse-color-column,
+.drocat-edge-table .drocat-pre-synaptic-color-column,
+.drocat-edge-table .drocat-post-synaptic-color-column {
+    width: 14%;
+    min-width: 112px;
+    max-width: 168px;
+}
+.drocat-edge-table th.drocat-color-column,
+.drocat-edge-table th.drocat-synapse-color-column,
+.drocat-edge-table th.drocat-pre-synaptic-color-column,
+.drocat-edge-table th.drocat-post-synaptic-color-column {
+    white-space: normal;
+    line-height: 1.15;
 }
 .drocat-edge-table .q-field--borderless .q-field__control {
     min-height: 34px;
@@ -1154,6 +1172,264 @@ html, body {
 .drocat-edge-table .q-field--borderless .q-field__input {
     color: var(--drocat-navy) !important;
     font-size: 13px;
+}
+.drocat-color-cell {
+    min-width: 0;
+    gap: 0 !important;
+    align-items: center !important;
+}
+.drocat-color-cell-picker {
+    flex: 0 0 18px;
+    width: 18px !important;
+    min-width: 18px !important;
+    height: 18px !important;
+    padding: 0 !important;
+    color: var(--drocat-muted) !important;
+    align-self: center !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    line-height: 1 !important;
+}
+.drocat-color-cell-picker .q-icon {
+    font-size: 13px !important;
+}
+.drocat-color-cell-picker-set {
+    border-radius: 4px !important;
+}
+.drocat-color-cell-preview {
+    display: block;
+    flex: 0 0 auto;
+    align-self: center;
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+    border: 1px solid rgba(11, 31, 58, .28);
+}
+.drocat-color-cell .q-field {
+    flex: 1 1 auto;
+    min-width: 0;
+    align-self: center;
+}
+.drocat-color-cell .q-field__control {
+    align-items: center;
+}
+.drocat-color-cell .q-field__native,
+.drocat-color-cell .q-field__input {
+    min-width: 0 !important;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.drocat-layer-color-control {
+    flex: 0 0 auto;
+}
+.drocat-layer-add-input-row {
+    display: grid !important;
+    grid-template-columns: minmax(110px, .8fr) minmax(220px, 1.45fr)
+        repeat(2, minmax(140px, 1fr));
+    align-items: stretch;
+    overflow: visible;
+    padding-bottom: 2px;
+}
+.drocat-layer-add-input-row.drocat-layer-add-input-row-pre-post {
+    grid-template-columns: minmax(110px, .8fr) minmax(220px, 1.35fr)
+        repeat(3, minmax(125px, 1fr));
+}
+.drocat-layer-add-field {
+    flex: none;
+    width: auto;
+    min-width: 0;
+    min-height: 52px;
+    height: 52px;
+}
+.drocat-layer-add-layer {
+    width: auto;
+}
+.drocat-layer-add-neuron-input {
+    /* A chip must stay inside the grid track.  Without an explicit
+       min/max-width the QSelect's intrinsic chip width can escape its grid
+       item and cover the adjacent Color field. */
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    flex: none;
+    overflow: hidden;
+}
+.drocat-layer-add-neuron-input .drocat-neuron-input-row,
+.drocat-layer-add-neuron-input .drocat-chip-input-shell,
+.drocat-layer-add-neuron-input .drocat-layer-add-field-control,
+.drocat-layer-add-field.q-field,
+.drocat-layer-add-color-control {
+    height: 52px;
+}
+.drocat-layer-add-field.q-field .q-field__control,
+.drocat-layer-add-color-input.q-field .q-field__control,
+.drocat-layer-add-neuron-input .q-field__control {
+    min-height: 52px !important;
+    height: 52px;
+}
+.drocat-layer-add-neuron-input .drocat-neuron-input-row,
+.drocat-layer-add-neuron-input .drocat-chip-input-shell,
+.drocat-layer-add-neuron-input .drocat-chip-input,
+.drocat-layer-add-neuron-input .q-field,
+.drocat-layer-add-neuron-input .q-field__control,
+.drocat-layer-add-neuron-input .q-field__control-container {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+}
+.drocat-layer-add-neuron-input .q-field__control {
+    position: relative;
+}
+.drocat-layer-add-neuron-input .drocat-chip-input-shell,
+.drocat-layer-add-neuron-input .q-field__control,
+.drocat-layer-add-neuron-input .q-field__control-container {
+    overflow: hidden;
+}
+.drocat-layer-add-field.q-field .q-field__native,
+.drocat-layer-add-field.q-field .q-field__input,
+.drocat-layer-add-neuron-input .q-field__native,
+.drocat-layer-add-neuron-input .q-field__input {
+    min-height: 28px;
+    max-height: 28px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.drocat-layer-add-neuron-input .q-chip {
+    min-width: 0;
+    max-width: calc(100% - 58px);
+    overflow: hidden;
+}
+.drocat-layer-add-neuron-input .q-chip__content {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.drocat-layer-add-neuron-input .drocat-chip-expand-btn {
+    flex: 0 0 auto;
+    max-width: 58px;
+    min-height: 28px;
+    line-height: 20px;
+    margin-top: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.drocat-layer-add-color-control {
+    width: auto;
+    min-width: 0;
+    flex: none;
+    align-items: stretch !important;
+}
+.drocat-layer-add-color-input {
+    width: 100%;
+    min-width: 0;
+}
+.drocat-layer-add-color-control > .q-field {
+    width: 100%;
+    min-width: 0;
+}
+.drocat-layer-add-color-picker {
+    flex: 0 0 20px;
+    width: 20px !important;
+    min-width: 20px !important;
+    height: 20px !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+.drocat-layer-add-color-picker .q-icon {
+    font-size: 14px !important;
+}
+.drocat-layer-add-color-picker-set {
+    border-radius: 4px !important;
+}
+.drocat-layer-add-form .q-field__label,
+.drocat-layer-add-form .q-field--float .q-field__label {
+    font-size: 14px !important;
+    line-height: 20px !important;
+    top: 7px !important;
+    transform: none !important;
+}
+.drocat-layer-add-form .q-field__native,
+.drocat-layer-add-form .q-field__input,
+.drocat-layer-add-form .q-chip__content {
+    font-size: 14px !important;
+    line-height: 20px !important;
+}
+.drocat-layer-add-neuron-input .drocat-chip-expand-btn {
+    position: static !important;
+    max-width: 58px;
+    min-height: 22px;
+    margin: 0 !important;
+    padding: 0 2px !important;
+    font-size: 12px !important;
+    line-height: 16px !important;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.drocat-layer-add-form .q-field__append {
+    align-self: flex-start;
+    min-height: 0;
+    padding-top: 7px;
+    padding-bottom: 0;
+}
+.drocat-layer-add-form .q-field__control-container {
+    min-width: 0;
+}
+.drocat-layer-add-neuron-input .q-field__append {
+    position: absolute !important;
+    top: 4px;
+    right: 4px;
+    z-index: 2;
+    display: flex;
+    align-items: flex-start;
+    min-height: 0 !important;
+    height: 22px;
+    padding: 0 !important;
+}
+.drocat-layer-add-color-input .q-field__append {
+    padding-left: 2px;
+    padding-right: 2px;
+}
+.drocat-layer-add-actions {
+    min-height: 40px;
+}
+.drocat-layer-add-form .drocat-layer-add-control,
+.drocat-layer-add-form .drocat-layer-add-control > .q-field,
+.drocat-layer-add-form .drocat-layer-add-control .q-field__control,
+.drocat-layer-add-form .drocat-layer-add-control .drocat-chip-input-shell,
+.drocat-layer-add-form .drocat-layer-add-control .drocat-neuron-input-row {
+    min-height: 52px !important;
+    height: 52px !important;
+}
+.drocat-layer-add-form .drocat-layer-add-control .q-field__control {
+    box-sizing: border-box;
+}
+
+@media (max-width: 1100px) {
+    .drocat-layer-add-input-row,
+    .drocat-layer-add-input-row.drocat-layer-add-input-row-pre-post {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+@media (max-width: 700px) {
+    .drocat-layer-add-input-row,
+    .drocat-layer-add-input-row.drocat-layer-add-input-row-pre-post {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+.drocat-layer-validation {
+    border: 1px solid rgba(185, 28, 28, .28) !important;
+    background: rgba(254, 226, 226, .72) !important;
+    box-shadow: none !important;
+}
+.drocat-layer-validation-label {
+    white-space: pre-line;
 }
 .drocat-edge-row-even > td {
     background: var(--drocat-row-even) !important;
@@ -1428,6 +1704,29 @@ html, body {
     overflow: hidden;
     border-radius: 6px;
     border: 1px solid var(--drocat-line);
+}
+.drocat-palette-swatches > div {
+    position: relative;
+}
+.drocat-palette-remove {
+    position: absolute !important;
+    top: 1px;
+    right: 1px;
+    z-index: 2;
+    width: 18px !important;
+    min-width: 18px !important;
+    height: 18px !important;
+    padding: 0 !important;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, .76) !important;
+    color: #dc2626 !important;
+}
+.drocat-palette-remove .q-icon {
+    font-size: 15px !important;
+    font-weight: 800;
+}
+.drocat-custom-color-input-row {
+    min-height: 42px;
 }
 .drocat-palette-name {
     font-size: 10.5px;

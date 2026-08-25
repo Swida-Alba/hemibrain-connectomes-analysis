@@ -53,6 +53,59 @@
     lists are documented in
     <a href="input_formats.html">Input File Formats</a>.</p>
 
+  <h2 id="layer-editor-modes">Layer editor modes</h2>
+  <p>Three segmented buttons on one row (<b>Standard</b>, <b>Advanced</b>,
+    <b>File upload</b>) pick how the neuron layers and their colors are
+    defined, and a <b>Synapse Mode</b> box plus <b>Synapse Threshold</b> sit
+    directly below them. Only <b>Standard</b> mode uses the on-screen color
+    palette editors (Neuron Colors / Synapse Colors / ROI Colors); the other
+    two modes take colors from the in-file settings.</p>
+  <ul>
+    <li><b>Standard</b> — the classic drag-and-drop layer rows (add neurons to
+      a row, drag rows to reorder, drag chips between rows). An <b>Export
+      CSV</b> button writes the current order to the layer-map CSV format
+      (<code>layer,neuron</code>). The color palette editors are shown here.</li>
+    <li><b>Advanced</b> — selecting it shows the editable layer editor table
+      directly (it is not collapsed). Each row's <b>Layer</b> cell is a
+      selection box that starts at 1 for a new table and only offers the
+      currently available layers (so layer 2 is never offered unless layer 1
+      is in use). Existing 0-based CSVs remain supported, but every used layer
+      number must be continuous. The
+      colour columns follow the synapse mode: <b>Synapse color</b> for
+      <code>synapse</code>, or <b>Pre-synaptic</b> + <b>Post-synaptic</b>
+      colors for <code>pre-post sites</code> (and the exported/uploaded CSV
+      matches that same column set). The single-color picker (alpha + Bokeh
+      palette) is opened from a color cell's picker button or the palette button
+      beside each colour input in the Add Row form. Empty color cells display
+      <code>(auto)</code>. The <b>See available neurons</b> viewer appends one
+      row per selected entry and assigns the whole viewer-selection batch to
+      the next layer; the Add Row neuron field also provides dataset-aware
+      suggestions. Rows are auto-saved to
+      disk as you edit; use <b>Export CSV</b> to download, or
+      <b>Upload CSV</b> to load a file into the table. The color palette
+      editors are hidden (colors come from the file).</li>
+    <li><b>File upload</b> — upload a custom-layer CSV directly. Its color
+      columns are used as-is (no editable table, no color palette editors).</li>
+  </ul>
+  <p>The same custom-layer CSV can also be produced/edited by hand. It has a
+    <code>layer</code> column (numbers may start at <b>0 or 1</b>; the lowest
+    value is treated as the first layer) and a <code>neuron</code> column (any
+    legal query name, the legacy <code>id_type_instance</code> name also
+    works). Optional color columns:</p>
+  <table>
+    <tr><th>Column</th><th>Meaning</th></tr>
+    <tr><td><code>color</code></td><td>Per-neuron display color. <code>rgba(...)</code>
+      overrides the global <b>Neuron Opacity</b>; <code>rgb(...)</code> inherits it.</td></tr>
+    <tr><td><code>synapse_color</code></td><td>Color of the inter-layer (connector)
+      synapses whose pre-synaptic site is this neuron.</td></tr>
+    <tr><td><code>pre_synaptic_color</code></td><td>Color of this neuron's pre-synaptic
+      <i>sites</i> (only used by the pre/post mode).</td></tr>
+    <tr><td><code>post_synaptic_color</code></td><td>Color of this neuron's post-synaptic
+      <i>sites</i> (only used by the pre/post mode).</td></tr>
+  </table>
+  <p>Download an example:
+    <a href="examples/skeleton_custom_layers.csv">skeleton_custom_layers.csv</a>.</p>
+
   <h2 id="hemisphere-analysis">Hemisphere analysis</h2>
   <p>The <b>Hemisphere</b> selector (next to Search Columns) restricts the
     plotted neurons to one side:</p>
@@ -107,14 +160,15 @@
           palettes, a live range slider selects part of the palette, and
           reset restores the original order and full range.</li>
         <li><b>Custom colors</b>: starts empty — no preset palette is shown
-          until colors are added. Add colors from the native picker,
+          until colors are added. Use the shared <b>Pick color</b> popup,
           free-form color formats, or individual swatches of any Bokeh
           palette (choose the palette in the dropdown, click a swatch to
-          select it, then press <b>Add color</b>). A live square preview
-          beside the color value shows the result with the <b>Opacity
-          override</b> applied; the per-entry opacity wins over the global
-          Neuron Opacity, while colors without an explicit opacity channel
-          inherit it.</li>
+          select it, then press <b>Add color</b>). The popup's alpha slider
+          uses 0.05 steps and only embeds alpha when <b>Override alpha</b> is
+          checked; otherwise the renderer's global Neuron Opacity is
+          inherited. Added colors appear in the horizontal preview bar,
+          where they can be dragged to reorder or removed with their red
+          cross.</li>
         <li>Default follows the background (Category10 / Set3) until a palette
           is picked manually.</li>
       </ul>
@@ -122,14 +176,39 @@
     <div class="card">
       <h3>Synapse Colors</h3>
       <ul>
-        <li><b>Synapse Colors</b>: palette for the connection markers between
-          layers (one color per consecutive-layer pair).</li>
-        <li><b>Skip Synapses</b>: hide markers for a clean view.</li>
-        <li><b>Min Synapse Count</b>, <b>Synapse Size</b> (a fold of the real
-          pre&rarr;post distance: <code>real</code> = 1x; any number or
-          <code>Nx real</code> can be typed), <b>Uniform Synapse Size</b>
-          (all markers use the median distance), <b>Opacity</b>,
-          <b>Mode</b> (cone or scatter).</li>
+        <li><b>Synapse Mode</b>: an outlined dropdown — <code>synapse</code>
+          (paired markers between consecutive layers), <code>pre-post
+          sites</code> (the input/output <i>sites</i> of the queried neurons),
+          or <code>skip</code> (hide markers). The cutoff <b>Min Synapse
+          Count</b> sits beside it.</li>
+        <li><b>Synapse Shape</b> (synapse mode): cone / scatter / sphere /
+          tetrahedron.</li>
+        <li><b>Pre/post shape</b> (pre-post sites mode): solid (post/input
+          sites as spheres, pre/output as cones) or scatter (post/input as
+          circles, pre/output as squares).</li>
+        <li><b>Synapse Threshold</b> (formerly Min Synapse Count): minimum
+          synapse weight for a marker to be shown; in pre-post site mode only
+          sites whose connection with a neighbour meets this threshold are
+          shown. It sits to the right of the Synapse Mode box, below the
+          layer-editor buttons.</li>
+        <li><b>Synapse Size</b> (a fold of the real pre&rarr;post distance:
+          <code>real</code> = 1x; any number or <code>Nx real</code> can be
+          typed). In pre/post-site mode every site is uniform and uses the
+          full mean real connector distance as its glyph size because each
+          sphere/cone is centered on its own pre- or post-synaptic site; a
+          one-layer view estimates it from sampled upstream/downstream pairs.
+          <b>Uniform Synapse Size</b> applies to paired markers, and
+          <b>Opacity</b> remains global.</li>
+        <li><b>pre-post (Pre/post-synaptic site mode)</b>: instead of the paired
+          synapses between adjacent layers, this renders the pre- and
+          post-synaptic <i>sites</i> of every queried neuron. Post-synaptic
+          (input) sites draw as spheres, pre-synaptic (output) sites as cones
+          (or circle/square scatter markers, see Pre/post shape), both colored
+          by the neuron's layer and given separate
+          <i>pre &lt;layer&gt;</i> / <i>post &lt;layer&gt;</i> legends. It is
+          not a paired-synapse view: the partner is not restricted to the
+          adjacent layer. An orange in-page banner and a note in
+          <code>user_warning_notes.txt</code> flag its behavior.</li>
       </ul>
     </div>
     <div class="card">
@@ -160,9 +239,9 @@
     <li><b>Cache Neurons/Synapses</b>: faster repeat renders.</li>
     <li><b>Smooth Skeleton</b>, <b>Show Soma</b>, <b>Show Connectors</b>.</li>
     <li><b>Simplification Method</b> (NeuPrint tube mode): <code>fast</code>
-      is the default direct path with 90% simplification. <code>fine</code>
-      is the FAFB-style transform rebuilt from the shared raw
-      <code>.swc.gz</code> cache; fine meshes are not persisted. <code>artistic</code>
+      is the default direct path with render-time mesh simplification.
+      <code>fine</code> is the FAFB-style transform rebuilt from the shared raw
+      <code>.swc.zst</code> cache; fine meshes are not persisted. <code>artistic</code>
       uses vertex-cluster mesh decimation. All methods
       use batched parallel online skeleton fetching across layers. The selector is available
       for NeuPrint and FlyWire/FAFB tube renders; line mode bypasses it.</li>
@@ -185,11 +264,17 @@
     aMe12_SMP238_PPL101_neuron_info.csv - merged neuron metadata with a
                                           numeric viz_layer column before
                                           bodyId
+    viz_layer_info.csv                  - reusable input layer assignments and
+                                          readable colors; only the active
+                                          synapse color family is populated
     parameters.txt                      - exact parameters of the run
     user_warning_notes.txt              - notes/warnings of the run</code></pre>
   <p class="small">With <b>Export Views</b> on, PNG screenshots
     (<code>{view}_{name}.png</code>) are written into the same folder; the
-    rotating <b>Export Video</b> adds videos/GIFs.</p>
+    rotating <b>Export Video</b> adds videos/GIFs. In pre-post site mode the
+    merged synapse export (and the in-page banner, plus the
+    <code>user_warning_notes.txt</code> entry) describes the per-site rows
+    rather than paired inter-layer synapses.</p>
 
   <div class="callout warn">
     <b>3D export needs Chrome</b> when Export Method = webdriver and

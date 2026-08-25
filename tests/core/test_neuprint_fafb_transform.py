@@ -208,7 +208,7 @@ class TestNeuprintPipeline:
         assert progress.descriptions[-1] == "Vector cache complete"
         assert progress.closed is True
 
-    def test_fast_first_render_persists_simplified_cache_and_decimates_in_memory(
+    def test_fast_first_render_persists_raw_cache_and_decimates_in_memory(
             self, tmp_path, monkeypatch):
         vs = build_vs(tmp_path, pipeline="fast")
         vs.skeleton_mode = "tube"
@@ -239,9 +239,10 @@ class TestNeuprintPipeline:
         )
         assert cache_file.exists()
         cached = morph_mod._load_cached_skeleton_file(cache_file)
-        # shared pipeline default: 90% simplified, level recorded in header
-        assert cached._drocat_simplification == 90
-        assert len(cached.nodes) < len(raw.nodes)
+        # The shared render source is raw level 0; mesh simplification is
+        # applied exactly once in memory for the selected render pipeline.
+        assert cached._drocat_simplification == 0
+        assert len(cached.nodes) == len(raw.nodes)
         assert 12211 in prepared
         # Fast is a render-time simplification mode: the cached skeleton is
         # reused while direct mesh decimation runs in memory.

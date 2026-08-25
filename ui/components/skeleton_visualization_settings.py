@@ -86,17 +86,17 @@ class SkeletonVisualizationSettings:
         if "min_synapse_num" in values:
             values["min_synapse_num"] = int(values["min_synapse_num"] or 1)
         if "synapse_size" in values:
-            # The combo box accepts free text; an emptied field falls back
-            # to 'real' instead of sending an invalid empty string.
+            # The combo box accepts free text; an emptied field falls back to
+            # the application default so pre/post sites retain the same fold.
             size = str(values["synapse_size"] or "").strip()
             if not size:
-                size = "real"
+                size = "3x real"
             elif not is_valid_synapse_size(size):
                 ui.notify(
-                    f"Invalid Synapse Size '{size}' — using 'real' instead.",
+                    f"Invalid Synapse Size '{size}' — using '3x real' instead.",
                     type="warning",
                 )
-                size = "real"
+                size = "3x real"
             values["synapse_size"] = size
         if "neuron_alpha" in values:
             values["neuron_alpha"] = float(values["neuron_alpha"] or 0)
@@ -412,10 +412,11 @@ def skeleton_visualization_settings(
                 ["fast", "fine", "artistic"],
                 get_user_default("simplification_method"),
                 hint=(
-                    "NeuPrint tube rendering: 'fast' (default) uses direct "
-                    "simp90 simplification plus the FAFB fast node-reduction "
-                    "stage; 'fine' smooths/resamples and uses the "
-                    "accelerated FAFB radius profile; 'artistic' uses "
+                    "NeuPrint tube rendering: 'fast' (default) reads the "
+                    "shared raw level-0 skeleton source, then applies direct "
+                    "mesh decimation in memory plus the FAFB fast "
+                    "node-reduction stage; 'fine' smooths/resamples and uses "
+                    "the accelerated FAFB radius profile; 'artistic' uses "
                     "vertex-cluster mesh decimation. All methods use "
                     "batched parallel online fetching and are available for "
                     "NeuPrint and FlyWire/FAFB tube renders; line mode "

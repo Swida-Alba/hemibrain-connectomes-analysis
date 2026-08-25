@@ -192,7 +192,8 @@ def test_html_writer_embeds_plotly_runtime_and_injects_warning(tmp_path):
     html = path.read_text(encoding="utf-8")
     assert "drocat-skeleton-simplification-warning" in html
     assert "skeleton_mesh_simplification=0.950" in html
-    assert "fixed simp90 skeleton cache" in html
+    assert "shared raw level-0" in html
+    assert "fixed simp90 skeleton cache" not in html
     assert html.index("drocat-skeleton-simplification-warning") > html.index("<body>")
 
 

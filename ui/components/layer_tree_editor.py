@@ -22,6 +22,13 @@ from nicegui import ui
 from ..type_suggestions import get_dataset_pools, match_suggestions
 from .common import neuron_list_input
 
+
+def _csv_quote(value: str) -> str:
+    """Quote a CSV field when it contains a comma, quote, or newline."""
+    if any(ch in value for ch in ',"\n'):
+        return '"' + value.replace('"', '""') + '"'
+    return value
+
 _DRAG_OVER_JS = (
     "(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }"
 )
@@ -194,6 +201,33 @@ class LayerTreeHandle:
         if not any(layer["name"] for layer in kept):
             return []
         return [layer["name"] for layer in kept]
+
+    def export_csv_text(self) -> str:
+        """Serialize the tree to the layer_map CSV format (layer, neuron).
+
+        Layer numbers are 1-based to match the visible layer labels; the Skeleton
+        backend auto-detects the 0/1 base when parsing, so this round-trips.
+        """
+        self._sync_input_state()
+        kept = self._kept_layers()
+        lines = [",".join(("layer", "neuron"))]
+        for offset, layer in enumerate(kept, start=1):
+            for neuron in layer["neurons"]:
+                lines.append(f"{offset},{_csv_quote(str(neuron).strip())}")
+        return "\n".join(lines) + "\n"
+
+    def export_csv(self) -> Optional[str]:
+        """Trigger a browser download of the current tree as CSV."""
+        csv_text = self.export_csv_text()
+        try:
+            if self.board is not None:
+                self.board.client.download(csv_text.encode("utf-8"), "skeleton_layers.csv", "text/csv")
+            else:
+                ui.download(csv_text.encode("utf-8"), "skeleton_layers.csv", media_type="text/csv")
+        except RuntimeError:
+            pass
+        self._update_status()
+        return csv_text
 
     # -------------------------------------------------------------- status
     def _update_status(self) -> None:
@@ -398,6 +432,9 @@ def layer_tree_editor(
         with ui.row().classes("items-end gap-2 w-full"):
             ui.button("Add Layer", icon="add").props("dense").on_click(
                 lambda: handle.add_layer()
+            )
+            ui.button("Export CSV", icon="file_download").props("dense outline").on_click(
+                lambda: handle.export_csv()
             )
 
         handle.status_label = ui.label("0 layers · 0 neurons").classes(

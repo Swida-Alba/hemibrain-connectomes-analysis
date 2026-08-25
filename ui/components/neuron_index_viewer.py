@@ -1347,6 +1347,7 @@ def create_neuron_index_viewer_link(
     dataset_getter: Callable[[], object],
     *,
     label: str = "See available neurons",
+    on_open: Callable[[], object] | None = None,
     query_values_getter: Callable[[], object] | None = None,
     query_selection: Callable[[List[str]], object] | None = None,
     query_resolution: Callable[[List[str]], object] | None = None,
@@ -1365,6 +1366,10 @@ def create_neuron_index_viewer_link(
     ``query_remove`` makes the mirrored query preview editable by removing
     one value at a time; ``query_edit`` lets a double-click return that value
     to the owning chip editor.
+
+    ``on_open`` runs immediately before the viewer resolves its dataset. It is
+    useful for callers that need to start a fresh selection session without
+    changing the viewer's query-selection semantics.
     """
     dialog = ui.dialog()
     with dialog:
@@ -1388,6 +1393,13 @@ def create_neuron_index_viewer_link(
             )
 
     def open_viewer():
+        if on_open is not None:
+            try:
+                on_open()
+            except Exception:
+                # Opening the viewer should remain usable even when a caller's
+                # session bookkeeping is being torn down during a tab switch.
+                pass
         try:
             datasets = _dataset_values(dataset_getter())
         except Exception as exc:

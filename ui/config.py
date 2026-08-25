@@ -418,6 +418,20 @@ PATH_MODES = ["all", "shortest"]
 # Skeleton modes
 SKELETON_MODES = ["tube", "line"]
 
+# Synapse rendering modes (mirrors VisualizeSkeleton.synapse_mode).
+# 'pre_post' renders the input/output SITES of the queried neurons rather
+# than the paired inter-layer synapses.
+SYNAPSE_MODE_OPTIONS = ["cone", "scatter", "sphere", "tetrahedron", "pre_post"]
+
+# Top-level synapse view modes (Skeleton tab). 'skip' maps to
+# VisualizeSkeleton.skip_synapse=True; 'pre-post sites' maps to
+# synapse_mode='pre_post' with its own shape selector.
+SYNAPSE_VIEW_MODES = ["synapse", "pre-post sites", "skip"]
+# Marker-shape choices for 'pre-post sites' mode (maps to pre_post_scatter).
+PRE_POST_SHAPES = ["solid (spheres + cones)", "scatter (circles + squares)"]
+# Layer editor modes (Skeleton tab), shown as segmented buttons.
+LAYER_EDITOR_MODES = ["Standard", "Advanced", "File upload"]
+
 # Brain mesh options
 BRAIN_MESH_OPTIONS = ["template", "whole", "none"]
 
