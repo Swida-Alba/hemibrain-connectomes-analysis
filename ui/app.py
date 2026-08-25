@@ -369,6 +369,10 @@ html, body {
     gap: 12px;
     align-items: stretch;
     min-height: 0;
+    /* Fixed window height so the two panels never reflow with the (changing)
+       result-set size, which otherwise flashes/reshapes while typing. The
+       tables scroll inside their panels instead of growing them. */
+    height: min(58vh, 680px);
 }
 .drocat-neuron-match-panel,
 .drocat-neuron-full-panel {
@@ -1103,6 +1107,11 @@ html, body {
     border-color: var(--drocat-line-strong) !important;
     border-radius: 10px;
 }
+/* Auto (default) table layout keeps the table inside its card width: the columns
+   flex to the available space (the checkbox/layer stay capped narrow, while
+   Neuron/colors take the rest), instead of ``fixed`` layout which distributes
+   leftover proportionally and can push the colour columns off-screen on narrower
+   cards. The header resizer still overrides a column's width via ``--wc-*``. */
 .drocat-edge-table .q-table__middle {
     overflow-x: auto;
 }
@@ -1130,32 +1139,92 @@ html, body {
 .drocat-edge-cell.drocat-edge-divider {
     border-right-color: var(--drocat-line-strong) !important;
 }
+/* Column widths are driven by ``--wc-*`` CSS variables so the header resizer can
+   drag them interactively (see ``layer_style_editor._COL_RESIZE_JS``). The
+   checkbox and layer columns stay narrow, leaving more room for Neuron/colors. */
 .drocat-edge-select-cell {
-    width: 52px;
-    min-width: 52px;
+    width: var(--wc-select, 42px);
+    min-width: 38px;
     border-right: 1px solid var(--drocat-line-strong) !important;
     text-align: center;
+    position: relative;
 }
 .drocat-edge-cell {
     padding: 4px 10px !important;
 }
 .drocat-edge-table .drocat-layer-column {
-    width: 58px;
-    min-width: 58px;
-    max-width: 68px;
+    width: var(--wc-layer, 68px);
+    min-width: 64px;
 }
 .drocat-edge-table .drocat-neuron-column {
-    width: 24%;
-    min-width: 220px;
-    max-width: 360px;
+    width: var(--wc-neuron, 400px);
+    min-width: 140px;
 }
-.drocat-edge-table .drocat-color-column,
-.drocat-edge-table .drocat-synapse-color-column,
-.drocat-edge-table .drocat-pre-synaptic-color-column,
+.drocat-edge-table .drocat-color-column {
+    width: var(--wc-color, 280px);
+    min-width: 110px;
+}
+.drocat-edge-table .drocat-synapse-color-column {
+    width: var(--wc-synapse_color, 280px);
+    min-width: 110px;
+}
+.drocat-edge-table .drocat-pre-synaptic-color-column {
+    width: var(--wc-pre_synaptic_color, 280px);
+    min-width: 110px;
+}
 .drocat-edge-table .drocat-post-synaptic-color-column {
-    width: 14%;
-    min-width: 112px;
-    max-width: 168px;
+    width: var(--wc-post_synaptic_color, 280px);
+    min-width: 110px;
+}
+/* The selected row must keep its cell text and chips readable (dark themes can
+   make navy-on-selected low-contrast). Keep the row light and the text navy. */
+.drocat-edge-table tr.selected,
+.drocat-edge-table tr.selected td {
+    background: var(--drocat-selected, #e9f0f9) !important;
+    color: var(--drocat-navy) !important;
+}
+.drocat-edge-table tr.selected .q-field__native,
+.drocat-edge-table tr.selected .q-field__input {
+    color: var(--drocat-navy) !important;
+}
+.drocat-edge-table tr.selected .q-chip {
+    opacity: 1 !important;
+}
+/* The narrow Layer column must still show the layer number, not just its arrow. */
+.drocat-layer-column .q-field--borderless .q-field__native,
+.drocat-layer-column .q-field--borderless .q-field__input {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.drocat-edge-header-cell {
+    position: relative;
+}
+.drocat-col-resizer {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 14px;
+    cursor: col-resize;
+    z-index: 30;
+    touch-action: none;
+    pointer-events: auto;
+}
+.drocat-col-resizer::after {
+    content: "";
+    position: absolute;
+    right: 1px;
+    top: 12px;
+    bottom: 12px;
+    width: 2px;
+    background: var(--drocat-line);
+    border-radius: 1px;
+}
+.drocat-col-resizer:hover,
+.drocat-col-resizer:active {
+    background: var(--drocat-cobalt);
+    opacity: .5;
 }
 .drocat-edge-table th.drocat-color-column,
 .drocat-edge-table th.drocat-synapse-color-column,
@@ -1195,16 +1264,18 @@ html, body {
     font-size: 13px !important;
 }
 .drocat-color-cell-picker-set {
+    /* The picker background IS the colour swatch when a value is set; hiding the
+       nested content avoids the round-button 25px content box that pushed the
+       old preview span 6.5px below centre. */
     border-radius: 4px !important;
+    box-sizing: border-box;
+    background-position: center !important;
+    background-size: cover !important;
+    transition: none;
 }
-.drocat-color-cell-preview {
-    display: block;
-    flex: 0 0 auto;
-    align-self: center;
-    width: 12px;
-    height: 12px;
-    border-radius: 2px;
-    border: 1px solid rgba(11, 31, 58, .28);
+.drocat-color-cell-picker-set .q-btn__content,
+.drocat-color-cell-picker-set .q-icon {
+    display: none !important;
 }
 .drocat-color-cell .q-field {
     flex: 1 1 auto;
@@ -1221,6 +1292,96 @@ html, body {
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+/* The swatch button must stay vertically centred in the row (the small
+   round/square button is shorter than the cell and carries no nested preview). */
+.drocat-color-cell-picker .q-btn__content {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    line-height: 1 !important;
+}
+
+/* In-table neuron chip cell: let the field grow with the chips (no clipping).
+   Quasar's multi QSelect keeps its chip row ``nowrap`` by default; force wrapping
+   so many chips fold onto extra lines and the row grows instead of overflowing. */
+.drocat-neuron-cell {
+    min-width: 0;
+    width: 100%;
+}
+.drocat-neuron-cell .q-field {
+    width: 100%;
+    min-width: 0;
+}
+.drocat-neuron-cell .q-field__control {
+    flex-wrap: wrap;
+    min-height: 34px;
+    padding: 4px 6px;
+}
+.drocat-neuron-cell .q-field__control-container {
+    min-height: 34px;
+}
+.drocat-neuron-cell .q-field__native,
+.drocat-neuron-cell .q-field__input {
+    flex-wrap: wrap;
+    white-space: normal;
+    min-height: 24px;
+    max-height: none;
+}
+.drocat-neuron-cell .q-chip {
+    max-width: 100%;
+    margin: 1px 2px;
+    white-space: normal;
+}
+
+/* In-table neuron auto-suggestion overlay: a plain positioned div below the cell.
+   It is not a Quasar menu, so opening it never blurs the cell's q-select. */
+.drocat-suggest-overlay {
+    position: absolute;
+    z-index: 7000;
+    display: none;
+    background: var(--drocat-surface, #ffffff);
+    border: 1px solid var(--drocat-line, #c8d4e4);
+    border-radius: 6px;
+    box-shadow: 0 6px 18px rgba(11, 31, 58, .18);
+    overflow: hidden;
+    max-height: 240px;
+    overflow-y: auto;
+}
+.drocat-suggest-item {
+    padding: 5px 10px;
+    cursor: pointer;
+    gap: 8px;
+    white-space: nowrap;
+}
+.drocat-suggest-item:hover {
+    background: var(--drocat-cobalt-soft, #e9f0f9);
+}
+.drocat-suggest-label {
+    font-size: 13px;
+    color: var(--drocat-navy, #0b1f3a);
+}
+.drocat-suggest-hint {
+    font-size: 11px;
+    color: var(--drocat-muted, #6b7a8f);
+    margin-left: auto;
+}
+
+/* Single-color picker palette: exactly ten swatches per row, centred. */
+.drocat-swatch-grid {
+    display: grid !important;
+    grid-template-columns: repeat(10, minmax(0, 1fr)) !important;
+    gap: 3px;
+    justify-items: center;
+    align-items: center;
+}
+.drocat-swatch-grid .drocat-swatch {
+    padding: 2px;
+}
+.drocat-swatch-grid .drocat-swatch > div {
+    width: 20px !important;
+    height: 20px !important;
+}
+
 .drocat-layer-color-control {
     flex: 0 0 auto;
 }
