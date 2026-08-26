@@ -179,35 +179,102 @@ if (!window.drocatResizeDelegated) {
 # listener emitted over the socket; ``__OVERLAY_ID__``/``__PICK_LID__`` are
 # substituted at build time with the overlay's element id + pick listener id.
 _SUGGESTION_JS = r"""
+function drocatSuggestSetHighlight(rows, index) {
+  for (var i = 0; i < rows.length; i++) {
+    rows[i].classList.remove('drocat-suggest-active');
+  }
+  if (index >= 0 && index < rows.length) {
+    rows[index].classList.add('drocat-suggest-active');
+    rows[index].scrollIntoView({ block: 'nearest' });
+  }
+}
+// Anchor the overlay just below the cell. The overlay is position:fixed, so it
+// uses viewport coords; re-applying the rect on scroll keeps it glued to the
+// cell as the page moves (matching the standard query box's menu).
+function drocatSuggestPosition(el, o) {
+  var r = el.getBoundingClientRect();
+  o.style.top = r.bottom + 'px';
+  o.style.left = r.left + 'px';
+  o.style.width = Math.max(r.width, 180) + 'px';
+}
+// Re-glue the overlay to its anchor cell (no-op when hidden). Used by the
+// scroll/resize listeners and by the requestAnimationFrame loop below, so it
+// keeps tracking the cell even if a scroll event is not dispatched.
+function drocatSuggestReposition() {
+  var o = document.getElementById('drocat-suggest-overlay');
+  if (!o || o.style.display === 'none') return;
+  var rowId = window.__drocatSuggestAnchorRow;
+  if (rowId === undefined) return;
+  var el = document.getElementById('neuron-cell-' + rowId);
+  if (el) drocatSuggestPosition(el, o);
+}
+// A rAF loop that re-anchors every frame while the overlay is open. Quasar
+// menus and real browsers fire scroll events, but programmatic/automated
+// scrolls can skip them; polling the cell rect every frame is cheap and keeps
+// the overlay glued in every case.
+function drocatSuggestStartTrack() {
+  var tick = function () {
+    var o = document.getElementById('drocat-suggest-overlay');
+    if (!o || o.style.display === 'none') {
+      window.__drocatSuggestRaf = null;
+      return;
+    }
+    drocatSuggestReposition();
+    window.__drocatSuggestRaf = requestAnimationFrame(tick);
+  };
+  if (!window.__drocatSuggestRaf) {
+    window.__drocatSuggestRaf = requestAnimationFrame(tick);
+  }
+}
+function drocatSuggestStopTrack() {
+  if (window.__drocatSuggestRaf) {
+    cancelAnimationFrame(window.__drocatSuggestRaf);
+    window.__drocatSuggestRaf = null;
+  }
+}
 window.drocatSuggest = {
-  render: function (rowId, items) {
+  render: function (rowId, items, isHistory) {
     var el = document.getElementById('neuron-cell-' + rowId);
     var o = document.getElementById('drocat-suggest-overlay');
     if (!el || !o) return;
-    var r = el.getBoundingClientRect();
-    // The overlay is position:fixed, so it uses viewport coords (no scroll)
-    // to stay anchored to the cell regardless of the surrounding layout.
-    o.style.top = r.bottom + 'px';
-    o.style.left = r.left + 'px';
-    o.style.width = Math.max(r.width, 180) + 'px';
+    // A transformed ancestor (the tab-panel slide transition keeps a persistent
+    // transform) becomes the containing block for position:fixed descendants, so
+    // absolute viewport coordinates would be displaced. Relocate the overlay to
+    // <body> so 'fixed' resolves against the viewport where the cell rect lives.
+    if (o.parentElement !== document.body) {
+      document.body.appendChild(o);
+    }
+    // Keep the anchored row so the scroll listener can re-glue the overlay to it.
+    window.__drocatSuggestAnchorRow = rowId;
+    drocatSuggestPosition(el, o);
     // A transparent click-through spacer spans the next row so its cell stays
     // visible and clickable (clicking it focuses it instead of being swallowed by
     // a suggestion item); the item list starts below that row.
     var html = '<div class="drocat-suggest-spacer"></div>';
+    if (isHistory) {
+      html += '<div class="drocat-suggest-header">Recent</div>';
+    }
     for (var i = 0; i < items.length; i++) {
       var value = items[i][0];
       var hint = items[i][1] || '';
       html += '<div class="drocat-suggest-item" data-value="' + value + '">';
       html += '<span class="drocat-suggest-label">' + value + '</span>';
-      if (hint) html += '<span class="drocat-suggest-hint text-caption">' + hint + '</span>';
+      if (hint) html += '<span class="drocat-suggest-hint">' + hint + '</span>';
+      // History rows can be pruned individually, mirroring the query box.
+      if (isHistory) {
+        html += '<span class="drocat-suggest-remove" data-value="' + value +
+                '" title="Remove from history">×</span>';
+      }
       html += '</div>';
     }
     o.innerHTML = html;
     o.style.display = 'block';
+    drocatSuggestStartTrack();
   },
   hide: function () {
     var o = document.getElementById('drocat-suggest-overlay');
     if (o) { o.style.display = 'none'; }
+    drocatSuggestStopTrack();
   },
   pick: function (value) {
     if (window.socket && window.did_handshake) {
@@ -215,6 +282,16 @@ window.drocatSuggest = {
         id: __OVERLAY_ID__,
         client_id: window.clientId,
         listener_id: '__PICK_LID__',
+        args: [JSON.stringify(value)]
+      });
+    }
+  },
+  remove: function (value) {
+    if (window.socket && window.did_handshake) {
+      window.socket.emit('event', {
+        id: __OVERLAY_ID__,
+        client_id: window.clientId,
+        listener_id: '__REMOVE_LID__',
         args: [JSON.stringify(value)]
       });
     }
@@ -227,11 +304,105 @@ window.drocatSuggest = {
 if (!window.drocatSuggestDelegated) {
   window.drocatSuggestDelegated = true;
   document.addEventListener('click', function (ev) {
+    var rem = ev.target && ev.target.closest ? ev.target.closest('.drocat-suggest-remove') : null;
+    if (rem) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      window.drocatSuggest.remove(rem.getAttribute('data-value'));
+      return;
+    }
     var t = ev.target && ev.target.closest ? ev.target.closest('.drocat-suggest-item') : null;
     if (t) {
       ev.preventDefault();
       ev.stopPropagation();
       window.drocatSuggest.pick(t.getAttribute('data-value'));
+    }
+  }, true);
+}
+// Down-key navigation into the open overlay: ArrowDown moves the highlight down
+// (entering the list from the cell), ArrowUp leaves it from the first row, and
+// Enter/Tab picks the highlighted row (mirroring the standard query box).
+if (!window.drocatSuggestNav) {
+  window.drocatSuggestNav = true;
+  document.addEventListener('keydown', function (event) {
+    if (!['ArrowDown', 'ArrowUp', 'Enter', 'Tab'].includes(event.key)) return;
+    var o = document.getElementById('drocat-suggest-overlay');
+    if (!o || o.style.display === 'none') return;
+    var rows = o.querySelectorAll('.drocat-suggest-item');
+    if (!rows.length) return;
+    var current = -1;
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].classList.contains('drocat-suggest-active')) current = i;
+    }
+    if (event.key === 'ArrowDown') {
+      if (current < rows.length - 1) {
+        event.preventDefault();
+        drocatSuggestSetHighlight(rows, current + 1);
+      }
+    } else if (event.key === 'ArrowUp') {
+      if (current === 0) {
+        event.preventDefault();
+        drocatSuggestSetHighlight(rows, -1);
+      } else if (current > 0) {
+        event.preventDefault();
+        drocatSuggestSetHighlight(rows, current - 1);
+      }
+    } else if (event.key === 'Enter' || event.key === 'Tab') {
+      if (current === -1) return;
+      event.preventDefault();
+      event.stopPropagation();
+      window.drocatSuggest.pick(rows[current].getAttribute('data-value'));
+    }
+  }, true);
+}
+// Re-anchor on scroll/resize as a first-line response (the rAF loop in
+// drocatSuggestStartTrack covers the case where a scroll event is not
+// dispatched). Capture-phase scroll catches scrolls from nested containers as
+// well as the window; both are a no-op when the overlay is hidden.
+if (!window.drocatSuggestReposition) {
+  window.drocatSuggestReposition = true;
+  document.addEventListener('scroll', drocatSuggestReposition, true);
+  window.addEventListener('resize', drocatSuggestReposition);
+}
+// Switch-cell guard: the overlay is an inline dropdown below the focused cell,
+// so its suggestion items overlap the neuron cells of the rows underneath. A
+// real click on one of those lower cells would otherwise land on an item and
+// commit a stray suggestion to the still-focused cell instead of switching
+// focus. On mousedown, if the pointer is over a DIFFERENT neuron cell (and the
+// overlay is open), close the overlay and focus that cell so the intended
+// switch happens.
+if (!window.drocatSuggestCellSwitch) {
+  window.drocatSuggestCellSwitch = true;
+  document.addEventListener('mousedown', function (ev) {
+    var o = document.getElementById('drocat-suggest-overlay');
+    if (!o || o.style.display === 'none') return;
+    // A genuine click on a suggestion item / header / remove button is an
+    // intentional pick (or history prune), never a cell switch. The item
+    // overlaps a lower row's cell rect, so decide by element type, not coords.
+    var t = ev.target;
+    if (t && t.closest && (t.closest('.drocat-suggest-item') ||
+        t.closest('.drocat-suggest-header') ||
+        t.closest('.drocat-suggest-remove'))) {
+      return;
+    }
+    var or = o.getBoundingClientRect();
+    if (ev.clientX < or.left || ev.clientX > or.right ||
+        ev.clientY < or.top || ev.clientY > or.bottom) return;
+    var focusedRow = window.__drocatSuggestAnchorRow;
+    var cells = document.querySelectorAll('.drocat-neuron-cell');
+    for (var i = 0; i < cells.length; i++) {
+      var cell = cells[i];
+      if (cell.id === 'neuron-cell-' + focusedRow) continue;
+      var r = cell.getBoundingClientRect();
+      if (ev.clientX >= r.left && ev.clientX <= r.right &&
+          ev.clientY >= r.top && ev.clientY <= r.bottom) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        window.drocatSuggest.hide();
+        var input = cell.querySelector('.q-field__input') || cell.querySelector('input');
+        if (input) input.focus();
+        return;
+      }
     }
   }, true);
 }
@@ -342,6 +513,10 @@ class LayerStyleEditorHandle:
         self._suggest_suppress: bool = False
         self._suggest_suppress_until: float = 0.0
         self._suggest_pick_listener_id: Optional[str] = None
+        self._suggest_remove_listener_id: Optional[str] = None
+        # Value -> searched column (type/instance) cache for history category tags.
+        self._history_cat_lookup: dict = {}
+        self._history_cat_key: Optional[str] = None
         # After a programmatic chip commit, the re-rendered q-select re-emits
         # ``@update:model-value`` with a possibly-stale chip list; ignore those
         # for a short window so they cannot overwrite the authoritative rows.
@@ -376,6 +551,16 @@ class LayerStyleEditorHandle:
         if isinstance(value, (list, tuple, set)):
             value = next(iter(value), "")
         return str(value or "").strip()
+
+    def _suggestions_enabled(self) -> bool:
+        """Settings toggle: live type-ahead suggestions are on."""
+        from ..config import get_auto_suggest_enabled
+        return bool(get_auto_suggest_enabled())
+
+    def _history_enabled(self) -> bool:
+        """Settings toggle: the Recent/Frequent history list is on."""
+        from ..config import get_show_history_enabled
+        return bool(get_show_history_enabled())
 
     def _suggest_neurons(self, text: str):
         """Return the shared dataset-aware suggestion list for the add field."""
@@ -530,12 +715,15 @@ class LayerStyleEditorHandle:
         return list(self._available_query_values)
 
     def apply_available_neurons(self, values) -> int:
-        """Append selected viewer entries as one row per entry.
+        """Commit the viewer's final selection as one row per entry.
 
-        The viewer reports the complete current selection after every change.
-        Existing table values are therefore used as the duplicate guard, while
-        the batch layer is allocated once and reused for all new entries in
-        the same viewer session.
+        The layer-editor viewer defers its selection to panel close, so this is
+        called once with the final "Selected" list. Because the table is not
+        touched while the panel is open, deselecting a matched value simply means
+        it never gets committed; existing rows are preserved and only genuinely
+        new entries are appended (filling empty scaffolding rows first, then
+        growing the table). The batch layer is allocated once and reused for all
+        new entries in the same viewer session.
         """
         cleaned = []
         seen = set()
@@ -736,10 +924,39 @@ class LayerStyleEditorHandle:
         (pure DOM, never NiceGUI elements) — creating NiceGUI items here would
         re-render the q-table body and remount the focused q-select, wiping typed
         text. Clicking an item commits through the registered ``pick`` listener.
+        History rows carry a ``Recent`` header and a right-aligned category tag,
+        matching the standard query box.
         """
         if self._suggest_overlay is None:
             return
-        suggestions = self._suggest_neurons(text) if text else self._recent_neuron_history()
+        if text:
+            # Type-ahead dataset suggestions, independently toggled in Settings.
+            if not self._suggestions_enabled():
+                self._close_suggest_overlay()
+                return
+            suggestions = self._suggest_neurons(text)
+            is_history = False
+        else:
+            # Query history, independently toggled in Settings.
+            if not self._history_enabled():
+                self._close_suggest_overlay()
+                return
+            suggestions = self._recent_neuron_history()
+            is_history = True
+        # Drop suggestions/history values already present in this cell as chips,
+        # so they do not render as a standalone (redundant) entry that clicks
+        # back onto an existing chip.
+        existing = {
+            str(n).strip()
+            for n in self.rows[row_id].get("neurons", [])
+            if str(n).strip()
+        }
+        if existing:
+            suggestions = [
+                (value, hint)
+                for value, hint in suggestions
+                if str(value).strip() not in existing
+            ]
         if not suggestions:
             self._close_suggest_overlay()
             return
@@ -747,7 +964,7 @@ class LayerStyleEditorHandle:
         items = [[str(value), str(hint or "")] for value, hint in suggestions[:30]]
         js = (
             f"window.drocatSuggest && window.drocatSuggest.render({int(row_id)}, "
-            f"{json.dumps(items)});"
+            f"{json.dumps(items)}, {json.dumps(is_history)});"
         )
         try:
             self.table.client.run_javascript(js)
@@ -759,22 +976,59 @@ class LayerStyleEditorHandle:
         value = getattr(event, "args", None)
         self._commit_neuron_suggestion(self._suggest_row, value)
 
+    def _on_suggest_remove(self, event) -> None:
+        """Remove one history entry from the Recent overlay."""
+        value = str(getattr(event, "args", None) or "").strip()
+        if not value:
+            return
+        try:
+            from ..history_store import remove as history_remove
+            history_remove(value)
+        except Exception:
+            return
+        if self._suggest_row is not None:
+            self._show_neuron_suggestions(self._suggest_row, "")
+
     def _recent_neuron_history(self):
-        """Recent + frequent neuron query history, limited to the dataset(s)."""
+        """Recent + frequent neuron query history; each carries a category tag.
+
+        History rows mirror the standard query box: the gray tag is the searched
+        column (type/instance/etc.) resolved from the dataset pools rather than the
+        literal ``history`` label.
+        """
         try:
             from ..history_store import frequent, recent
             dataset = self._dataset_value()
             scope = [dataset] if dataset else None
+            lookup = self._history_category_lookup(dataset)
             seen = set()
             entries = []
             for value in list(recent(datasets=scope)) + list(frequent(datasets=scope)):
                 item = str(value).strip()
                 if item and item not in seen:
                     seen.add(item)
-                    entries.append((item, "history"))
+                    entries.append((item, lookup.get(item, "")))
             return entries
         except Exception:
             return []
+
+    def _history_category_lookup(self, dataset: str) -> dict:
+        """Value -> searched column (type/instance) over the dataset pools, cached."""
+        if self._history_cat_key == dataset:
+            return self._history_cat_lookup
+        lookup = {}
+        if dataset:
+            try:
+                from ..type_suggestions import get_dataset_pools
+                pools = get_dataset_pools(dataset)
+                for column in ("type", "instance"):
+                    for candidate, _ in pools.get(column, []):
+                        lookup.setdefault(str(candidate), column)
+            except Exception:
+                pass
+        self._history_cat_key = dataset
+        self._history_cat_lookup = lookup
+        return lookup
 
     def _close_suggest_overlay(self) -> None:
         # Closing (commit / blur / no matches) suppresses re-opening from the cell's
@@ -1037,9 +1291,16 @@ def layer_style_editor(
         if _listener.type == "pick":
             handle._suggest_pick_listener_id = _listener.id
             break
+    # History-row removal uses its own listener so an 'x' click never commits a pick.
+    handle._suggest_overlay.on("remove", handle._on_suggest_remove)
+    for _listener in handle._suggest_overlay._event_listeners.values():
+        if _listener.type == "remove":
+            handle._suggest_remove_listener_id = _listener.id
+            break
     _suggest_js = (
         _SUGGESTION_JS.replace("__OVERLAY_ID__", str(handle._suggest_overlay.id))
         .replace("__PICK_LID__", str(handle._suggest_pick_listener_id))
+        .replace("__REMOVE_LID__", str(handle._suggest_remove_listener_id))
     )
     ui.add_head_html(f"<script>{_suggest_js}</script>")
 
@@ -1103,6 +1364,9 @@ def layer_style_editor(
             query_values_getter=handle.available_query_values,
             query_selection=handle.apply_available_neurons,
             query_label="Advanced layer selection",
+            # Hold the selection in the panel ("Selected") and commit it only
+            # when the dialog closes, so deselecting a matched value removes it.
+            defer_apply=True,
         )
 
         with ui.row().classes(

@@ -51,50 +51,82 @@ from ..roi_options import (
 )
 
 
-def _offer_layer_draft_recovery(layer_style) -> None:
-    """Offer to continue the most recent auto-saved (dirty) layer-style draft.
+def _offer_layer_draft_recovery(layer_style, *, on_advanced=None):
+    """Build (but do not open) the draft-recovery dialog and return ``offer``.
 
     The draft store persists every edited table to ``local_data/layer_style_drafts/``
     with a ``dirty`` flag cleared only on export/visualization. On a fresh load any
     draft still marked dirty (unexported and unvisualized) is offered for recovery, so
     a crash or quit does not silently lose edits. ``Continue`` loads it back into the
-    editor; ``Discard`` deletes it.
+    editor and switches to the Advanced panel (via ``on_advanced``); ``Discard`` deletes it.
+
+    ``offer()`` presents the dialog only when the Skeleton tab is actually shown,
+    so it does not pop up on app load or while the user is on another tab.
     """
+    state = {"dialog": None, "message": None}
+
+    def _discard(name):
+        try:
+            layer_style_store.delete_draft(name)
+        finally:
+            if state["dialog"] is not None:
+                state["dialog"].close()
+
+    def _continue(name):
+        try:
+            rows = layer_style_store.load_draft(name)
+            if rows:
+                layer_style.set_rows(rows, name=name)
+            if on_advanced is not None:
+                on_advanced()
+            elif layer_style.expansion is not None:
+                layer_style.expansion.set_value(True)
+        finally:
+            if state["dialog"] is not None:
+                state["dialog"].close()
+
+    def offer() -> None:
+        if state["dialog"] is None:
+            return
+        try:
+            pending = layer_style_store.pending_drafts()
+        except Exception:
+            return
+        if not pending:
+            return
+        draft = pending[0]
+        if state["message"] is not None:
+            state["message"].text = (
+                f"Draft '{draft.get('name')}' (updated {draft.get('updated_at')}) has "
+                "unsaved changes that were not exported or visualized."
+            )
+        state["dialog"].open()
+
     try:
         pending = layer_style_store.pending_drafts()
     except Exception:
-        return
-    if not pending:
-        return
-    draft = pending[0]
-    with ui.dialog() as dlg, ui.card().classes("w-96"):
-        ui.label("Continue auto-saved layer style?").classes("text-subtitle1")
-        ui.label(
-            f"Draft '{draft.get('name')}' (updated {draft.get('updated_at')}) has "
-            "unsaved changes that were not exported or visualized."
-        ).classes("text-caption drocat-muted")
-        with ui.row().classes("w-full justify-end gap-2"):
+        pending = []
+    if pending and not state["dialog"]:
+        draft = pending[0]
+        with ui.dialog() as dlg, ui.card().classes("w-96"):
+            ui.label("Continue auto-saved layer style?").classes("text-subtitle1")
+            _message = ui.label(
+                f"Draft '{draft.get('name')}' (updated {draft.get('updated_at')}) has "
+                "unsaved changes that were not exported or visualized."
+            ).classes("text-caption drocat-muted")
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button(
+                    "Discard",
+                    on_click=lambda d=draft["name"]: _discard(d),
+                ).props("flat outline dense")
+                ui.button(
+                    "Continue",
+                    on_click=lambda d=draft["name"]: _continue(d),
+                ).props("color=primary dense")
+        state["dialog"] = dlg
+        state["message"] = _message
 
-            def _discard():
-                try:
-                    layer_style_store.delete_draft(draft["name"])
-                finally:
-                    dlg.close()
-
-            ui.button("Discard", on_click=_discard).props("flat outline dense")
-
-            def _continue():
-                try:
-                    rows = layer_style_store.load_draft(draft["name"])
-                    if rows:
-                        layer_style.set_rows(rows, name=draft["name"])
-                    if layer_style.expansion is not None:
-                        layer_style.expansion.set_value(True)
-                finally:
-                    dlg.close()
-
-            ui.button("Continue", on_click=_continue).props("color=primary dense")
-    dlg.open()
+    return offer
 
 
 def _flatten_neuron_layers(neuron_layers) -> list:
@@ -243,9 +275,19 @@ def create_skeleton_tab():
                         search_columns.value if search_columns is not None else "auto"
                     ),
                 )
-            # On reopen, offer to continue any auto-saved (dirty, not-yet-exported
-            # or visualized) draft so a crash does not silently lose edits.
-            _offer_layer_draft_recovery(layer_style)
+
+            def _recovery_to_advanced() -> None:
+                # 'Continue' loads the draft into the Advanced Layer Editor and
+                # switches the layer-input mode to 'Advanced' so it is visible.
+                layer_editor_mode["value"] = "Advanced"
+                _sync_layer_editor_mode()
+
+            # On reopen of the Skeleton tab, offer to continue any auto-saved
+            # (dirty, not-yet-exported or visualized) draft so a crash does not
+            # silently lose edits. The dialog is opened only when the tab is shown.
+            recovery_offer = _offer_layer_draft_recovery(
+                layer_style, on_advanced=_recovery_to_advanced
+            )
             with file_upload_panel:
                 with ui.card().classes("w-full drocat-card").props(
                     'id="card-skeleton-layer-upload-card"'
@@ -1107,6 +1149,7 @@ def create_skeleton_tab():
 
     skeleton_output.run_button.on_click(run_skeleton)
     skeleton_output.cancel_button.on_click(skeleton_runner.cancel)
+    return recovery_offer
 
 
 def create_net_viz_tab():

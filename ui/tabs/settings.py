@@ -19,10 +19,12 @@ from ..config import (
     clear_tab_output_overrides,
     get_auto_suggest_enabled,
     get_default_output_dir,
+    get_show_history_enabled,
     get_user_default,
     reset_user_defaults,
     set_auto_suggest_enabled,
     set_default_output_dir,
+    set_show_history_enabled,
     set_user_default,
 )
 from ..components.common import (
@@ -620,30 +622,49 @@ def create_settings_tab():
             section_header("App Settings", "tune")
             ui.label(
                 "Auto-suggestion shows dataset type/instance/bodyId names while "
-                "typing in the pathfinding neuron inputs, plus a Recent/Frequent "
-                "query history when the field is empty. The change applies "
-                "immediately to every input."
+                "typing in a neuron input; query history shows Recent/Frequent "
+                "values when the field is empty. Both drive the pathfinding "
+                "neuron boxes AND the advanced layer editor cell dropdown, and "
+                "take effect immediately."
             ).classes("text-caption drocat-muted")
-            auto_suggest_cb = ui.checkbox(
-                "Input Auto-Suggestion",
-                value=get_auto_suggest_enabled(),
-            ).tooltip(
-                "Type-ahead suggestions (dataset type names + query history) in "
-                "the pathfinding neuron inputs. Disabling restores plain chip "
-                "inputs."
-            )
+            with ui.column().classes("gap-1"):
+                auto_suggest_cb = ui.checkbox(
+                    "Input Auto-Suggestion",
+                    value=get_auto_suggest_enabled(),
+                ).tooltip(
+                    "Type-ahead suggestions (dataset type names) in the "
+                    "pathfinding neuron inputs and the advanced layer editor "
+                    "cell dropdown. Disabling restores plain chip inputs (the "
+                    "query-history list below is unaffected)."
+                )
+                history_cb = ui.checkbox(
+                    "Show Query History",
+                    value=get_show_history_enabled(),
+                ).tooltip(
+                    "Recent/Frequent history list shown when a neuron input's "
+                    "field is empty, in the pathfinding neuron inputs and the "
+                    "advanced layer editor cell dropdown. Disabling hides the "
+                    "history list but keeps live type-ahead suggestions."
+                )
 
-            def _toggle_auto_suggest(e):
-                enabled = bool(e.value)
-                if set_auto_suggest_enabled(enabled):
+            def _toggle_setting(event, setter, what):
+                enabled = bool(event.value)
+                if setter(enabled):
                     ui.notify(
-                        "Input auto-suggestion " + ("enabled" if enabled else "disabled"),
+                        f"{what} " + ("enabled" if enabled else "disabled"),
                         type="positive" if enabled else "warning",
                     )
                 else:
                     ui.notify("Failed to save the setting", type="negative")
 
-            auto_suggest_cb.on_value_change(_toggle_auto_suggest)
+            auto_suggest_cb.on_value_change(
+                lambda e, s=set_auto_suggest_enabled, w="Input auto-suggestion":
+                _toggle_setting(e, s, w)
+            )
+            history_cb.on_value_change(
+                lambda e, s=set_show_history_enabled, w="Query history":
+                _toggle_setting(e, s, w)
+            )
 
         # Default Settings (persistent defaults for the one-time tab controls)
         with ui.card().classes("w-full drocat-card"):

@@ -887,8 +887,8 @@ html, body {
 /* ---------- Grouped navigation: layered cards ---------- */
 /* Every tab group is its own tinted card: the group header sits on top of
    its tab segments INSIDE the same card, so header and tabs are always
-   aligned and each group reads as an independent block. Settings is a
-   standalone card (no header), separated from the function groups. */
+   aligned and each group reads as an independent block. Settings is promoted
+   to the header (beside the theme toggle), so it no longer occupies a nav card. */
 .drocat-nav {
     display: flex;
     gap: 8px;
@@ -1356,9 +1356,11 @@ html, body {
     height: 48px;
 }
 .drocat-suggest-item {
+    display: flex;
+    align-items: center;
     padding: 5px 10px;
     cursor: pointer;
-    gap: 8px;
+    gap: 10px;
     white-space: nowrap;
     pointer-events: auto;
     background: var(--drocat-surface, #ffffff);
@@ -1371,14 +1373,49 @@ html, body {
 .drocat-suggest-item:hover {
     background: var(--drocat-cobalt-soft, #e9f0f9);
 }
+/* Highlight for arrow-key navigation (matches the standard query box). */
+.drocat-suggest-item.drocat-suggest-active {
+    background: var(--drocat-cobalt-soft, #e9f0f9);
+}
+.drocat-suggest-header {
+    padding: 4px 10px;
+    font-size: 11px;
+    color: var(--drocat-muted, #6b7a8f);
+    background: var(--drocat-surface, #ffffff);
+    border: 1px solid var(--drocat-line, #c8d4e4);
+    border-top: none;
+}
 .drocat-suggest-label {
     font-size: 13px;
     color: var(--drocat-navy, #0b1f3a);
+    flex-shrink: 0;
+    flex-grow: 1;
+    min-width: 0;
 }
 .drocat-suggest-hint {
     font-size: 11px;
     color: var(--drocat-muted, #6b7a8f);
     margin-left: auto;
+    text-align: right;
+    flex-shrink: 0;
+}
+/* History-row removal 'x' (in-table overlay): a small, right-aligned control
+   that does not commit the row when clicked. */
+.drocat-suggest-remove {
+    flex-shrink: 0;
+    margin-left: 6px;
+    width: 16px;
+    height: 16px;
+    line-height: 16px;
+    font-size: 14px;
+    text-align: center;
+    color: var(--drocat-muted, #6b7a8f);
+    border-radius: 3px;
+    cursor: pointer;
+}
+.drocat-suggest-remove:hover {
+    color: var(--drocat-navy, #0b1f3a);
+    background: var(--drocat-cobalt-soft, #e9f0f9);
 }
 
 /* Single-color picker palette: exactly ten swatches per row, centred. */
@@ -2173,6 +2210,12 @@ def main_page():
                     ui.element("div").classes("drocat-theme-sep")
                     ui.icon("dark_mode").classes("drocat-theme-moon")
                 theme_menu = ui.menu().classes("drocat-theme-menu")
+            # Settings lives in the header beside the theme toggle rather than as
+            # a left-nav tool tab. Its navigation is wired once nav_panels exists
+            # below (the header is built before the tab panels).
+            settings_btn = ui.button(icon="settings").props("flat").classes(
+                "drocat-dark-toggle"
+            ).tooltip("Settings")
             theme_items = {}
             with theme_menu:
                 for label, icon, mode in THEME_OPTIONS:
@@ -2255,12 +2298,8 @@ def main_page():
                     with ui.element("div").classes("drocat-group-tabs"):
                         for label, icon in tabs:
                             group_tab(label, icon)
-            # Standalone Settings card (no header), apart from the groups.
-            with ui.element("div").classes(
-                "drocat-group-card drocat-tint-settings drocat-settings-card"
-            ):
-                with ui.element("div").classes("drocat-group-tabs"):
-                    group_tab("Settings", "settings")
+            # Settings is promoted to the header (beside the theme toggle), so it
+            # is no longer rendered as a left-nav tool-tab card below the groups.
 
         with ui.tab_panels(value="Complete Paths").classes("w-full bg-transparent") as nav_panels:
             # Connection
@@ -2274,7 +2313,7 @@ def main_page():
                 create_inter_dataset_tab()
             # Visualization
             with ui.tab_panel("Skeleton").classes("p-0"):
-                create_skeleton_tab()
+                skeleton_recovery = create_skeleton_tab()
             with ui.tab_panel("Net-Viz").classes("p-0"):
                 create_net_viz_tab()
             # Similarity
@@ -2298,6 +2337,11 @@ def main_page():
             with ui.tab_panel("Settings").classes("p-0"):
                 create_settings_tab()
 
+        # The header Settings button opens the Settings panel and is tracked in
+        # tab_buttons so the active-tab highlight follows it too.
+        tab_buttons["Settings"] = settings_btn
+        settings_btn.on_click(lambda: nav_panels.set_value("Settings"))
+
         def sync_active_tab(value):
             for label, button in tab_buttons.items():
                 if label == value:
@@ -2307,6 +2351,13 @@ def main_page():
 
         nav_panels.on_value_change(lambda event: sync_active_tab(event.value))
         sync_active_tab(nav_panels.value)
+
+        # Offer any auto-saved (uncommitted) layer style draft only when the
+        # user switches to the Skeleton tab, so the recovery dialog does not
+        # pop up on app load or while the user is on another tab.
+        nav_panels.on_value_change(
+            lambda event: skeleton_recovery() if event.value == "Skeleton" else None
+        )
 
     # --- Token warning dialog -------------------------------------------
     # When no NeuPrint token is configured, pop a warning once the page is

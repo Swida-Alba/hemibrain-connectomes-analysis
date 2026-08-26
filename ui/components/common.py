@@ -1157,10 +1157,23 @@ def neuron_list_input(
         # the continuation no longer has candidates.
         _candidate_state = {"text": None, "entries": []}
 
+        def _feature_enabled() -> bool:
+            """Whether any part of the suggest/history UX is live. Either the
+            type-ahead suggestions or the query history can be on alone, so the
+            menu lifecycle runs when either is enabled; an empty editor still
+            needs to decide between the two below."""
+            from ..config import get_auto_suggest_enabled, get_show_history_enabled
+            return bool(get_auto_suggest_enabled() or get_show_history_enabled())
+
         def _suggestions_enabled() -> bool:
-            """Settings toggle: the whole feature can be switched off live."""
+            """Settings toggle: live type-ahead suggestions are on."""
             from ..config import get_auto_suggest_enabled
-            return get_auto_suggest_enabled()
+            return bool(get_auto_suggest_enabled())
+
+        def _history_enabled() -> bool:
+            """Settings toggle: the Recent/Frequent history list is on."""
+            from ..config import get_show_history_enabled
+            return bool(get_show_history_enabled())
 
         def _reset_candidate_state():
             _candidate_state["text"] = None
@@ -1228,6 +1241,21 @@ def neuron_list_input(
                 # highlight the client just re-applied after the pick.
                 _last_suggest_text["value"] = ""
                 chip_input.run_method("updateInputValue", "")
+                # Quasar's new-value-mode re-adds leftover editor text (e.g. 'MTe')
+                # as a chip when the model is set externally, and the managed
+                # updateInputValue can be racy on the first pick. Synchronously
+                # clear the native input (same approach as the keyboard pick) so
+                # only the picked value lands in the list.
+                try:
+                    chip_input.client.run_javascript(
+                        "(function(){"
+                        f"var s=document.querySelector('.drocat-suggest-anchor-{_suggest_token} .q-field__input');"
+                        "if(s){var d=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;"
+                        "d.call(s,'');}"
+                        "})()"
+                    )
+                except Exception:
+                    pass
                 sync_options(merged)
                 chip_input.set_value(merged)
             pending_input["value"] = ""
@@ -1475,8 +1503,8 @@ def neuron_list_input(
 
         def _on_suggest_input(event):
             # The editor text changed: refresh the list immediately (the
-            # settings toggle switches the whole feature off at runtime).
-            if not _suggestions_enabled():
+            # settings toggles switch suggestions and history off at runtime).
+            if not _feature_enabled():
                 _reset_candidate_state()
                 _close_suggest()
                 return
@@ -1490,17 +1518,23 @@ def neuron_list_input(
                 # blank focused editor is the only default path that renders
                 # query history instead of dataset suggestions.
                 if text.strip():
-                    _get_suggestions(text.strip())
+                    # Under the minimum length, dataset suggestions need at
+                    # least one typed character; history is the fallback.
+                    if _suggestions_enabled():
+                        _get_suggestions(text.strip())
                 else:
                     # A manual clear starts a new query. Do not let the next
                     # query reuse candidates from the text that was erased.
                     _reset_candidate_state()
-                if _focused["value"]:
+                if _focused["value"] and _history_enabled():
                     _show_history(text.strip())
                 else:
                     _close_suggest()
                 return
-            _show_suggestions(_get_suggestions(text.strip()))
+            if _suggestions_enabled():
+                _show_suggestions(_get_suggestions(text.strip()))
+            else:
+                _close_suggest()
 
         def _on_suggest_input_value(event):
             """Handle Quasar's component event only while this field owns
@@ -1520,7 +1554,7 @@ def neuron_list_input(
         def _on_suggest_focus(_event):
             _close_other_suggestion_menus()
             _focused["value"] = True
-            if not _suggestions_enabled():
+            if not _feature_enabled():
                 return
             # The menu is already showing suggestions (e.g. after a pick) —
             # do not flip it back to the history list.
@@ -1529,7 +1563,8 @@ def neuron_list_input(
             # No editor text yet -> offer the persistent query history.
             if not pending_input["value"]:
                 _reset_candidate_state()
-                _show_history()
+                if _history_enabled():
+                    _show_history()
 
         def _on_suggest_blur(event):
             # Quasar can emit a component-level blur while it is moving focus
@@ -1541,8 +1576,8 @@ def neuron_list_input(
             blur_args = getattr(event, "args", None)
             if isinstance(blur_args, dict) and blur_args.get("still_inside"):
                 return
-            if not _suggestions_enabled():
-                # The setting can be changed from the Settings tab while a
+            if not _feature_enabled():
+                # A setting can be changed from the Settings tab while a
                 # menu is open. Treat the next focus change as a real blur
                 # even in that disabled state so no stale popup survives.
                 _focused["value"] = False
@@ -1601,12 +1636,12 @@ def neuron_list_input(
             # finished. With an empty editor and the field still in use,
             # offer the Recent list again; otherwise hide the menu.
             _reset_candidate_state()
-            if not _suggestions_enabled():
+            if not _feature_enabled():
                 _close_suggest()
             elif _suppress_history_popup["value"]:
                 _suppress_history_popup["value"] = False
                 _close_suggest()
-            elif not pending_input["value"] and _focused["value"]:
+            elif not pending_input["value"] and _focused["value"] and _history_enabled():
                 _show_history()
             else:
                 _close_suggest()

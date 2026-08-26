@@ -440,6 +440,107 @@ class TestEditorHandle:
         assert showed == [(1, "")]
         assert handle._suggest_suppress is False
 
+    def test_suggestion_settings_gate_typing_overlay(
+        self, store_patch_for_component, monkeypatch
+    ):
+        """Unchecking Input Auto-Suggestion hides the type-ahead suggestions.
+
+        A non-empty query must close the overlay instead of rendering the
+        dataset suggestion list, but the empty-field history list is unaffected.
+        """
+        from ui.components import layer_style_editor as editor_module
+        import ui.config as _config
+
+        client, handle = build_editor(store_patch_for_component)
+        # Track whether the suggestion resolver was ever consulted (it should
+        # not be while the setting is off).
+        consulted = []
+        monkeypatch.setattr(
+            handle, "_suggest_neurons",
+            lambda _text: consulted.append(
+                "suggest") or [("aMe12", "type")],
+        )
+        monkeypatch.setattr(_config, "get_auto_suggest_enabled", lambda: False)
+
+        def _catch_close(*_a, **_k):
+            # _close_suggest_overlay arms the suppress window; record it but do
+            # not hit the socket in the test.
+            handle._suggest_suppress = True
+            handle._suggest_suppress_until = time.time() + 0.4
+
+        monkeypatch.setattr(handle, "_close_suggest_overlay", _catch_close)
+
+        assert handle._suggestions_enabled() is False
+        handle._show_neuron_suggestions(0, "aMe")
+        # Suggestions were suppressed and no keyword search ran.
+        assert consulted == []
+        assert handle._suggest_suppress is True
+
+    def test_suggestion_settings_gate_history_overlay(
+        self, store_patch_for_component, monkeypatch
+    ):
+        """Unchecking Show Query History hides the empty-field history list.
+
+        An empty field must close the overlay instead of rendering a Recent/
+        Frequent list, but live self._suggest_neurons typing is unaffected.
+        """
+        from ui.components import layer_style_editor as editor_module
+        import ui.config as _config
+
+        client, handle = build_editor(store_patch_for_component)
+        consulted = []
+        monkeypatch.setattr(
+            handle, "_recent_neuron_history",
+            lambda: consulted.append("history") or [("l-LNv", "type")],
+        )
+        monkeypatch.setattr(_config, "get_show_history_enabled", lambda: False)
+
+        def _catch_close(*_a, **_k):
+            handle._suggest_suppress = True
+            handle._suggest_suppress_until = time.time() + 0.4
+
+        monkeypatch.setattr(handle, "_close_suggest_overlay", _catch_close)
+
+        assert handle._history_enabled() is False
+        handle._show_neuron_suggestions(0, "")
+        # History was suppressed and the store was never queried.
+        assert consulted == []
+        assert handle._suggest_suppress is True
+
+    def test_suggestion_settings_render_respects_history_flag(
+        self, store_patch_for_component, monkeypatch
+    ):
+        """Enabled history renders the Recent payload (isHistory=true), while a
+        typed query renders the dataset suggestion payload (isHistory=false)."""
+        from ui.components import layer_style_editor as editor_module
+        import ui.config as _config
+
+        client, handle = build_editor(store_patch_for_component)
+        monkeypatch.setattr(_config, "get_auto_suggest_enabled", lambda: True)
+        monkeypatch.setattr(_config, "get_show_history_enabled", lambda: True)
+        monkeypatch.setattr(
+            handle, "_suggest_neurons", lambda _t: [("aMe12", "type")],
+        )
+        monkeypatch.setattr(
+            handle, "_recent_neuron_history", lambda: [("l-LNv", "type")],
+        )
+        seen = []
+        monkeypatch.setattr(
+            handle.table.client, "run_javascript",
+            lambda js: seen.append(js),
+        )
+
+        # Typing a query → suggestion payload, not history.
+        handle._show_neuron_suggestions(0, "aMe")
+        assert seen and "aMe12" in seen[-1]
+        assert "true" not in seen[-1]  # not a history render
+
+        # Empty field → history payload with the Recent flag.
+        seen.clear()
+        handle._show_neuron_suggestions(0, "")
+        assert seen and "l-LNv" in seen[-1]
+        assert "true" in seen[-1]  # isHistory=true
+
     def test_delete_selected_rows(self, store_patch_for_component):
         client, handle = build_editor(store_patch_for_component)
         handle.name_input.value = "del"

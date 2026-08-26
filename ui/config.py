@@ -160,14 +160,36 @@ def clear_tab_output_overrides() -> bool:
 
 
 def get_auto_suggest_enabled() -> bool:
-    """Whether the neuron-input auto-suggest + history is enabled (Settings)."""
+    """Whether type-ahead neuron-name suggestions are enabled (Settings).
+
+    Independent of the query-history toggle: this drives only the live
+    suggestions shown while typing in a neuron input (pathfinding boxes and the
+    advanced layer editor cell dropdown).
+    """
     return bool(load_local_config().get("auto_suggest_enabled", True))
 
 
 def set_auto_suggest_enabled(enabled: bool) -> bool:
-    """Persist the input auto-suggestion toggle; applies immediately."""
+    """Persist the type-ahead suggestion toggle; applies immediately."""
     config = load_local_config()
     config["auto_suggest_enabled"] = bool(enabled)
+    return save_local_config(config)
+
+
+def get_show_history_enabled() -> bool:
+    """Whether the Recent/Frequent query history is enabled (Settings).
+
+    Independent of the type-ahead suggestion toggle: this drives only the
+    history list shown when a neuron input's editor is empty (pathfinding
+    boxes and the advanced layer editor cell dropdown).
+    """
+    return bool(load_local_config().get("show_history_enabled", True))
+
+
+def set_show_history_enabled(enabled: bool) -> bool:
+    """Persist the query-history toggle; applies immediately."""
+    config = load_local_config()
+    config["show_history_enabled"] = bool(enabled)
     return save_local_config(config)
 
 
