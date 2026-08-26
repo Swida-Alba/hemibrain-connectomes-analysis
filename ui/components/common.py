@@ -1550,11 +1550,18 @@ def neuron_list_input(
                     _show_history(text.strip())
                 else:
                     _close_suggest()
+                    # Nothing was shown for this text: clear the dedup key so a
+                    # later re-enable (or re-focus) of the feature re-processes
+                    # the same keystroke.
+                    _last_suggest_text["value"] = None
                 return
             if _suggestions_enabled():
                 _show_suggestions(_get_suggestions(text.strip()))
             else:
                 _close_suggest()
+                # Suggestions are toggled off: forget this text so re-enabling
+                # the toggle lets the very next keystroke reopen the list.
+                _last_suggest_text["value"] = None
 
         def _on_suggest_input_value(event):
             """Handle Quasar's component event only while this field owns

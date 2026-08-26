@@ -3255,7 +3255,7 @@ class TestTabs:
             "Homolog": "similarity", "Morphology": "similarity",
             "Connectivity": "similarity",
             "Find Lines": "nb", "Find Neurons": "nb", "Co-Labeling": "nb",
-            "Downloader": "flylight", "Settings": "settings",
+            "Downloader": "flylight",
         }
         buttons = {
             ((el._props or {}).get("label") or "").replace("\n", " "): el
@@ -3267,10 +3267,15 @@ class TestTabs:
             card = card_of(buttons[label])
             assert f"drocat-tint-{tint}" in card._classes, f"{label} in wrong card"
 
-        # Settings card is standalone: no header inside it.
-        settings_card = card_of(buttons["Settings"])
-        assert "drocat-settings-card" in settings_card._classes
-        assert all(card_of(el) is not settings_card for el in headers)
+        # Settings is promoted to the header (beside the theme toggle) rather than
+        # a left-nav card, so no Settings group-tab button or nav card exists.
+        header_settings = [
+            el for el in client.elements.values()
+            if type(el).__name__ == "Button"
+            and "drocat-dark-toggle" in getattr(el, "_classes", [])
+            and el._props.get("icon") == "settings"
+        ]
+        assert header_settings, "Settings button should live in the header beside the theme toggle"
 
         # Clicking a group tab switches the shared panel and active state.
         panels = next(
@@ -4813,7 +4818,9 @@ class TestComponents:
         texts = [el.text for el in client.elements.values() if getattr(el, "text", "")]
         assert "APL" in texts and "APL2" in texts and "type" in texts
 
-        # Clicking the first suggestion commits it as a chip and closes the menu.
+        # Clicking the first suggestion commits it as a chip and keeps the menu
+        # open (re-offering Recent for the still-focused field) — mirroring the
+        # standard query box, where a pick does not close the list.
         def _subtree_texts(el):
             """Flatten the element subtree texts (labels live inside a row)."""
             out = [getattr(el, "text", "")]
@@ -4830,7 +4837,7 @@ class TestComponents:
         click.handler(SimpleNamespace())
         assert container.get_value() == ("exact", ["APL"])
 
-        assert menu.value is False
+        assert menu.value is True
 
         # An empty focused field offers the persisted query history.
         focus = next(l for l in chip._event_listeners.values() if l.type == "focus")
