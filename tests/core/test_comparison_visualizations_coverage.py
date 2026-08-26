@@ -632,3 +632,533 @@ def test_interactive_heatmap_large_branch(tmp_path):
     assert out.exists()
     html = out.read_text(encoding="utf-8")
     assert "Show Labels" in html  # large matrices start with labels hidden
+
+
+# ============================================================================
+# Additional coverage: dependency guards, fallbacks, error paths
+# ============================================================================
+
+import comparison.visualizations as vis_module
+from comparison import metrics as comparison_metrics_module
+
+
+def _raiser(*args, **kwargs):
+    raise RuntimeError("boom")
+
+
+def _df_types_no_hvp():
+    """Tiny result DataFrame without has_valid_path column."""
+    return pd.DataFrame({"type_pre": ["A"], "type_post": ["B"], "weight": [1.0]})
+
+
+# --- Dependency guards ------------------------------------------------------
+
+def test_init_requires_matplotlib(monkeypatch):
+    monkeypatch.setattr(vis_module, "HAS_MATPLOTLIB", False)
+    with pytest.raises(ImportError):
+        ComparisonVisualizer()
+
+
+def test_vprint_verbose():
+    v = ComparisonVisualizer(verbose=True)
+    v._vprint("hello", 42)  # exercises tqdm.write branch
+
+
+def test_heatmap_functions_require_seaborn(
+    monkeypatch, viz, results, aligned, similarities, path_data, ratio_data, prob_data
+):
+    monkeypatch.setattr(vis_module, "HAS_SEABORN", False)
+    with pytest.raises(ImportError):
+        viz.plot_edge_weight_heatmap(aligned, DATASETS)
+    with pytest.raises(ImportError):
+        viz.plot_edge_weight_heatmap_all_thresholds(
+            results, THRESHOLDS, align_func=lambda t: aligned
+        )
+    with pytest.raises(ImportError):
+        viz.plot_similarity_matrix(similarities)
+    with pytest.raises(ImportError):
+        viz.plot_dual_similarity_matrices(similarities)
+    with pytest.raises(ImportError):
+        viz.plot_similarity_per_threshold({1: similarities})
+    with pytest.raises(ImportError):
+        viz.plot_similarity_matrix_per_threshold(
+            results, THRESHOLDS, align_func=lambda t: aligned
+        )
+    with pytest.raises(ImportError):
+        viz.plot_path_heatmap(path_data, DATASETS)
+    with pytest.raises(ImportError):
+        viz.plot_path_heatmap_all_thresholds(lambda t: path_data, THRESHOLDS, DATASETS)
+    with pytest.raises(ImportError):
+        viz.plot_ratio_heatmap(ratio_data, DATASETS)
+    with pytest.raises(ImportError):
+        viz.plot_traversal_probability_heatmap(prob_data, DATASETS)
+    with pytest.raises(ImportError):
+        viz.plot_ratio_heatmap_all_thresholds(
+            lambda t: ratio_data, THRESHOLDS, DATASETS
+        )
+    with pytest.raises(ImportError):
+        viz.plot_traversal_probability_heatmap_all_thresholds(
+            lambda t: prob_data, THRESHOLDS, DATASETS
+        )
+
+
+def test_trend_functions_require_matplotlib(monkeypatch, viz, results, aligned, path_data):
+    monkeypatch.setattr(vis_module, "HAS_MATPLOTLIB", False)
+    fig, df = viz.plot_jaccard_similarity_trend(lambda t: aligned, THRESHOLDS, DATASETS)
+    assert fig is None and df.empty
+    fig, df = viz.plot_edge_rank_correlation_trend(lambda t: aligned, THRESHOLDS, DATASETS)
+    assert fig is None and df.empty
+    fig, df = viz.plot_path_rank_correlation_trend(lambda t: path_data, THRESHOLDS, DATASETS)
+    assert fig is None and df.empty
+    fig, df = viz.plot_cosine_similarity_trend(lambda t: aligned, THRESHOLDS, DATASETS)
+    assert fig is None and df.empty
+    fig, df = viz.plot_conservation_across_thresholds(results, THRESHOLDS)
+    assert fig is None and df is None
+
+
+# --- Threshold comparison subplot fallbacks ----------------------------------
+
+def test_threshold_comparison_subplots_no_seaborn_fallback(monkeypatch, viz):
+    monkeypatch.setattr(vis_module, "HAS_SEABORN", False)
+    df_w = pd.DataFrame({"weight": [1.0, 2.0, 3.0]})  # no type_pre/type_post
+    res = {
+        "d1": {1: df_w, 2: pd.DataFrame()},
+        "d2": {1: pd.DataFrame({"weight": [2.0, 4.0]}), 2: pd.DataFrame()},
+    }
+    fig = viz.plot_threshold_comparison_subplots(res, [1, 2])
+    assert fig is not None
+
+
+def test_edge_heatmap_all_thresholds_no_dataset_columns(viz, results):
+    # aligned frame without any dataset column -> index-based top_edges fallback
+    other = pd.DataFrame({"zzz": [1.0, 2.0]}, index=["e1", "e2"])
+    fig = viz.plot_edge_weight_heatmap_all_thresholds(
+        results, THRESHOLDS, align_func=lambda t: other
+    )
+    assert fig is not None  # "No data available" fallback
+
+
+# --- Similarity subplot branches ---------------------------------------------
+
+def test_similarity_per_threshold_nan_value_and_unused_axes(viz, similarities):
+    sims_nan = similarities.copy()
+    sims_nan.loc[0, "jaccard_similarity"] = np.nan  # NaN -> 0 branch
+    sims = similarities.copy()
+    # 4 thresholds on a 3-col grid -> two unused axes hidden
+    fig = viz.plot_similarity_per_threshold(
+        {1: sims_nan, 2: sims, 3: sims, 4: sims}, metric="jaccard"
+    )
+    assert fig is not None
+
+
+def test_similarity_matrix_per_threshold_branches(
+    viz, results, aligned, similarities, monkeypatch
+):
+    # path_data_func raising -> swallowed
+    fig = viz.plot_similarity_matrix_per_threshold(
+        results, THRESHOLDS,
+        align_func=lambda t: aligned,
+        similarity_func=lambda t: similarities.copy(),
+        path_data_func=_raiser,
+        show_progress=False,
+    )
+    assert fig is not None
+    # empty cached similarities -> recompute path
+    fig = viz.plot_similarity_matrix_per_threshold(
+        results, [1],
+        align_func=lambda t: aligned,
+        similarity_func=lambda t: pd.DataFrame(),
+        show_progress=False,
+    )
+    assert fig is not None
+
+    # recompute yields empty -> skip threshold
+    class _EmptyMetrics:
+        def calculate_all_pairwise_similarities(self, *a, **k):
+            return pd.DataFrame()
+
+    monkeypatch.setattr(comparison_metrics_module, "ComparisonMetrics", _EmptyMetrics)
+    fig = viz.plot_similarity_matrix_per_threshold(
+        results, [1], align_func=lambda t: aligned, show_progress=False
+    )
+    assert fig is not None
+    # align_func raising -> per-threshold warning branch
+    fig = viz.plot_similarity_matrix_per_threshold(
+        results, [1], align_func=_raiser, show_progress=False
+    )
+    assert fig is not None
+
+
+# --- Path / ratio / probability all-threshold heatmaps ------------------------
+
+def test_path_heatmap_all_thresholds_dup_index_and_bad_value(viz):
+    df = pd.DataFrame(
+        {"ds_one": [5.0, 4.0, 9.0], "ds_two": [3.0, 2.0, "bad"]},
+        index=["p", "p", "q"],  # duplicate index -> Series.sum branch
+    )
+    fig = viz.plot_path_heatmap_all_thresholds(lambda t: df, THRESHOLDS, DATASETS)
+    assert fig is not None
+
+
+def test_path_heatmap_all_thresholds_no_dataset_columns(viz):
+    df = pd.DataFrame({"zzz": [1.0, 2.0]}, index=["p1", "p2"])
+    fig = viz.plot_path_heatmap_all_thresholds(lambda t: df, THRESHOLDS, ["nope"])
+    assert fig is not None  # fallback figure
+
+
+def test_path_heatmap_all_thresholds_no_thresholds(viz, path_data):
+    fig = viz.plot_path_heatmap_all_thresholds(lambda t: path_data, [], DATASETS)
+    assert fig is not None
+
+
+def test_path_heatmap_all_thresholds_many_paths(viz):
+    n = 40
+    df = pd.DataFrame(
+        {"ds_one": np.linspace(1, 40, n), "ds_two": np.linspace(2, 30, n)},
+        index=[f"p{i}" for i in range(n)],
+    )
+    # >30 rows -> annotations disabled
+    fig = viz.plot_path_heatmap_all_thresholds(
+        lambda t: df.copy(), THRESHOLDS, DATASETS, max_paths=32
+    )
+    assert fig is not None
+
+
+def test_ratio_heatmap_all_thresholds_raising(viz):
+    fig = viz.plot_ratio_heatmap_all_thresholds(_raiser, THRESHOLDS, DATASETS)
+    assert fig is not None  # "No ratio data available"
+
+
+def test_ratio_heatmap_all_thresholds_no_dataset_columns(viz):
+    df = pd.DataFrame({"zzz": [0.5, 0.6]}, index=["e1", "e2"])
+    fig = viz.plot_ratio_heatmap_all_thresholds(lambda t: df, THRESHOLDS, ["nope"])
+    assert fig is not None
+
+
+def test_ratio_heatmap_all_thresholds_dup_index_and_bad_value(viz):
+    df = pd.DataFrame(
+        {"ds_one": [0.5, 0.4, 0.9], "ds_two": [0.3, 0.2, "bad"]},
+        index=["e", "e", "f"],
+    )
+    fig = viz.plot_ratio_heatmap_all_thresholds(lambda t: df, THRESHOLDS, DATASETS)
+    assert fig is not None
+
+
+def test_ratio_heatmap_all_thresholds_many_edges(viz):
+    n = 40
+    df = pd.DataFrame(
+        {"ds_one": np.linspace(0.1, 0.9, n), "ds_two": np.linspace(0.2, 0.8, n)},
+        index=[f"e{i}" for i in range(n)],
+    )
+    fig = viz.plot_ratio_heatmap_all_thresholds(
+        lambda t: df.copy(), THRESHOLDS, DATASETS, max_edges=32
+    )
+    assert fig is not None
+
+
+def test_traversal_prob_all_thresholds_raising(viz):
+    fig = viz.plot_traversal_probability_heatmap_all_thresholds(
+        _raiser, THRESHOLDS, DATASETS
+    )
+    assert fig is not None  # "No probability data available"
+
+
+def test_traversal_prob_all_thresholds_no_dataset_columns(viz):
+    df = pd.DataFrame({"zzz": [0.5, 0.6]}, index=["p1", "p2"])
+    fig = viz.plot_traversal_probability_heatmap_all_thresholds(
+        lambda t: df, THRESHOLDS, ["nope"]
+    )
+    assert fig is not None
+
+
+def test_traversal_prob_all_thresholds_dup_index_and_bad_value(viz):
+    df = pd.DataFrame(
+        {"ds_one": [0.5, 0.4, 0.9], "ds_two": [0.3, 0.2, "bad"]},
+        index=["p", "p", "q"],
+    )
+    fig = viz.plot_traversal_probability_heatmap_all_thresholds(
+        lambda t: df, THRESHOLDS, DATASETS
+    )
+    assert fig is not None
+
+
+def test_traversal_prob_all_thresholds_many_paths(viz):
+    n = 40
+    df = pd.DataFrame(
+        {"ds_one": np.linspace(0.01, 0.9, n), "ds_two": np.linspace(0.02, 0.8, n)},
+        index=[f"p{i}" for i in range(n)],
+    )
+    fig = viz.plot_traversal_probability_heatmap_all_thresholds(
+        lambda t: df.copy(), THRESHOLDS, DATASETS, max_paths=32
+    )
+    assert fig is not None
+
+
+# --- Conservation across thresholds -------------------------------------------
+
+def test_conservation_presence_matrix_sanitized_names(viz):
+    # dataset name with ':' -> sanitized column lookup; second dataset column missing
+    res = {
+        "a:b": {1: _edge_df(3), 5: _edge_df(2)},
+        "c": {1: _edge_df(3), 5: _edge_df(2)},
+    }
+    matrix = pd.DataFrame(
+        {"a_b_t1": ["True", "False"], "a_b_t5": ["True", "True"]}
+    )
+    align = pd.DataFrame({"a:b": [1.0, 0.0], "c": [1.0, 1.0]}, index=["x", "y"])
+    fig, df = viz.plot_conservation_across_thresholds(
+        res, THRESHOLDS, align_func=lambda t: align, path_presence_matrix=matrix
+    )
+    assert fig is not None and not df.empty
+
+
+def test_conservation_presence_matrix_missing_col_no_hvp(viz):
+    res = {"d1": {1: _df_types_no_hvp(), 5: _df_types_no_hvp()}}
+    matrix = pd.DataFrame({"other_t1": ["True"]})  # no matching column
+    fig, df = viz.plot_conservation_across_thresholds(
+        res, THRESHOLDS,
+        align_func=lambda t: pd.DataFrame(),
+        path_presence_matrix=matrix,
+    )
+    assert fig is not None
+
+
+def test_conservation_fallback_common_paths(viz):
+    df_types = _df_types_no_hvp()
+    df_hvp_false = pd.DataFrame(
+        {"type_pre": ["A"], "type_post": ["B"], "weight": [1.0],
+         "has_valid_path": [False]}
+    )
+    df_notypes = pd.DataFrame({"weight": [1.0, 2.0]})
+    res = {
+        "d1": {1: df_types, 5: df_types},
+        "d2": {1: df_hvp_false, 5: pd.DataFrame()},
+        "d3": {1: df_notypes, 5: df_types},
+    }
+    fig, df = viz.plot_conservation_across_thresholds(
+        res, THRESHOLDS, align_func=_raiser
+    )
+    assert fig is not None and not df.empty
+
+
+def test_conservation_empty_results(viz):
+    fig, df = viz.plot_conservation_across_thresholds({}, THRESHOLDS)
+    assert fig is not None and not df.empty
+
+
+# --- Trend plot fallbacks -------------------------------------------------------
+
+def test_jaccard_and_edge_rank_trend_empty_aligned(viz):
+    fig, df = viz.plot_jaccard_similarity_trend(
+        lambda t: pd.DataFrame(), THRESHOLDS, DATASETS
+    )
+    assert fig is not None and df.empty
+    fig, df = viz.plot_edge_rank_correlation_trend(
+        lambda t: pd.DataFrame(), THRESHOLDS, DATASETS
+    )
+    assert fig is not None and df.empty
+
+
+def test_path_rank_trend_raising(viz):
+    fig, df = viz.plot_path_rank_correlation_trend(_raiser, THRESHOLDS, DATASETS)
+    assert fig is not None and df.empty
+
+
+def test_cosine_trend_align_raise_and_none(viz):
+    fig, df = viz.plot_cosine_similarity_trend(_raiser, THRESHOLDS, DATASETS)
+    assert fig is not None and df.empty
+    fig, df = viz.plot_cosine_similarity_trend(lambda t: None, THRESHOLDS, DATASETS)
+    assert fig is not None and df.empty
+
+
+# --- Plotly conservation branches -----------------------------------------------
+
+def test_plotly_conservation_presence_branches(viz):
+    res = {
+        "a:b": {1: _edge_df(2), 5: _edge_df(2)},
+        "c": {1: _edge_df(2), 5: _edge_df(2)},
+    }
+    matrix = pd.DataFrame(
+        {
+            "a_b_t1": [True, False],     # bool dtype
+            "a_b_t5": [1, 0],            # numeric dtype
+            "c_t5": [True, True],        # bool; c_t1 missing -> fallback
+        }
+    )
+    payload = viz.plot_conservation_across_thresholds_plotly(
+        res, THRESHOLDS, align_func=_raiser, path_presence_matrix=matrix
+    )
+    parsed = json.loads(payload)
+    assert "data" in parsed
+
+
+def test_plotly_conservation_missing_col_no_hvp(viz):
+    # presence matrix exists but has no matching column and df lacks has_valid_path
+    res = {"d1": {1: _df_types_no_hvp(), 5: _df_types_no_hvp()}}
+    matrix = pd.DataFrame({"unrelated": [1]})
+    payload = viz.plot_conservation_across_thresholds_plotly(
+        res, THRESHOLDS, path_presence_matrix=matrix
+    )
+    parsed = json.loads(payload)
+    assert "data" in parsed
+
+
+def test_plotly_conservation_common_path_fallbacks(viz):
+    df_hvp_false = pd.DataFrame(
+        {"type_pre": ["A"], "type_post": ["B"], "weight": [1.0],
+         "has_valid_path": [False]}
+    )
+    df_notypes = pd.DataFrame({"weight": [1.0]})
+    res = {
+        "d1": {1: _df_types_no_hvp(), 5: _df_types_no_hvp()},
+        "d2": {1: df_notypes, 5: _df_types_no_hvp()},
+        "d3": {1: df_hvp_false, 5: pd.DataFrame()},
+    }
+    payload = viz.plot_conservation_across_thresholds_plotly(res, THRESHOLDS)
+    parsed = json.loads(payload)
+    assert "data" in parsed
+
+
+def test_plotly_conservation_empty_results(viz):
+    payload = viz.plot_conservation_across_thresholds_plotly({}, THRESHOLDS)
+    parsed = json.loads(payload)
+    assert "data" in parsed
+
+
+# --- save_all_plots error / misc branches ----------------------------------------
+
+def test_save_all_plots_error_paths(viz, results, aligned, tmp_path, monkeypatch):
+    monkeypatch.setattr(viz, "plot_conservation_across_thresholds", _raiser)
+    monkeypatch.setattr(viz, "plot_path_rank_correlation_trend", _raiser)
+    monkeypatch.setattr(viz, "plot_cosine_similarity_trend", _raiser)
+    viz.save_all_plots(
+        results, aligned, pd.DataFrame(), str(tmp_path / "out"), THRESHOLDS,
+        align_func=_raiser,
+        similarity_func=None,
+        path_data_func=_raiser,
+        ratio_data_func=_raiser,
+        prob_data_func=_raiser,
+        nickname_map=None,
+        silent=True,
+    )
+    assert os.path.isdir(str(tmp_path / "out"))
+
+
+def test_save_all_plots_plotly_failure(
+    viz, results, aligned, similarities, path_data, ratio_data, prob_data,
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(viz, "plot_conservation_across_thresholds_plotly", _raiser)
+    sims = similarities.copy()
+    viz.save_all_plots(
+        results, aligned, sims, str(tmp_path / "out"), THRESHOLDS,
+        align_func=lambda t: aligned,
+        similarity_func=lambda t: sims,
+        path_data_func=lambda t: path_data,
+        ratio_data_func=lambda t: ratio_data,
+        prob_data_func=lambda t: prob_data,
+        silent=True,
+    )
+    assert os.path.isdir(str(tmp_path / "out"))
+
+
+def test_save_all_plots_similarity_plot_failure(
+    viz, results, aligned, similarities, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(viz, "plot_similarity_matrix_per_threshold", _raiser)
+    sims = similarities.copy()
+    viz.save_all_plots(
+        results, aligned, sims, str(tmp_path / "out"), THRESHOLDS,
+        align_func=lambda t: aligned,
+        similarity_func=lambda t: sims,
+        silent=True,
+    )
+    assert os.path.isdir(str(tmp_path / "out"))
+
+
+class _FakeMetricsSVD:
+    """Fake ComparisonMetrics returning sims that include svd_similarity."""
+
+    def calculate_all_pairwise_similarities(self, aligned, datasets, threshold=1, **kw):
+        return pd.DataFrame([{
+            "dataset_1": "ds_one", "dataset_2": "ds_two",
+            "jaccard_similarity": 0.5, "svd_similarity": 0.6,
+            "cosine_similarity": 0.7, "edge_rank_correlation": 0.4,
+            "spearman_rank_correlation": 0.3,
+        }])
+
+    def calculate_edge_list_rank_correlation(self, a, b):
+        return 0.5
+
+    def calculate_path_list_rank_correlation(self, a, b):
+        return 0.5
+
+    def calculate_cosine_similarity(self, a, b):
+        return 0.5
+
+
+def test_save_all_plots_misc_branches(viz, results, tmp_path, monkeypatch):
+    monkeypatch.setattr(comparison_metrics_module, "ComparisonMetrics", _FakeMetricsSVD)
+    aligned_two = pd.DataFrame(
+        {"ds_one": [3.0, 1.0], "ds_two": [2.0, 0.0]}, index=["e1", "e2"]
+    )
+    aligned_one = pd.DataFrame({"ds_one": [3.0, 1.0]}, index=["e1", "e2"])
+    aligned_odd = pd.DataFrame({"zzz": [1.0]}, index=["e1"])
+
+    def align(t):
+        if t == 1:
+            return aligned_one
+        if t == 2:
+            return aligned_odd
+        return pd.DataFrame()
+
+    def path_data(t):
+        if t == 1:
+            raise RuntimeError("no path data")
+        return pd.DataFrame()
+
+    viz.save_all_plots(
+        results, aligned_two, pd.DataFrame(), str(tmp_path / "out"), [1, 2, 5],
+        align_func=align,
+        similarity_func=None,
+        path_data_func=path_data,
+        silent=True,
+    )
+    vis_data = tmp_path / "out" / "visualization_data"
+    assert (vis_data / "similarity_per_threshold.csv").exists()
+
+
+# --- PDF summary generation --------------------------------------------------------
+
+def test_generate_vis_summary_pdf_categorized(viz, tmp_path):
+    from PIL import Image
+
+    plots = tmp_path / "plots"
+    for sub in ("threshold_2", "minsyn_5", "by_ratio", "visualization_data"):
+        (plots / sub).mkdir(parents=True)
+
+    def save(img, rel):
+        img.save(str(plots / rel), "PNG")
+
+    save(Image.new("RGB", (3000, 2000), "red"), "big.png")   # scale < 1 resize
+    save(Image.new("L", (40, 40)), "gray.png")               # non-RGB convert
+    save(Image.new("P", (40, 40)), "pal.png")                # palette -> RGBA paste
+    save(Image.new("LA", (40, 40)), "la.png")                # LA -> plain paste
+    save(Image.new("RGB", (30, 30), "blue"), "threshold_2/t.png")
+    save(Image.new("RGB", (30, 30), "green"), "minsyn_5/m.png")
+    save(Image.new("RGB", (30, 30), "red"), "by_ratio/r.png")
+    save(Image.new("RGB", (30, 30), "red"), "visualization_data/v.png")  # skipped
+    (plots / "notes.txt").write_text("not an image")          # skipped
+    (plots / "bad.png").write_bytes(b"definitely-not-a-png")  # processing error
+
+    viz._generate_vis_summary_pdf(str(plots))
+    assert (tmp_path / "vis_summary.pdf").exists()
+
+
+def test_generate_vis_summary_pdf_all_unreadable(viz, tmp_path):
+    plots = tmp_path / "plots"
+    plots.mkdir()
+    (plots / "bad1.png").write_bytes(b"junk")
+    (plots / "bad2.png").write_bytes(b"junk")
+    viz._generate_vis_summary_pdf(str(plots))
+    assert not (tmp_path / "vis_summary.pdf").exists()
