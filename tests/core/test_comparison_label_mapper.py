@@ -313,3 +313,150 @@ def test_verify_mapping_file_dispatch(tmp_path):
 
     unsupported = LabelMapper.verify_mapping_file(str(tmp_path / "m.txt"))
     assert not unsupported["valid"]
+
+
+# ---------------------------------------------------------------------------
+# Appended coverage batch: target/intermediate roles, dict/CSV/JSON load
+# branches, unsanitization, sanitized reverse lookups, verify error paths.
+# ---------------------------------------------------------------------------
+
+
+def test_merge_target_and_intermediate():
+    a = LabelMapper(
+        target_mapping_dict={DS1: [["PN1"]]}, target_labels=["t"],
+        intermediate_mapping_dict={DS1: [["IN1"]]}, intermediate_labels=["i"],
+    )
+    b = LabelMapper(
+        target_mapping_dict={DS1: [["PN2"]], DS2: [["PN3"]]}, target_labels=["t"],
+        intermediate_mapping_dict={DS1: [["IN2"]]}, intermediate_labels=["i"],
+    )
+    a.merge(b)
+    assert a.get_neurons_for_label("t", DS1, "target") == ["PN1", "PN2"]
+    assert a.get_neurons_for_label("t", DS2, "target") == ["PN3"]
+    assert a.get_neurons_for_label("i", DS1, "intermediate") == ["IN1", "IN2"]
+
+
+def test_load_intermediate_csv_expanded(tmp_path):
+    csv = tmp_path / "inter.csv"
+    csv.write_text(
+        "custom_label,flywire_FAFB,male_cns_v0_9,notes\n"
+        "i1,500,510,x\n"
+        ",600,,y\n"
+    )
+    mapper = LabelMapper(intermediate_mapping_file=str(csv))
+    assert mapper.get_std_label("flywire_FAFB", 500, "intermediate") == "i1"
+    assert mapper.get_std_label(DS2, 510, "intermediate") == "i1"
+    # missing label + no std_pattern -> auto-generated from first dataset value
+    assert mapper.get_std_label("flywire_FAFB", 600, "intermediate") == "600"
+
+
+def test_load_expanded_target_and_legacy_source_csv(tmp_path):
+    target_csv = tmp_path / "target_exp.csv"
+    target_csv.write_text("custom_label,flywire_FAFB\ntg1,800\n")
+    mapper = LabelMapper(target_mapping_file=str(target_csv))
+    assert mapper.get_std_label("flywire_FAFB", 800, "target") == "tg1"
+
+    source_csv = tmp_path / "source_legacy.csv"
+    source_csv.write_text("std_label,flywire_FAFB\nsg1,900;901\n")
+    mapper2 = LabelMapper(source_mapping_file=str(source_csv))
+    assert mapper2.get_std_label("flywire_FAFB", 900, "source") == "sg1"
+    assert mapper2.get_std_label("flywire_FAFB", 901, "source") == "sg1"
+
+
+def test_load_legacy_intermediate_csv(tmp_path):
+    csv = tmp_path / "legacy_inter.csv"
+    csv.write_text(
+        "std_label,flywire_FAFB\n"
+        "ig1,70;71\n"
+        ",\n"  # row with no valid data -> skipped
+    )
+    mapper = LabelMapper(intermediate_mapping_file=str(csv))
+    assert mapper.get_std_label("flywire_FAFB", 70, "intermediate") == "ig1"
+    assert mapper.get_std_label("flywire_FAFB", 71, "intermediate") == "ig1"
+
+
+def test_load_json_std_label_key(tmp_path):
+    p = tmp_path / "sl.json"
+    p.write_text(json.dumps(
+        {"source_mapping": {"std_label": ["g1"], "ds1": [["9"]]}}))
+    mapper = LabelMapper(source_mapping_file=str(p))
+    assert mapper.get_std_label("ds1", "9", "source") == "g1"
+
+
+def test_load_from_dict_branches():
+    # empty dataset entry is skipped
+    m = LabelMapper(source_mapping_dict={DS1: [], DS2: [["x"]]}, source_labels=["g"])
+    assert m.get_std_label(DS2, "x", "source") == "g"
+    assert m.get_datasets("source") == [DS2]
+    # flat list with len(labels) == len(neurons) > 1 -> one group each
+    m2 = LabelMapper(source_mapping_dict={DS1: ["n1", "n2"]}, source_labels=["l1", "l2"])
+    assert m2.get_std_label(DS1, "n1", "source") == "l1"
+    assert m2.get_std_label(DS1, "n2", "source") == "l2"
+    # flat list without labels -> single group with auto-generated label
+    m3 = LabelMapper(source_mapping_dict={DS1: ["n3", "n4"]})
+    assert m3.get_all_std_labels("source") == ["source_grp1"]
+    # more groups than labels -> labels extended
+    m4 = LabelMapper(source_mapping_dict={DS1: [["a"], ["b"], ["c"]]},
+                     source_labels=["only1"])
+    assert set(m4.get_all_std_labels("source")) == {
+        "only1", "source_grp2", "source_grp3"}
+
+
+def test_unsanitize_dataset_names():
+    m = LabelMapper()
+    # hemibrain conversion is documented as best-effort/lossy:
+    # only the first remaining underscore is restored to a dot
+    assert m._unsanitize_dataset_name("hemibrain_v1_2_1") == "hemibrain:v1.2_1"
+    assert m._unsanitize_dataset_name("male_cns_v0_9") == "male-cns:v0.9"
+    assert m._unsanitize_dataset_name("flywire_FAFB") == "flywire_FAFB"
+    assert m._unsanitize_dataset_name("other_ds") == "other_ds"
+
+
+def test_get_std_label_hemi_suffix_sanitized():
+    m = LabelMapper(source_mapping_dict={"hemibrain_v1_2_1": [["aMe12"]]},
+                    source_labels=["g"])
+    assert m.get_std_label("hemibrain:v1.2.1", "aMe12_R", "source") == "g_R"
+
+
+def test_role_query_helpers():
+    mapper = _dict_mapper()
+    # get_neurons_for_label across roles + base-label sanitized fallback
+    assert mapper.get_neurons_for_label("pn_grp", DS1, "target") == ["PN1"]
+    assert mapper.get_neurons_for_label("in_grp", DS2, "intermediate") == ["IN2"]
+    m = LabelMapper(target_mapping_dict={"hemibrain_v1_2_1": [["x"]]},
+                    target_labels=["base"])
+    assert m.get_neurons_for_label("base_L", "hemibrain:v1.2.1", "target") == ["x"]
+    # get_all_std_labels / get_datasets for target and intermediate
+    assert mapper.get_all_std_labels("target") == ["pn_grp"]
+    assert mapper.get_all_std_labels("intermediate") == ["in_grp"]
+    assert set(mapper.get_datasets("target")) == {DS1, DS2}
+    assert set(mapper.get_datasets("intermediate")) == {DS1, DS2}
+    # get_all_neurons_for_dataset for target and intermediate
+    assert mapper.get_all_neurons_for_dataset(DS1, "target") == ["PN1"]
+    assert mapper.get_all_neurons_for_dataset(DS2, "intermediate") == ["IN2"]
+
+
+def test_get_label_sanitized_target_intermediate():
+    m = LabelMapper(
+        target_mapping_dict={"hemibrain_v1_2_1": [["tt"]]}, target_labels=["tg"],
+        intermediate_mapping_dict={"hemibrain_v1_2_1": [["ii"]]},
+        intermediate_labels=["ig"],
+    )
+    assert m.get_label("hemibrain:v1.2.1", "tt") == "tg"
+    assert m.get_label("hemibrain:v1.2.1", "ii") == "ig"
+
+
+def test_verify_csv_format_read_error(tmp_path):
+    d = tmp_path / "adir.csv"
+    d.mkdir()
+    res = LabelMapper.verify_csv_format(str(d))
+    assert not res["valid"]
+    assert "Failed to read CSV" in res["errors"][0]
+
+
+def test_verify_json_format_read_error(tmp_path):
+    d = tmp_path / "adir.json"
+    d.mkdir()
+    res = LabelMapper.verify_json_format(str(d))
+    assert not res["valid"]
+    assert "Failed to read file" in res["errors"][0]
