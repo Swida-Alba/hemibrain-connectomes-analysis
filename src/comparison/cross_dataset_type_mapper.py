@@ -413,6 +413,33 @@ class CrossDatasetTypeMapper:
                 for mt in mcns_types:
                     self._n_to_1_types['male-cns:v1.0'].add(mt)
         
+        # Similarly for MANC (both versions share the same mancType column)
+        for manc_type in manc_types:
+            mcns_types = manc_to_mcns.get(manc_type, set())
+            if len(mcns_types) == 1:
+                mcns_type = next(iter(mcns_types))
+                self._type_mappings['manc:v1.0'][manc_type] = {'male-cns:v1.0': mcns_type}
+                self._type_mappings['manc:v1.2.1'][manc_type] = {'male-cns:v1.0': mcns_type}
+                
+                # Transitive mappings
+                if mcns_type in self._type_mappings['male-cns:v1.0']:
+                    for target_ds, target_type in self._type_mappings['male-cns:v1.0'][mcns_type].items():
+                        if target_ds not in ['manc:v1.0', 'manc:v1.2.1']:
+                            self._type_mappings['manc:v1.0'][manc_type][target_ds] = target_type
+                            self._type_mappings['manc:v1.2.1'][manc_type][target_ds] = target_type
+            elif len(mcns_types) > 1:
+                self._conflicts.append(TypeMappingConflict(
+                    source_dataset='manc:v1.0',
+                    target_dataset='male-cns:v1.0',
+                    source_type=manc_type,
+                    target_types=mcns_types,
+                    relationship='N-to-1',
+                ))
+                self._n_to_1_types['manc:v1.0'].add(manc_type)
+                self._n_to_1_types['manc:v1.2.1'].add(manc_type)
+                for mt in mcns_types:
+                    self._n_to_1_types['male-cns:v1.0'].add(mt)
+        
         # Build reverse lookup for fast type resolution
         self._build_reverse_lookup()
         

@@ -216,8 +216,11 @@ def match_search_pools(
 
 def _body_id_key(value: Any) -> str:
     text = str(value or "").strip()
-    if text.endswith(".0") and text[:-2].isdigit():
-        return text[:-2]
+    # Strip ALL trailing zero decimals ("100.0", "100.00", ...), matching the
+    # \d+(?:\.0+)? shape accepted by the numeric-search checks.
+    match = re.fullmatch(r"(\d+)\.0+", text)
+    if match:
+        return match.group(1)
     return text
 
 
@@ -424,7 +427,10 @@ def apply_structured_filter(
     """
     import pandas as pd
 
-    if match_all or frame is None or len(frame) == 0 or not filter_spec:
+    if frame is None:
+        # No frame to filter; None stays None (copy() would crash).
+        return frame
+    if match_all or len(frame) == 0 or not filter_spec:
         return frame.copy()
 
     columns = structured_search_columns(frame)

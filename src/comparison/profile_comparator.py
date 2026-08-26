@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union, Any, TYPE_CHECKING
 from datetime import datetime
 import os
+import time
 import warnings
 import math
 import heapq
@@ -70,12 +71,17 @@ except ImportError:
     def tqdm(iterable, *args, **kwargs):
         return iterable
 
-from .connectivity_profiler import ConnectivityProfile, ConnectivityProfiler, ProfilerConfig
+from .connectivity_profiler import ConnectivityProfile, ConnectivityProfiler, ProfilerConfig, progress_bars_disabled
 from .cross_dataset_type_mapper import CrossDatasetTypeMapper, get_type_mapper
 try:
     from ..visualization_options import default_analysis_skeleton_mesh_simplification
 except ImportError:
     from visualization_options import default_analysis_skeleton_mesh_simplification
+
+try:
+    from ..flywire_ids import is_flywire_dataset
+except ImportError:
+    from flywire_ids import is_flywire_dataset
 
 if TYPE_CHECKING:
     from .connectivity_profiler import ConnectivityStatus
@@ -1476,6 +1482,14 @@ class ProfileComparator:
         # Get all partner types
         all_partners = set(partners_a.keys()) | set(partners_b.keys())
         
+        if not all_partners:
+            # No partners on either side: return an empty detail table with
+            # the documented schema (skip sorting, which fails columnless).
+            return pd.DataFrame(columns=[
+                'partner_type', 'in_a', 'in_b',
+                'weight_a', 'weight_b', 'rank_a', 'rank_b', 'status'
+            ])
+        
         rows = []
         for partner in sorted(all_partners, key=lambda x: str(x)):
             in_a = partner in partners_a
@@ -2151,6 +2165,73 @@ class ProfileComparator:
         return df
 
 
+# ============================================================================
+# NeuPrint Dataset Availability
+# ============================================================================
+
+# Cached per-server dataset listing: server -> (timestamp, dataset list).
+_NEUPRINT_AVAILABLE_CACHE: Dict[str, Tuple[float, List[str]]] = {}
+
+
+def fetch_neuprint_available_datasets(
+    server: str = 'https://neuprint.janelia.org',
+    token: Optional[str] = None,
+    max_age_seconds: float = 300.0,
+) -> Optional[List[str]]:
+    """Return the datasets hosted by a NeuPrint server, minus hidden ones.
+
+    The server's ``/api/dbmeta/datasets`` endpoint also lists hidden
+    datasets (e.g. ``banc:v888``) that are not queryable through the API;
+    those are the only entries excluded.  Returns ``None`` when the listing
+    cannot be obtained (no token, network failure), so callers can fall
+    back to attempting the requested dataset directly.
+    """
+    now = time.time()
+    cached = _NEUPRINT_AVAILABLE_CACHE.get(server)
+    if cached is not None and (now - cached[0]) < max_age_seconds:
+        return list(cached[1])
+
+    if not token:
+        try:
+            from ..utils.token_manager import token_manager
+        except ImportError:
+            try:
+                from utils.token_manager import token_manager
+            except ImportError:
+                token_manager = None
+        if token_manager is not None:
+            token = token_manager.get_neuprint_token()
+    if not token:
+        return None
+
+    try:
+        import requests
+        response = requests.get(
+            f"{server}/api/dbmeta/datasets",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-type": "application/json",
+            },
+            timeout=15,
+        )
+        if response.status_code == 200:
+            data = response.json()
+            if isinstance(data, dict):
+                available = sorted(
+                    name for name, meta in data.items()
+                    if not (isinstance(meta, dict)
+                            and str(meta.get("hidden", "")).lower() == "true")
+                )
+                # Only successful listings are cached: a transient network
+                # failure must not poison later calls within the TTL.
+                _NEUPRINT_AVAILABLE_CACHE[server] = (now, available)
+                return list(available)
+    except Exception:
+        pass
+
+    return None
+
+
 class HomologFinder:
     """
     A class for finding homologs of neurons across datasets using connectivity profiles.
@@ -2421,8 +2502,43 @@ class HomologFinder:
             if not dataset: return None
             if dataset in self.clients: return self.clients[dataset]
             
+            # FlyWire-family datasets (FAFB/BANC) live on FlyWire/Codex, not
+            # on the NeuPrint server.  Skip client creation instead of
+            # surfacing a misleading "dataset does not exist on the neuprint
+            # server" warning.
+            if is_flywire_dataset(dataset):
+                if self.verbose:
+                    print(
+                        f"[HomologFinder] {dataset} is a FlyWire dataset; "
+                        "no NeuPrint client needed (local/CAVE data)"
+                    )
+                return None
+            
             try:
                 from neuprint import Client
+            except ImportError:
+                if self.verbose:
+                    print(
+                        f"[HomologFinder] Warning: neuprint package is not "
+                        f"installed; skipping client for {dataset}"
+                    )
+                return None
+            
+            # Pre-screen against the datasets the NeuPrint server actually
+            # hosts.  Only server-hidden entries (e.g. banc:v888) are
+            # excluded from that listing; unknown datasets get a short
+            # warning instead of the client constructor's long error dump.
+            available = fetch_neuprint_available_datasets(token=self.token)
+            if available is not None and dataset not in available:
+                if self.verbose:
+                    print(
+                        f"[HomologFinder] Warning: Dataset '{dataset}' does not "
+                        f"exist on the NeuPrint server. "
+                        f"Available datasets: {available}"
+                    )
+                return None
+            
+            try:
                 # Try to use token if provided
                 if self.token:
                     c = Client('https://neuprint.janelia.org', dataset=dataset, token=self.token)
@@ -2434,7 +2550,10 @@ class HomologFinder:
                 return c
             except Exception as e:
                 if self.verbose:
-                    print(f"[HomologFinder] Warning: Could not initialize client for {dataset}: {e}")
+                    # Drop the server's long "Available datasets: [...]" dump
+                    # from constructor errors so the warning stays readable.
+                    msg = str(e).split('Available datasets:')[0].strip()
+                    print(f"[HomologFinder] Warning: Could not initialize client for {dataset}: {msg}")
                 return None
 
         # Initialize clients for source and target
@@ -2522,7 +2641,8 @@ class HomologFinder:
         results = []
         type_iter = neuron_types
         if verbose:
-            type_iter = tqdm(neuron_types, desc=f"{dataset_a} vs {dataset_b} types", unit="type")
+            type_iter = tqdm(neuron_types, desc=f"{dataset_a} vs {dataset_b} types", unit="type",
+                             disable=progress_bars_disabled(True, verbose))
 
         for neuron_type in type_iter:
             try:
@@ -2553,9 +2673,12 @@ class HomologFinder:
                     # Enforce minimum shared partners if requested
                     overlap_count = 0
                     try:
-                        partners_a = set(profile_a.get_partner_types(direction))
-                        partners_b = set(profile_b.get_partner_types(direction))
-                        overlap_count = len(partners_a & partners_b)
+                        # Same partner source the combined score uses (typed +
+                        # untyped bodyIds), so the filter matches the metric.
+                        # Note: do NOT reuse the loop variable names here.
+                        partner_set_a = ProfileComparator._get_all_bodyids(profile_a, direction)
+                        partner_set_b = ProfileComparator._get_all_bodyids(profile_b, direction)
+                        overlap_count = len(set(partner_set_a) & set(partner_set_b))
                     except Exception:
                         pass
 
@@ -2653,9 +2776,12 @@ class HomologFinder:
                         # Enforce minimum shared partners if requested
                         overlap_count = 0
                         try:
-                            partners_a = set(profile_a.get_partner_types(direction))
-                            partners_b = set(profile_b.get_partner_types(direction))
-                            overlap_count = len(partners_a & partners_b)
+                            # Same partner source the combined score uses
+                            # (typed + untyped bodyIds).
+                            # Note: do NOT reuse the loop variable names here.
+                            partner_set_a = ProfileComparator._get_all_bodyids(profile_a, direction)
+                            partner_set_b = ProfileComparator._get_all_bodyids(profile_b, direction)
+                            overlap_count = len(set(partner_set_a) & set(partner_set_b))
                         except Exception:
                             pass
 
@@ -3055,7 +3181,7 @@ class HomologFinder:
             for bid in tqdm(
                 bodyids,
                 desc=f"Loading cached {label} profiles",
-                disable=not show_progress or not self.verbose,
+                disable=progress_bars_disabled(show_progress, self.verbose),
                 leave=True
             ):
                 cached = self.profiler._load_from_cache(bid, dataset, required_top_k=required_top_k)
@@ -3103,7 +3229,7 @@ class HomologFinder:
             pbar = tqdm(
                 need_build,
                 desc=f"Building {label} profiles",
-                disable=not show_progress or not self.verbose,
+                disable=progress_bars_disabled(show_progress, self.verbose),
                 leave=True
             )
             
@@ -3240,8 +3366,7 @@ class HomologFinder:
             from ..coana import FindNeuronConnection
             
             # Determine if this is a FlyWire/local dataset
-            dataset_lower = dataset.lower()
-            is_flywire = any(x in dataset_lower for x in ['flywire', 'fafb', 'banc'])
+            is_flywire = is_flywire_dataset(dataset)
             
             # Create FNC instance with minimal settings
             # Pass token from HomologFinder; FNC handles env vars if empty
@@ -3350,7 +3475,7 @@ class HomologFinder:
             iterator = tqdm(
                 neurons,
                 desc=f"Building profiles for {dataset}",
-                disable=not show_progress or not self.verbose,
+                disable=progress_bars_disabled(show_progress, self.verbose),
                 leave=False
             )
             
@@ -4398,7 +4523,7 @@ class HomologFinder:
         for source_bid in tqdm(
             source_bodyids,
             desc="Comparing source neurons",
-            disable=not show_progress or not self.verbose,
+            disable=progress_bars_disabled(show_progress, self.verbose),
             leave=True
         ):
             source_profile = source_profiles_cache.get(source_bid)
@@ -4939,7 +5064,7 @@ class HomologFinder:
         self._log("Loading and processing connection data...")
         self._in_progress_bar = True
         try:
-            with tqdm(total=4, desc="Loading data", disable=not show_progress or not self.verbose, leave=True) as pbar:
+            with tqdm(total=4, desc="Loading data", disable=progress_bars_disabled(show_progress, self.verbose), leave=True) as pbar:
                 # Load source cache (already complete from Step 0)
                 source_conn = self._load_connection_cache(source_dataset, auto_build=False)
                 if source_conn is None:
@@ -5121,7 +5246,7 @@ class HomologFinder:
                     pbar = tqdm(
                         source_bodyids, 
                         desc="Building source profiles",
-                        disable=not show_progress or not self.verbose,
+                        disable=progress_bars_disabled(show_progress, self.verbose),
                         leave=False
                     )
                     
@@ -5295,7 +5420,7 @@ class HomologFinder:
                 for source_bid in tqdm(
                     source_bodyids,
                     desc=f"Finding candidates for {query} neurons",
-                    disable=not show_progress or not self.verbose,
+                    disable=progress_bars_disabled(show_progress, self.verbose),
                     leave=False
                 ):
                     # Get source profile for candidate finding
@@ -7423,7 +7548,8 @@ class HomologFinder:
         iterator = range(n_shuffles)
         if show_progress:
             try:
-                iterator = tqdm(iterator, desc="Shuffle iterations")
+                iterator = tqdm(iterator, desc="Shuffle iterations",
+                                disable=progress_bars_disabled(show_progress, self.verbose))
             except:
                 pass
         
@@ -8760,7 +8886,7 @@ class ConnectivityProfileComparer:
         else:
             self._log("Aggregating type-level profiles...")
             for label, neuron_ids in tqdm(neurons.items(), desc="Aggregating types", 
-                                           disable=not self.verbose, unit="type"):
+                                           disable=progress_bars_disabled(True, self.verbose), unit="type"):
                 individual_profiles = []
                 
                 for nid in neuron_ids:
@@ -9176,7 +9302,7 @@ class ConnectivityProfileComparer:
             
             self._log(f"Computing cross-dataset {dir_name} similarity ({n_rows}×{n_cols}, {total_pairs} pairs)...")
             
-            with tqdm(total=total_pairs, desc=f"  {dir_name}", disable=not self.verbose) as pbar:
+            with tqdm(total=total_pairs, desc=f"  {dir_name}", disable=progress_bars_disabled(True, self.verbose)) as pbar:
                 for i, row_label in enumerate(row_labels):
                     profile_a = profiles_a.get(row_label)
                     if profile_a is None:
@@ -9432,7 +9558,7 @@ class ConnectivityProfileComparer:
             
             # Use progress bar for pairwise comparisons
             pair_count = 0
-            with tqdm(total=total_pairs, desc=f"  {dir_name} similarities", disable=not self.verbose) as pbar:
+            with tqdm(total=total_pairs, desc=f"  {dir_name} similarities", disable=progress_bars_disabled(True, self.verbose)) as pbar:
                 for i in range(n):
                     for j in range(n):
                         if i == j:
@@ -9518,7 +9644,7 @@ class ConnectivityProfileComparer:
             
             self._log(f"Computing bodyId-level {dir_name} similarity matrices ({n}x{n}, {total_pairs} pairs)...")
             
-            with tqdm(total=total_pairs, desc=f"  bodyId {dir_name}", disable=not self.verbose) as pbar:
+            with tqdm(total=total_pairs, desc=f"  bodyId {dir_name}", disable=progress_bars_disabled(True, self.verbose)) as pbar:
                 for i in range(n):
                     for j in range(n):
                         if i == j:
@@ -9607,7 +9733,7 @@ class ConnectivityProfileComparer:
             
             self._log(f"Computing type-avg-bodyId {dir_name} similarity matrices ({n}x{n})...")
             
-            pbar = tqdm(total=n, desc=f"Type-avg-bodyId {dir_name}", disable=not self.verbose)
+            pbar = tqdm(total=n, desc=f"Type-avg-bodyId {dir_name}", disable=progress_bars_disabled(True, self.verbose))
             for i, type_a in enumerate(type_labels):
                 for j, type_b in enumerate(type_labels):
                     if i == j:
@@ -10620,7 +10746,7 @@ a:hover { text-decoration: underline; }
             )
             
             # Generate heatmap for each direction × metric combination
-            pbar = tqdm(total=total_heatmaps, desc=f"Generating {prefix_display} heatmaps", disable=not self.verbose)
+            pbar = tqdm(total=total_heatmaps, desc=f"Generating {prefix_display} heatmaps", disable=progress_bars_disabled(True, self.verbose))
             for direction, metric_matrices in render_matrices.items():
                 for metric_key, matrix in metric_matrices.items():
                     if matrix is None:

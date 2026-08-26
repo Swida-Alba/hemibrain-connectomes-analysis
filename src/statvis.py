@@ -2228,8 +2228,16 @@ def Conn2FullMat(source_df,target_df,conn_df,conn_type,weight_col='weight'):
         tbodyId = [f"{row.bodyId}_{row.type}" for _, row in target_df.iterrows()]
     else:
         tbodyId = target_df.bodyId.tolist()
-    stype = source_df.type.unique().tolist()
-    ttype = target_df.type.unique().tolist()
+    if 'type' in source_df.columns:
+        stype = source_df.type.unique().tolist()
+    else:
+        # No type annotation: fall back to bodyId labels so the type-level
+        # matrix mirrors the bodyId-level one.
+        stype = [str(x) for x in source_df.bodyId.unique().tolist()]
+    if 'type' in target_df.columns:
+        ttype = target_df.type.unique().tolist()
+    else:
+        ttype = [str(x) for x in target_df.bodyId.unique().tolist()]
     sbodyId.sort()
     tbodyId.sort()
     stype.sort()
@@ -2474,8 +2482,10 @@ def VisConnMat(cmat,filename,title='',color_scale=None,showfig=True,fontsize=12,
                 cmin=zmin,
                 cmax=zmax,
                 colorbar=dict(
-                    title=metric_type.capitalize() + scale_label,
-                    titleside='right'
+                    title=dict(
+                        text=metric_type.capitalize() + scale_label,
+                        side='right'
+                    )
                 ),
                 line=dict(width=0.5, color='rgba(0,0,0,0.2)')
             ),
@@ -2498,8 +2508,10 @@ def VisConnMat(cmat,filename,title='',color_scale=None,showfig=True,fontsize=12,
             'zmin': zmin,
             'zmax': zmax,
             'colorbar': dict(
-                title=metric_type.capitalize() + scale_label,
-                titleside='right'
+                title=dict(
+                    text=metric_type.capitalize() + scale_label,
+                    side='right'
+                )
             )
         }
         
@@ -2540,16 +2552,14 @@ def VisConnMat(cmat,filename,title='',color_scale=None,showfig=True,fontsize=12,
         'title_text': title,
         'font_size': fontsize,
         'xaxis': dict(
-            title='<b>Target</b>',
+            title=dict(text='<b>Target</b>', font=dict(size=fontsize+2, color='#333333')),
             side='bottom',
-            titlefont=dict(size=fontsize+2, color='#333333'),
             tickangle=-45 if len(cmat.columns) > 1 else 0,  # Always rotate when multiple labels
             range=[-0.5, len(cmat.columns) - 0.5] if use_scatter_mode else None
         ),
         'yaxis': dict(
-            title='<b>Source</b>',
+            title=dict(text='<b>Source</b>', font=dict(size=fontsize+2, color='#333333')),
             side='left',
-            titlefont=dict(size=fontsize+2, color='#333333'),
             autorange='reversed',  # Keep the original order (top to bottom)
             range=[len(cmat.index) - 0.5, -0.5] if use_scatter_mode else None
         ),
@@ -5628,9 +5638,18 @@ def path_filter(path_df, keyword_in_path_to_remove=None):
         keywords = keyword_in_path_to_remove
         
     mask = pd.Series(False, index=path_df.index)
-    if 'path_str' in path_df.columns:
+    # After split_path(), 'path_str' holds the ORIGINAL list column and the
+    # string form lives in 'path'; pick whichever column holds strings.
+    match_col = None
+    for col in ('path_str', 'path'):
+        if col in path_df.columns:
+            sample = path_df[col].dropna()
+            if sample.empty or isinstance(sample.iloc[0], str):
+                match_col = col
+                break
+    if match_col is not None:
         for kw in keywords:
-            mask |= path_df['path_str'].str.contains(kw, na=False)
+            mask |= path_df[match_col].str.contains(kw, na=False)
     
     excluded = path_df[mask].copy()
     kept = path_df[~mask].copy()

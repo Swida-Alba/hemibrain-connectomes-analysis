@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -41,6 +42,24 @@ from tqdm import tqdm
 # ============================================================================
 # Connectivity Status Classification
 # ============================================================================
+
+def progress_bars_disabled(show_progress: bool = True, verbose: bool = True) -> bool:
+    """Whether raw tqdm bars should be suppressed.
+
+    The UI runs tools as subprocesses with piped (non-TTY) stdout; every
+    tqdm refresh then lands in the log panel as a separate stale line
+    ("Loading data: 0%|...|" repeated between each log message).  The
+    structured ``[DROCAT][progress]`` step events already drive the UI's
+    determinate progress bar, so raw bars are only useful on a real
+    terminal.
+    """
+    if not show_progress or not verbose:
+        return True
+    try:
+        return not sys.stdout.isatty()
+    except Exception:
+        return True
+
 
 def _escape_cypher_string_fallback(value):
     """Inline escape fallback (only used when src.utils.api_utils is unavailable)."""
@@ -1199,7 +1218,15 @@ def normalize_partner_type(type_name: str, config: FuzzyMatchConfig) -> str:
         Normalized type name
     """
     if not config.enabled or pd.isna(type_name) or type_name is None:
-        return str(type_name) if type_name else ''
+        # NaN is truthy, so it must be caught before the str() fallback,
+        # otherwise it would normalize to the literal string 'nan'.
+        if type_name is None or (isinstance(type_name, float) and pd.isna(type_name)):
+            return ''
+        try:
+            is_missing = pd.isna(type_name)
+        except (TypeError, ValueError):
+            is_missing = False
+        return '' if is_missing else str(type_name)
     
     result = str(type_name)
     
@@ -1889,6 +1916,20 @@ class ConnectivityProfiler:
             except:
                 return None
         
+        def parse_int_key_mapping(val):
+            # bodyId -> type mappings lose their int keys in the JSON/CSV
+            # round-trip ({'1': 'A'}); restore them like from_dict() does.
+            parsed = parse_json(val)
+            if not parsed:
+                return parsed
+            restored = {}
+            for k, v in parsed.items():
+                try:
+                    restored[int(k)] = v
+                except (TypeError, ValueError):
+                    restored[k] = v
+            return restored
+        
         return ConnectivityProfile(
             neuron_id=row['neuron_id'],
             dataset=row['dataset'],
@@ -1911,8 +1952,8 @@ class ConnectivityProfiler:
             unique_types_upstream=int(row.get('unique_types_upstream', 0)),
             unique_types_downstream=int(row.get('unique_types_downstream', 0)),
             is_sparse=bool(row.get('is_sparse', False)),
-            partner_type_mapping_upstream=parse_json(row.get('partner_type_mapping_upstream')),
-            partner_type_mapping_downstream=parse_json(row.get('partner_type_mapping_downstream')),
+            partner_type_mapping_upstream=parse_int_key_mapping(row.get('partner_type_mapping_upstream')),
+            partner_type_mapping_downstream=parse_int_key_mapping(row.get('partner_type_mapping_downstream')),
             top_k_bodyid_used=int(row.get('top_k_bodyid_used', 20)),
             top_m_type_target=int(row.get('top_m_type_target', 5)),
             untyped_upstream_bodyids=parse_json(row.get('untyped_upstream_bodyids')),
@@ -3786,8 +3827,8 @@ class ConnectivityProfiler:
         # Ensure connection cache is loaded first
         self._get_cached_conn_df(dataset)
         
-        for neuron in tqdm(neurons, desc="Building profiles from cache", 
-                          disable=not show_progress, unit="neuron"):
+        for neuron in tqdm(neurons, desc="Building profiles from cache",
+                          disable=progress_bars_disabled(show_progress, getattr(self, 'verbose', True)), unit="neuron"):
             try:
                 if skip_profile_cache:
                     # Build profile directly from connection cache (no disk cache check)
@@ -3936,52 +3977,31 @@ class ConnectivityProfiler:
         dataset_lower = dataset.lower()
         
         if 'flywire' in dataset_lower or 'fafb' in dataset_lower or 'banc' in dataset_lower:
-            # Local dataset - load neurons file
-            src_dir = Path(__file__).parent.parent
-            project_root = src_dir.parent
-            datasets_folder = project_root / 'datasets'
-            safe_name = dataset.replace(':', '_').replace('.', '_')
-            dataset_path = datasets_folder / safe_name
-            
-            # Try to load neurons file
-            neurons_files = [
-                dataset_path / f'{safe_name}_allneurons_neuron_df.parquet',
-                dataset_path / f'{safe_name}_allneurons_neuron_df.csv',
-                dataset_path / f'{safe_name}_neurons.parquet',
-                dataset_path / f'{safe_name}_neurons.csv',
-                dataset_path / 'neurons.parquet',
-                dataset_path / 'neurons.csv',
-            ]
-            
-            for neurons_file in neurons_files:
-                if neurons_file.exists():
-                    try:
-                        if str(neurons_file).endswith('.parquet'):
-                            df = pd.read_parquet(neurons_file)
-                        else:
-                            df = pd.read_csv(neurons_file)
-                        
-                        # Find bodyId column
-                        bid_col = None
-                        for col in ['bodyId', 'pt_root_id', 'root_id', 'body_id']:
-                            if col in df.columns:
-                                bid_col = col
-                                break
-                        
-                        # Find type column
-                        type_col = None
-                        for col in ['type', 'cell_type', 'celltype']:
-                            if col in df.columns:
-                                type_col = col
-                                break
-                        
-                        if bid_col and type_col:
-                            mask = df[type_col] == neuron_type
-                            return df.loc[mask, bid_col].astype(int).tolist()
-                    except Exception as e:
-                        self._log(f"Warning: Could not load neurons from {neurons_file}: {e}")
-            
-            return []
+            # Local dataset - resolve the query with the shared prioritized
+            # column search used by the connection tabs (bodyId -> type ->
+            # instance -> other *Type fields such as cell_type -> taxonomy).
+            # The first column with a hit owns the query, so a name stored
+            # only in cell_type (e.g. FAFB's circadian_clock) still resolves.
+            df = self._load_local_neuron_frame(dataset)
+            if df is None or df.empty:
+                return []
+
+            try:
+                from ..neuron_search import resolve_dataframe_query
+            except ImportError:
+                from neuron_search import resolve_dataframe_query
+            try:
+                body_ids, _info = resolve_dataframe_query(
+                    df, neuron_type, search_columns='auto'
+                )
+            except Exception as e:
+                self._log(f"Warning: Could not resolve '{neuron_type}' in {dataset}: {e}")
+                return []
+
+            if not body_ids:
+                return []
+            resolved = pd.to_numeric(pd.Series(body_ids), errors='coerce').dropna()
+            return resolved.astype(int).tolist()
         
         else:
             # NeuPrint query
@@ -4007,6 +4027,55 @@ class ConnectivityProfiler:
             except Exception as e:
                 self._log(f"Warning: Could not get bodyIds for {neuron_type} in {dataset}: {e}")
                 return []
+    
+    def _load_local_neuron_frame(self, dataset: str) -> Optional[pd.DataFrame]:
+        """Load (and memoize) the local neuron table for a FlyWire dataset.
+
+        The frame is cached per file path and mtime so repeated type
+        lookups (one per query item) do not re-read the full table.
+        Returns ``None`` when no neuron table exists for the dataset.
+        """
+        src_dir = Path(__file__).parent.parent
+        project_root = src_dir.parent
+        datasets_folder = project_root / 'datasets'
+        safe_name = dataset.replace(':', '_').replace('.', '_')
+        dataset_path = datasets_folder / safe_name
+
+        neurons_files = [
+            dataset_path / f'{safe_name}_allneurons_neuron_df.parquet',
+            dataset_path / f'{safe_name}_allneurons_neuron_df.csv',
+            dataset_path / f'{safe_name}_neurons.parquet',
+            dataset_path / f'{safe_name}_neurons.csv',
+            dataset_path / 'neurons.parquet',
+            dataset_path / 'neurons.csv',
+        ]
+        neurons_file = next((p for p in neurons_files if p.exists()), None)
+        if neurons_file is None:
+            return None
+
+        cache = getattr(self, '_local_neuron_frames', None)
+        if cache is None:
+            cache = {}
+            self._local_neuron_frames = cache
+        try:
+            mtime = neurons_file.stat().st_mtime
+        except OSError:
+            mtime = None
+        cached = cache.get(str(neurons_file))
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+
+        try:
+            if str(neurons_file).endswith('.parquet'):
+                df = pd.read_parquet(neurons_file)
+            else:
+                df = pd.read_csv(neurons_file)
+        except Exception as e:
+            self._log(f"Warning: Could not load neurons from {neurons_file}: {e}")
+            return None
+
+        cache[str(neurons_file)] = (mtime, df)
+        return df
     
     def list_types(
         self,

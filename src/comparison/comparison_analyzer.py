@@ -45,6 +45,18 @@ def _escape_cypher_string_fallback(value):
     return value.replace('\\', '\\\\').replace("'", "\\'")
 
 
+def _wildcard_pattern_to_regex(pattern: str) -> str:
+    """Convert a user wildcard pattern to a regex pattern.
+
+    Every ``*`` means "any string".  Pre-existing ``.*`` sequences are already
+    that wildcard and must not be mangled into ``..`` (the naive chained
+    ``replace('*', '.*')`` turned ``X.*`` into ``X..*``, which no longer
+    matched the bare ``X``).
+    """
+    placeholder = '\x00'
+    return pattern.replace('.*', placeholder).replace('*', '.*').replace(placeholder, '.*')
+
+
 class ComparisonAnalyzer:
     """
     Main orchestrator for cross-dataset comparison analysis.
@@ -843,7 +855,7 @@ class ComparisonAnalyzer:
                         escaped_t = escape_cypher_string(t)
                         if '.*' in t or '*' in t:
                             # Convert to Cypher regex pattern
-                            pattern = escaped_t.replace('.*', '.*').replace('*', '.*')
+                            pattern = _wildcard_pattern_to_regex(escaped_t)
                             formatted.append(f"a.type =~ '{pattern}'")
                         else:
                             formatted.append(f"a.type = '{escaped_t}'")
@@ -1009,7 +1021,7 @@ class ComparisonAnalyzer:
                 for p in patterns:
                     if isinstance(p, str):
                         if '.*' in p or '*' in p:
-                            pattern = p.replace('.*', '.*').replace('*', '.*')
+                            pattern = _wildcard_pattern_to_regex(p)
                             if re.match(pattern, str(type_val)):
                                 return True
                         elif str(type_val) == p:
@@ -2126,10 +2138,9 @@ class ComparisonAnalyzer:
                 # (Cannot evaluate hemisphere conservation without hemisphere suffixes)
                 continue
 
-            if hemi_pre == hemi_post:
-                counterpart = f"{base_pre}_{opposite(hemi_pre)} -> {base_post}_{opposite(hemi_post)}"
-            else:
-                counterpart = f"{base_pre}_{opposite(hemi_pre)} -> {base_post}_{opposite(hemi_post)}"
+            # Mirror counterpart: flip the hemisphere of both endpoints.
+            # (opposite() handles same-side and cross-hemisphere edges alike.)
+            counterpart = f"{base_pre}_{opposite(hemi_pre)} -> {base_post}_{opposite(hemi_post)}"
 
             if counterpart not in index_set:
                 original_weights = {ds: aligned.at[edge_key, ds] for ds in dataset_names if ds in aligned.columns and aligned.at[edge_key, ds] > 0}
@@ -5988,7 +5999,7 @@ class ComparisonAnalyzer:
             return str(pattern) == type_name
         
         if '.*' in pattern or '*' in pattern:
-            regex_pattern = pattern.replace('.*', '.*').replace('*', '.*')
+            regex_pattern = _wildcard_pattern_to_regex(pattern)
             try:
                 return bool(re.match(f'^{regex_pattern}$', type_name))
             except re.error:
@@ -6250,7 +6261,7 @@ class ComparisonAnalyzer:
                     if isinstance(pattern, str):
                         # Handle regex patterns
                         if '.*' in pattern or '*' in pattern:
-                            regex = pattern.replace('.*', '.*').replace('*', '.*')
+                            regex = _wildcard_pattern_to_regex(pattern)
                             if re.match(f'^{regex}$', name, re.IGNORECASE):
                                 return True
                         elif name.lower() == pattern.lower():
@@ -6562,7 +6573,7 @@ class ComparisonAnalyzer:
                 for pattern in patterns:
                     if isinstance(pattern, str):
                         if '.*' in pattern or '*' in pattern:
-                            regex = pattern.replace('.*', '.*').replace('*', '.*')
+                            regex = _wildcard_pattern_to_regex(pattern)
                             if re.match(f'^{regex}$', name, re.IGNORECASE):
                                 return True
                         elif name.lower() == pattern.lower():
@@ -6753,7 +6764,8 @@ class ComparisonAnalyzer:
         
         # Try to import plotly, fall back to basic HTML if not available
         try:
-                                    has_plotly = True
+            import plotly  # noqa: F401
+            has_plotly = True
         except ImportError:
             has_plotly = False
             self._log("Warning: Plotly not installed. Generating basic HTML report.")

@@ -972,3 +972,1572 @@ class TestFindDirectConnections:
         assert unconserved.exists()
         assert len(kept) == 2
         assert len(pd.read_csv(unconserved)) == 1
+
+
+# =============================================================================
+# FindPath offline pipeline (layer discovery + path reconstruction)
+# =============================================================================
+
+class _FakeVisualizePath:
+    """Records every VisualizePath construction; visualize() is a no-op."""
+
+    instances = []
+
+    def __init__(self, *args, **kwargs):
+        self.kwargs = kwargs
+        self.edge_limit_trimmed = False
+        _FakeVisualizePath.instances.append(self)
+
+    def visualize(self, **kwargs):
+        pass
+
+
+def _make_path_fc(monkeypatch, tmp_path, edges, types, *, max_interlayer=5,
+                  source_ids=("S",), target_ids=("T",), skip_bodyId=False,
+                  min_synapse=1):
+    """Wire a FindNeuronConnection for an offline FindPath run.
+
+    Connection layers are served from the static ``edges`` list filtered by
+    the requested upstream set; neuron metadata comes from ``types``.
+    """
+    edge_set = [(str(u), str(v), w) for (u, v, w) in edges]
+
+    def fake_fetch(upstream_bodyIds=None, downstream_bodyIds=None, **kwargs):
+        ups = {str(u) for u in (upstream_bodyIds or [])}
+        rows = [(u, v, w) for (u, v, w) in edge_set if u in ups]
+        if not rows:
+            return pd.DataFrame(columns=["bodyId_pre", "bodyId_post",
+                                         "weight", "type_pre", "type_post"])
+        return pd.DataFrame({
+            "bodyId_pre": [r[0] for r in rows],
+            "bodyId_post": [r[1] for r in rows],
+            "weight": [r[2] for r in rows],
+            "type_pre": [types.get(r[0], r[0]) for r in rows],
+            "type_post": [types.get(r[1], r[1]) for r in rows],
+        })
+
+    def fake_enrich(conn, traversal_probability_threshold=0, dataset=None,
+                    script_path=None, target_neurons_df=None, label_mapper=None,
+                    global_incoming_weights=None, separate_hemispheres=False,
+                    **kwargs):
+        conn_e = conn.copy()
+        conn_e["connection_ratio"] = 0.5
+        conn_e["traversal_probability"] = 0.5
+        conn_t = (conn_e.groupby(["type_pre", "type_post"], as_index=False)
+                  ["weight"].sum())
+        conn_t["connection_ratio"] = 0.5
+        conn_t["traversal_probability"] = 0.5
+        return conn_e, conn_t, None
+
+    _FakeVisualizePath.instances = []
+    monkeypatch.setattr(coana.sv, "EnrichConnectionTable", fake_enrich)
+    monkeypatch.setattr(coana, "VisualizePath", _FakeVisualizePath)
+
+    fc, logs = make_fc(
+        saveas="",
+        save_folder=str(tmp_path / "base"),
+        output_dir=str(tmp_path),
+        source_fname="src",
+        target_fname="tgt",
+        dataset="test:v1",
+        max_interlayer=max_interlayer,
+        min_synapse_num=min_synapse,
+        min_ratio=0.0,
+        min_traversal_probability=0.0,
+        parameter_dict={"k": "v"},
+        parameter_df=pd.DataFrame({"p": [1]}),
+        source_df=pd.DataFrame({"bodyId": list(source_ids),
+                                "type": [types.get(s, s) for s in source_ids]}),
+        target_df=pd.DataFrame({"bodyId": list(target_ids),
+                                "type": [types.get(t, t) for t in target_ids]}),
+        sourceNeurons=list(source_ids),
+        targetNeurons=list(target_ids),
+        separate_hemispheres=False,
+        output_format="csv",
+        script_path=str(tmp_path),
+        graph_edge_limit_groups=0,
+        graph_edge_limit_bodyid=None,
+        edgeN_limit=0,
+        network_layout="hierarchical",
+        showfig=False,
+        skip_bodyId=skip_bodyId,
+        keyword_in_path_to_remove=["None"],
+        label_mapper=None,
+        node_color="#1f77b4",
+        target_color="#d62728",
+        link_color="rgba(100,100,100,0.3)",
+    )
+    os.makedirs(fc.save_folder, exist_ok=True)
+    fc._fetch_path_connections = fake_fetch
+    fc._fetch_neurons_local_or_api = lambda ids, columns=None: pd.DataFrame({
+        "bodyId": [str(b) for b in ids],
+        "type": [types.get(str(b), str(b)) for b in ids],
+        "post": [100] * len(ids),
+    })
+    fc._fetch_total_incoming_weight_by_type = lambda *a, **k: None
+    fc._fetch_total_incoming_weight = lambda *a, **k: None
+    fc._ensure_neuprint_client = lambda: None
+    fc._fetch_neurons_batched = lambda ids: pd.DataFrame({
+        "bodyId": [str(b) for b in ids],
+        "type": [types.get(str(b), str(b)) for b in ids],
+        "instance": [str(b) + "_i" for b in ids],
+    })
+    return fc, logs
+
+
+class TestFindPathPipeline:
+    CHAIN = [("S", "A", 10), ("A", "B", 8), ("B", "T", 6)]
+    TYPES = {"S": "TS", "A": "TA", "B": "TB", "T": "TT"}
+
+    def test_full_run_csv_outputs(self, monkeypatch, tmp_path):
+        fc, _ = _make_path_fc(monkeypatch, tmp_path, self.CHAIN, self.TYPES)
+        fc.FindPath()
+
+        folder = Path(fc.path_folder)
+        assert folder.name.startswith("find-paths-complete_")
+        assert (folder / "source_neurons.csv").exists()
+        assert (folder / "target_neurons.csv").exists()
+        assert (folder / "all_attributes.json").exists()
+        params = (folder / "parameters.txt").read_text()
+        assert "Analysis Parameters for FindPath" in params
+
+        # type-level path output at run root
+        path_type = folder / "src_to_tgt_path_type.csv"
+        assert path_type.exists()
+        ptdf = pd.read_csv(path_type)
+        assert len(ptdf) == 1
+
+        # bodyId-level outputs (skip_bodyId=False -> find_bodyId_path True)
+        path_body = folder / "src_to_tgt_path_bodyId.csv"
+        assert path_body.exists()
+        details = folder / "data_details"
+        bodyid = pd.read_csv(details / "connection_info_bodyId.csv")
+        assert set(zip(bodyid["bodyId_pre"].astype(str),
+                       bodyid["bodyId_post"].astype(str))) == {
+            ("S", "A"), ("A", "B"), ("B", "T")}
+        # interlayer neuron sheets (one per hop)
+        for i in (1, 2, 3):
+            assert (details / f"layer_{i}.csv").exists()
+        assert (details / "parameters.csv").exists()
+        assert (details / "total_weight_layer.csv").exists()
+        assert (details / "connection_type.csv").exists()
+
+        # enrollment status columns
+        tgt = pd.read_csv(folder / "target_neurons.csv")
+        assert tgt.loc[tgt["bodyId"].astype(str) == "T", "Checked"].iloc[0] in (True, "True")
+        src = pd.read_csv(folder / "source_neurons.csv")
+        assert src.loc[src["bodyId"].astype(str) == "S", "isInPath"].iloc[0] in (True, "True")
+        # both type-level and bodyId-level visualizations constructed
+        assert len(_FakeVisualizePath.instances) == 2
+
+    def test_frontier_dried_no_paths(self, monkeypatch, tmp_path):
+        # T is unreachable: only S->A exists.
+        fc, _ = _make_path_fc(
+            monkeypatch, tmp_path, [("S", "A", 10)], self.TYPES)
+        # No path connects source to target: FindPath completes gracefully —
+        # the type-level analysis is skipped when conn_types has no columns
+        # (previously a KeyError('type_pre') crashed the run here).
+        fc.FindPath()
+        assert fc._depth_cap_reached is False
+        folder = Path(fc.path_folder)
+        # enrollment + type-level CSVs are still saved
+        assert (folder / "source_neurons.csv").exists()
+        assert (folder / "data_details" / "connection_type.csv").exists()
+
+    def test_depth_cap_reached(self, monkeypatch, tmp_path):
+        # The chain needs 3 hops; depth cap of 1 leaves T untraced with a
+        # live frontier -> the run records a truncated search.
+        fc, _ = _make_path_fc(
+            monkeypatch, tmp_path, self.CHAIN, self.TYPES, max_interlayer=1)
+        # No complete path exists; the run now completes without crashing.
+        fc.FindPath()
+        assert fc._depth_cap_reached is True
+
+    def test_skip_bodyid_flag(self, monkeypatch, tmp_path):
+        fc, _ = _make_path_fc(
+            monkeypatch, tmp_path, self.CHAIN, self.TYPES, skip_bodyId=True)
+        fc.FindPath(find_bodyId_path=False)
+        folder = Path(fc.path_folder)
+        assert (folder / "src_to_tgt_path_type.csv").exists()
+        assert not (folder / "src_to_tgt_path_bodyId.csv").exists()
+        # only the type-level visualization is constructed
+        assert len(_FakeVisualizePath.instances) == 1
+
+
+# =============================================================================
+# _enrich_connections_with_neuron_info (local table + API fallback)
+# =============================================================================
+
+class TestEnrichConnectionsWithNeuronInfo:
+    DATASET = "hemibrain:v1.2.1"
+    SAFE = "hemibrain_v1_2_1"
+
+    def _fc(self, tmp_path, *, use_cache=True):
+        fc, logs = make_fc(
+            dataset=self.DATASET,
+            script_path=str(tmp_path),
+            use_cache=use_cache,
+            separate_hemispheres=False,
+        )
+        fc._local_neuron_df_cache = {}
+        fetch_calls = []
+
+        def fake_fetch(ids, columns=None):
+            fetch_calls.append(list(ids))
+            return pd.DataFrame({
+                "bodyId": [str(i) for i in ids],
+                "type": ["API_" + str(i) for i in ids],
+                "instance": ["APII_" + str(i) for i in ids],
+            })
+
+        fc._fetch_neurons_local_or_api = fake_fetch
+        fc._fetch_calls = fetch_calls
+        return fc
+
+    def _write_local_table(self, tmp_path, bodyids, *, nt=True):
+        d = tmp_path / "datasets" / self.SAFE
+        d.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame({
+            "bodyId": [str(b) for b in bodyids],
+            "type": ["LOC_" + str(b) for b in bodyids],
+            "instance": ["LOCI_" + str(b) for b in bodyids],
+            "hemisphere": ["R"] * len(bodyids),
+        })
+        if nt:
+            df["nt_type"] = ["ACh"] * len(bodyids)
+        df.to_csv(d / f"{self.SAFE}_allneurons_neuron_df.csv", index=True)
+
+    def test_empty_frame_returns_unchanged(self, tmp_path):
+        fc = self._fc(tmp_path)
+        out = fc._enrich_connections_with_neuron_info(pd.DataFrame())
+        assert out.empty
+
+    def test_online_only_fetches_from_api(self, tmp_path):
+        fc = self._fc(tmp_path, use_cache=False)
+        out = fc._enrich_connections_with_neuron_info(
+            conn_df([("1", "2", 5), ("2", "3", 3)]))
+        assert len(fc._fetch_calls) == 1
+        assert out.loc[0, "type_pre"] == "API_1"
+        assert out.loc[0, "type_post"] == "API_2"
+        assert out.loc[1, "type_post"] == "API_3"
+        # hemisphere columns ensured on the API frame
+        assert "hemisphere_pre" in out.columns
+
+    def test_local_csv_enrichment_with_nt(self, tmp_path):
+        self._write_local_table(tmp_path, ["1", "2", "3"])
+        fc = self._fc(tmp_path)
+        out = fc._enrich_connections_with_neuron_info(
+            conn_df([("1", "2", 5), ("2", "3", 3)]))
+        assert out.loc[0, "type_pre"] == "LOC_1"
+        assert out.loc[1, "type_post"] == "LOC_3"
+        assert out.loc[0, "nt_type_pre"] == "ACh"
+        assert out.loc[0, "instance_post"] == "LOCI_2"
+        assert fc._fetch_calls == []  # nothing fetched from API
+
+    def test_missing_bodyids_fetched_from_api(self, tmp_path):
+        # Local table only knows 1 and 2; neuron 9 must come from the API.
+        self._write_local_table(tmp_path, ["1", "2"])
+        fc = self._fc(tmp_path)
+        out = fc._enrich_connections_with_neuron_info(conn_df([("1", "9", 4)]))
+        assert len(fc._fetch_calls) == 1
+        assert sorted(fc._fetch_calls[0]) == ["9"]
+        assert out.loc[0, "type_pre"] == "LOC_1"
+        assert out.loc[0, "type_post"] == "API_9"
+
+    def test_custom_group_columns_merged(self, tmp_path):
+        self._write_local_table(tmp_path, ["1", "2"])
+        fc = self._fc(tmp_path)
+        fc.source_df = pd.DataFrame({"bodyId": ["1"], "custom_group": ["G_src"]})
+        fc.target_df = pd.DataFrame({"bodyId": ["2"], "custom_group": ["G_tgt"]})
+        # pre-existing enrichment columns are dropped before the merge
+        df = conn_df([("1", "2", 7)])
+        df["type_pre"] = "stale"
+        df["type_post"] = "stale"
+        out = fc._enrich_connections_with_neuron_info(df)
+        assert out.loc[0, "type_pre"] == "LOC_1"
+        assert out.loc[0, "custom_group_pre"] == "G_src"
+        assert out.loc[0, "custom_group_post"] == "G_tgt"
+
+
+# =============================================================================
+# _fetch_connections_with_cave_api (mocked CAVEDataFetcher + API cache)
+# =============================================================================
+
+class TestFetchConnectionsWithCaveApi:
+    UP = "720575940614131061"
+    DOWN1 = "720575940614131062"
+    DOWN2 = "720575940614131063"
+
+    def _install_fake_cave(self, monkeypatch, *, behavior="ok"):
+        import types as _types
+
+        fetcher_log = []
+
+        class FakeCAVEDataFetcher:
+            def __init__(self, dataset=None, materialization_version=None,
+                         cache_enabled=False, verbose=False):
+                fetcher_log.append(("init", dataset, materialization_version,
+                                    cache_enabled, verbose))
+
+            def fetch_connections(self, ids, direction="pre"):
+                fetcher_log.append(("fetch", tuple(ids), direction))
+                if behavior == "importerror":
+                    raise ImportError("caveclient missing")
+                if behavior == "error":
+                    raise RuntimeError("CAVE server unreachable")
+                return pd.DataFrame({
+                    "pre_pt_root_id": [int(self.UP)] * 2,
+                    "post_pt_root_id": [int(self.DOWN1), int(self.DOWN2)],
+                    "weight": [12, 2],
+                })
+
+        FakeCAVEDataFetcher.UP = self.UP
+        FakeCAVEDataFetcher.DOWN1 = self.DOWN1
+        FakeCAVEDataFetcher.DOWN2 = self.DOWN2
+        mod = _types.ModuleType("cave_data_fetcher")
+        mod.CAVEDataFetcher = FakeCAVEDataFetcher
+        monkeypatch.setitem(sys.modules, "cave_data_fetcher", mod)
+        return fetcher_log
+
+    def _fc(self, tmp_path, **attrs):
+        base = dict(
+            dataset="fafb:v1",
+            script_path=str(tmp_path),
+            use_cache=True,
+            version=1,
+            min_synapse_num=1,
+            min_ratio=0.0,
+            min_traversal_probability=0.0,
+            exclude_intra_type_connections=False,
+            label_mapper=None,
+        )
+        base.update(attrs)
+        fc, logs = make_fc(**base)
+        fc._cave_fetcher = None
+        # Isolate the CAVE fetch from the enrichment engine (tested above).
+        def fake_enrich(conn_df):
+            conn_df = conn_df.copy()
+            conn_df["type_pre"] = "PT_" + conn_df["bodyId_pre"].astype(str).str[-1]
+            conn_df["type_post"] = "PT_" + conn_df["bodyId_post"].astype(str).str[-1]
+            return conn_df
+        fc._enrich_connections_with_neuron_info = fake_enrich
+        return fc
+
+    def test_fetch_caches_and_serves_from_cache(self, monkeypatch, tmp_path):
+        log = self._install_fake_cave(monkeypatch)
+        fc = self._fc(tmp_path)
+        out = fc._fetch_connections_with_cave_api([self.UP])
+        assert len(out) == 2
+        assert set(out["bodyId_post"]) == {self.DOWN1, self.DOWN2}
+        assert out.loc[0, "type_pre"].startswith("PT_")
+        # fetcher constructed once via _get_cave_fetcher, one API fetch
+        assert log[0][0] == "init" and log[0][3] is False
+        assert len([e for e in log if e[0] == "fetch"]) == 1
+        # API cache written under the hermetic script_path
+        cache_dir = tmp_path / "cache" / "fafb_v1" / "API_cache"
+        assert (cache_dir / "connections.parquet").exists()
+        assert (cache_dir / "neuron_index.parquet").exists()
+
+        # Second call: neuron already in the API cache -> no new API fetch.
+        out2 = fc._fetch_connections_with_cave_api([self.UP])
+        assert len(out2) == 2
+        assert len([e for e in log if e[0] == "fetch"]) == 1
+
+    def test_downstream_filter(self, monkeypatch, tmp_path):
+        self._install_fake_cave(monkeypatch)
+        fc = self._fc(tmp_path, use_cache=False)
+        out = fc._fetch_connections_with_cave_api(
+            [self.UP], downstream_bodyIds=[self.DOWN1])
+        assert len(out) == 1
+        assert out.iloc[0]["bodyId_post"] == self.DOWN1
+
+    def test_min_weight_excludes_and_sets_flag(self, monkeypatch, tmp_path):
+        self._install_fake_cave(monkeypatch)
+        fc = self._fc(tmp_path, use_cache=False, min_synapse_num=5)
+        out = fc._fetch_connections_with_cave_api([self.UP])
+        # weight>=5 keeps only the weight-12 edge; the weight-2 edge is gone
+        assert len(out) == 1
+        assert out.iloc[0]["bodyId_post"] == self.DOWN1
+        assert fc._min_synapse_excluded is True
+
+    def test_intra_type_exclusion_and_label_mapper(self, monkeypatch, tmp_path):
+        self._install_fake_cave(monkeypatch)
+
+        class FakeLabelMapper:
+            def apply_to_dataframe(self, df, dataset):
+                df = df.copy()
+                # row 0 maps both ends to the same label -> intra-type;
+                # row 1 keeps distinct labels and survives.
+                df["std_label_pre"] = ["STD", "STD"]
+                df["std_label_post"] = ["STD", "SAME2"]
+                return df
+
+        fc = self._fc(tmp_path, use_cache=False,
+                      exclude_intra_type_connections=True,
+                      label_mapper=FakeLabelMapper())
+
+        def same_type_enrich(conn_df):
+            conn_df = conn_df.copy()
+            conn_df["type_pre"] = "SAME"
+            conn_df["type_post"] = ["SAME", "OTHER"]
+            return conn_df
+
+        fc._enrich_connections_with_neuron_info = same_type_enrich
+        out = fc._fetch_connections_with_cave_api([self.UP])
+        # label mapping applied first, then the intra-type row removed
+        assert len(out) == 1
+        assert out.iloc[0]["type_pre"] == "STD"
+        assert out.iloc[0]["type_post"] == "SAME2"
+
+    def test_importerror_returns_empty_frame(self, monkeypatch, tmp_path):
+        self._install_fake_cave(monkeypatch, behavior="importerror")
+        fc = self._fc(tmp_path, use_cache=False)
+        out = fc._fetch_connections_with_cave_api([self.UP])
+        assert out.empty
+        assert list(out.columns) == ["bodyId_pre", "bodyId_post", "weight", "roi"]
+
+    def test_generic_error_returns_empty_frame(self, monkeypatch, tmp_path):
+        self._install_fake_cave(monkeypatch, behavior="error")
+        fc = self._fc(tmp_path, use_cache=False)
+        out = fc._fetch_connections_with_cave_api([self.UP])
+        assert out.empty
+        assert "type_pre" in out.columns
+
+
+# =============================================================================
+# VisualizeDirectConnections_simple (fake VisualizePath recorder)
+# =============================================================================
+
+class TestVisualizeDirectConnectionsSimple:
+    def _fc(self, monkeypatch, tmp_path, *, conn_type=None, conn_df=None,
+            conn_group=None, raise_on_visualize=False):
+        calls = []
+
+        class FakeVP:
+            def __init__(self, path_file=None, output_folder=None, **kwargs):
+                self.path_file = path_file
+                self.output_folder = output_folder
+                self.edge_limit_trimmed = False
+                calls.append(self)
+
+            def visualize(self, **kwargs):
+                if raise_on_visualize:
+                    raise RuntimeError("plotly export failed")
+
+        monkeypatch.setattr(coana, "VisualizePath", FakeVP)
+        fc, logs = make_fc(
+            conn_type=conn_type if conn_type is not None else pd.DataFrame(),
+            conn_df=conn_df if conn_df is not None else pd.DataFrame(),
+            conn_group=conn_group,
+            direct_folder=str(tmp_path),
+            showfig=False,
+            edgeN_limit=0,
+            network_layout="hierarchical",
+            output_format="csv",
+        )
+        return fc, logs, calls
+
+    def test_type_bodyid_and_group_visualizations(self, monkeypatch, tmp_path):
+        conn_type = pd.DataFrame({
+            "type_pre": ["TS", "TS"], "type_post": ["TA", "TB"],
+            "weight": [10, 5], "connection_ratio": [0.4, 0.2],
+            "traversal_probability": [0.6, 0.3],
+        })
+        conn_df = pd.DataFrame({
+            "bodyId_pre": ["1", "1"], "bodyId_post": ["2", "3"],
+            "weight": [10, 5], "connection_ratio": [0.4, 0.2],
+            "traversal_probability": [0.6, 0.3],
+            "type_pre": ["TS", "TS"], "type_post": ["TA", "TB"],
+            "hemisphere_code_pre": ["R", "R"],
+            "hemisphere_code_post": ["R", "L"],
+        })
+        conn_group = pd.DataFrame({
+            "custom_group_pre": ["G1"], "custom_group_post": ["G2"],
+            "weight": [9], "connection_ratio": [0.5],
+            "traversal_probability": [0.5],
+        })
+        fc, logs, calls = self._fc(
+            monkeypatch, tmp_path, conn_type=conn_type, conn_df=conn_df,
+            conn_group=conn_group)
+        fc.VisualizeDirectConnections_simple()
+        assert len(calls) == 3
+        type_blocks = calls[0].path_file["path_block"].tolist()
+        assert "TS -> TA" in type_blocks
+        body_blocks = calls[1].path_file["path_block"].tolist()
+        assert any(b.startswith("1_TS") for b in body_blocks)
+        group_blocks = calls[2].path_file["path_block"].tolist()
+        assert group_blocks == ["G1 -> G2"]
+        assert calls[1].output_folder.endswith("bodyId_visualization")
+        assert calls[2].output_folder.endswith("custom_groups")
+
+    def test_no_connections_no_visualization(self, monkeypatch, tmp_path):
+        fc, logs, calls = self._fc(monkeypatch, tmp_path)
+        fc.VisualizeDirectConnections_simple()
+        assert calls == []
+        assert any("No connections to visualize" in m for m in logs)
+
+    def test_visualization_failure_is_swallowed(self, monkeypatch, tmp_path):
+        conn_type = pd.DataFrame({
+            "type_pre": ["TS"], "type_post": ["TA"], "weight": [10],
+            "connection_ratio": [0.4], "traversal_probability": [0.6],
+        })
+        fc, logs, calls = self._fc(
+            monkeypatch, tmp_path, conn_type=conn_type,
+            raise_on_visualize=True)
+        fc.VisualizeDirectConnections_simple()  # must not raise
+        assert any("visualization failed" in m for m in logs)
+
+
+# =============================================================================
+# cache loaders / warm-up / cache status on real tmp_path parquet caches
+# =============================================================================
+
+def _cache_fc(tmp_path, **attrs):
+    """FindNeuronConnection wired to a tmp_path-backed cache layout."""
+    cache_folder = tmp_path / "cache" / "test_v1"
+    cache_folder.mkdir(parents=True, exist_ok=True)
+    fc, logs = make_fc(
+        dataset="test:v1",
+        script_path=str(tmp_path),
+        cache_folder=str(cache_folder),
+        use_cache=True,
+        client_type="neuprint",
+        _conn_df_cache=None,
+        _conn_index=None,
+        _conn_index_post=None,
+        _conn_db_pre_id_cache=None,
+        _conn_cache_signature=None,
+        _neuron_index_cache=None,
+        _neuron_index_dict=None,
+        _neuron_index_signature_value=None,
+        _local_neuron_df_cache=dict(),
+    )
+    for key, value in attrs.items():
+        setattr(fc, key, value)
+    return fc, logs
+
+
+def _write_conn_parquet(fc, pre, post, weight):
+    pl.DataFrame({
+        "bodyId_pre": pre,
+        "bodyId_post": post,
+        "weight": weight,
+        "roi": ["r"] * len(pre),
+        "cached_date": ["2026-01-01"] * len(pre),
+    }).write_parquet(fc._get_connection_db_path())
+
+
+def _write_index_parquet(fc, rows):
+    path = fc._get_neuron_index_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    pd.DataFrame(rows).to_parquet(path, index=False)
+
+
+class TestCacheLoaders:
+    def test_load_connection_db_and_build_indexes(self, tmp_path):
+        fc, logs = _cache_fc(tmp_path)
+        _write_conn_parquet(fc, ["1", "1", "2"], ["2", "3", "3"], [5, 6, 7])
+        db = fc._load_connection_db()
+        assert db.height == 3
+        assert fc._conn_index["1"] == [0, 1]
+        assert fc._conn_index_post["3"] == [1, 2]
+        # second call with matching signature -> served from memory
+        fc._conn_cache_signature = fc._connection_cache_signature()
+        db2 = fc._load_connection_db()
+        assert db2 is db
+        # warm-up reports the loaded cache once the neuron index is ready
+        _write_index_parquet(fc, {
+            "bodyId": ["1"], "type": ["T1"], "instance": ["I1"], "post": [10],
+            "downstream_complete": [True], "last_fetched": [""],
+            "connection_count": [2],
+        })
+        fc._load_neuron_index()
+        status = fc.warm_up_cache(quiet=True)
+        assert status["connections_loaded"] == 3
+        assert status["index_ready"] is True
+
+    def test_load_connection_db_includes_batch_files(self, tmp_path):
+        fc, _ = _cache_fc(tmp_path)
+        _write_conn_parquet(fc, ["1"], ["2"], [5])
+        batch_dir = Path(fc.cache_folder) / "_batch_files"
+        batch_dir.mkdir(parents=True)
+        pl.DataFrame({
+            "bodyId_pre": ["3"], "bodyId_post": ["4"], "weight": [9],
+            "roi": ["r"], "cached_date": ["2026-01-01"],
+        }).write_parquet(batch_dir / "batch_0001.parquet")
+        fc._conn_df_cache = None
+        db = fc._load_connection_db()
+        assert db.height == 2
+        assert set(db["bodyId_pre"].to_list()) == {"1", "3"}
+
+    def test_load_connection_db_no_cache_mode(self, tmp_path):
+        fc, _ = _cache_fc(tmp_path, use_cache=False)
+        db = fc._load_connection_db()
+        assert db.is_empty()
+        assert fc._conn_index == {}
+
+    def test_load_connection_db_pandas_memory_frame_converted(self, tmp_path):
+        fc, _ = _cache_fc(tmp_path)
+        fc._conn_df_cache = pd.DataFrame({
+            "bodyId_pre": ["1"], "bodyId_post": ["2"], "weight": [5],
+            "roi": ["r"], "cached_date": ["2026-01-01"],
+        })
+        # matching signature: signature None + empty on-disk cache
+        fc._conn_cache_signature = fc._connection_cache_signature()
+        db = fc._load_connection_db()
+        assert isinstance(db, pl.DataFrame)
+        assert db.height == 1
+
+    def test_load_neuron_index_and_dict(self, tmp_path):
+        fc, _ = _cache_fc(tmp_path)
+        _write_index_parquet(fc, {
+            "bodyId": ["1", "2"], "type": ["T1", "T2"],
+            "instance": ["I1", "I2"], "post": [10, 20],
+            "downstream_complete": [True, False],
+            "last_fetched": ["", ""], "connection_count": [1, 0],
+        })
+        idx = fc._load_neuron_index()
+        assert len(idx) == 2
+        assert fc._neuron_index_dict["1"]["type"] == "T1"
+        # warm-up sees the index too
+        status = fc.warm_up_cache(quiet=True)
+        assert status["neurons_indexed"] == 2
+
+    def test_get_cache_status_and_all_dataset_bodyids(self, tmp_path):
+        fc, _ = _cache_fc(tmp_path)
+        _write_conn_parquet(fc, ["1"], ["2"], [5])
+        _write_index_parquet(fc, {
+            "bodyId": ["1", "2"], "type": ["T1", "T2"],
+            "instance": ["I1", "I2"], "post": [10, 20],
+            "downstream_complete": [True, False],
+            "last_fetched": ["", ""], "connection_count": [1, 0],
+        })
+        ds_dir = tmp_path / "datasets" / "test_v1"
+        ds_dir.mkdir(parents=True)
+        pd.DataFrame({
+            "bodyId": ["1", "2", "3"], "type": ["a", "b", "c"],
+            "instance": ["x", "y", "z"], "post": [1, 2, 3],
+        }).to_csv(ds_dir / "test_v1_allneurons_neuron_df.csv", index=True)
+
+        # Fixed: get_cache_status handles the polars connection frame from
+        # _load_connection_db (n_unique(), null-safe) instead of raising
+        # AttributeError on pandas-only nunique().
+        status_polars = fc.get_cache_status()
+        assert status_polars["connections_cached"] == 1
+        assert status_polars["unique_upstream"] == 1
+
+        # Serve a pandas frame to exercise the rest of the status report.
+        fc._load_connection_db = lambda force_reload=False: pd.DataFrame({
+            "bodyId_pre": ["1"], "bodyId_post": ["2"], "weight": [5],
+        })
+        status = fc.get_cache_status()
+        assert status["neuron_df_exists"] is True
+        assert status["neuron_df_count"] == 3
+        assert status["neurons_indexed"] == 2
+        assert status["neurons_complete"] == 1
+        assert status["connections_cached"] == 1
+        assert status["unique_upstream"] == 1
+
+
+class TestGetAllDatasetBodyids:
+    def test_from_csv(self, tmp_path):
+        fc, _ = _cache_fc(tmp_path)
+        fc._get_neuron_index_path = lambda: str(tmp_path / "nope" / "index.parquet")
+        ds_dir = tmp_path / "datasets" / "test_v1"
+        ds_dir.mkdir(parents=True)
+        pd.DataFrame({"bodyId": [1, 2, 2], "type": ["a", "b", "b"]}).to_csv(
+            ds_dir / "test_v1_allneurons_neuron_df.csv", index=True)
+        assert fc._get_all_dataset_bodyids() == ["1", "2"]
+
+    def test_from_parquet(self, tmp_path):
+        fc, _ = _cache_fc(tmp_path)
+        fc._get_neuron_index_path = lambda: str(tmp_path / "nope" / "index.parquet")
+        ds_dir = tmp_path / "datasets" / "test_v1"
+        ds_dir.mkdir(parents=True)
+        pd.DataFrame({"bodyId": ["7", "8"]}).to_parquet(
+            ds_dir / "test_v1_allneurons_neuron_df.parquet", index=False)
+        assert fc._get_all_dataset_bodyids() == ["7", "8"]
+
+    def test_no_table_returns_empty(self, tmp_path):
+        fc, _ = _cache_fc(tmp_path)
+        fc._get_neuron_index_path = lambda: str(tmp_path / "nope" / "index.parquet")
+        assert fc._get_all_dataset_bodyids() == []
+
+
+class TestUpdateNeuronIndexAfterFetch:
+    def _fc(self):
+        fc, logs = make_fc(dataset="test:v1", script_path="/tmp/no_such_dir",
+                           use_cache=True)
+        saved = []
+        fc._load_neuron_index = lambda force_reload=False: pd.DataFrame({
+            "bodyId": ["1", "2"], "type": ["T1", "T2"],
+            "instance": ["I1", "I2"], "post": [10, 20],
+            "downstream_complete": [False, False],
+            "last_fetched": ["", ""], "connection_count": [0, 0],
+        })
+        fc._save_neuron_index_state = (
+            lambda df, touched_bodyids=None, force=False: saved.append(df.copy()))
+        return fc, logs, saved
+
+    def test_marks_counts_and_appends_missing(self):
+        fc, _, saved = self._fc()
+        fc._fetch_neurons_batched = lambda ids: pd.DataFrame({
+            "bodyId": ["3"], "type": ["T3"], "instance": ["I3"], "post": [30],
+        })
+        connections = pd.DataFrame({
+            "bodyId_pre": ["1", "1", "3"], "bodyId_post": ["2", "3", "4"],
+            "weight": [1, 2, 3],
+        })
+        fc._update_neuron_index_after_fetch(
+            connections, ["1", "3"], downstream_bodyIds=None)
+        assert len(saved) == 1
+        out = saved[0].set_index("bodyId")
+        assert int(out.loc["1", "connection_count"]) == 2
+        # neuron 3 fetched via the batched-API fallback and appended
+        assert "3" in out.index
+        assert int(out.loc["3", "connection_count"]) == 1
+        assert out.loc["3", "type"] == "T3"
+
+    def test_zero_outdegree_marked_complete(self):
+        fc, _, saved = self._fc()
+        fc._update_neuron_index_after_fetch(
+            pd.DataFrame(columns=["bodyId_pre", "bodyId_post", "weight"]),
+            ["2"], downstream_bodyIds=None)
+        out = saved[0]
+        row = out[out["bodyId"] == "2"].iloc[0]
+        assert bool(row["downstream_complete"]) is True
+        assert int(row["connection_count"]) == 0
+
+    def test_partial_downstream_not_marked_complete(self):
+        fc, _, saved = self._fc()
+        fc._fetch_neurons_batched = lambda ids: pd.DataFrame({
+            "bodyId": list(ids), "type": [""] * len(ids),
+            "instance": [""] * len(ids), "post": [0] * len(ids),
+        })
+        fc._update_neuron_index_after_fetch(
+            pd.DataFrame({"bodyId_pre": ["1"], "bodyId_post": ["2"],
+                          "weight": [1]}),
+            ["1"], downstream_bodyIds=["2"])
+        out = saved[0]
+        row = out[out["bodyId"] == "1"].iloc[0]
+        assert bool(row["downstream_complete"]) is False
+
+    def test_missing_ids_resolved_from_local_dataset(self, tmp_path):
+        fc, logs = make_fc(dataset="test:v1", script_path=str(tmp_path),
+                           use_cache=True)
+        fc._local_neuron_df_cache = {}
+        saved = []
+        fc._load_neuron_index = lambda force_reload=False: pd.DataFrame({
+            "bodyId": ["1"], "type": ["T1"], "instance": ["I1"], "post": [10],
+            "downstream_complete": [False], "last_fetched": [""],
+            "connection_count": [0],
+        })
+        fc._save_neuron_index_state = (
+            lambda df, touched_bodyids=None, force=False: saved.append(df.copy()))
+        ds_dir = tmp_path / "datasets" / "test_v1"
+        ds_dir.mkdir(parents=True)
+        pd.DataFrame({
+            "bodyId": ["9"], "type": ["T9"], "instance": ["I9"], "post": [99],
+        }).to_csv(ds_dir / "test_v1_allneurons_neuron_df.csv", index=True)
+        fc._update_neuron_index_after_fetch(
+            pd.DataFrame({"bodyId_pre": ["9"], "bodyId_post": ["1"],
+                          "weight": [4]}),
+            ["9"], downstream_bodyIds=None)
+        out = saved[0]
+        row = out[out["bodyId"] == "9"].iloc[0]
+        assert row["type"] == "T9"
+        assert int(row["connection_count"]) == 1
+
+
+class TestValidateAndRepairCache:
+    def test_cache_disabled_short_circuits(self, tmp_path):
+        fc, _ = _cache_fc(tmp_path, use_cache=False)
+        summary = fc.validate_and_repair_cache(quiet=True)
+        assert summary["total_indexed"] == 0
+
+    def test_no_index_nothing_to_repair(self, tmp_path):
+        fc, _ = _cache_fc(tmp_path)
+        summary = fc.validate_and_repair_cache(quiet=True)
+        assert summary == {
+            "total_indexed": 0, "total_with_connections": 0,
+            "falsely_complete": 0, "repaired": 0, "types_updated": 0,
+        }
+
+    def test_repair_false_completion_and_enrich_types(self, tmp_path):
+        fc, _ = _cache_fc(tmp_path)
+        _write_index_parquet(fc, {
+            "bodyId": ["1", "2", "3"], "type": ["", "", "T3"],
+            "instance": ["", "", ""], "post": [0, 0, 0],
+            "downstream_complete": [True, True, False],
+            "last_fetched": ["", "", ""], "connection_count": [5, 0, -1],
+        })
+        # only neuron 3 has cached downstream rows -> 1 is falsely complete
+        _write_conn_parquet(fc, ["3"], ["9"], [5])
+        ds_dir = tmp_path / "datasets" / "test_v1"
+        ds_dir.mkdir(parents=True)
+        pd.DataFrame({
+            "bodyId": ["1", "2"], "type": ["TA", "TB"],
+            "instance": ["IA", "IB"], "post": [1, 2],
+        }).to_csv(ds_dir / "test_v1_allneurons_neuron_df.csv", index=False)
+
+        summary = fc.validate_and_repair_cache(quiet=True)
+        assert summary["total_indexed"] == 3
+        assert summary["total_with_connections"] == 1
+        assert summary["falsely_complete"] == 1
+        assert summary["repaired"] == 1
+        assert summary["types_updated"] >= 1
+
+        repaired = fc._read_neuron_index_disk().set_index("bodyId")
+        assert bool(repaired.loc["1", "downstream_complete"]) is False
+        assert int(repaired.loc["1", "connection_count"]) == -1
+        # zero-outdegree neuron keeps its completion flag
+        assert bool(repaired.loc["2", "downstream_complete"]) is True
+        assert repaired.loc["1", "type"] == "TA"
+
+    def test_clean_cache_needs_no_repair(self, tmp_path):
+        fc, _ = _cache_fc(tmp_path)
+        _write_index_parquet(fc, {
+            "bodyId": ["3"], "type": ["T3"], "instance": [""], "post": [0],
+            "downstream_complete": [True], "last_fetched": [""],
+            "connection_count": [1],
+        })
+        _write_conn_parquet(fc, ["3"], ["9"], [5])
+        summary = fc.validate_and_repair_cache(quiet=True)
+        assert summary["falsely_complete"] == 0
+        assert summary["repaired"] == 0
+
+
+class TestVisualizeSelectedPaths:
+    def test_wrapper_forwards_colors_and_limits(self, monkeypatch, tmp_path):
+        calls = []
+
+        class FakeVP:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                calls.append(self)
+
+            def visualize(self):
+                return ("CONN", "GRAPH")
+
+        monkeypatch.setattr(coana, "VisualizePath", FakeVP)
+        fc, _ = make_fc(
+            source_color="#111111", intermediate_color="#222222",
+            target_color="#333333", link_color="rgba(1,1,1,0.5)",
+            node_color=["#111111", "#222222"], edgeN_limit=77,
+            verbose_mode="silent",
+        )
+        paths = pd.DataFrame({"path_block": ["A -> B"], "weights": [[5]]})
+        out = fc.VisualizeSelectedPaths(
+            paths, sheet_name="path_type", output_folder=str(tmp_path))
+        assert out == ("CONN", "GRAPH")
+        kw = calls[0].kwargs
+        assert kw["source_color"] == "#111111"
+        assert kw["target_color"] == "#333333"
+        assert kw["edgeN_limit"] == 77
+        assert kw["network_layout"] == "hierarchical"
+        assert kw["showfig"] is False
+
+
+class TestSaveNeuronInfo:
+    def test_saves_source_target_parameters(self, tmp_path):
+        fc, _ = make_fc(
+            source_fname="src", target_fname="tgt",
+            source_df=pd.DataFrame({"bodyId": ["1"], "type": ["T"]}),
+            target_df=pd.DataFrame({"bodyId": ["2"], "type": ["U"]}),
+            parameter_df=pd.DataFrame(
+                {"parameter": ["p"], "value": ["v"]}),
+            _source_target_identical=True,
+        )
+        # missing source_df raises
+        bare = object.__new__(coana.FindNeuronConnection)
+        with pytest.raises(RuntimeError):
+            bare.SaveNeuronInfo()
+        out = fc.SaveNeuronInfo(output_dir=str(tmp_path))
+        files = sorted(p.name for p in Path(out).glob("*.csv"))
+        assert "src_to_tgt_source_neurons.csv" in files
+        assert "src_to_tgt_target_neurons.csv" in files
+        assert "src_to_tgt_parameters.csv" in files
+
+    def test_no_parameter_df_skips_params(self, monkeypatch, tmp_path):
+        # Remove the class-level default so hasattr() really misses it
+        monkeypatch.delattr(coana.FindNeuronConnection, "parameter_df")
+        fc, _ = make_fc(
+            source_fname="s", target_fname="t",
+            source_df=pd.DataFrame({"bodyId": ["1"]}),
+            target_df=pd.DataFrame({"bodyId": ["2"]}),
+        )
+        out = fc.SaveNeuronInfo(output_dir=str(tmp_path),
+                                filename_prefix="custom")
+        files = sorted(p.name for p in Path(out).glob("*.csv"))
+        assert files == ["custom_source_neurons.csv", "custom_target_neurons.csv"]
+
+
+class TestFetchIncomingAndBackward:
+    def test_incoming_online_flywire_cave(self, monkeypatch, tmp_path):
+        fc, _ = make_fc(dataset="fafb:v1", script_path=str(tmp_path),
+                        use_cache=False, verbose_mode="silent")
+
+        class FakeFetcher:
+            def fetch_connections(self, ids, direction=None,
+                                  show_progress=False):
+                assert direction == "post"
+                return pd.DataFrame({
+                    "pre_pt_root_id": [720575940614131061],
+                    "post_pt_root_id": [ids[0]], "weight": [3],
+                })
+
+        fc._cave_fetcher = FakeFetcher()
+        out = fc._fetch_incoming_connections_online(["720575940614131062"])
+        assert list(out.columns) >= ["bodyId_pre", "bodyId_post", "weight"]
+        assert (out["roi"] == "WholeBrain").all()
+        assert fc._fetch_incoming_connections_online([]).empty
+
+    def test_backward_layer_cached_plus_api(self, monkeypatch, tmp_path):
+        fc, logs = make_fc(dataset="test:v1", script_path=str(tmp_path),
+                           use_cache=True, cache_only=False)
+        cached = pl.DataFrame({
+            "bodyId_pre": ["1"], "bodyId_post": ["10"], "weight": [5],
+            "roi": ["r"],
+        })
+        fc._conn_df_cache = cached
+        # keep the test focused on the backward-layer logic
+        fc._enrich_connections_with_neuron_info = lambda df: df.copy()
+        fc._conn_index = None
+        fc._conn_index_post = None
+        fc._neuron_index_dict = {}
+        fc._load_connection_db = lambda force_reload=False: cached
+        api_calls = []
+        fc._fetch_incoming_connections_online = lambda posts: (
+            api_calls.append(list(posts)) or pd.DataFrame({
+                "bodyId_pre": ["2"], "bodyId_post": ["10"], "weight": [4],
+                "roi": ["r"],
+            }))
+        out = fc._fetch_path_connections_backward(["10"], source_bodyIds=None)
+        assert set(out["bodyId_pre"]) == {"1", "2"}
+        assert api_calls == [["10"]]
+
+    def test_backward_source_cache_complete_skips_api(self, tmp_path):
+        fc, logs = make_fc(dataset="test:v1", script_path=str(tmp_path),
+                           use_cache=True, cache_only=False)
+        cached = pl.DataFrame({
+            "bodyId_pre": ["1"], "bodyId_post": ["10"], "weight": [5],
+            "roi": ["r"],
+        })
+        fc._conn_df_cache = cached
+        # keep the test focused on the backward-layer logic
+        fc._enrich_connections_with_neuron_info = lambda df: df.copy()
+        fc._conn_index = None
+        fc._conn_index_post = None
+        fc._neuron_index_dict = {
+            "1": {"downstream_complete": True, "connection_count": 1},
+        }
+        fc._load_connection_db = lambda force_reload=False: cached
+        api_calls = []
+        fc._fetch_incoming_connections_online = lambda posts: (
+            api_calls.append(1) or pd.DataFrame())
+        out = fc._fetch_path_connections_backward(["10"], source_bodyIds=["1"])
+        assert api_calls == []
+        assert len(out) == 1
+
+    def test_backward_cache_only_warns_when_unproven(self, tmp_path):
+        fc, logs = make_fc(dataset="test:v1", script_path=str(tmp_path),
+                           use_cache=True, cache_only=True)
+        cached = pl.DataFrame({
+            "bodyId_pre": ["1"], "bodyId_post": ["10"], "weight": [5],
+            "roi": ["r"],
+        })
+        fc._conn_df_cache = cached
+        # keep the test focused on the backward-layer logic
+        fc._enrich_connections_with_neuron_info = lambda df: df.copy()
+        fc._conn_index = None
+        fc._conn_index_post = None
+        fc._neuron_index_dict = {}
+        fc._load_connection_db = lambda force_reload=False: cached
+        fc._fetch_incoming_connections_online = lambda posts: pd.DataFrame()
+        out = fc._fetch_path_connections_backward(["10"], source_bodyIds=["1"])
+        assert len(out) == 1
+        assert any("cache_only" in note for note in fc._warn_notes)
+
+
+class TestFetchConnectionsBulk:
+    def test_empty_upstream_returns_empty(self, tmp_path):
+        fc, _ = make_fc(dataset="test:v1", script_path=str(tmp_path))
+        assert fc._fetch_connections_bulk([]).empty
+
+    def test_flywire_online_via_cave(self, monkeypatch, tmp_path):
+        fc, _ = make_fc(dataset="fafb:v1", script_path=str(tmp_path),
+                        use_cache=False)
+
+        class FakeFetcher:
+            def fetch_connections(self, ids, direction=None,
+                                  show_progress=False):
+                return pd.DataFrame({
+                    "pre_pt_root_id": [ids[0]] * 2,
+                    "post_pt_root_id": [720575940614131062,
+                                          720575940614131063],
+                    "weight": [3, 4],
+                })
+
+        fc._cave_fetcher = FakeFetcher()
+        statuses = []
+        out = fc._fetch_connections_bulk(
+            ["720575940614131061"],
+            downstream_bodyIds=["720575940614131062"],
+            status_callback=statuses.append)
+        assert len(out) == 1
+        assert "roi" in out.columns
+
+    def test_flywire_online_empty_result(self, tmp_path):
+        fc, _ = make_fc(dataset="fafb:v1", script_path=str(tmp_path),
+                        use_cache=False)
+
+        class FakeFetcher:
+            def fetch_connections(self, *a, **k):
+                return None
+
+        fc._cave_fetcher = FakeFetcher()
+        assert fc._fetch_connections_bulk(["720575940614131061"]).empty
+
+
+class TestInitializeNeuronInfo:
+    def _base_attrs(self, tmp_path):
+        return dict(
+            client_type="flywire", client_flywire=None, client_hemibrain=None,
+            dataset="test:v1", script_path=str(tmp_path),
+            output_dir=str(tmp_path / "out"),
+            max_interlayer=1, separate_hemispheres=False,
+            hemisphere_filter="both", label_mapper=None,
+            custom_source_group_names=None, custom_target_group_names=None,
+            custom_source_name=None, custom_target_name=None,
+            search_columns=None, saveas="", save_folder=None,
+            folder_prefix=None, min_synapse_num=1, min_ratio=0.0,
+            min_traversal_probability=0.0, aggregate_method="sum",
+            filter_by="bodyId", exclude_intra_type_connections=False,
+            find_reciprocal=False,
+            keyword_in_path_to_remove=["None"], server="",
+            run_date="2026-01-01", kwargs_fetch={},
+            simple_fetch=True, largeTargetSet=False,
+            sourceNeurons=["A"], targetNeurons=["B"],
+        )
+
+    def _fake_getNeurons(self, monkeypatch):
+        calls = []
+
+        def fake(query, dataset=None, custom_group_names=None, client=None,
+                 verbose=False, search_columns=None, search_info_sink=None):
+            calls.append(list(query))
+            df = pd.DataFrame({
+                "bodyId": ["1"], "type": ["T"], "instance": ["I"],
+            })
+            return df, None, "_".join(str(q) for q in query), None
+
+        monkeypatch.setattr(coana.sv, "getNeurons", fake)
+        return calls
+
+    def test_identical_source_target_single_fetch(self, monkeypatch, tmp_path):
+        calls = self._fake_getNeurons(monkeypatch)
+        attrs = self._base_attrs(tmp_path)
+        attrs.update(sourceNeurons=["A"], targetNeurons=["A"],
+                     max_interlayer=-1)
+        fc, logs = make_fc(**attrs)
+        fc.InitializeNeuronInfo()
+        assert calls == [["A"]]  # fetched once only
+        assert fc._source_target_identical is True
+        assert fc.source_fname == "A"
+        assert fc.target_fname == "A"
+        assert fc.target_df is not fc.source_df  # copy, not alias
+
+    def test_two_sided_with_label_mapper(self, monkeypatch, tmp_path):
+        calls = self._fake_getNeurons(monkeypatch)
+
+        class FakeMapper:
+            is_empty = False
+
+            def get_std_label(self, dataset, value, role):
+                return f"STD_{role}"
+
+            def get_neurons_for_label(self, label, dataset, role):
+                return []
+
+        attrs = self._base_attrs(tmp_path)
+        attrs.update(label_mapper=FakeMapper(), custom_source_name="mySrc",
+                     custom_target_name="myTgt")
+        fc, logs = make_fc(**attrs)
+        fc.InitializeNeuronInfo()
+        assert calls == [["A"], ["B"]]
+        assert fc.source_df.iloc[0]["type"] == "STD_source"
+        assert fc.target_df.iloc[0]["type"] == "STD_target"
+        assert fc.source_fname == "mySrc"
+        assert fc.target_fname == "myTgt"
+        assert fc.parameter_dict["source name"] == "mySrc"
+        assert "parameter" in fc.parameter_df.columns
+
+    def test_all_neurons_both_sides_rejected(self, monkeypatch, tmp_path):
+        self._fake_getNeurons(monkeypatch)
+        attrs = self._base_attrs(tmp_path)
+        attrs.update(sourceNeurons=["all_neurons"],
+                     targetNeurons=["all_neurons"])
+        fc, _ = make_fc(**attrs)
+        with pytest.raises(ValueError):
+            fc.InitializeNeuronInfo()
+
+
+# =============================================================================
+# neuron fetching: by type / from dataset or API / bulk profile cache
+# =============================================================================
+
+class TestFetchNeuronsByTypes:
+    def _write_local(self, tmp_path, rows):
+        ds_dir = tmp_path / "datasets" / "test_v1"
+        ds_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(rows).to_csv(
+            ds_dir / "test_v1_allneurons_neuron_df.csv", index=True)
+
+    def test_local_csv_with_columns(self, tmp_path):
+        self._write_local(tmp_path, {
+            "bodyId": ["1", "2", "3"], "type": ["T1", "T1", "T2"],
+            "instance": ["I1", "I2", "I3"], "post": [10, 20, 30],
+        })
+        fc, _ = make_fc(dataset="test:v1", script_path=str(tmp_path),
+                        use_cache=True, separate_hemispheres=False)
+        fc._local_neuron_df_cache = {}
+        out = fc._fetch_neurons_by_types(
+            ["T1"], columns=["bodyId", "type", "post", "side"])
+        assert len(out) == 2
+        # missing 'side' column filled with ''
+        assert (out["side"] == "").all()
+
+    def test_local_csv_hemisphere_columns_added(self, tmp_path):
+        self._write_local(tmp_path, {
+            "bodyId": ["1"], "type": ["T1"], "instance": ["I1"], "post": [10],
+            "hemisphere": ["R"], "hemisphere_code": ["R"],
+        })
+        fc, _ = make_fc(dataset="test:v1", script_path=str(tmp_path),
+                        use_cache=True, separate_hemispheres=True)
+        fc._local_neuron_df_cache = {}
+        out = fc._fetch_neurons_by_types(["T1"], columns=["bodyId", "type"])
+        assert {"instance", "hemisphere", "hemisphere_code"} <= set(out.columns)
+
+    def test_flywire_online_via_cave_fetcher(self, monkeypatch, tmp_path):
+        fc, _ = make_fc(dataset="fafb:v1", script_path=str(tmp_path),
+                        use_cache=False, client_flywire=None,
+                        separate_hemispheres=False)
+
+        class FakeCave:
+            def fetch_neurons_by_types(self, types, show_progress=False):
+                return pd.DataFrame({
+                    "root_id": [720575940614131061, 720575940614131062],
+                    "type": list(types) * 1, "tag": ["a", "b"],
+                })
+
+        fc._cave_fetcher = FakeCave()
+        out = fc._fetch_neurons_by_types(
+            ["TA", "TB"], columns=["bodyId", "type", "instance", "post"])
+        assert len(out) == 2
+        assert "bodyId" in out.columns
+        assert list(out["post"]) == [0, 0]
+
+    def test_flywire_online_empty_result(self, tmp_path):
+        fc, _ = make_fc(dataset="fafb:v1", script_path=str(tmp_path),
+                        use_cache=False, client_flywire=None)
+
+        class FakeCave:
+            def fetch_neurons_by_types(self, types, show_progress=False):
+                return None
+
+        fc._cave_fetcher = FakeCave()
+        out = fc._fetch_neurons_by_types(["TA"])
+        assert out.empty
+
+    def test_flywire_cached_but_no_local_table(self, tmp_path):
+        # cache enabled but no local neuron table -> documented empty result
+        fc, logs = make_fc(dataset="fafb:v1", script_path=str(tmp_path),
+                           use_cache=True)
+        fc._local_neuron_df_cache = {}
+        out = fc._fetch_neurons_by_types(["TA"], columns=["bodyId"])
+        assert out.empty
+
+
+class TestFetchFromDatasetOrApiBranches:
+    def test_flywire_online_only(self, tmp_path):
+        fc, _ = make_fc(dataset="fafb:v1", script_path=str(tmp_path),
+                        use_cache=False)
+        calls = []
+        fc._fetch_flywire_neurons_online = lambda ids, columns=None: (
+            calls.append(list(ids)) or pd.DataFrame({
+                "bodyId": [str(i) for i in ids], "type": ["T"] * len(ids),
+            }))
+        out = fc._fetch_from_dataset_or_api(
+            ["720575940614131061"], columns=["bodyId", "type"])
+        assert calls == [["720575940614131061"]]
+        assert len(out) == 1
+
+    def test_flywire_cache_enabled_missing_table_warns(self, tmp_path):
+        fc, logs = make_fc(dataset="fafb:v1", script_path=str(tmp_path),
+                           use_cache=True)
+        fc._local_neuron_df_cache = {}
+        out = fc._fetch_from_dataset_or_api(
+            ["720575940614131061"], columns=["bodyId"])
+        assert out.empty
+        assert any("Local neuron data not found" in m for m in logs)
+
+    def test_neuprint_batched_fallback(self, tmp_path):
+        fc, _ = make_fc(dataset="test:v1", script_path=str(tmp_path),
+                        use_cache=False, client_type="neuprint")
+        fc._ensure_neuprint_client = lambda: None
+        fc._fetch_neurons_batched = lambda ids: pd.DataFrame({
+            "bodyId": [str(i) for i in ids], "type": ["T"] * len(ids),
+            "instance": ["I"] * len(ids),
+        })
+        out = fc._fetch_from_dataset_or_api(
+            [5813, 5814], columns=["bodyId", "type", "instance"])
+        assert len(out) == 2
+        assert list(out.columns) == ["bodyId", "type", "instance"]
+
+
+class TestBuildConnectivityProfileCache:
+    def test_delegates_to_profiler(self, monkeypatch, tmp_path, capsys):
+        import types as _types
+
+        built = {"T1": object()}
+
+        class FakeConfig:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        class FakeProfiler:
+            def __init__(self, config):
+                self.config = config
+
+            def build_connectivity_profile_cache(self, **kwargs):
+                self.kwargs = kwargs
+                return built
+
+        fake_module = _types.ModuleType("comparison.connectivity_profiler")
+        fake_module.ConnectivityProfiler = FakeProfiler
+        fake_module.ProfilerConfig = FakeConfig
+        monkeypatch.setitem(
+            sys.modules, "comparison.connectivity_profiler", fake_module)
+
+        fc, _ = make_fc(dataset="test:v1", script_path=str(tmp_path),
+                        verbose_mode="silent")
+        result = fc.build_connectivity_profile_cache(
+            neuron_types=["T1", "T2"], top_k=3, top_m=2, max_neurons=10)
+        assert result["total_profiles"] == 1
+        assert result["failed_types"] == ["T2"]
+        assert result["profiles"] == built
+
+
+# =============================================================================
+# FlyWire one-time imports (merged connections + enriched neuron CSV)
+# =============================================================================
+
+def _flywire_fc(tmp_path, **attrs):
+    cache_folder = tmp_path / "cache" / "FAFB_v1_0"
+    cache_folder.mkdir(parents=True, exist_ok=True)
+    ds_dir = tmp_path / "datasets" / "FAFB_v1_0"
+    ds_dir.mkdir(parents=True, exist_ok=True)
+    fc, logs = make_fc(
+        dataset="FAFB:v1.0", script_path=str(tmp_path),
+        cache_folder=str(cache_folder), use_cache=True,
+        client_type="flywire", force_API_fetching=False,
+        _conn_df_cache=None, _conn_index=None, _conn_index_post=None,
+        _conn_db_pre_id_cache=None, _conn_cache_signature=None,
+        _neuron_index_cache=None, _neuron_index_dict=None,
+        _neuron_index_signature_value=None,
+        _local_neuron_df_cache=dict())
+    for key, value in attrs.items():
+        setattr(fc, key, value)
+    return fc, logs
+
+
+class TestFlywireOneTimeImports:
+    def test_import_merged_connections_parquet(self, tmp_path):
+        fc, logs = _flywire_fc(tmp_path)
+        merged = tmp_path / "datasets" / "FAFB_v1_0" / "fafb_merged_connections.parquet"
+        pl.DataFrame({
+            "pre_root_id": ["720575940000000011", "720575940000000012"],
+            "post_root_id": ["720575940000000021", "720575940000000022"],
+            "syn_count": [7, 9],
+            "neuropil": ["ME", "ME"],
+        }).write_parquet(merged)
+        df = fc._load_connection_db()
+        assert df is not None and df.height == 2
+        assert set(df.columns) >= {"bodyId_pre", "bodyId_post", "weight", "roi"}
+        assert os.path.exists(fc._get_connection_db_path())
+        # index was built from the imported frame
+        assert fc._conn_index is not None
+        assert "720575940000000011" in fc._conn_index
+
+    def test_import_merged_connections_csv(self, tmp_path):
+        fc, logs = _flywire_fc(tmp_path)
+        merged = tmp_path / "datasets" / "FAFB_v1_0" / "fafb_merged_connections.csv"
+        pd.DataFrame({
+            "pre": ["720575940000000031"],
+            "post": ["720575940000000041"],
+            "synapses": [4],
+        }).to_csv(merged, index=False)
+        df = fc._load_connection_db()
+        assert df.height == 1
+        assert df["weight"][0] == 4
+        # roi/cached_date were backfilled
+        assert "roi" in df.columns and "cached_date" in df.columns
+
+    def test_import_neuron_index_from_enriched_csv(self, tmp_path):
+        fc, logs = _flywire_fc(tmp_path)
+        table = tmp_path / "datasets" / "FAFB_v1_0" / "FAFB_v1_0_allneurons_neuron_df.csv"
+        pd.DataFrame({
+            "bodyId": ["720575940000000051", "720575940000000052"],
+            "type": ["Mi1", "Tm3"],
+            "name": ["Mi1_L", "Tm3_R"],
+            "post": [12, 0],
+        }).to_csv(table, index=False)
+        # the import writes the index parquet; its folder must exist
+        os.makedirs(os.path.dirname(fc._get_neuron_index_path()),
+                    exist_ok=True)
+        df = fc._load_neuron_index()
+        assert df is not None and len(df) == 2
+        assert set(df["downstream_complete"]) == {True}
+        assert os.path.exists(fc._get_neuron_index_path())
+        assert fc._neuron_index_dict is not None
+
+
+# =============================================================================
+# _prepare_flywire_data decision tree
+# =============================================================================
+
+class TestPrepareFlywireData:
+    def test_non_flywire_noop(self):
+        fc, _ = make_fc(client_type="neuprint", dataset="hemibrain:v1.2.1")
+        assert fc._prepare_flywire_data() is None
+
+    def test_online_mode_banc_raises(self, tmp_path):
+        fc, _ = _flywire_fc(tmp_path, dataset="BANC:v1.0", use_cache=False)
+        with pytest.raises(RuntimeError):
+            fc._prepare_flywire_data()
+
+    def test_online_mode_fafb_forces_api(self, tmp_path):
+        fc, _ = _flywire_fc(tmp_path, use_cache=False)
+        fc.force_API_fetching = False
+        fc._prepare_flywire_data()
+        assert fc.force_API_fetching is True
+
+    def test_banc_force_api_falls_back_to_local(self, monkeypatch, tmp_path):
+        fc, _ = _flywire_fc(tmp_path, dataset="BANC:v1.0",
+                            force_API_fetching=True)
+
+        class FakeBANC:
+            @staticmethod
+            def ensure_banc_data(dataset, dataset_dir):
+                return True
+
+        monkeypatch.setattr(coana, "BANC_file_converter", FakeBANC)
+        fc._prepare_flywire_data()
+        assert fc.force_API_fetching is False
+
+    def test_force_api_with_api_cache(self, tmp_path):
+        fc, _ = _flywire_fc(tmp_path, force_API_fetching=True)
+        api_dir = tmp_path / "cache" / "FAFB_v1_0" / "API_cache"
+        api_dir.mkdir(parents=True)
+        (api_dir / "connections.parquet").write_bytes(b"x")
+        (api_dir / "neuron_index.parquet").write_bytes(b"x")
+        assert fc._prepare_flywire_data() is None
+
+    def test_force_api_without_api_cache(self, tmp_path):
+        fc, logs = _flywire_fc(tmp_path, force_API_fetching=True)
+        assert fc._prepare_flywire_data() is None
+
+    def test_valid_existing_cache(self, tmp_path):
+        fc, _ = _flywire_fc(tmp_path)
+        cache_dir = tmp_path / "cache" / "FAFB_v1_0"
+        pl.DataFrame({"bodyId_pre": ["1"], "bodyId_post": ["2"],
+                      "weight": [1]}).write_parquet(
+            cache_dir / "connections.parquet")
+        idx_dir = tmp_path / "neuron_indexes" / "FAFB_v1_0"
+        idx_dir.mkdir(parents=True)
+        pd.DataFrame({"bodyId": ["1"]}).to_parquet(
+            idx_dir / "neuron_index.parquet", index=False)
+        assert fc._prepare_flywire_data() is None
+
+    def test_invalid_cache_converter_failure_exits(self, monkeypatch, tmp_path):
+        fc, _ = _flywire_fc(tmp_path)
+        cache_dir = tmp_path / "cache" / "FAFB_v1_0"
+        (cache_dir / "connections.parquet").write_text("not parquet")
+        idx_dir = tmp_path / "neuron_indexes" / "FAFB_v1_0"
+        idx_dir.mkdir(parents=True)
+        (idx_dir / "neuron_index.parquet").write_text("not parquet")
+
+        class FakeFAFB:
+            @staticmethod
+            def ensure_flywire_data(dataset, dataset_dir):
+                return False
+
+        monkeypatch.setattr(coana, "FAFB_file_converter", FakeFAFB)
+        with pytest.raises(SystemExit):
+            fc._prepare_flywire_data()
+
+
+# =============================================================================
+# build_connection_cache: neuron_types resolution + parallel batches
+# =============================================================================
+
+def _bulk_conn_frame(batch):
+    return pd.DataFrame({
+        "bodyId_pre": [str(b) for b in batch],
+        "bodyId_post": ["900"] * len(batch),
+        "weight": [5] * len(batch),
+    })
+
+
+class TestBuildConnectionCacheModes:
+    def _dataset_table(self, tmp_path):
+        ds_dir = tmp_path / "datasets" / "test_v1"
+        ds_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({
+            "bodyId": ["1", "2", "3", "4"],
+            "type": ["T1", "T1", "T2", "T2"],
+        }).to_csv(ds_dir / "test_v1_allneurons_neuron_df.csv", index=True)
+
+    def test_neuron_types_sequential(self, tmp_path):
+        self._dataset_table(tmp_path)
+        fc, _ = _cache_fc(tmp_path)
+        fc._fetch_connections_bulk = (
+            lambda upstream_bodyIds=None, downstream_bodyIds=None,
+            cancel_event=None, status_callback=None:
+            _bulk_conn_frame(upstream_bodyIds or []))
+        result = fc.build_connection_cache(neuron_types=["T1"], quiet=True)
+        assert result["total_neurons"] == 2
+        assert result["newly_cached"] == 2
+        assert result["total_connections"] == 2
+        assert os.path.exists(fc._get_connection_db_path())
+
+    def test_bodyids_parallel_workers(self, tmp_path):
+        self._dataset_table(tmp_path)
+        fc, _ = _cache_fc(tmp_path)
+        fc._fetch_connections_bulk = (
+            lambda upstream_bodyIds=None, downstream_bodyIds=None,
+            cancel_event=None, status_callback=None:
+            _bulk_conn_frame(upstream_bodyIds or []))
+        result = fc.build_connection_cache(
+            neuron_bodyIds=["1", "2", "3", "4"], batch_size=2,
+            max_workers=2, quiet=True)
+        assert result["newly_cached"] == 4
+        assert result["total_connections"] == 4
+
+    def test_force_rebuild_reimports_from_metadata(self, tmp_path):
+        self._dataset_table(tmp_path)
+        fc, _ = _cache_fc(tmp_path)
+        # pre-existing index with progress flags -> join-back path
+        idx_path = fc._get_neuron_index_path()
+        os.makedirs(os.path.dirname(idx_path), exist_ok=True)
+        pd.DataFrame({
+            "bodyId": ["1", "2"],
+            "type": ["T1", "T1"],
+            "instance": ["a", "b"],
+            "post": [1, 1],
+            "downstream_complete": [True, True],
+            "last_fetched": ["", ""],
+            "connection_count": [1, 1],
+        }).to_parquet(idx_path, index=False)
+        fc._fetch_connections_bulk = (
+            lambda upstream_bodyIds=None, downstream_bodyIds=None,
+            cancel_event=None, status_callback=None:
+            _bulk_conn_frame(upstream_bodyIds or []))
+        result = fc.build_connection_cache(
+            neuron_bodyIds=["1"], force_rebuild=True, quiet=True)
+        assert result["newly_cached"] == 1
+        assert result["already_cached"] == 0
+
+
+# =============================================================================
+# FindAllPath: find_reciprocal pipeline + graph-cache reuse
+# =============================================================================
+
+class _RecipFakeVP(_FakeVisualizePath):
+    """VisualizePath stand-in supporting the reciprocal viz call shape."""
+
+    def build_network(self):
+        self.G_network = None
+
+    def create_heatmap(self):
+        pass
+
+    def create_network(self):
+        pass
+
+
+class TestFindAllPathReciprocal:
+    CHAIN = [("S", "A", 10), ("A", "B", 8), ("B", "T", 6)]
+    TYPES = {"S": "TS", "A": "TA", "B": "TB", "T": "TT"}
+
+    def _wire(self, monkeypatch, tmp_path):
+        fc, logs = _make_path_fc(monkeypatch, tmp_path, self.CHAIN,
+                                 self.TYPES)
+        fc._dataset_safe = "test_v1"
+
+        # richer enrichment: also produce a custom-group frame
+        def rich_enrich(conn, traversal_probability_threshold=0, dataset=None,
+                        script_path=None, target_neurons_df=None,
+                        label_mapper=None, global_incoming_weights=None,
+                        separate_hemispheres=False, **kwargs):
+            was_polars = isinstance(conn, pl.DataFrame)
+            base = conn.to_pandas() if was_polars else conn.copy()
+            base["connection_ratio"] = 0.5
+            base["traversal_probability"] = 0.5
+            conn_e = pl.from_pandas(base) if was_polars else base
+            conn_t = (base.groupby(["type_pre", "type_post"],
+                                   as_index=False)["weight"].sum())
+            conn_t["connection_ratio"] = 0.5
+            conn_t["traversal_probability"] = 0.5
+            conn_g = pd.DataFrame({
+                "custom_group_pre": ["GA"],
+                "custom_group_post": ["GB"],
+                "weight": [10],
+                "connection_ratio": [0.5],
+                "traversal_probability": [0.5],
+            })
+            if was_polars:
+                return conn_e, pl.from_pandas(conn_t), pl.from_pandas(conn_g)
+            return conn_e, conn_t, conn_g
+
+        monkeypatch.setattr(coana.sv, "EnrichConnectionTable", rich_enrich)
+        monkeypatch.setattr(coana, "VisualizePath", _RecipFakeVP)
+        _FakeVisualizePath.instances = []
+
+        # reciprocal edges among graph nodes
+        fc._fetch_direct_connections_for_nodes = lambda node_ids: pd.DataFrame({
+            "bodyId_pre": ["A", "B"],
+            "bodyId_post": ["B", "T"],
+            "weight": [8, 6],
+            "type_pre": ["TA", "TB"],
+            "type_post": ["TB", "TT"],
+        })
+        return fc, logs
+
+    def test_find_reciprocal_outputs_and_viz(self, monkeypatch, tmp_path):
+        coana.clear_findallpath_cache()
+        fc, _ = self._wire(monkeypatch, tmp_path)
+        fc.FindAllPath(find_reciprocal=True)
+
+        folder = Path(fc.allpath_folder)
+        recip = folder / "find_reciprocal"
+        assert recip.is_dir()
+        assert (recip / "reciprocal_connection_type.csv").exists()
+        assert (recip / "reciprocal_connection_bodyId.csv").exists()
+        assert (recip / "parameters.csv").exists()
+        # type/group/bodyId reciprocal visualizations were constructed
+        assert len(_FakeVisualizePath.instances) >= 3
+        coana.clear_findallpath_cache()
+
+    def test_graph_cache_reuse_with_higher_threshold(self, monkeypatch,
+                                                     tmp_path):
+        coana.clear_findallpath_cache()
+        fc, _ = self._wire(monkeypatch, tmp_path)
+        fc.FindAllPath(find_reciprocal=False)
+        # second run: same query, higher threshold -> reuse + weight filter
+        fc.min_synapse_num = 5
+        fc.FindAllPath(find_reciprocal=False)
+        folder = Path(fc.allpath_folder)
+        assert (folder / "all_attributes.json").exists()
+        coana.clear_findallpath_cache()
+

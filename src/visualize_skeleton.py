@@ -941,80 +941,16 @@ class WebDriverExportSession:
         # Track screenshot count for periodic memory cleanup
         self._screenshot_count += 1
         
-        # Always use fast_mode (canvas.toDataURL) - it's fast and high quality
-        fast_mode = True
+        # Always use fast_mode (canvas.toDataURL) - it's fast and high quality.
+        # The former Method 1 (Plotly.toImage via execute_async_script) was only
+        # reachable with fast_mode disabled, which never happens; it was removed
+        # as dead code. Method 2 below handles all WebGL exports.
+        fast_mode = True  # noqa: F841 - kept for signature/history clarity
         
         img = None
         temp_png = output_path.rsplit('.', 1)[0] + '_temp.png'
         scaled_width = self.width * self.scale
         scaled_height = self.height * self.scale
-        
-        # Method 1: Try Plotly.toImage() - the official high-quality export API
-        # Skip this in fast_mode for better performance
-        if use_webgl_export and not fast_mode:
-            try:
-                # Use Plotly's toImage function which produces high-quality exports
-                # This function properly handles WebGL rendering and antialiasing
-                # Note: We store in window._lastImageData to allow explicit cleanup
-                img_data = self.driver.execute_async_script("""
-                    var callback = arguments[arguments.length - 1];
-                    var gd = document.querySelector('.js-plotly-plot');
-                    if (!gd || !Plotly) {
-                        callback(null);
-                        return;
-                    }
-                    
-                    // Force a render before capture
-                    if (gd._fullLayout && gd._fullLayout.scene && gd._fullLayout.scene._scene) {
-                        var scene = gd._fullLayout.scene._scene;
-                        if (scene.render) scene.render();
-                    }
-                    
-                    // Use Plotly.toImage for high-quality export
-                    Plotly.toImage(gd, {
-                        format: 'png',
-                        width: arguments[0],
-                        height: arguments[1],
-                        scale: 1  // We already scaled the dimensions
-                    }).then(function(dataUrl) {
-                        // Store temporarily for potential cleanup
-                        window._lastImageData = dataUrl;
-                        callback(dataUrl);
-                    }).catch(function(err) {
-                        callback(null);
-                    });
-                """, scaled_width, scaled_height)
-                
-                if img_data and img_data.startswith('data:image/png;base64,'):
-                    base64_data = img_data.split(',')[1]
-                    img_bytes = base64.b64decode(base64_data)
-                    
-                    # Immediately clear the data URL from browser memory
-                    try:
-                        self.driver.execute_script("window._lastImageData = null;")
-                    except:
-                        pass
-                    
-                    # Clear Python reference to large string
-                    img_data = None
-                    base64_data = None
-                    
-                    # Verify non-empty image
-                    if len(set(img_bytes[:1000])) > 1:
-                        with open(temp_png, 'wb') as f:
-                            f.write(img_bytes)
-                        img = Image.open(temp_png)
-                        
-                        # Clear the large bytes object
-                        img_bytes = None
-                        
-                        # Verify image has content
-                        import numpy as np
-                        arr = np.array(img)
-                        if arr.max() == 0:  # All black
-                            img = None
-            except Exception:
-                pass  # Will try next method
         
         # Method 2: Try WebGL canvas.toDataURL() with forced render
         if img is None and use_webgl_export:

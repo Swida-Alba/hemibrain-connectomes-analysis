@@ -293,14 +293,17 @@ def test_conflict_detection(mapper):
     assert any(c.source_type == 'AggFW' and c.relationship == 'N-to-1'
                for c in n_to_1)
     assert any(c.source_type == 'HBa' for c in n_to_1)
-    # NOTE: source only builds reverse N-to-1 detection for flywire/hemibrain;
-    # MANC N-to-1 (MNx) is not detected (asymmetry worth reporting).
+    # Fixed: MANC reverse N-to-1 detection now exists alongside
+    # flywire/hemibrain (MNx -> {Mn1, Mn2}).
+    assert any(c.source_type == 'MNx' and c.relationship == 'N-to-1'
+               for c in n_to_1)
     # SplitN (male-cns) -> {FWa, FWb}
     assert any(c.source_type == 'SplitN' and c.relationship == '1-to-N'
                and c.target_types == {'FWa', 'FWb'} for c in one_to_n)
 
     assert mapper.is_n_to_1_type('AggFW', FW) is True
     assert mapper.is_n_to_1_type('AggA', MCNS) is True
+    assert mapper.is_n_to_1_type('MNx', MANC) is True
     assert mapper.is_n_to_1_type('Same1', MCNS) is False
     # n-to-1 types are NOT mapped (aggregation avoided)
     assert mapper.get_mapped_type('AggFW', FW, MCNS) is None
@@ -496,9 +499,10 @@ def test_get_merge_mapping_for_types(mapper):
     merge_more = mapper.get_merge_mapping_for_types(
         ['BANC_Same1', 'HB_aMe12', 'MANC_MN1'], verbose=True)
     assert merge_more['BANC_Same1'] == 'Same1'
-    assert merge_more['HB_aMe12'] == 'aMe12'
-    # MANC reverse mapping is not built by the mapper, so MN1 stays native
-    assert merge_more['MANC_MN1'] == 'MN1'
+    # Fixed: MANC reverse mapping is built, so aMe12 now carries its MANC
+    # alias and MN1 resolves to the male-cns canonical type.
+    assert merge_more['HB_aMe12'] == 'aMe12(MN1)'
+    assert merge_more['MANC_MN1'] == 'aMe12(MN1)'
 
 
 # ---------------------------------------------------------------------------

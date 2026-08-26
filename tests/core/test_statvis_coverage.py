@@ -309,6 +309,21 @@ class TestMatrixHelpers:
         assert cmat_b.at["1_S", "2_T1"] == 0.7
         assert cmat_t.at["S", "T1"] == 0.7
 
+    def test_conn2fullmat_without_type_column(self):
+        # Regression: frames without a 'type' column used to crash on
+        # source_df.type.unique(); they now fall back to bodyId labels.
+        source_df = pd.DataFrame({"bodyId": [1]})
+        target_df = pd.DataFrame({"bodyId": [2, 3]})
+        conn_df = pd.DataFrame({"bodyId_pre": [1], "bodyId_post": [2],
+                                "weight": [4]})
+        conn_type = pd.DataFrame(columns=["type_pre", "type_post", "weight"])
+        cmat_b, cmat_t = sv.Conn2FullMat(source_df, target_df, conn_df,
+                                         conn_type)
+        assert cmat_b.index.tolist() == ["1"]
+        assert cmat_b.at["1", "2"] == 4
+        assert cmat_b.at["1", "3"] == 0
+        assert cmat_t.at["1", "2"] == 0  # empty conn_type fills nothing
+
     def test_calrc(self):
         cmat = pd.DataFrame([[1, 0], [2, 3]], index=["s1", "s2"],
                             columns=["t1", "t2"])
@@ -489,6 +504,15 @@ class TestPathBuilders:
         assert kept.empty and len(excluded) == 2
         kept, excluded = sv.path_filter(pd.DataFrame(), "B")
         assert kept.empty and excluded.empty
+
+    def test_path_filter_after_split_path(self):
+        # Regression: split_path leaves the original list in path_str and the
+        # string form in path; filtering must match against the strings
+        # instead of silently no-op'ing on the list column.
+        df = sv.split_path(pd.DataFrame({"path": [[1, 2, 3], [4, 5]]}))
+        kept, excluded = sv.path_filter(df, "2")
+        assert kept["path"].tolist() == ["4->5"]
+        assert excluded["path"].tolist() == ["1->2->3"]
 
     def test_integer_synapse_count(self):
         assert sv._integer_synapse_count(5.0) == 5
@@ -797,3 +821,574 @@ class TestMiscHelpers:
         assert "Central brain" in sv._get_coverage_notes("hemibrain:v1.2.1")
         assert "not available" in sv._get_coverage_notes("unknown-ds")
         assert "FAFB" in sv._get_coverage_notes("flywire_70k")
+
+
+# =============================================================================
+# _VisConnMatInteractive_local (the big HTML generator, lines 2726-5590)
+# =============================================================================
+#
+# VisConnMatInteractive prefers vispath_pkg when importable; setting
+# sys.modules["vispath_pkg"] = None makes the ``from vispath_pkg import ...``
+# raise ImportError so execution falls through to the local implementation.
+
+@pytest.fixture
+def local_interactive(monkeypatch):
+    monkeypatch.setitem(sys.modules, "vispath_pkg", None)
+
+
+class TestVisConnMatInteractiveLocal:
+    def _cmat(self, rows, cols, seed=0):
+        rng = np.random.default_rng(seed)
+        return pd.DataFrame(
+            rng.integers(0, 20, size=(rows, cols)).astype(float),
+            index=[f"r{i}" for i in range(rows)],
+            columns=[f"c{j}" for j in range(cols)],
+        )
+
+    def test_single_matrix_small(self, tmp_path, local_interactive):
+        out = tmp_path / "conn_weight.html"
+        cmat = self._cmat(5, 4)
+        sv.VisConnMatInteractive(cmat, str(out), title="Synapse counts",
+                                 showfig=False, verbose=True)
+        assert out.exists() and out.stat().st_size > 1000
+        text = out.read_text(encoding="utf-8")
+        assert "plotly" in text.lower()
+        assert "r0" in text and "c0" in text
+
+    def test_ratio_title_metric(self, tmp_path, local_interactive):
+        out = tmp_path / "conn_ratio.html"
+        cmat = self._cmat(4, 4, seed=1) / 20.0
+        sv.VisConnMatInteractive(cmat, str(out), title="Connection ratio",
+                                 showfig=False, verbose=False)
+        assert out.exists()
+        assert "'ratio'" in out.read_text(encoding="utf-8")
+
+    def test_probability_filename_metric(self, tmp_path, local_interactive):
+        out = tmp_path / "transmission_prob.html"
+        cmat = self._cmat(4, 3, seed=2) / 20.0
+        sv.VisConnMatInteractive(cmat, str(out), title="", showfig=False,
+                                 verbose=False)
+        assert out.exists()
+
+    def test_matrices_dict_mode(self, tmp_path, local_interactive):
+        out = tmp_path / "multi.html"
+        base = self._cmat(4, 4, seed=3)
+        matrices = {
+            "weight": base,
+            "ratio": base / base.values.max(),
+            "probability": base / base.values.max(),
+        }
+        sv.VisConnMatInteractive(base, str(out), title="Multi",
+                                 matrices_dict=matrices, showfig=False,
+                                 verbose=False)
+        text = out.read_text(encoding="utf-8")
+        assert out.exists() and "weight" in text and "probability" in text
+
+    def test_conn_df_type_lookup(self, tmp_path, local_interactive):
+        out = tmp_path / "bodyid.html"
+        cmat = pd.DataFrame(
+            [[5.0, 0.0], [3.0, 2.0]], index=["10", "20"], columns=["30", "40"])
+        conn = pd.DataFrame({
+            "bodyId_pre": [10, 20], "type_pre": ["Mi1", "Tm3"],
+            "bodyId_post": [30, 40], "type_post": ["DN1", "DN2"],
+        })
+        sv.VisConnMatInteractive(cmat, str(out), title="bodyId",
+                                 conn_df=conn, showfig=False, verbose=False)
+        text = out.read_text(encoding="utf-8")
+        assert "Mi1" in text and "DN1" in text
+
+    def test_clustering_failure_falls_back(self, tmp_path, local_interactive,
+                                           monkeypatch):
+        import scipy.cluster.hierarchy as hierarchy
+
+        def broken_linkage(*a, **k):
+            raise RuntimeError("clustering unavailable")
+
+        monkeypatch.setattr(hierarchy, "linkage", broken_linkage)
+        out = tmp_path / "noclust.html"
+        sv.VisConnMatInteractive(self._cmat(4, 4, seed=4), str(out),
+                                 title="noclust", showfig=False, verbose=True)
+        assert out.exists()
+
+    def test_large_matrix_paths(self, tmp_path, local_interactive):
+        # >100 rows triggers is_large; keep cols small so hover loop is cheap.
+        out = tmp_path / "large.html"
+        cmat = self._cmat(101, 5, seed=5)
+        sv.VisConnMatInteractive(cmat, str(out), title="big", showfig=False,
+                                 verbose=False)
+        assert out.exists()
+        out2 = tmp_path / "large_ratio.html"
+        sv.VisConnMatInteractive(cmat / 20.0, str(out2), title="ratio",
+                                 showfig=False, verbose=False)
+        assert out2.exists()
+
+    def test_wrapper_falls_back_to_local(self, tmp_path, local_interactive):
+        out = tmp_path / "wrapper.html"
+        sv.VisConnMatInteractive(self._cmat(3, 3, seed=6), str(out),
+                                 title="wrap", showfig=False, verbose=False)
+        assert out.exists()
+
+
+# =============================================================================
+# VisConnMat large-matrix optimization branch (2444, 2510-2632)
+# =============================================================================
+
+class TestVisConnMatLarge:
+    def test_large_matrix_heatmap(self, tmp_path, patched_colorbar):
+        rng = np.random.default_rng(7)
+        cmat = pd.DataFrame(
+            rng.integers(0, 30, size=(101, 4)).astype(float),
+            index=[f"s{i}" for i in range(101)],
+            columns=[f"t{j}" for j in range(4)])
+        out = tmp_path / "large_heatmap.html"
+        sv.VisConnMat(cmat, filename=str(out), title="Synapses",
+                      showfig=False, scale="log2")
+        assert out.exists()
+
+    def test_large_sparse_rounding(self, tmp_path, patched_colorbar):
+        cmat = pd.DataFrame(np.zeros((101, 4)))
+        cmat.iloc[0, 0] = 5.0
+        out = tmp_path / "sparse.html"
+        sv.VisConnMat(cmat, filename=str(out), title="sparse", showfig=False)
+        assert out.exists()
+
+
+# =============================================================================
+# SankeyDirect (6672-6725)
+# =============================================================================
+
+class TestSankeyDirect:
+    def test_writes_html(self, tmp_path):
+        cmat = pd.DataFrame([[3.0, 0.0], [1.0, 4.0]],
+                            index=["A", "B"], columns=["X", "Y"])
+        out = tmp_path / "sankey.html"
+        sv.SankeyDirect(cmat, str(out), showfig=False)
+        assert out.exists() and "plotly" in out.read_text().lower()
+
+    def test_no_positive_values_returns_early(self, tmp_path):
+        cmat = pd.DataFrame([[0.0, 0.0]], index=["A"], columns=["X", "Y"])
+        out = tmp_path / "empty_sankey.html"
+        sv.SankeyDirect(cmat, str(out), showfig=False)
+        assert not out.exists()
+
+
+# =============================================================================
+# Vis3S soma path (6733-6979)
+# =============================================================================
+
+class TestVis3S:
+    def test_soma_plot_saves_png(self, tmp_path):
+        import matplotlib
+        matplotlib.use("Agg")
+        df = pd.DataFrame({
+            "bodyId": [1, 2, 3],
+            "type": ["Mi1", "Mi1", "Tm3"],
+            "somaLocation": ["[100, 200, 300]", "[150, 250, 350]",
+                             "[400, 500, 600]"],
+            "somaRadius": [100, 120, 80],
+        })
+        save_path = str(tmp_path / "vis3s")
+        sv.Vis3S(df, toPlot="soma", save_path=save_path, showfig=False,
+                 dataset="test", show_mesh=False, dpi=50)
+        assert os.path.exists(save_path + ".png")
+
+
+# =============================================================================
+# build_synapse_mesh / build_site_mesh (7018-7380)
+# =============================================================================
+
+class TestMeshBuilders:
+    def test_synapse_mesh_sphere(self):
+        pre = np.array([[0.0, 0.0, 0.0], [10.0, 10.0, 10.0]])
+        post = np.array([[1.0, 1.0, 1.0], [11.0, 11.0, 11.0]])
+        mesh = sv.build_synapse_mesh(pre, post, mode="sphere", size=50.0)
+        assert mesh is not None
+
+    def test_synapse_mesh_cone_and_tetra(self):
+        pre = np.array([[0.0, 0.0, 0.0]])
+        post = np.array([[5.0, 5.0, 5.0]])
+        assert sv.build_synapse_mesh(pre, post, mode="cone", size=20.0) is not None
+        assert sv.build_synapse_mesh(pre, post, mode="tetrahedron", size=20.0) is not None
+
+    def test_synapse_mesh_array_size(self):
+        pre = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])
+        post = np.array([[2.0, 2.0, 2.0], [3.0, 3.0, 3.0]])
+        mesh = sv.build_synapse_mesh(pre, post, mode="sphere",
+                                     size=np.array([10.0, 20.0]))
+        assert mesh is not None
+
+    def test_synapse_mesh_empty(self):
+        pre = np.empty((0, 3))
+        post = np.empty((0, 3))
+        mesh = sv.build_synapse_mesh(pre, post, mode="sphere")
+        assert mesh is not None
+
+    def test_synapse_mesh_unknown_mode(self):
+        with pytest.raises(ValueError):
+            sv.build_synapse_mesh(np.array([[0.0, 0, 0]]),
+                                  np.array([[1.0, 1, 1]]), mode="bogus")
+
+    def test_site_mesh_sphere_and_cone(self):
+        coords = np.array([[0.0, 0.0, 0.0], [5.0, 5.0, 5.0]])
+        assert sv.build_site_mesh(coords, mode="sphere") is not None
+        assert sv.build_site_mesh(coords, mode="cone") is not None
+
+    def test_site_mesh_empty_and_1d(self):
+        assert sv.build_site_mesh(np.empty((0, 3)), mode="sphere") is not None
+        assert sv.build_site_mesh(np.array([1.0, 2.0, 3.0]), mode="sphere") is not None
+
+    def test_site_mesh_unknown_mode(self):
+        with pytest.raises(ValueError):
+            sv.build_site_mesh(np.array([[0.0, 0, 0]]), mode="bogus")
+
+
+# =============================================================================
+# _get_neuron_df flywire + missing branches (502-539)
+# =============================================================================
+
+class TestGetNeuronDf:
+    def test_flywire_cache_hit(self, monkeypatch):
+        df = pd.DataFrame({"bodyId": ["1"], "type": ["Mi1"]})
+        sv._NEURON_DF_CACHE["flywire_fafb"] = {"neuron_df": df}
+        try:
+            out = sv._get_neuron_df("fafb")
+            assert list(out["bodyId"]) == ["1"]
+        finally:
+            sv._NEURON_DF_CACHE.pop("flywire_fafb", None)
+
+    def test_flywire_load_failure(self, monkeypatch):
+        sv._NEURON_DF_CACHE.pop("flywire_fafb", None)
+        # fafb_utils import / resolve path failing raises FileNotFoundError
+        monkeypatch.setattr(sv, "resolve_flywire_dataset_dir",
+                            lambda root, ds: None)
+        with pytest.raises(FileNotFoundError):
+            sv._get_neuron_df("fafb")
+
+    def test_standard_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sv.os.path, "exists", lambda p: False)
+        with pytest.raises(FileNotFoundError):
+            sv._get_neuron_df("nonexistent-dataset:v9.9")
+
+
+# =============================================================================
+# _ensure_local_dataset_files (445-478)
+# =============================================================================
+
+class TestEnsureLocalDatasetFiles:
+    def test_failed_registry_raises(self, monkeypatch):
+        sv._FAILED_DATASET_DOWNLOADS.add("missing-ds_v1")
+        try:
+            with pytest.raises(FileNotFoundError):
+                sv._ensure_local_dataset_files("missing-ds:v1")
+        finally:
+            sv._FAILED_DATASET_DOWNLOADS.discard("missing-ds_v1")
+
+    def test_pull_success_creates_files(self, tmp_path, monkeypatch):
+        dataset_dir = tmp_path / "datasets" / "fake_ds_v1"
+        body = str(dataset_dir / "fake_ds_v1_allneurons")
+
+        def fake_path_body(dataset):
+            return "fake_ds_v1", str(dataset_dir), body
+
+        def fake_pull(dataset, save_path=None, omitNoneType=False, client=None,
+                      **kwargs):
+            pd.DataFrame({"bodyId": [1]}).to_csv(
+                save_path + "_neuron_df.csv", index=False)
+            pd.DataFrame({"roi": ["R"]}).to_parquet(
+                save_path + "_roi_count_df.parquet")
+
+        monkeypatch.setattr(sv, "_get_dataset_path_body", fake_path_body)
+        monkeypatch.setattr(sv, "pull_dataset", fake_pull)
+        monkeypatch.setattr(sv, "clear_neuron_cache", lambda *a, **k: None)
+        normalized, out_body = sv._ensure_local_dataset_files(
+            "fake-ds:v1", verbose=False)
+        assert normalized == "fake_ds_v1"
+        assert os.path.exists(out_body + "_neuron_df.csv")
+
+    def test_pull_failure_recorded(self, tmp_path, monkeypatch):
+        dataset_dir = tmp_path / "datasets" / "fail_ds_v1"
+
+        def fake_path_body(dataset):
+            return "fail_ds_v1", str(dataset_dir), str(
+                dataset_dir / "fail_ds_v1_allneurons")
+
+        def failing_pull(*a, **k):
+            raise RuntimeError("offline")
+
+        monkeypatch.setattr(sv, "_get_dataset_path_body", fake_path_body)
+        monkeypatch.setattr(sv, "pull_dataset", failing_pull)
+        with pytest.raises(RuntimeError):
+            sv._ensure_local_dataset_files("fail-ds:v1")
+        assert "fail_ds_v1" in sv._FAILED_DATASET_DOWNLOADS
+        sv._FAILED_DATASET_DOWNLOADS.discard("fail_ds_v1")
+
+
+# =============================================================================
+# _build_dataset_metadata branches (1345, 1358, 1364-1372)
+# =============================================================================
+
+class TestBuildDatasetMetadata:
+    def test_no_type_column(self):
+        ndf = pd.DataFrame({"bodyId": [1, 2], "pre": [10, 20], "post": [5, 6]})
+        roi = pd.DataFrame({"bodyId": [1, 2], "roi": ["AL", "AL"],
+                            "pre": [10, 20], "post": [5, 6]})
+        meta = sv._build_dataset_metadata("hemibrain", ndf, roi)
+        assert meta["neuron_counts"]["typed"] == 0
+        assert meta["synapse_counts"]["total"] == 41
+        assert meta["roi_coverage"]["roi_list"] == ["AL"]
+        assert meta["roi_coverage"]["neuron_counts_per_roi"]["AL"] == 2
+
+    def test_client_primary_rois(self):
+        class ClientStub:
+            primary_rois = ["LH", "AL"]
+
+        ndf = pd.DataFrame({"bodyId": [1], "type": ["Mi1"], "pre": [1],
+                            "post": [0]})
+        roi = pd.DataFrame({"bodyId": [1], "roi": ["LH"], "pre": [1],
+                            "post": [0]})
+        meta = sv._build_dataset_metadata("hemibrain", ndf, roi,
+                                          client=ClientStub())
+        assert meta["roi_coverage"]["roi_list"] == ["LH", "AL"]
+
+
+# =============================================================================
+# LogInHemibrain (1274-1290)
+# =============================================================================
+
+class TestLogInHemibrain:
+    def test_returns_client_and_dataset(self, monkeypatch):
+        class ClientStub:
+            def __init__(self, address, dataset=None, token=None):
+                self.address = address
+                self.dataset = dataset
+                self.token = token
+
+        monkeypatch.setattr(sv, "Client", ClientStub)
+        client, dataset = sv.LogInHemibrain("sometoken")
+        assert dataset == "hemibrain:v1.2.1"
+        assert isinstance(client, ClientStub)
+
+
+# =============================================================================
+# pull_dataset with injected fetch_fn (1497-1728)
+# =============================================================================
+
+class TestPullDataset:
+    def _frames(self, body_ids):
+        ndf = pd.DataFrame({"bodyId": list(body_ids),
+                            "type": ["Mi1"] * len(body_ids),
+                            "pre": [1] * len(body_ids),
+                            "post": [2] * len(body_ids),
+                            "roiInfo": ["AL"] * len(body_ids)})
+        roi = pd.DataFrame({"bodyId": list(body_ids),
+                            "roi": ["AL"] * len(body_ids),
+                            "pre": [1] * len(body_ids),
+                            "post": [2] * len(body_ids)})
+        return ndf, roi
+
+    def test_cancelled_before_start(self):
+        import threading
+        ev = threading.Event()
+        ev.set()
+        with pytest.raises(sv.DatasetPullCancelled):
+            sv.pull_dataset("hemibrain:v1.2.1", cancel_event=ev)
+
+    def test_sequential_pull_with_fetch_fn(self, tmp_path, monkeypatch):
+        import neuprint
+
+        class CriteriaStub:
+            def __init__(self, bodyId=None, **kwargs):
+                self.bodyId = bodyId
+
+        monkeypatch.setattr(neuprint, "NeuronCriteria", CriteriaStub)
+
+        class ClientStub:
+            def fetch_custom(self, query):
+                return pd.DataFrame({"bodyId": [1, 2, 3, 4, 5]})
+
+        def fetch_fn(criteria, client=None):
+            return self._frames(criteria.bodyId)
+
+        save_path = str(tmp_path / "ds_allneurons")
+        sv.pull_dataset("hemibrain:v1.2.1", save_path=save_path,
+                        client=ClientStub(), fetch_fn=fetch_fn,
+                        batch_size=2, omitNoneType=True)
+        assert os.path.exists(save_path + "_neuron_df.csv")
+        assert os.path.exists(save_path + "_roi_count_df.parquet")
+        assert os.path.exists(str(tmp_path / "ds_metadata.json"))
+
+    def test_parallel_pull_with_progress(self, tmp_path, monkeypatch):
+        import neuprint
+
+        class CriteriaStub:
+            def __init__(self, bodyId=None, **kwargs):
+                self.bodyId = bodyId
+
+        monkeypatch.setattr(neuprint, "NeuronCriteria", CriteriaStub)
+
+        class ClientStub:
+            def fetch_custom(self, query):
+                return pd.DataFrame({"bodyId": [1, 2, 3, 4]})
+
+        def fetch_fn(criteria, client=None):
+            return self._frames(criteria.bodyId)
+
+        progress = []
+        save_path = str(tmp_path / "ds_allneurons")
+        sv.pull_dataset("hemibrain:v1.2.1", save_path=save_path,
+                        client=ClientStub(), fetch_fn=fetch_fn,
+                        batch_size=2, max_workers=2,
+                        progress_callback=lambda cur, tot: progress.append((cur, tot)))
+        assert os.path.exists(save_path + "_neuron_df.csv")
+        assert progress and progress[-1][0] == 4
+
+
+# =============================================================================
+# getNeurons legacy query pipeline (nested groups, dict filters, None query)
+# =============================================================================
+
+def _getneurons_rdf():
+    return pd.DataFrame({"bodyId": [1, 2, 3, 4], "roi": ["r"] * 4})
+
+
+def _patch_getneurons_local(monkeypatch):
+    monkeypatch.setattr(
+        sv, "_ensure_local_dataset_files",
+        lambda dataset, client=None, verbose=True: ("synth_ds", "ignored"))
+    monkeypatch.setattr(
+        sv, "_get_cached_neuron_df",
+        lambda dn, path: (_synthetic_ndf(), _getneurons_rdf()))
+    monkeypatch.setattr(sv, "_get_cached_neuron_search", lambda dataset: None)
+
+
+class TestGetNeuronsLegacyPipeline:
+    def test_none_query_uses_api_fetch(self, monkeypatch):
+        calls = {}
+
+        def fake_fetch(criteria, client=None):
+            calls["criteria"] = criteria
+            return _synthetic_ndf(), _getneurons_rdf()
+
+        monkeypatch.setattr(sv, "fetch_neurons", fake_fetch)
+        ndf, rdf, name, criteria = sv.getNeurons(
+            None, dataset="hemibrain:v1.2.1", verbose=False)
+        assert name == "ALL"
+        assert criteria is None
+        assert len(ndf) == 4
+        assert calls["criteria"] is None
+
+    def test_empty_list_returns_all_typed(self, monkeypatch):
+        _patch_getneurons_local(monkeypatch)
+        ndf, rdf, name, _ = sv.getNeurons(
+            [], dataset="hemibrain:v1.2.1", verbose=False)
+        assert name == "allneurons"
+        assert len(ndf) == 4
+        assert set(ndf["type"]) == {"Mi1", "Tm3", "DN1"}
+
+    def test_nested_list_custom_groups(self, monkeypatch):
+        _patch_getneurons_local(monkeypatch)
+        ndf, rdf, name, _ = sv.getNeurons(
+            [["Mi1", "Tm3"], "DN1"],
+            dataset="hemibrain:v1.2.1",
+            custom_group_names=["vis_group"],
+            verbose=False)
+        assert "custom_group" in ndf.columns
+        assert len(ndf) == 4
+        grouped = set(ndf.loc[ndf["type"].isin(["Mi1", "Tm3"]),
+                              "custom_group"])
+        assert grouped == {"vis_group"}
+        # two group names -> joined auto name
+        assert name == "vis_group_DN1"
+
+    def test_nested_list_auto_group_name(self, monkeypatch):
+        _patch_getneurons_local(monkeypatch)
+        ndf, _, name, _ = sv.getNeurons(
+            [["Mi1", "Tm3"]], dataset="hemibrain:v1.2.1", verbose=False)
+        assert name == "Mi1_etc"
+        assert set(ndf["custom_group"]) == {"Mi1_etc"}
+
+    def test_dict_filter_branch(self, monkeypatch):
+        rdf = _getneurons_rdf()
+        monkeypatch.setattr(
+            sv, "_get_cached_neuron_df",
+            lambda dn, path: (_synthetic_ndf(), rdf))
+        matched, roi, name, criteria = sv.getNeurons(
+            {"startswith": ["Mi"]},
+            dataset="hemibrain:v1.2.1", verbose=False)
+        assert criteria is None
+        assert len(matched) == 2
+        assert set(matched["type"]) == {"Mi1"}
+
+
+# =============================================================================
+# EnrichConnectionTable dataset-discovery and target-neuron branches
+# =============================================================================
+
+class _GetLabelMapper:
+    def __init__(self, mapping):
+        self._mapping = mapping
+
+    def get_label(self, dataset, key):
+        return self._mapping.get(str(key), str(key))
+
+
+class TestEnrichDatasetDiscoveryBranches:
+    def _conn(self):
+        return pd.DataFrame({
+            "bodyId_pre": ["1", "2"],
+            "bodyId_post": ["3", "4"],
+            "weight": [5, 6],
+            "post": [100, 120],
+        })
+
+    def test_legacy_root_dataset_path(self, tmp_path):
+        # dataset table only at the legacy root-level location
+        clean = "synth_ds"
+        datasets = tmp_path / "datasets"
+        datasets.mkdir()
+        table = datasets / f"{clean}_allneurons_neuron_df.csv"
+        pd.DataFrame({
+            "bodyId": ["1", "2", "3", "4"],
+            "type": ["A", "A", "B", "B"],
+            "post": [100, 100, 120, 120],
+        }).to_csv(table, index=False)
+        conn_e, conn_t, conn_g = sv.EnrichConnectionTable(
+            self._conn(), dataset="synth:ds", script_path=str(tmp_path),
+            engine="pandas")
+        assert conn_e is not None and len(conn_e) == 2
+        assert conn_t is not None
+
+    def test_globbed_subdir_dataset_path(self, tmp_path):
+        clean = "synth_ds"
+        subdir = tmp_path / "datasets" / clean
+        subdir.mkdir(parents=True)
+        pd.DataFrame({
+            "bodyId": ["1", "2", "3", "4"],
+            "type": ["A", "A", "B", "B"],
+            "post": [100, 100, 120, 120],
+        }).to_csv(subdir / "custom_allneurons_neuron_df.csv", index=False)
+        conn_e, conn_t, _ = sv.EnrichConnectionTable(
+            self._conn(), dataset="synth:ds", script_path=str(tmp_path),
+            engine="pandas")
+        assert len(conn_e) == 2
+
+    def test_target_neurons_df_with_label_mapper(self, tmp_path):
+        # No local dataset at all -> use_local=False -> target_neurons_df path
+        target = pd.DataFrame({
+            "bodyId": ["3", "4"],
+            "type": ["B", "B"],
+            "post": [120, 120],
+        })
+        mapper = _GetLabelMapper({"B": "Bstd"})
+        conn_e, conn_t, _ = sv.EnrichConnectionTable(
+            self._conn(), dataset="synth:ds", script_path=str(tmp_path),
+            target_neurons_df=target, label_mapper=mapper, engine="pandas")
+        assert len(conn_e) == 2
+        assert "connection_ratio" in conn_e.columns
+
+    def test_no_local_no_target_warns(self, tmp_path, capsys):
+        conn_e, conn_t, _ = sv.EnrichConnectionTable(
+            self._conn(), dataset="synth:ds", script_path=str(tmp_path),
+            engine="pandas")
+        assert "Could not fetch neuron info" in capsys.readouterr().out
+        assert len(conn_e) == 2

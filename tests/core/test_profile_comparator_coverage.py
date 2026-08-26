@@ -35,7 +35,19 @@ def _profile(bid, ds=DS_A, upstream=None, downstream=None, **kwargs):
         total_downstream_weight=float(sum(downstream.values())),
     )
     params.update(kwargs)
-    return ConnectivityProfile(**params)
+    profile = ConnectivityProfile(**params)
+    # Derive counts so _compute_connectivity_status classifies rich profiles
+    # as COMPLETE instead of NONE (which would skip them in comparisons).
+    if not upstream and not downstream:
+        return profile
+    profile.actual_upstream_count = len(upstream)
+    profile.actual_downstream_count = len(downstream)
+    profile.top_k_bodyid_used = min(len(upstream), len(downstream))
+    profile.unique_types_upstream = len(upstream)
+    profile.unique_types_downstream = len(downstream)
+    profile._connectivity_status = profile._compute_connectivity_status().value
+    profile.is_weak_connectivity = not profile.connectivity_status.is_valid_for_comparison()
+    return profile
 
 
 def _rich_profile(bid, ds=DS_A, scale=1.0):
@@ -468,13 +480,14 @@ def test_compare_profiles_simple():
 
 
 def test_get_partner_overlap_details():
-    # SOURCE BUG (reported, not fixed here): with NO overlapping/any partners
-    # the internal sort-key assignment fails because df.apply(axis=1) on the
-    # empty DataFrame cannot be assigned to the single 'sort_key' column.
     pa0 = _profile('a', upstream={'X': 3.0})
     pb0 = _profile('b')
-    with pytest.raises(ValueError):
-        ProfileComparator.get_partner_overlap_details(pa0, pb0, 'downstream')
+    # Fixed: with an empty partner union the detail table is returned with
+    # the documented schema instead of raising on the sort-key assignment.
+    df0 = ProfileComparator.get_partner_overlap_details(pa0, pb0, 'downstream')
+    assert df0.empty
+    assert list(df0.columns) == ['partner_type', 'in_a', 'in_b', 'weight_a',
+                                 'weight_b', 'rank_a', 'rank_b', 'status']
 
     pa = _profile('a', upstream={'X': 3.0, 'Y': 2.0, 'Z': 1.0})
     pb = _profile('b', upstream={'X': 1.0, 'W': 1.0})
@@ -753,6 +766,141 @@ def test_homolog_finder_data_availability(finder):
     assert status[DS_B]['available'] is False
 
 
+def _install_fake_neuprint(monkeypatch, client_cls):
+    """Register a fake ``neuprint`` module so client init is hermetic."""
+    import sys
+    import types
+
+    fake = types.ModuleType('neuprint')
+    fake.Client = client_cls
+    monkeypatch.setitem(sys.modules, 'neuprint', fake)
+
+
+def test_fetch_neuprint_available_datasets_excludes_hidden(monkeypatch):
+    from comparison import profile_comparator as pc
+
+    server = 'https://neuprint.test'
+    monkeypatch.setattr(pc, '_NEUPRINT_AVAILABLE_CACHE', {})
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                'male-cns:v1.0': {'hidden': False},
+                'hemibrain:v1.2.1': {},
+                # hidden entries are the only ones excluded
+                'banc:v888': {'hidden': 'true'},
+            }
+
+    calls = []
+    monkeypatch.setattr(
+        'requests.get',
+        lambda url, headers=None, timeout=None: calls.append(url) or FakeResponse(),
+    )
+
+    result = pc.fetch_neuprint_available_datasets(server=server, token='tok')
+    assert result == ['hemibrain:v1.2.1', 'male-cns:v1.0']
+    assert len(calls) == 1
+
+    # Cached within the TTL: no second HTTP call
+    assert pc.fetch_neuprint_available_datasets(server=server, token='tok') == result
+    assert len(calls) == 1
+
+
+def test_fetch_neuprint_available_datasets_failure_paths(monkeypatch):
+    from comparison import profile_comparator as pc
+    from utils.token_manager import token_manager
+
+    server = 'https://neuprint.test'
+    cache = {}
+    monkeypatch.setattr(pc, '_NEUPRINT_AVAILABLE_CACHE', cache)
+
+    # No token anywhere -> None without hitting the network
+    monkeypatch.setattr(token_manager, 'get_neuprint_token', lambda: None)
+    assert pc.fetch_neuprint_available_datasets(server=server) is None
+
+    # Network failure -> None and nothing cached (later calls retry)
+    def boom(url, headers=None, timeout=None):
+        raise RuntimeError('offline')
+
+    monkeypatch.setattr('requests.get', boom)
+    assert pc.fetch_neuprint_available_datasets(server=server, token='tok') is None
+    assert cache == {}
+
+
+def test_homolog_finder_skips_neuprint_client_for_flywire(tmp_path, capsys):
+    from comparison.profile_comparator import HomologFinder
+
+    finder = HomologFinder(
+        source_dataset='flywire_FAFB_v783',
+        target_dataset='flywire_BANC_v888',
+        output_dir=str(tmp_path),
+        verbose=True,
+    )
+    out = capsys.readouterr().out
+    assert finder.clients == {}
+    assert finder.client is None
+    assert 'is a FlyWire dataset' in out
+    # No misleading neuprint error for FlyWire identifiers
+    assert 'does not exist' not in out
+    assert 'Could not initialize client' not in out
+
+
+def test_homolog_finder_graceful_for_unknown_neuprint_dataset(tmp_path, capsys, monkeypatch):
+    from comparison import profile_comparator as pc
+
+    class BoomClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError('Client must not be constructed for unknown datasets')
+
+    _install_fake_neuprint(monkeypatch, BoomClient)
+    monkeypatch.setattr(
+        pc, 'fetch_neuprint_available_datasets',
+        lambda token=None, **kwargs: ['hemibrain:v1.2.1', 'male-cns:v1.0'],
+    )
+
+    finder = pc.HomologFinder(
+        source_dataset='hemibrain:v9.9.9',
+        output_dir=str(tmp_path),
+        verbose=True,
+    )
+    out = capsys.readouterr().out
+    assert finder.clients == {}
+    assert "does not exist on the NeuPrint server" in out
+    assert "Available datasets: ['hemibrain:v1.2.1', 'male-cns:v1.0']" in out
+    # Hidden server entries never leak into the available listing
+    assert 'banc:v888' not in out
+
+
+def test_homolog_finder_trims_long_client_error(tmp_path, capsys, monkeypatch):
+    from comparison import profile_comparator as pc
+
+    class FailingClient:
+        def __init__(self, server, dataset=None, token=None):
+            raise RuntimeError(
+                f"Dataset '{dataset}' does not exist on the neuprint server. "
+                "Available datasets: ['very', 'long', 'server', 'dump']"
+            )
+
+    _install_fake_neuprint(monkeypatch, FailingClient)
+    # Listing unavailable -> fall through to the client constructor
+    monkeypatch.setattr(
+        pc, 'fetch_neuprint_available_datasets', lambda token=None, **kwargs: None
+    )
+
+    finder = pc.HomologFinder(
+        source_dataset='hemibrain:v9.9.9',
+        output_dir=str(tmp_path),
+        verbose=True,
+    )
+    out = capsys.readouterr().out
+    assert finder.clients == {}
+    assert 'Could not initialize client for hemibrain:v9.9.9' in out
+    # The long server-side dump is stripped from the warning
+    assert 'Available datasets:' not in out
+
+
 def test_homolog_finder_get_neuron_info(finder):
     class FakeFNC:
         def _fetch_neurons_local_or_api(self, ids, columns=None):
@@ -801,11 +949,11 @@ def test_compare_types_bodyid_core(finder):
                                       'target_bodyId', 'jaccard', 'cosine',
                                       'rank_corr', 'rank_union'}
     assert bodyid_df['jaccard'].iloc[0] == pytest.approx(1.0)
-    # NOTE: source bug - compare_types_bodyid_core calls
-    # profile.get_partner_types() which does not exist on
-    # ConnectivityProfile, so overlap_count is always 0 and rank metrics
-    # are forced to NaN whenever min_common_partners > 0.
-    assert np.isnan(bodyid_df['rank_corr'].iloc[0])
+    # Fixed behavior: overlap is computed from the same typed+untyped bodyId
+    # sets the score uses, so identical profiles report full overlap and the
+    # min_common_partners=3 filter keeps the rank metrics.
+    assert bodyid_df['overlap_partners'].iloc[0] == 12
+    assert bodyid_df['rank_corr'].notna().all()
     assert type_summary.iloc[0]['n_source_bodyIds'] == 2
     assert type_summary.iloc[0]['avg_jaccard'] == pytest.approx(1.0)
 
@@ -835,3 +983,1660 @@ def test_homolog_finder_get_partner_overlap(finder):
 
     # missing profile on either side -> empty frame
     assert finder.get_partner_overlap('Nope', DS_A, 'C', DS_B).empty
+
+
+# ===========================================================================
+# Extended coverage: hermetic fakes for coana / profiler internals
+# ===========================================================================
+
+import json
+import os
+import sys
+import warnings as _warnings_mod
+from types import ModuleType, SimpleNamespace
+
+from comparison import connectivity_profiler as cp_module
+from comparison import profile_comparator as pc_module
+from comparison.profile_comparator import HomologFinder
+
+SAFE_A = DS_A.replace(':', '_').replace('.', '_')
+SAFE_B = DS_B.replace(':', '_').replace('.', '_')
+
+
+class _FakeFNC:
+    """Hermetic stand-in for coana.FindNeuronConnection."""
+
+    instances = []
+    write_cache_path = None     # Path: if set, build_connection_cache writes parquet here
+    total_neurons = 5
+    raise_on_build = False
+
+    @classmethod
+    def reset(cls):
+        cls.instances = []
+        cls.write_cache_path = None
+        cls.total_neurons = 5
+        cls.raise_on_build = False
+
+    def __init__(self, dataset=None, token=None, use_cache=True,
+                 verbose_mode='normal', simple_fetch=False):
+        self.dataset = dataset
+        self.token = token
+        self.verbose_mode = verbose_mode
+        self.simple_fetch = simple_fetch
+        self._conn_df_cache = None
+        self._conn_index = {}
+        self._conn_index_post = {}
+        self._in_progress_bar = False
+        _FakeFNC.instances.append(self)
+
+    def build_connection_cache(self, batch_size=1000, quiet=True):
+        if _FakeFNC.raise_on_build:
+            raise RuntimeError('boom')
+        if _FakeFNC.write_cache_path is not None:
+            path = _FakeFNC.write_cache_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame({
+                'bodyId_pre': [1, 2],
+                'bodyId_post': [2, 3],
+                'weight': [5.0, 4.0],
+            }).to_parquet(path)
+        return {
+            'total_neurons': _FakeFNC.total_neurons,
+            'already_cached': 2,
+            'newly_cached': 0,
+            'total_connections': 2,
+        }
+
+
+def _install_fake_coana(monkeypatch, fnc_cache=None):
+    """Register a fake top-level `coana` module used by every FNC import chain."""
+    mod = ModuleType('coana')
+    mod.FindNeuronConnection = _FakeFNC
+    mod._FNC_CACHE = fnc_cache if fnc_cache is not None else {}
+    monkeypatch.setitem(sys.modules, 'coana', mod)
+    return mod
+
+
+@pytest.fixture(autouse=True)
+def _reset_fake_fnc():
+    _FakeFNC.reset()
+    yield
+    _FakeFNC.reset()
+
+
+class _FakeProfilerFull(_FakeProfilerForFinder):
+    """Stub profiler extended with the methods used by finder/comparer flows."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.config = SimpleNamespace(
+            top_k_bodyid=15, top_m_type=5, include_untyped_partners=True)
+        self._in_progress_bar = False
+        self.from_cache = {}          # (bid, dataset) -> cached profile
+        self.types_for_bodyids = {}   # dataset -> {bid: type}
+        self.type_lists = {}          # (pattern, dataset) -> [types]
+        self.label_groups = {}        # (label, dataset) -> {type: [ids]}
+
+    def _load_from_cache(self, bid, dataset, required_top_k=15):
+        return self.from_cache.get((bid, dataset))
+
+    def get_types_for_bodyids(self, bids, dataset):
+        lookup = self.types_for_bodyids.get(dataset, {})
+        return {b: lookup[b] for b in bids if b in lookup}
+
+    def list_types(self, pattern, dataset):
+        return list(self.type_lists.get((pattern, dataset), []))
+
+    def get_types_for_label(self, label, dataset):
+        return dict(self.label_groups.get((label, dataset), {}))
+
+    def get_profiles_batch(self, ids, dataset, force_refresh=False,
+                           skip_profile_cache=False, show_progress=False):
+        out = {}
+        for nid in ids:
+            p = self.profiles.get((str(nid), dataset))
+            if p is not None:
+                out[nid] = p
+        return out
+
+
+class _FakeLabelMapper:
+    def __init__(self, mapping):
+        self.mapping = mapping  # (name, dataset) -> mapped
+
+    def get_mapped_label(self, name, dataset):
+        return self.mapping.get((name, dataset))
+
+
+@pytest.fixture
+def pc_fake_repo(tmp_path, monkeypatch):
+    """Redirect Path(__file__) lookups into tmp_path (project root)."""
+    fake_file = tmp_path / 'src' / 'comparison' / 'profile_comparator.py'
+    fake_file.parent.mkdir(parents=True, exist_ok=True)
+    fake_file.write_text('', encoding='utf-8')
+    monkeypatch.setattr(pc_module, '__file__', str(fake_file))
+    return tmp_path
+
+
+# ---------------------------------------------------------------------------
+# ProfileComparator.direct_comparison (static)
+# ---------------------------------------------------------------------------
+
+def _dc_profiler():
+    return _FakeProfilerFull(
+        profiles={
+            ('T1', DS_A): _rich_profile('T1', DS_A),
+            ('T1', DS_B): _rich_profile('T1', DS_B),
+            ('T2', DS_B): _profile('T2', ds=DS_B, upstream={'Z': 1.0}),
+        },
+        available={DS_A: ['T1'], DS_B: ['T1', 'T2']},
+    )
+
+
+def test_direct_comparison_static_loose_mode(monkeypatch):
+    _install_fake_coana(monkeypatch)
+    fake = _dc_profiler()
+    out = ProfileComparator.direct_comparison(
+        'T1', 'T1', dataset_a=DS_A, dataset_b=DS_B,
+        profiler=fake, verbose=False)
+    assert out['comparison_mode'] == 'loose'
+    assert not out['results'].empty
+    row = out['results'].iloc[0]
+    assert row['rank_corr'] == pytest.approx(1.0)
+    assert out['summary']['n_comparisons'] == 1
+    assert out['summary']['same_type_matches'] == 1
+    # legacy alias 'type' normalizes to loose
+    out2 = ProfileComparator.direct_comparison(
+        'T1', ['T1', 'T2'], source_dataset=DS_A, target_dataset=DS_B,
+        profiler=fake, comparison_mode='type', verbose=False)
+    assert len(out2['results']) == 2
+
+
+def test_direct_comparison_static_label_mapper(monkeypatch):
+    _install_fake_coana(monkeypatch)
+    fake = _dc_profiler()
+    mapper = _FakeLabelMapper({('T1x', DS_A): 'T1', ('T1x', DS_B): 'T1'})
+    out = ProfileComparator.direct_comparison(
+        'T1x', None, dataset_a=DS_A, dataset_b=DS_B,
+        profiler=fake, label_mapper=mapper, verbose=False)
+    assert not out['results'].empty
+    assert out['results'].iloc[0]['type_a'] == 'T1'
+
+
+def test_direct_comparison_static_strict_types(monkeypatch):
+    _install_fake_coana(monkeypatch)
+
+    def bodyid_profile(bid, ds):
+        up = {100 + i: float(10 - i) for i in range(6)}
+        down = {200 + i: float(8 - i) for i in range(6)}
+        return ConnectivityProfile(
+            neuron_id=bid, dataset=ds,
+            typed_upstream_bodyids=up, typed_downstream_bodyids=down,
+            upstream_ranks={}, downstream_ranks={},
+            total_upstream_weight=float(sum(up.values())),
+            total_downstream_weight=float(sum(down.values())),
+        )
+
+    fake = _FakeProfilerFull(
+        profiles={
+            ('1', DS_A): bodyid_profile(1, DS_A),
+            ('3', DS_B): bodyid_profile(3, DS_B),
+        },
+        bodyids={('T', DS_A): [1], ('T', DS_B): [3]},
+    )
+    out = ProfileComparator.direct_comparison(
+        'T', 'T', dataset_a=DS_A, dataset_b=DS_B,
+        profiler=fake, comparison_mode='strict', verbose=False)
+    assert out['comparison_mode'] == 'strict'
+    assert 'type_summary' in out and 'bodyid_results' in out
+    assert len(out['results']) == 1
+    assert out['results'].iloc[0]['n_source_bodyIds'] == 1
+
+
+def test_direct_comparison_static_all_bodyid(monkeypatch):
+    _install_fake_coana(monkeypatch)
+    fake = _FakeProfilerFull(
+        profiles={
+            ('5', DS_A): _rich_profile(5, DS_A),
+            ('101', DS_B): _rich_profile(101, DS_B),
+        },
+    )
+    out = ProfileComparator.direct_comparison(
+        [5], [101], dataset_a=DS_A, dataset_b=DS_B,
+        profiler=fake, comparison_mode='loose', verbose=False)
+    # all-int input forces strict mode even when 'loose' requested
+    assert out['comparison_mode'] == 'strict'
+    assert not out['results'].empty
+
+
+def test_direct_comparison_static_empty_source_nan_rows(monkeypatch):
+    _install_fake_coana(monkeypatch)
+    fake = _FakeProfilerFull(
+        profiles={
+            ('Empty', DS_A): _profile('Empty', DS_A),
+            ('T1', DS_B): _rich_profile('T1', DS_B),
+            ('T2', DS_B): _rich_profile('T2', DS_B),
+        },
+    )
+    out = ProfileComparator.direct_comparison(
+        'Empty', ['T1', 'T2'], dataset_a=DS_A, dataset_b=DS_B,
+        profiler=fake, verbose=False)
+    # empty source -> NaN rows for every target
+    assert len(out['results']) == 2
+    assert out['results']['rank_corr'].isna().all()
+
+    # same_label_only filters non-matching labels
+    out_same = ProfileComparator.direct_comparison(
+        'Empty', ['T1'], dataset_a=DS_A, dataset_b=DS_B,
+        profiler=fake, same_label_only=True, verbose=False)
+    assert out_same['results'].empty
+
+    # insufficient profiles on one side -> empty return dict
+    out_none = ProfileComparator.direct_comparison(
+        'Empty', 'Ghost', dataset_a=DS_A, dataset_b=DS_B,
+        profiler=fake, verbose=False)
+    assert out_none['results'].empty
+    assert out_none['summary'] == {}
+
+
+def test_direct_comparison_static_missing_datasets():
+    with pytest.raises(ValueError):
+        ProfileComparator.direct_comparison('A', 'B', dataset_a=DS_A)
+
+
+def test_homolog_finder_direct_comparison_wrapper(finder, monkeypatch, tmp_path):
+    _install_fake_coana(monkeypatch)
+    fake = _dc_profiler()
+    finder.profiler = fake
+    finder.source_dataset = DS_A
+    finder.target_dataset = DS_B
+
+    out = finder.direct_comparison('T1', 'T1', output_dir=str(tmp_path),
+                                   save_results=True)
+    assert not out['results'].empty
+    assert os.path.exists(out['output_file'])
+    params_path = out['output_file'].replace('.csv', '_params.json')
+    assert os.path.exists(params_path)
+    with open(params_path) as f:
+        params = json.load(f)
+    assert params['dataset_a'] == DS_A
+
+    # missing datasets -> ValueError
+    finder.source_dataset = None
+    finder.target_dataset = None
+    with pytest.raises(ValueError):
+        finder.direct_comparison('T1', 'T1')
+
+
+# ---------------------------------------------------------------------------
+# HomologFinder._get_target_bodyids_and_types
+# ---------------------------------------------------------------------------
+
+def test_get_target_bodyids_and_types_neuron_index(finder, pc_fake_repo):
+    idx_dir = pc_fake_repo / 'neuron_indexes' / SAFE_A
+    idx_dir.mkdir(parents=True)
+    pd.DataFrame({'bodyId': [1, 2], 'type': ['Cand', None]}).to_parquet(
+        idx_dir / 'neuron_index.parquet')
+    bodyids, lookup = finder._get_target_bodyids_and_types(DS_A)
+    assert bodyids == [1, 2]
+    assert lookup[1] == 'Cand'
+    assert lookup[2] == ''
+
+
+def test_get_target_bodyids_and_types_csv_fallback(finder, pc_fake_repo):
+    ds_dir = pc_fake_repo / 'datasets' / SAFE_B
+    ds_dir.mkdir(parents=True)
+    (ds_dir / f'{SAFE_B}_allneurons_neuron_df.csv').write_text(
+        'bodyId,type\n101,Cand\n102,\n', encoding='utf-8')
+    bodyids, lookup = finder._get_target_bodyids_and_types(DS_B)
+    assert bodyids == [101, 102]
+    assert lookup[101] == 'Cand'
+    assert lookup[102] == ''
+
+
+def test_get_target_bodyids_and_types_missing(finder, pc_fake_repo):
+    bodyids, lookup = finder._get_target_bodyids_and_types(DS_A)
+    assert bodyids == [] and lookup == {}
+
+
+# ---------------------------------------------------------------------------
+# HomologFinder._build_profiles_batch / _build_profiles_memory_safe
+# ---------------------------------------------------------------------------
+
+def test_build_profiles_batch_cached_and_built(finder):
+    p_cached = _rich_profile(11, DS_A)
+    p_built = _rich_profile(12, DS_A)
+    fake = _FakeProfilerFull(
+        profiles={('12', DS_A): p_built},
+        available={DS_A: ['T']},
+    )
+    fake.from_cache = {(11, DS_A): p_cached}
+    finder.profiler = fake
+    finder._batch_size = 1  # force mid-batch flush branch
+
+    out = finder._build_profiles_batch([11, 12], DS_A, show_progress=False)
+    assert out == {11: p_cached, 12: p_built}
+    assert fake.calls['consolidate'] >= 2  # pre + final consolidation
+    assert fake._defer_cache_writes is False
+
+    # everything cached -> early return without building
+    fake2 = _FakeProfilerFull(available={DS_A: ['T']})
+    fake2.from_cache = {(11, DS_A): p_cached}
+    finder.profiler = fake2
+    out2 = finder._build_profiles_batch([11], DS_A, show_progress=False)
+    assert out2 == {11: p_cached}
+
+
+def test_build_profiles_memory_safe_clears_caches(finder, monkeypatch):
+    coana_mod = _install_fake_coana(monkeypatch)
+    p = _rich_profile(11, DS_A)
+    fake = _FakeProfilerFull(
+        profiles={('11', DS_A): p}, available={DS_A: ['T']})
+    finder.profiler = fake
+    finder._conn_cache[DS_A] = pd.DataFrame({'x': [1]})
+    cp_module._PROFILER_CONN_CACHE[SAFE_A] = {'conn_df': 'junk'}
+    coana_mod._FNC_CACHE[SAFE_A] = {'conn_df': 'junk'}
+    try:
+        out = finder._build_profiles_memory_safe(
+            [11], DS_A, show_progress=False)
+        assert out == {11: p}
+        assert cp_module._PROFILER_CONN_CACHE[SAFE_A] == {}
+        assert coana_mod._FNC_CACHE[SAFE_A] == {}
+        assert DS_A not in finder._conn_cache
+    finally:
+        cp_module._PROFILER_CONN_CACHE.pop(SAFE_A, None)
+
+
+def test_build_profiles_memory_safe_ensure_cache_complete(finder, monkeypatch):
+    _install_fake_coana(monkeypatch)
+    fake = _FakeProfilerFull(available={DS_A: ['T']})
+    finder.profiler = fake
+    finder.ensure_cache_complete = True
+    out = finder._build_profiles_memory_safe([99], DS_A, show_progress=False)
+    assert out == {}  # no profile available for 99
+    assert len(_FakeFNC.instances) == 1  # cache completeness check ran
+
+
+# ---------------------------------------------------------------------------
+# HomologFinder.find_homologs (end-to-end with synthetic data)
+# ---------------------------------------------------------------------------
+
+def _finder_for_homologs(finder, monkeypatch, target_bodyids=(101, 102)):
+    fake = _FakeProfilerFull(
+        profiles={
+            ('Q', DS_A): _rich_profile('Q', DS_A),
+            ('5', DS_A): _rich_profile(5, DS_A),
+            ('101', DS_B): _rich_profile(101, DS_B),
+            ('102', DS_B): _rich_profile(102, DS_B),
+            ('Cand', DS_B): _rich_profile('Cand', DS_B),
+        },
+        bodyids={('Q', DS_A): [5]},
+        available={DS_A: ['Q'], DS_B: ['Cand']},
+    )
+    finder.profiler = fake
+    finder.source_dataset = DS_A
+    finder.target_dataset = DS_B
+    finder.use_auto_type_mapping = False
+    finder.morphological_enrichment = False
+    lookup = {101: 'Cand', 102: ''}
+    monkeypatch.setattr(
+        finder, '_get_target_bodyids_and_types',
+        lambda dataset: (list(target_bodyids), dict(lookup)))
+    return fake
+
+
+def test_find_homologs_end_to_end(finder, monkeypatch, tmp_path):
+    _finder_for_homologs(finder, monkeypatch)
+    df = finder.find_homologs(source='Q', show_progress=False,
+                              include_partner_details=False)
+    assert not df.empty
+    assert {'source_bodyId', 'target_bodyId', 'rank_corr'} <= set(df.columns)
+    assert set(df['target_bodyId']) == {101, 102}
+    # identical synthetic partners -> perfect similarity
+    assert df['rank_corr'].max() == pytest.approx(1.0)
+    # results saved under the default output dir
+    assert list(tmp_path.iterdir())
+
+
+def test_find_homologs_shuffle_branch(finder, monkeypatch):
+    _finder_for_homologs(finder, monkeypatch)
+    stats = {
+        'p_value': 0.01, 'z_score': 2.5, 'effect_size': 1.1,
+        'is_significant': True, 'summary': 'sig',
+    }
+    monkeypatch.setattr(finder, 'run_random_control_test',
+                        lambda **kwargs: dict(stats))
+    df = finder.find_homologs(source='Q', show_progress=False,
+                              include_partner_details=False,
+                              run_shuffle_test=True, n_shuffles=3)
+    assert 'shuffle_p_value' in df.columns
+    assert df['shuffle_significant'].all()
+
+
+def test_find_homologs_validation_and_empty(finder, monkeypatch):
+    _finder_for_homologs(finder, monkeypatch)
+    finder.source_dataset = None
+    finder.target_dataset = None
+    with pytest.raises(ValueError):
+        finder.find_homologs()
+    with pytest.raises(ValueError):
+        finder.find_homologs(source='Q')
+    with pytest.raises(ValueError):
+        finder.find_homologs(source='Q', source_dataset=DS_A)
+
+    # unknown type -> no bodyIds -> empty frame
+    df = finder.find_homologs(source='Ghost', source_dataset=DS_A,
+                              target_dataset=DS_B, show_progress=False)
+    assert df.empty
+
+
+def test_find_novel_homologs_delegates(finder, monkeypatch):
+    calls = {}
+
+    def fake_find(**kwargs):
+        calls.update(kwargs)
+        return pd.DataFrame({'x': [1]})
+
+    monkeypatch.setattr(finder, 'find_homologs', fake_find)
+    out = finder.find_novel_homologs('Q', DS_A, top_n=5, min_score=0.4)
+    assert calls['source_dataset'] == DS_A and calls['target_dataset'] == DS_A
+    assert calls['top_n'] == 5 and calls['min_score'] == 0.4
+    assert not out.empty
+
+
+# ---------------------------------------------------------------------------
+# HomologFinder._compare_candidates_core
+# ---------------------------------------------------------------------------
+
+def _core_inputs(include_weak=False):
+    src_profiles = {5: _rich_profile(5, DS_A)}
+    status = {5: src_profiles[5].connectivity_status}
+    if include_weak:
+        src_profiles[6] = _profile(6, DS_A)  # empty -> NONE status
+        status[6] = src_profiles[6].connectivity_status
+    tgt_profiles = {101: _rich_profile(101, DS_B),
+                    102: _rich_profile(102, DS_B)}
+    return src_profiles, status, tgt_profiles
+
+
+def test_compare_candidates_core_cross(finder):
+    src_profiles, status, tgt_profiles = _core_inputs(include_weak=True)
+    candidate_map = {bid: {101: 3, 102: 1} for bid in src_profiles}
+    results, intra_df, skipped, warned, s_map, t_map, t_counts = \
+        finder._compare_candidates_core(
+            source_bodyids=list(src_profiles),
+            source_profiles_cache=src_profiles,
+            source_status_map=status,
+            target_profiles_cache=tgt_profiles,
+            target_type_lookup={101: 'Cand', 102: ''},
+            source_type_lookup={5: 'Q', 6: 'Q'},
+            candidate_map=candidate_map,
+            is_cross_dataset=True,
+            target_dataset=DS_B,
+            show_progress=False,
+            similarity_metric='rank_corr',
+            top_n=5,
+            include_intra_type=False,
+        )
+    assert not results.empty
+    assert set(results['target_bodyId']) == {101, 102}
+    assert skipped['none'] == [6]  # empty source skipped
+    assert intra_df.empty
+    assert t_map[101] == tgt_profiles[101].connectivity_status
+
+
+def test_compare_candidates_core_vector_prefilter_and_min_score(finder):
+    src_profiles, status, tgt_profiles = _core_inputs()
+    candidate_map = {5: {101: 3, 102: 1}}
+    # prune to top fraction by adjacency count
+    results, *_ = finder._compare_candidates_core(
+        source_bodyids=[5], source_profiles_cache=src_profiles,
+        source_status_map=status, target_profiles_cache=tgt_profiles,
+        target_type_lookup={101: 'Cand', 102: ''},
+        source_type_lookup={5: 'Q'}, candidate_map=candidate_map,
+        is_cross_dataset=True, target_dataset=DS_B, show_progress=False,
+        similarity_metric='rank_corr', top_n=5,
+        vector_prefiltering=True, vector_prune_fraction=0.5)
+    assert list(results['target_bodyId']) == [101]
+
+    # fraction >= 1.0 keeps every cosine-positive candidate
+    results_all, *_ = finder._compare_candidates_core(
+        source_bodyids=[5], source_profiles_cache=src_profiles,
+        source_status_map=status, target_profiles_cache=tgt_profiles,
+        target_type_lookup={101: 'Cand', 102: ''},
+        source_type_lookup={5: 'Q'}, candidate_map=candidate_map,
+        is_cross_dataset=True, target_dataset=DS_B, show_progress=False,
+        similarity_metric='rank_corr', top_n=5,
+        vector_prefiltering=True, vector_prune_fraction=1.0)
+    assert len(results_all) == 2
+
+    # min_score filter removes lower matches
+    results_min, *_ = finder._compare_candidates_core(
+        source_bodyids=[5], source_profiles_cache=src_profiles,
+        source_status_map=status, target_profiles_cache=tgt_profiles,
+        target_type_lookup={101: 'Cand', 102: ''},
+        source_type_lookup={5: 'Q'}, candidate_map=candidate_map,
+        is_cross_dataset=True, target_dataset=DS_B, show_progress=False,
+        similarity_metric='rank_corr', top_n=5, min_score=0.999)
+    assert len(results_min) >= 1
+    assert (results_min['rank_corr'] >= 0.999).all()
+
+
+def test_compare_candidates_core_intra(finder):
+    profiles = {
+        5: _rich_profile(5, DS_A),
+        6: _rich_profile(6, DS_A),
+    }
+    status = {b: p.connectivity_status for b, p in profiles.items()}
+    candidate_map = {5: {6: 1}, 6: {5: 1}}
+    results, intra_df, skipped, warned, *_ = finder._compare_candidates_core(
+        source_bodyids=[5, 6], source_profiles_cache=profiles,
+        source_status_map=status, target_profiles_cache=profiles,
+        target_type_lookup={5: 'Q', 6: 'Q'},
+        source_type_lookup={5: 'Q', 6: 'Q'},
+        candidate_map=candidate_map,
+        is_cross_dataset=False, target_dataset=DS_A, show_progress=False,
+        similarity_metric='jaccard', top_n=2, include_intra_type=True)
+    assert not results.empty
+    assert results['is_same_dataset'].all()
+    # intra-type pairwise comparison between the two sources
+    assert len(intra_df) == 1
+    # synthetic type-level profiles carry no typed bodyId structure, so
+    # combined_score_intra_dataset yields NaN scores (code path exercised)
+    assert pd.isna(intra_df.iloc[0]['rank_corr'])
+    assert intra_df.iloc[0]['is_same_type']
+
+
+# ---------------------------------------------------------------------------
+# HomologFinder._save_homolog_results_internal
+# ---------------------------------------------------------------------------
+
+def _homolog_results_df():
+    rows = []
+    for tgt_bid, tgt_type, rc in [(101, 'Cand', 0.95), (102, '', 0.40)]:
+        rows.append({
+            'source_bodyId': 5, 'source_type': 'Q',
+            'target_bodyId': tgt_bid, 'target_type': tgt_type,
+            'target_dataset': DS_B,
+            'rank_corr': rc, 'rank_union': rc - 0.05,
+            'jaccard': rc - 0.1, 'cosine': rc - 0.15,
+            'adjacency_score': 3, 'shared_type_count': 6,
+            'union_type_count': 6,
+            'is_same_type': False, 'is_same_dataset': False,
+            'source_status': 'complete', 'target_status': 'complete',
+            'weak_source': False, 'weak_target': False,
+            'source_partner_count': 12, 'target_partner_count': 12,
+        })
+    return pd.DataFrame(rows)
+
+
+def test_save_homolog_results_internal_full(finder, monkeypatch, tmp_path):
+    _finder_for_homologs(finder, monkeypatch)
+    results_df = _homolog_results_df()
+    intra_df = pd.DataFrame({'source_bodyId': [5], 'other_bodyId': [6],
+                             'rank_corr': [1.0], 'jaccard': [0.9]})
+    shuffle_stats = {
+        'n_shuffles': 3,
+        'observed_score': np.float64(0.9),
+        'mean_shuffled': 0.2, 'std_shuffled': 0.1,
+        'p_value': 0.0, 'z_score': 2.0, 'effect_size': 1.2,
+        'interpretation': 'significant',
+        'real_results': results_df,       # excluded key (DataFrame)
+        'shuffled_results': [results_df], # excluded key
+        'extra_df': results_df,           # DataFrame -> skipped
+        'scores': [np.float64(0.1), 0.2], # list with numpy items
+        'arr': np.array([0.5]),           # ndarray -> .item()
+        'misc': object(),                 # falls back to str()
+    }
+    out = finder._save_homolog_results_internal(
+        results_df=results_df, query='Q', source_dataset=DS_A,
+        target_dataset=DS_B, output_dir=str(tmp_path),
+        saveas='fixed_folder', direction='both',
+        include_partner_details=True, top_n_details=2,
+        params={'top_n': 5, 'metric': 'rank_corr'},
+        shuffle_stats=shuffle_stats, intra_type_df=intra_df,
+        similarity_metric='rank_corr',
+        source_status_summary={'complete': 1, 'incomplete': 0},
+        visualize_top_n=1)
+
+    base = tmp_path / 'fixed_folder'
+    for rel in ['README.txt',
+                'results/bodyid_results.csv',
+                'results/homolog_results.csv',
+                'results/intra_type_results.csv',
+                'results/shuffle_test.json',
+                'results/source_status_summary.json',
+                'results/type_summary.csv',
+                'profiles/query/Q.csv',
+                'profiles/query/source_bodyids.csv',
+                'profiles/matches/top_target_bodyids.csv',
+                'profiles/matches/Cand.csv',
+                'overlaps/Q_vs_Cand.csv']:
+        assert (base / rel).exists(), rel
+
+    with open(base / 'results' / 'shuffle_test.json') as f:
+        saved = json.load(f)
+    assert 'real_results' not in saved
+    assert 'shuffled_results' not in saved
+    assert 'extra_df' not in saved
+    assert saved['observed_score'] == pytest.approx(0.9)
+    assert saved['scores'] == pytest.approx([0.1, 0.2])
+    assert saved['arr'] == pytest.approx(0.5)
+
+    ts = pd.read_csv(base / 'results' / 'type_summary.csv')
+    assert 'avg_rank_corr' in ts.columns
+    assert 'visualized' in ts.columns
+    assert out['query_profile'] is not None
+    assert 'Cand' in out['match_profiles']
+
+
+def test_save_homolog_results_internal_nan_and_sort_fallback(finder, monkeypatch, tmp_path):
+    _finder_for_homologs(finder, monkeypatch)
+    results_df = _homolog_results_df()
+    results_df['rank_corr'] = np.nan
+    # drop metrics so the requested sort metric must fall back
+    results_df = results_df.drop(columns=['rank_union', 'jaccard', 'cosine'])
+    finder._save_homolog_results_internal(
+        results_df=results_df, query='Q', source_dataset=DS_A,
+        target_dataset=DS_B, output_dir=str(tmp_path), saveas='nan_folder',
+        direction='upstream', include_partner_details=False,
+        top_n_details=1, params={}, similarity_metric='rank_union')
+    ts = pd.read_csv(tmp_path / 'nan_folder' / 'results' / 'type_summary.csv')
+    # all rows had NaN rank_corr -> empty aggregated summary (header only)
+    assert ts.empty
+    assert 'avg_rank_corr' in ts.columns
+
+
+def test_save_homolog_results_internal_type_level_and_fallback(finder, monkeypatch, tmp_path):
+    _finder_for_homologs(finder, monkeypatch)
+    # type-level rows (no source_bodyId column)
+    type_df = pd.DataFrame({
+        'source_neuron': ['Q', 'Q'],
+        'target_type': ['Cand', 'Other'],
+        'rank_corr': [0.8, np.nan],
+        'rank_union': [0.7, np.nan],
+        'jaccard': [0.6, np.nan],
+        'adjacency_score': [2, 0],
+        'is_same_type': [False, False],
+    })
+    finder._save_homolog_results_internal(
+        results_df=type_df, query='Q', source_dataset=DS_A,
+        target_dataset=DS_B, output_dir=str(tmp_path), saveas='type_folder',
+        direction='both', include_partner_details=False, top_n_details=1,
+        params={}, visualize_top_n=1)
+    ts = pd.read_csv(tmp_path / 'type_folder' / 'results' / 'type_summary.csv')
+    assert len(ts) == 1  # NaN row filtered
+    assert ts.iloc[0]['target_type'] == 'Cand'
+    assert ts.iloc[0]['visualized']
+
+    # fallback branch: neither target_type nor target column present
+    bare_df = pd.DataFrame({'foo': [1], 'rank_corr': [0.5]})
+    finder._save_homolog_results_internal(
+        results_df=bare_df, query='Q', source_dataset=DS_A,
+        target_dataset=DS_B, output_dir=str(tmp_path), saveas=None,
+        direction='both', include_partner_details=False, top_n_details=1,
+        params={})
+    # saveas=None -> auto-generated timestamped folder
+    folders = [p for p in tmp_path.iterdir() if p.is_dir()]
+    assert any(f.name.startswith(finder.output_folder_prefix) for f in folders)
+
+
+# ---------------------------------------------------------------------------
+# HomologFinder._load_connection_cache and friends
+# ---------------------------------------------------------------------------
+
+def _write_neuron_index(pc_fake_repo, safe_name, bodyids, types):
+    idx_dir = pc_fake_repo / 'neuron_indexes' / safe_name
+    idx_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({'bodyId': bodyids, 'type': types}).to_parquet(
+        idx_dir / 'neuron_index.parquet')
+
+
+def test_load_connection_cache_internal_hit(finder):
+    df = pd.DataFrame({'bodyId_pre': [1]})
+    finder._conn_cache[DS_A] = df
+    assert finder._load_connection_cache(DS_A) is df
+
+
+def test_load_connection_cache_fnc_branch(finder, monkeypatch, pc_fake_repo):
+    raw = pd.DataFrame({'bodyId_pre': [1, 2], 'bodyId_post': [2, 1],
+                        'weight': [5, 3]})
+    coana_mod = _install_fake_coana(monkeypatch, fnc_cache={
+        SAFE_A: {'conn_df': raw}})
+    _write_neuron_index(pc_fake_repo, SAFE_A, [1, 2], ['T1', 'T2'])
+    out = finder._load_connection_cache(DS_A)
+    assert out is not None
+    assert list(out['type_pre']) == ['T1', 'T2']
+    assert list(out['type_post']) == ['T2', 'T1']
+    # enrichment happens on a copy: the shared FNC frame stays untouched
+    assert 'type_pre' not in raw.columns
+    assert coana_mod._FNC_CACHE[SAFE_A]['conn_df'] is raw
+
+
+def test_load_connection_cache_disk_parquet(finder, monkeypatch, pc_fake_repo):
+    _install_fake_coana(monkeypatch)  # empty _FNC_CACHE -> falls to disk
+    cache_dir = pc_fake_repo / 'cache' / SAFE_A
+    cache_dir.mkdir(parents=True)
+    pd.DataFrame({'bodyId_pre': [1], 'bodyId_post': [2],
+                  'weight': [4]}).to_parquet(cache_dir / 'connections.parquet')
+    _write_neuron_index(pc_fake_repo, SAFE_A, [1, 2], ['T1', 'T2'])
+    out = finder._load_connection_cache(DS_A)
+    assert out is not None
+    assert out.iloc[0]['type_pre'] == 'T1'
+    assert out.iloc[0]['type_post'] == 'T2'
+
+
+def test_load_connection_cache_missing_and_no_typemap(finder, monkeypatch, pc_fake_repo):
+    _install_fake_coana(monkeypatch)
+    # auto_build disabled -> None when cache file absent
+    assert finder._load_connection_cache(DS_A, auto_build=False) is None
+
+    # cache exists but no type mapping anywhere -> None
+    cache_dir = pc_fake_repo / 'cache' / SAFE_A
+    cache_dir.mkdir(parents=True)
+    pd.DataFrame({'bodyId_pre': [1], 'bodyId_post': [2],
+                  'weight': [4]}).to_parquet(cache_dir / 'connections.parquet')
+    assert finder._load_connection_cache(DS_A, auto_build=False) is None
+
+
+def test_load_connection_cache_auto_build(finder, monkeypatch, tmp_path, pc_fake_repo):
+    _install_fake_coana(monkeypatch)
+    cache_path = tmp_path / 'cache' / 'connections.parquet'
+    monkeypatch.setattr(finder, '_get_connection_cache_path',
+                        lambda dataset: cache_path)
+    _FakeFNC.write_cache_path = cache_path
+    _FakeFNC.total_neurons = 2
+    _write_neuron_index(pc_fake_repo, SAFE_A, [1, 2], ['T1', 'T2'])
+    out = finder._load_connection_cache(DS_A, auto_build=True)
+    assert out is not None
+    assert 'type_pre' in out.columns
+    assert len(_FakeFNC.instances) == 1
+
+
+def test_ensure_connection_cache_complete(finder, monkeypatch):
+    coana_mod = _install_fake_coana(monkeypatch)
+    coana_mod._FNC_CACHE[SAFE_A] = {'conn_df': 'junk'}
+    assert finder._ensure_connection_cache_complete(DS_A) is True
+    assert coana_mod._FNC_CACHE[SAFE_A] == {}
+
+    _FakeFNC.total_neurons = 0
+    assert finder._ensure_connection_cache_complete(DS_A) is False
+
+    _FakeFNC.total_neurons = 5
+    _FakeFNC.raise_on_build = True
+    assert finder._ensure_connection_cache_complete(DS_A) is False
+
+
+# ---------------------------------------------------------------------------
+# HomologFinder shuffle / random control test
+# ---------------------------------------------------------------------------
+
+def test_shuffle_profile_deterministic(finder):
+    cp_module._PROFILER_CONN_CACHE[SAFE_A] = {
+        'type_lookup': {i: f'PT{i}' for i in range(12)}}
+    try:
+        profile = _rich_profile(5, DS_A)
+        s1 = finder.shuffle_profile(profile, seed=42)
+        s2 = finder.shuffle_profile(profile, seed=42)
+        assert s1.upstream_partners == s2.upstream_partners
+        assert s1.downstream_partners == s2.downstream_partners
+        assert sorted(s1.upstream_partners.values()) == \
+            sorted(profile.upstream_partners.values())
+        assert s1.neuron_id.endswith('_shuffled')
+    finally:
+        cp_module._PROFILER_CONN_CACHE.pop(SAFE_A, None)
+
+
+def test_shuffle_profile_fallback_pool(finder):
+    # no cache / no profiler loaders -> warns and shuffles within own types
+    profile = _rich_profile(5, DS_A)
+    with pytest.warns(UserWarning):
+        shuffled = finder.shuffle_profile(profile, seed=7)
+    pool = set(profile.upstream_partners) | set(profile.downstream_partners)
+    assert set(shuffled.upstream_partners) <= pool
+
+
+def test_get_type_pool_variants(finder):
+    # branch 1: profiler connection cache
+    cp_module._PROFILER_CONN_CACHE[SAFE_A] = {
+        'type_lookup': {1: 'T1', 2: 'T2', 3: 'T1'}}
+    try:
+        assert set(finder._get_type_pool(DS_A)) == {'T1', 'T2'}
+    finally:
+        cp_module._PROFILER_CONN_CACHE.pop(SAFE_A, None)
+
+    # branch 2: profiler neuron index
+    fake = _FakeProfilerForFinder(available={})
+    fake._load_neuron_index = lambda dataset: pd.DataFrame(
+        {'type': ['A', 'B', None]})
+    finder.profiler = fake
+    assert set(finder._get_type_pool(DS_A)) == {'A', 'B'}
+
+    # branch 3: connection data fallback
+    fake._load_neuron_index = lambda dataset: None
+    fake._load_connection_data = lambda dataset: pd.DataFrame(
+        {'type_pre': ['A', None], 'type_post': ['C', 'C']})
+    assert set(finder._get_type_pool(DS_A)) == {'A', 'C'}
+
+    # branch 4: nothing available
+    fake._load_connection_data = lambda dataset: None
+    assert finder._get_type_pool(DS_A) == []
+
+
+def test_run_random_control_test(finder, monkeypatch, tmp_path):
+    _finder_for_homologs(finder, monkeypatch)
+    real_df = pd.DataFrame({'target_type': ['Cand'], 'rank_corr': [0.9]})
+    monkeypatch.setattr(finder, 'find_homologs_fast', lambda **kw: real_df.copy())
+    cp_module._PROFILER_CONN_CACHE[SAFE_B] = {'type_lookup': {101: 'Cand'}}
+    try:
+        res = finder.run_random_control_test(
+            source='Q', source_dataset=DS_A, target_dataset=DS_B,
+            n_shuffles=3, seed=42, show_progress=False,
+            output_dir=str(tmp_path))
+    finally:
+        cp_module._PROFILER_CONN_CACHE.pop(SAFE_B, None)
+    assert 'error' not in res
+    assert res['n_shuffles'] == 3
+    assert 0.0 <= res['p_value'] <= 1.0
+    out_dir = tmp_path / res['output_path'].split('/')[-1]
+    for fname in ['real_results.csv', 'control_test_stats.csv',
+                  'shuffled_score_distribution.csv', 'summary.txt']:
+        assert (out_dir / fname).exists()
+
+    # empty real results -> early return with p_value 1.0
+    monkeypatch.setattr(finder, 'find_homologs_fast',
+                        lambda **kw: pd.DataFrame())
+    res_empty = finder.run_random_control_test(
+        source='Q', source_dataset=DS_A, target_dataset=DS_B,
+        n_shuffles=2, show_progress=False)
+    assert res_empty['p_value'] == 1.0
+    assert not res_empty['is_significant']
+
+    # profiler raises -> error dict
+    class _RaisingProfiler:
+        def get_profile(self, neuron, dataset):
+            raise RuntimeError('boom')
+    finder.profiler = _RaisingProfiler()
+    res_err = finder.run_random_control_test(
+        source='Q', source_dataset=DS_A, target_dataset=DS_B)
+    assert 'error' in res_err and not res_err['is_significant']
+
+
+def test_run_homolog_with_profile_empty_pool(finder, monkeypatch):
+    _finder_for_homologs(finder, monkeypatch)
+    # no type pool for target dataset -> empty frame
+    out = finder._run_homolog_with_profile(_rich_profile(5, DS_A), DS_B, 5)
+    assert out.empty
+
+
+# ===========================================================================
+# ConnectivityProfileComparer coverage (chunk 5)
+# ===========================================================================
+
+from pathlib import Path
+
+
+def _comparer(query, tmp_path=None, dataset=DS_A, **kwargs):
+    """Build a comparer with hermetic defaults (no type-mapper file loads)."""
+    kwargs.setdefault('verbose', False)
+    kwargs.setdefault('generate_heatmaps', False)
+    kwargs.setdefault('use_auto_type_mapping', False)
+    if tmp_path is not None:
+        kwargs.setdefault('output_dir', str(tmp_path))
+    return ConnectivityProfileComparer(query, dataset=dataset, **kwargs)
+
+
+def _install_fake_heatmap(monkeypatch, calls):
+    """Fake comparison.interactive_heatmap used by the vispath fallback."""
+    fake_mod = ModuleType('comparison.interactive_heatmap')
+
+    def gen(matrices_dict, filename, title=None, showfig=False, verbose=False):
+        calls.append(filename)
+        Path(filename).write_text('<html></html>', encoding='utf-8')
+
+    fake_mod.generate_interactive_heatmap = gen
+    monkeypatch.setitem(sys.modules, 'comparison.interactive_heatmap', fake_mod)
+
+
+def _block_vispath(monkeypatch):
+    """Force the vispath import to fail so the heatmap fallback runs.
+
+    Other tests leak the real vispath-subproject src into sys.path, so a
+    None sys.modules entry is used to hard-block the import chain.
+    """
+    for name in ('vispath_pkg', 'vispath_pkg.vispath'):
+        sys.modules.pop(name, None)
+        monkeypatch.setitem(sys.modules, name, None)
+
+
+def test_comparer_init_modes_and_errors(tmp_path):
+    # cross-dataset dict with <2 datasets -> ValueError
+    with pytest.raises(ValueError):
+        ConnectivityProfileComparer({DS_A: ['T1']}, verbose=False)
+
+    # dict query + dataset parameter -> UserWarning, forced bodyId skip,
+    # flattened 'ds:name' query
+    with pytest.warns(UserWarning):
+        comp = ConnectivityProfileComparer(
+            {DS_A: ['T1'], DS_B: ['T2']}, dataset=DS_A,
+            output_dir=str(tmp_path), verbose=False,
+            use_auto_type_mapping=False)
+    assert comp.is_cross_dataset is True
+    assert comp.skip_bodyId_level is True
+    assert comp.query == [f'{DS_A}:T1', f'{DS_B}:T2']
+    assert comp.dataset == DS_A
+
+    # intra-dataset without dataset -> ValueError
+    with pytest.raises(ValueError):
+        ConnectivityProfileComparer(['T1'], verbose=False)
+
+    # aggregation level normalization ('custom group' UI label)
+    comp2 = _comparer(['T1'], tmp_path, aggregation_level='custom group')
+    assert comp2.aggregation_level == 'custom'
+    comp2b = _comparer(['T1'], tmp_path, aggregation_level='bogus')
+    assert comp2b.aggregation_level == 'type'
+
+    # one-element datasets list is accepted for single-dataset mode
+    comp3 = ConnectivityProfileComparer(
+        ['T1'], datasets=[DS_A], verbose=False, use_auto_type_mapping=False)
+    assert comp3.dataset == DS_A and comp3.is_multi_dataset is False
+
+    # multi-dataset mode
+    comp4 = ConnectivityProfileComparer(
+        ['T1'], datasets=[DS_A, DS_B], verbose=False,
+        use_auto_type_mapping=False)
+    assert comp4.is_multi_dataset is True
+    assert comp4.datasets == [DS_A, DS_B]
+
+
+def test_comparer_query_helpers(tmp_path):
+    comp = _comparer(['T1'], tmp_path)
+
+    # _format_query_for_log: full and truncated
+    assert comp._format_query_for_log(['a', 'b']) == "['a', 'b']"
+    assert comp._format_query_for_log(42) == '42'
+    long_q = [f't{i}' for i in range(12)]
+    s = comp._format_query_for_log(long_q)
+    assert '(2 more)' in s and '(12 total items)' in s
+
+    # _sort_types_string_first
+    assert comp._sort_types_string_first(['2', 'B', '1', 'A']) == \
+        ['A', 'B', '1', '2']
+
+    # _normalize_query variants
+    assert comp._normalize_query('Mi1') == (['Mi1'], None)
+    assert comp._normalize_query(5) == ([5], None)
+    assert comp._normalize_query([]) == ([], None)
+    assert comp._normalize_query(['a', 'b']) == (['a', 'b'], None)
+    nested, names = comp._normalize_query([['G1', [1, 2]], ['G2', [3]], 'bad'])
+    assert nested == [[1, 2], [3]] and names == ['G1', 'G2']
+
+    # _looks_like_pattern
+    assert comp._looks_like_pattern('aMe.*') is True
+    assert comp._looks_like_pattern('Mi1') is False
+
+    # _generate_query_name
+    assert comp._generate_query_name() == 'T1'
+    comp_multi = _comparer(['T1', 'T2'], tmp_path)
+    assert comp_multi._generate_query_name() == 'T1_etc'
+    comp_grp = _comparer(['T1'], tmp_path)
+    comp_grp._custom_group_names = ['My:Group']
+    assert comp_grp._generate_query_name() == 'My_Group'
+    comp_empty = _comparer(['T1'], tmp_path)
+    comp_empty.query = []
+    assert comp_empty._generate_query_name() == 'unnamed'
+
+    # _safe_folder_name
+    assert ConnectivityProfileComparer._safe_folder_name('a/b c:d.e') == 'a_b_c_d_e'
+
+    # query mapping pass-throughs (no type mapper loaded)
+    assert comp._map_query_item(5, DS_A) == 5
+    assert comp._map_query_item('17', DS_A) == '17'
+    assert comp._map_query_item('aMe.*', DS_A) == 'aMe.*'
+    assert comp._map_query_item('Mi1', DS_A) == 'Mi1'
+    assert comp._mapped_query_for(DS_A) == comp.query
+    assert comp._canonical_label('Mi1', DS_A) == 'Mi1'
+
+
+def test_comparer_parse_group_map_csv(tmp_path):
+    comp = _comparer(['T1'], tmp_path)
+
+    with pytest.raises(FileNotFoundError):
+        comp._parse_group_map_csv(str(tmp_path / 'nope.csv'))
+
+    bad = tmp_path / 'bad.csv'
+    bad.write_text('a,b\n1,2\n', encoding='utf-8')
+    with pytest.raises(ValueError):
+        comp._parse_group_map_csv(str(bad))
+
+    good = tmp_path / 'groups.csv'
+    good.write_text(
+        'group,id_type_instance\n'
+        'G1,Mi1\nG1,12345\nG2,Tm3\n', encoding='utf-8')
+    normalized, names = comp._parse_group_map_csv(str(good))
+    assert names == ['G1', 'G2']
+    assert normalized == [['Mi1', 12345], ['Tm3']]
+
+    # group_map_csv at init overrides the query
+    comp2 = _comparer(['ignored'], tmp_path, group_map_csv=str(good))
+    assert comp2._custom_group_names == ['G1', 'G2']
+
+
+def test_comparer_load_custom_groups_from_mapping(tmp_path):
+    comp = _comparer(['T1'], tmp_path)
+
+    # unreadable / invalid JSON -> ValueError
+    with pytest.raises(ValueError):
+        comp._load_custom_groups_from_mapping(str(tmp_path / 'missing.json'), DS_A)
+    bad = tmp_path / 'bad.json'
+    bad.write_text('{oops', encoding='utf-8')
+    with pytest.raises(ValueError):
+        comp._load_custom_groups_from_mapping(str(bad), DS_A)
+
+    def _write(data):
+        p = tmp_path / 'preset.json'
+        p.write_text(json.dumps(data), encoding='utf-8')
+        return str(p)
+
+    # no labels -> ([], [])
+    assert comp._load_custom_groups_from_mapping(
+        _write({'source_mapping': {DS_A: [['x']]}}), DS_A) == ([], [])
+    # labels but dataset missing -> ([], [])
+    assert comp._load_custom_groups_from_mapping(
+        _write({'source_mapping': {'custom_label': ['g1'],
+                                   'other_ds': [['x']]}}), DS_A) == ([], [])
+
+    # valid preset (safe-name dataset key + digit conversion + empty rows dropped)
+    safe_a = DS_A.replace(':', '_').replace('.', '_')
+    normalized, names = comp._load_custom_groups_from_mapping(
+        _write({'source_mapping': {
+            'custom_label': ['g1', 'g2', 'g3'],
+            safe_a: [['T1', 'T2'], [], ['5']]}
+        }), DS_A)
+    assert names == ['g1', 'g3']
+    assert normalized == [['T1', 'T2'], [5]]
+
+    # multi-dataset mode records per-dataset member lists
+    comp_multi = ConnectivityProfileComparer(
+        ['T1'], datasets=[DS_A, DS_B], verbose=False,
+        use_auto_type_mapping=False)
+    comp_multi._load_custom_groups_from_mapping(
+        _write({'source_mapping': {
+            'custom_label': ['g1'],
+            safe_a: [['T1']],
+            DS_B: [[7]]}
+        }), DS_A)
+    assert DS_A in comp_multi._mapping_ds_members
+    assert comp_multi._mapping_ds_members[DS_B] == [[7]]
+
+    # custom_mapping_file at init forces custom aggregation
+    comp_init = _comparer(['T1'], tmp_path, custom_mapping_file=_write(
+        {'source_mapping': {'custom_label': ['g1'], safe_a: [['T1']]}}))
+    assert comp_init.aggregation_level == 'custom'
+    assert comp_init._custom_group_names == ['g1']
+
+
+def test_comparer_get_neurons_to_compare_variants(tmp_path):
+    comp = _comparer(['T1'], tmp_path)
+    fake = _FakeProfilerFull(
+        bodyids={('T1', DS_A): [1, 2], ('aMe1', DS_A): [10],
+                 ('aMe2', DS_A): [11]},
+    )
+    fake.types_for_bodyids[DS_A] = {1: 'T1'}
+    fake.type_lists[('aMe.*', DS_A)] = ['aMe1', 'aMe2']
+    fake.label_groups[('clock', DS_A)] = {'cA': [20], 'cB': ['21']}
+    comp.profiler = fake
+
+    # explicit custom groups win over everything
+    out = comp._get_neurons_to_compare(
+        query=[[1, 2], [3]], custom_group_names=['G1', 'G2'])
+    assert out == {'G1': [1, 2], 'G2': [3]}
+
+    # custom aggregation: every flat item is its own literal group
+    comp.aggregation_level = 'custom'
+    assert comp._get_neurons_to_compare(query=['T1', '7']) == \
+        {'T1': ['T1'], '7': [7]}
+    comp.aggregation_level = 'type'
+
+    # bodyIds: known type aggregates, unknown keeps bodyId label
+    out = comp._get_neurons_to_compare(query=[1, 9])
+    assert out == {'T1': [1], '9': [9]}
+
+    # bodyid aggregation: per-neuron labels {bid}_{type}
+    out = comp._get_neurons_to_compare(query=[1, 9], aggregation_level='bodyid')
+    assert out == {'1_T1': [1], '9': [9]}
+
+    # exact type resolution
+    assert comp._get_neurons_to_compare(query=['T1']) == {'T1': [1, 2]}
+    out = comp._get_neurons_to_compare(query=['T1'], aggregation_level='bodyid')
+    assert out == {'1_T1': [1], '2_T1': [2]}
+
+    # pattern expansion (types and bodyid levels)
+    out = comp._get_neurons_to_compare(query=['aMe.*'])
+    assert out == {'aMe1': [10], 'aMe2': [11]}
+    out = comp._get_neurons_to_compare(query=['aMe.*'], aggregation_level='bodyid')
+    assert out == {'10_aMe1': [10], '11_aMe2': [11]}
+
+    # taxonomy label expansion (string ids coerced to int)
+    out = comp._get_neurons_to_compare(query=['clock'])
+    assert out == {'cA': [20], 'cB': [21]}
+
+    # unresolved literal fallbacks
+    assert comp._get_neurons_to_compare(query=['Ghost']) == {'Ghost': ['Ghost']}
+    assert comp._get_neurons_to_compare(query=['zz.*']) == {'zz.*': ['zz.*']}
+
+
+def test_comparer_ensure_connection_cache(tmp_path, monkeypatch):
+    _install_fake_coana(monkeypatch)
+    comp = _comparer(['T1'], tmp_path)
+
+    assert comp._ensure_connection_cache_complete() is True
+    _FakeFNC.total_neurons = 0
+    assert comp._ensure_connection_cache_complete() is False
+    _FakeFNC.reset()
+    _FakeFNC.raise_on_build = True
+    assert comp._ensure_connection_cache_complete() is False
+    assert comp._ensure_connection_cache_complete_for_dataset(DS_A) is False
+    _FakeFNC.reset()
+    assert comp._ensure_connection_cache_complete_for_dataset(DS_A) is True
+
+
+def test_comparer_matrix_helpers(tmp_path):
+    comp = _comparer(['T1', 'T2'], tmp_path)
+
+    # _aggregate_profiles_from_list
+    assert comp._aggregate_profiles_from_list([], 'X') is None
+    p1 = _rich_profile(1)
+    assert comp._aggregate_profiles_from_list([p1], 'X') is p1
+    agg = comp._aggregate_profiles_from_list(
+        [_rich_profile(1), _rich_profile(2)], 'X')
+    assert agg.num_neurons_aggregated == 2
+    assert agg.dataset == DS_A
+    assert agg.neuron_id == 'X'
+
+    # _compute_similarity_from_types edge cases
+    s = comp._compute_similarity_from_types({'a': 1.0}, {'a': 1.0})
+    assert s['jaccard'] == pytest.approx(1.0)
+    assert np.isnan(s['rank'])  # <3 shared -> no rank
+    weights_a = {f'p{i}': float(6 - i) for i in range(4)}
+    weights_b = {f'p{i}': float(6 - i) for i in range(4)}
+    s2 = comp._compute_similarity_from_types(weights_a, weights_b)
+    assert s2['rank'] == pytest.approx(1.0)
+
+    # similarity matrices (3 directions, 5 metrics, diagonal 1.0)
+    profiles = {'T1': _rich_profile(1, DS_A), 'T2': _rich_profile(2, DS_A)}
+    mats = comp._compute_similarity_matrices(profiles)
+    assert set(mats) == {'overall', 'upstream', 'downstream'}
+    assert set(mats['overall']) == {'jaccard', 'weighted_jaccard', 'cosine',
+                                    'rank_corr', 'rank_corr_union'}
+    assert mats['overall']['jaccard'].loc['T1', 'T1'] == 1.0
+    assert list(mats['overall']['jaccard'].index) == ['T1', 'T2']
+
+    # single-direction comparer
+    comp_up = _comparer(['T1', 'T2'], tmp_path, direction='upstream')
+    mats_up = comp_up._compute_similarity_matrices(profiles)
+    assert set(mats_up) == {'upstream'}
+
+    # bodyId-level matrices: labels {bid}_{type}
+    bodyid_profiles = {
+        ('T1', 1): _rich_profile(1, DS_A),
+        ('T1', 2): _rich_profile(2, DS_A),
+        ('T2', 3): _rich_profile(3, DS_A),
+    }
+    bm = comp._compute_bodyid_similarity_matrices(bodyid_profiles)
+    assert '1_T1' in bm['overall']['jaccard'].index
+
+    # type-avg-bodyId matrices: intra avg for T1 (2 bids), 1.0 for T2 (1 bid)
+    tm = comp._compute_type_avg_bodyid_matrices(bodyid_profiles)
+    tav = tm['overall']['jaccard']
+    assert tav.loc['T2', 'T2'] == 1.0
+    assert 0.0 <= tav.loc['T1', 'T1'] <= 1.0
+
+    # inter-dataset matrices + consolidation (multi-dataset layout)
+    comp.datasets = [DS_A, DS_B]
+    anchors = {
+        'T1': {DS_A: ('T1', _rich_profile(1, DS_A)),
+               DS_B: ('T1', _rich_profile(1, DS_B))},
+    }
+    inter = comp._compute_inter_dataset_matrices(anchors)
+    assert 'overall' in inter['T1']
+    m = inter['T1']['overall']['jaccard']
+    assert np.isnan(m.loc[DS_A, DS_A])  # diagonal stays NaN
+    assert m.loc[DS_A, DS_B] == pytest.approx(1.0)
+    consolidated = comp._aggregate_inter_dataset_matrices(inter)
+    assert 'overall' in consolidated
+    frame = consolidated['overall']['jaccard']
+    assert list(frame.index) == ['T1']
+    assert frame.iloc[0, 0] == pytest.approx(1.0)
+    assert comp._aggregate_inter_dataset_matrices({}) == {}
+
+
+def test_comparer_get_output_path_default(pc_fake_repo):
+    comp = _comparer(['T1'])  # no output_dir -> local_data default
+    path = comp._get_output_path()
+    assert str(path).startswith(str(pc_fake_repo))
+    assert 'local_data' in path.parts and 'connectivity_profiling' in path.parts
+
+
+def test_comparer_run_single_dataset(tmp_path, pc_fake_repo, monkeypatch):
+    calls = []
+    _block_vispath(monkeypatch)
+    _install_fake_heatmap(monkeypatch, calls)
+
+    comp = _comparer(['T1', 'T2'], tmp_path,
+                     skip_bodyId_level=False, generate_heatmaps=True)
+    comp.profiler = _FakeProfilerFull(
+        profiles={
+            ('1', DS_A): _rich_profile(1, DS_A, scale=1.0),
+            ('2', DS_A): _rich_profile(2, DS_A, scale=0.9),
+            ('3', DS_A): _rich_profile(3, DS_A, scale=1.1),
+        },
+        bodyids={('T1', DS_A): [1, 2], ('T2', DS_A): [3]},
+    )
+    res = comp.run()
+
+    assert res['n_type_profiles'] == 2
+    assert res['n_bodyid_profiles'] == 3
+    assert res['bodyid_level_skipped'] is False
+    assert res['is_cross_dataset'] is False
+    assert set(res['type_matrices']) == {'overall', 'upstream', 'downstream'}
+
+    out = Path(res['output_path'])
+    assert (out / 'parameters.json').exists()
+    assert (out / 'README.txt').exists()
+    assert (out / 'report.html').exists()
+    assert len(list((out / 'type_level' / 'results').glob(
+        'type_similarity_*.csv'))) == 15
+    assert len(list((out / 'bodyid_level' / 'results').glob(
+        'bodyid_similarity_*.csv'))) == 15
+    assert len(list((out / 'bodyid_level' / 'results').glob(
+        'type_avg_bodyid_similarity_*.csv'))) == 15
+    assert len(list((out / 'profiles' / 'individual').glob('*.json'))) == 3
+    assert len(list((out / 'profiles' / 'aggregated').glob('*.json'))) == 2
+    # heatmap fallback path (vispath blocked above)
+    assert calls and len(res['heatmaps_generated']) == 45
+
+
+def test_comparer_run_single_dataset_insufficient(tmp_path):
+    comp = _comparer(['OnlyOne'], tmp_path)
+    comp.profiler = _FakeProfilerFull(
+        profiles={('1', DS_A): _rich_profile(1, DS_A)},
+        bodyids={('OnlyOne', DS_A): [1]},
+    )
+    res = comp.run()
+    assert res == {'n_type_profiles': 1, 'error': 'Insufficient profiles'}
+
+
+def test_comparer_run_bodyid_aggregation(tmp_path, pc_fake_repo):
+    comp = _comparer([1, 2], tmp_path, aggregation_level='bodyid')
+    fake = _FakeProfilerFull(
+        profiles={
+            ('1', DS_A): _rich_profile(1, DS_A),
+            ('2', DS_A): _rich_profile(2, DS_A),
+        },
+    )
+    fake.types_for_bodyids[DS_A] = {1: 'T1', 2: 'T1'}
+    comp.profiler = fake
+    res = comp.run()
+    assert res['n_type_profiles'] == 2
+    # bodyid aggregation skips the separate bodyId-level steps
+    assert res['bodyid_level_skipped'] is True
+    assert res['bodyid_matrices'] == {}
+    assert '1_T1' in res['type_labels']
+
+
+def test_comparer_run_multi_dataset(tmp_path, pc_fake_repo):
+    comp = ConnectivityProfileComparer(
+        ['T1', 'T2'], datasets=[DS_A, DS_B],
+        output_dir=str(tmp_path), verbose=False,
+        generate_heatmaps=False, use_auto_type_mapping=False,
+        skip_bodyId_level=False)
+    comp.profiler = _FakeProfilerFull(
+        profiles={
+            ('1', DS_A): _rich_profile(1, DS_A),
+            ('2', DS_A): _rich_profile(2, DS_A),
+            ('3', DS_A): _rich_profile(3, DS_A),
+            ('10', DS_B): _rich_profile(10, DS_B),
+            ('11', DS_B): _rich_profile(11, DS_B),
+        },
+        bodyids={
+            ('T1', DS_A): [1, 2], ('T2', DS_A): [3],
+            ('T1', DS_B): [10], ('T2', DS_B): [11],
+        },
+    )
+    res = comp.run()
+
+    assert res['is_multi_dataset'] is True
+    assert res['is_cross_dataset'] is False
+    assert res['bodyid_level_skipped'] is False
+    assert sorted(res['inter_anchors']) == ['T1', 'T2']
+    assert set(res['intra_matrices_by_dataset']) == {DS_A, DS_B}
+    assert set(res['inter_type_matrices']) == \
+        {'overall', 'upstream', 'downstream'}
+
+    out = Path(res['output_path'])
+    assert (out / 'parameters.json').exists()
+    assert (out / 'README.txt').exists()
+    assert (out / 'report.html').exists()
+    intra_res = out / 'intra_dataset' / SAFE_A / 'results'
+    assert (intra_res / 'similarity_overall_jaccard.csv').exists()
+    assert (intra_res / 'bodyid_similarity_jaccard_overall.csv').exists()
+    assert (intra_res / 'type_avg_bodyid_similarity_jaccard_overall.csv').exists()
+    cross_res = out / 'cross_dataset' / 'all_types' / 'results'
+    assert (cross_res / 'similarity_overall_jaccard.csv').exists()
+    assert (out / 'cross_dataset' / 'mapping_summary.csv').exists()
+    assert (out / 'profiles' / SAFE_A / 'aggregated' / 'T1_profile.json').exists()
+    assert (out / 'profiles' / SAFE_A / 'individual' / '1_T1_profile.json').exists()
+
+    mapping_df = pd.read_csv(out / 'cross_dataset' / 'mapping_summary.csv')
+    assert list(mapping_df['anchor']) == ['T1', 'T2']
+    assert (mapping_df['same name'] == 1).all()
+
+
+def test_comparer_run_cross_dataset(tmp_path):
+    comp = ConnectivityProfileComparer(
+        {DS_A: ['T1', 5], DS_B: ['T2']},
+        output_dir=str(tmp_path), verbose=False,
+        generate_heatmaps=False, use_auto_type_mapping=False)
+    comp.profiler = _FakeProfilerFull(
+        profiles={
+            ('1', DS_A): _rich_profile(1, DS_A),
+            ('5', DS_A): _rich_profile(5, DS_A),
+            ('7', DS_B): _rich_profile(7, DS_B),
+        },
+        bodyids={('T1', DS_A): [1], ('T2', DS_B): [7]},
+    )
+    res = comp.run()
+
+    assert res['is_cross_dataset'] is True
+    assert res['n_type_profiles'] == 3
+    assert res['bodyid_level_skipped'] is True
+    assert res['row_labels'] == ['T1', '5']
+    assert res['col_labels'] == ['T2']
+    assert 'overall' in res['cross_matrices']
+    assert res['cross_matrices']['overall']['jaccard'].loc['T1', 'T2'] == \
+        pytest.approx(1.0)
+
+    out = Path(res['output_path'])
+    assert (out / 'metadata.json').exists()
+    assert (out / 'cross_dataset' / 'overall_jaccard.csv').exists()
+    assert (out / 'profiles' / DS_A / 'T1_profile.json').exists()
+    meta = json.loads((out / 'metadata.json').read_text(encoding='utf-8'))
+    assert meta['datasets'] == [DS_A, DS_B]
+
+    # no resolvable profiles -> early error dict
+    comp_empty = ConnectivityProfileComparer(
+        {DS_A: ['Nope'], DS_B: ['Nada']},
+        output_dir=str(tmp_path), verbose=False,
+        generate_heatmaps=False, use_auto_type_mapping=False)
+    comp_empty.profiler = _FakeProfilerFull()
+    res_empty = comp_empty.run()
+    assert res_empty == {'is_cross_dataset': True,
+                         'error': 'No profiles extracted',
+                         'n_type_profiles': 0}
+
+
+def test_comparer_compare_intra_inter_type(tmp_path):
+    comp = _comparer(['T1', 'T2'], tmp_path)
+    comp.profiler = _FakeProfilerFull(
+        profiles={
+            ('1', DS_A): _rich_profile(1, DS_A, scale=1.0),
+            ('2', DS_A): _rich_profile(2, DS_A, scale=0.95),
+            ('3', DS_A): _rich_profile(3, DS_A, scale=1.0),
+            ('4', DS_A): _rich_profile(4, DS_A, scale=1.05),
+        },
+        bodyids={('T1', DS_A): [1, 2], ('T2', DS_A): [3, 4]},
+    )
+    res = comp.compare_intra_inter_type()
+    assert len(res['intra_type']) == 2     # T1 pair + T2 pair
+    assert len(res['inter_type']) == 4     # 2x2 sampled pairs
+    assert set(res['intra_type'].columns) >= {'type', 'bodyId_a', 'bodyId_b',
+                                              'jaccard', 'cosine'}
+
+    # all-numeric query -> nothing to compare
+    comp_num = _comparer([1, 2], tmp_path)
+    comp_num.profiler = _FakeProfilerFull()
+    res_num = comp_num.compare_intra_inter_type()
+    assert res_num['intra_type'].empty and res_num['inter_type'].empty
+
+
+# ---------------------------------------------------------------------------
+# Chunk 6: remaining comparer branches (mappers, anchors, extraction edges)
+# ---------------------------------------------------------------------------
+
+class _FakeTypeMapper:
+    """Stand-in for CrossDatasetTypeMapper (name resolution only)."""
+
+    _loaded = True
+
+    def resolve_type_across_datasets(self, name, datasets, source_dataset=None):
+        return {ds: f'{name}_mapped' for ds in datasets}
+
+    def get_canonical_type(self, label, dataset):
+        return f'{label}_canon'
+
+
+class _SelectiveRaisingProfiler(_FakeProfilerFull):
+    """get_profile raises for bodyIds listed in raise_for."""
+
+    def __init__(self, raise_for=(), **kwargs):
+        super().__init__(**kwargs)
+        self.raise_for = set(raise_for)
+
+    def get_profile(self, neuron, dataset, force_refresh=False):
+        try:
+            if int(neuron) in self.raise_for:
+                raise RuntimeError('profile fetch failed')
+        except (TypeError, ValueError):
+            pass
+        return super().get_profile(neuron, dataset, force_refresh)
+
+
+def test_comparer_verbose_log_and_progress(tmp_path):
+    comp = _comparer(['T1'], tmp_path, verbose=True)
+    comp._log('hello')            # verbose print branch
+    comp._progress(1, 2, 'step')  # structured progress branch
+
+
+def test_comparer_multi_init_with_mappings(tmp_path):
+    csv = tmp_path / 'groups.csv'
+    csv.write_text('group,id_type_instance\nG1,Mi1\nG2,Tm3\n', encoding='utf-8')
+    comp = ConnectivityProfileComparer(
+        ['ignored'], datasets=[DS_A, DS_B], group_map_csv=str(csv),
+        verbose=False, use_auto_type_mapping=False)
+    assert comp._custom_group_names == ['G1', 'G2']
+
+    preset = tmp_path / 'preset.json'
+    preset.write_text(json.dumps({'source_mapping': {
+        'custom_label': ['g1'], DS_A: [['T1']]}
+    }), encoding='utf-8')
+    comp2 = ConnectivityProfileComparer(
+        ['ignored'], datasets=[DS_A, DS_B],
+        custom_mapping_file=str(preset),
+        verbose=False, use_auto_type_mapping=False)
+    assert comp2.aggregation_level == 'custom'
+    assert comp2._custom_group_names == ['g1']
+
+
+def test_comparer_custom_groups_mapping_edges(tmp_path):
+    comp = _comparer(['T1'], tmp_path)
+
+    def _write(data):
+        p = tmp_path / 'preset.json'
+        p.write_text(json.dumps(data), encoding='utf-8')
+        return str(p)
+
+    # string member list (single member not wrapped in a list)
+    normalized, names = comp._load_custom_groups_from_mapping(
+        _write({'source_mapping': {'custom_label': ['g1'],
+                                   DS_A: ['T1']}}), DS_A)
+    assert (normalized, names) == ([['T1']], ['g1'])
+
+    # all rows empty -> warning + ([], [])
+    assert comp._load_custom_groups_from_mapping(
+        _write({'source_mapping': {'custom_label': ['g1'],
+                                   DS_A: [[]]}}), DS_A) == ([], [])
+
+    # multi-dataset mode with a bare-string row
+    comp_multi = ConnectivityProfileComparer(
+        ['T1'], datasets=[DS_A, DS_B], verbose=False,
+        use_auto_type_mapping=False)
+    comp_multi._load_custom_groups_from_mapping(
+        _write({'source_mapping': {'custom_label': ['g1'],
+                                   DS_A: [['T1']],
+                                   DS_B: ['plain']}}), DS_A)
+    assert comp_multi._mapping_ds_members[DS_B] == [['plain']]
+
+
+def test_comparer_query_name_and_neuron_edges(tmp_path):
+    comp = _comparer(['T1'], tmp_path)
+
+    # query whose first item is a list
+    comp.query = [[1, 2]]
+    assert comp._generate_query_name() == '1'
+
+    # defaults from self.query / self.dataset
+    fake = _FakeProfilerFull(bodyids={('T1', DS_A): [1]})
+    comp.profiler = fake
+    comp.query = ['T1']
+    assert comp._get_neurons_to_compare() == {'T1': [1]}
+
+    # non-list group member gets wrapped
+    out = comp._get_neurons_to_compare(query=[5], custom_group_names=['G'])
+    assert out == {'G': [5]}
+
+    # pattern whose matched type has no bodyIds is skipped
+    fake.type_lists[('p.*', DS_A)] = ['Empty']
+    assert comp._get_neurons_to_compare(query=['p.*']) == {}
+
+    # taxonomy expansion at bodyid aggregation level
+    fake.label_groups[('clock', DS_A)] = {'cA': [20]}
+    out = comp._get_neurons_to_compare(query=['clock'],
+                                       aggregation_level='bodyid')
+    assert out == {'20_cA': [20]}
+
+
+def test_comparer_type_mapper_branches(tmp_path):
+    comp = _comparer(['T1'], tmp_path)
+    comp._type_mapper = _FakeTypeMapper()
+    assert comp._map_query_item('Mi1', DS_A) == 'Mi1_mapped'
+    assert comp._map_query_item(5, DS_A) == 5
+    assert comp._map_query_item('Mi.*', DS_A) == 'Mi.*'
+    assert comp._canonical_label('Mi1', DS_A) == 'Mi1_canon'
+
+    # multi-dataset mapped query (flat and custom-group forms)
+    comp_m = ConnectivityProfileComparer(
+        ['T1'], datasets=[DS_A, DS_B], verbose=False,
+        use_auto_type_mapping=False)
+    comp_m._type_mapper = _FakeTypeMapper()
+    assert comp_m._mapped_query_for(DS_A) == ['T1_mapped']
+    comp_m._custom_group_names = ['G']
+    comp_m.query = [['Mi1']]
+    assert comp_m._mapped_query_for(DS_A) == [['Mi1_mapped']]
+    comp_m._mapping_ds_members = {DS_A: [['X', 5]]}
+    assert comp_m._mapped_query_for(DS_A) == [['X', 5]]
+
+
+def test_comparer_multi_run_bodyid_and_pattern_anchors(tmp_path, pc_fake_repo):
+    comp = ConnectivityProfileComparer(
+        [1, 'aMe.*'], datasets=[DS_A, DS_B],
+        output_dir=str(tmp_path), verbose=False,
+        generate_heatmaps=False, use_auto_type_mapping=False,
+        skip_bodyId_level=True)
+    comp.profiler = _FakeProfilerFull(
+        profiles={
+            ('1', DS_A): _rich_profile(1, DS_A),
+            ('10', DS_A): _rich_profile(10, DS_A),
+            ('1', DS_B): _rich_profile(1, DS_B),
+            ('10', DS_B): _rich_profile(10, DS_B),
+        },
+        bodyids={
+            ('T1', DS_A): [1], ('aMe1', DS_A): [10],
+            ('T1', DS_B): [1], ('aMe1', DS_B): [10],
+        },
+    )
+    comp.profiler.types_for_bodyids[DS_A] = {1: 'T1'}
+    comp.profiler.types_for_bodyids[DS_B] = {1: 'T1'}
+    comp.profiler.type_lists[('aMe.*', DS_A)] = ['aMe1']
+    comp.profiler.type_lists[('aMe.*', DS_B)] = ['aMe1']
+
+    res = comp.run()
+    assert res['is_multi_dataset'] is True
+    # bodyId anchor '1' (via its type) + pattern anchor 'aMe1'
+    assert sorted(res['inter_anchors']) == ['1', 'aMe1']
+
+
+def test_comparer_multi_run_custom_group_anchors(tmp_path, pc_fake_repo):
+    comp = ConnectivityProfileComparer(
+        [['G1', [1]], ['G2', [2]]], datasets=[DS_A, DS_B],
+        output_dir=str(tmp_path), verbose=False,
+        generate_heatmaps=False, use_auto_type_mapping=False,
+        skip_bodyId_level=True)
+    comp.profiler = _FakeProfilerFull(
+        profiles={
+            ('1', DS_A): _rich_profile(1, DS_A),
+            ('2', DS_A): _rich_profile(2, DS_A),
+            ('1', DS_B): _rich_profile(1, DS_B),
+            ('2', DS_B): _rich_profile(2, DS_B),
+        },
+    )
+    res = comp.run()
+    assert res['is_multi_dataset'] is True
+    assert sorted(res['inter_anchors']) == ['G1', 'G2']
+
+
+def test_comparer_cross_extraction_edges(tmp_path):
+    # calling the cross extraction outside cross mode raises
+    comp_plain = _comparer(['T1'], tmp_path)
+    with pytest.raises(RuntimeError):
+        comp_plain._extract_cross_dataset_profiles()
+
+    comp = ConnectivityProfileComparer(
+        {DS_A: ['5', 'T1', 'Ghost'], DS_B: ['T2']},
+        output_dir=str(tmp_path), verbose=False,
+        generate_heatmaps=False, use_auto_type_mapping=False)
+    comp.profiler = _SelectiveRaisingProfiler(
+        raise_for={3},
+        profiles={
+            ('5', DS_A): _rich_profile(5, DS_A),
+            ('1', DS_A): _rich_profile(1, DS_A),
+            ('2', DS_A): _rich_profile(2, DS_A),
+            ('7', DS_B): _rich_profile(7, DS_B),
+        },
+        bodyids={('T1', DS_A): [1, 2, 3], ('Ghost', DS_A): [9],
+                 ('T2', DS_B): [7]},
+    )
+    profiles_by_ds, row_labels, col_labels = comp._extract_cross_dataset_profiles()
+    # digit-string query kept as label, T1 aggregated from 2 surviving bids,
+    # Ghost dropped (profile fetch failures)
+    assert row_labels == ['5', 'T1']
+    assert col_labels == ['T2']
+    assert profiles_by_ds[DS_A]['T1'].num_neurons_aggregated == 2
+
+
+def test_comparer_run_ensure_cache_branch(tmp_path, monkeypatch):
+    _install_fake_coana(monkeypatch)
+    comp = _comparer(['OnlyOne'], tmp_path,
+                     use_cache=True, ensure_cache_complete=True)
+    comp.profiler = _FakeProfilerFull(
+        profiles={('1', DS_A): _rich_profile(1, DS_A)},
+        bodyids={('OnlyOne', DS_A): [1]},
+    )
+    res = comp.run()  # cache ensured first, then insufficient profiles
+    assert res == {'n_type_profiles': 1, 'error': 'Insufficient profiles'}
+
+
+def test_comparer_intra_inter_ensure_cache_and_profile_error(
+        tmp_path, monkeypatch):
+    _install_fake_coana(monkeypatch)
+    comp = _comparer(['T1'], tmp_path,
+                     use_cache=True, ensure_cache_complete=True)
+    comp.profiler = _SelectiveRaisingProfiler(
+        raise_for={2},
+        profiles={('1', DS_A): _rich_profile(1, DS_A)},
+        bodyids={('T1', DS_A): [1, 2]},
+    )
+    res = comp.compare_intra_inter_type()
+    # bodyId 2 fails to extract -> only 1 profile -> no pairs
+    assert res['intra_type'].empty and res['inter_type'].empty

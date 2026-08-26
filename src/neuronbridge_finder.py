@@ -306,8 +306,10 @@ def _create_mountain_order(scores, labels):
     result_scores = [0] * n
     result_labels = [''] * n
 
-    left = n // 2 - 1 if n % 2 == 0 else n // 2
-    right = n // 2 if n % 2 == 0 else n // 2
+    # Write pointers start NEXT TO the center slot; starting them at the
+    # center itself made the first alternating write overwrite the peak.
+    left = n // 2 - 1
+    right = n // 2 + 1
 
     for i, (score, label) in enumerate(sorted_pairs):
         if i == 0:
@@ -1883,7 +1885,8 @@ class NeuronBridgeFinder:
     def _sort_expression_matrix(
         self,
         expression_df: pd.DataFrame,
-        as_types_rows: bool = True
+        as_types_rows: bool = True,
+        input_format: str = 'auto'
     ) -> pd.DataFrame:
         """
         Sort expression matrix by co-labeling quality.
@@ -1896,10 +1899,14 @@ class NeuronBridgeFinder:
         Parameters
         ----------
         expression_df : pd.DataFrame
-            Expression matrix. If as_types_rows=False, expects Lines × Types format.
+            Expression matrix. Orientation per ``input_format``.
         as_types_rows : bool
             If True (default), output has types as rows and lines as columns.
             If False, output has lines as rows and types as columns.
+        input_format : str
+            'lines_x_types' or 'types_x_lines' states the input orientation
+            explicitly.  'auto' (legacy) guesses from the shape, which is
+            unreliable for small matrices (fewer types than lines).
             
         Returns
         -------
@@ -1907,13 +1914,17 @@ class NeuronBridgeFinder:
             Sorted expression matrix with types as rows (if as_types_rows=True).
         """
         # Determine if input needs transposing to get Types × Lines format
-        # When as_types_rows=True (default), we want types as rows (many rows, few columns)
-        # Input from _calculate_mutual_information is Lines × Types (few rows, many columns)
-        # Heuristic: if significantly more columns than rows, it's likely Lines × Types format
-        needs_transpose = (
-            expression_df.index.name == 'line' or 
-            (as_types_rows and len(expression_df.columns) > len(expression_df) * 2)
-        )
+        if input_format == 'lines_x_types':
+            needs_transpose = True
+        elif input_format == 'types_x_lines':
+            needs_transpose = False
+        else:
+            # Legacy heuristic: 'line'-named index, or clearly more columns
+            # than rows (Lines × Types with many types).
+            needs_transpose = (
+                expression_df.index.name == 'line' or 
+                (as_types_rows and len(expression_df.columns) > len(expression_df))
+            )
         
         if needs_transpose:
             expression_transposed = expression_df.T
@@ -2464,7 +2475,8 @@ class NeuronBridgeFinder:
             ]
             # Re-sort by quality (min_score descending within complete/incomplete groups)
             expression_transposed = self._sort_expression_matrix(
-                expression_transposed.T, as_types_rows=True
+                expression_transposed.T, as_types_rows=True,
+                input_format='lines_x_types'
             )
             self._vprint(f"   📊 Showing top {top_n_types} types (of {total_types} after filter)")
             # Add filter info to title
@@ -3618,7 +3630,9 @@ class NeuronBridgeFinder:
         import time
         
         max_retries = 5
-        retry_delays = [2, 5, 10]  # Seconds to wait before each retry
+        # One wait per retry: max_retries - 1 entries, otherwise the fourth
+        # failure raises IndexError instead of sleeping for the final retry.
+        retry_delays = [2, 5, 10, 15]  # Seconds to wait before each retry
         
         self._vprint("🔌 Initializing NeuronBridge client...")
         
@@ -8099,7 +8113,9 @@ class NeuronBridgeFinder:
             return results
         
         # Sort expression matrix by co-labeling quality using shared helper
-        expression_transposed = self._sort_expression_matrix(expression_df, as_types_rows=True)
+        expression_transposed = self._sort_expression_matrix(
+            expression_df, as_types_rows=True, input_format='lines_x_types'
+        )
         
         n_lines = len(expression_transposed.columns)
         nonzero_count = (expression_transposed > 0).sum(axis=1)

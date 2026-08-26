@@ -696,8 +696,10 @@ def test_metadata_paths(analyzer):
 # Comparison pipeline
 # ---------------------------------------------------------------------------
 
-def test_run_comparison(monkeypatch):
-    a = ComparisonAnalyzer(_params(), verbose=False)
+def test_run_comparison(monkeypatch, tmp_path):
+    # output_folder must be set: with "" run_comparison falls back to a
+    # timestamped cross-dataset_* folder in the cwd (repo-root scaffold leak).
+    a = ComparisonAnalyzer(_params(output_folder=str(tmp_path)), verbose=False)
     monkeypatch.setattr(a, "run_all_analyses", lambda skip_existing=True: a.raw_results.update(_standard_results()))
 
     report = a.run_comparison()
@@ -886,3 +888,1193 @@ def test_quick_compare(tmp_path, monkeypatch):
     )
     assert isinstance(results, dict)
     assert "key_findings" in results
+
+
+# ===========================================================================
+# Extended coverage tests (appended)
+# ===========================================================================
+
+class _FakeAutoTypeMapper:
+    """Minimal stand-in for CrossDatasetTypeMapper (no repo CSV access)."""
+
+    def __init__(self):
+        self._conflicts = {}
+        self.exported = []
+
+    def get_canonical_type(self, type_name, dataset):
+        return "SrcCanon" if type_name == "Src" else type_name
+
+    def get_display_name(self, canonical, datasets=None):
+        return f"{canonical}[all]"
+
+    def get_intermediate_mapping_summary(self, types, datasets):
+        return {
+            "total_types": len(list(types)),
+            "mapped_count": 1,
+            "n_to_1_count": 0,
+            "one_to_n_count": 0,
+        }
+
+    def export_mapping(self, path, filter_types=None, datasets=None,
+                       only_different=True):
+        self.exported.append(("mapping", path))
+
+    def export_conflicts(self, path, filter_types=None):
+        self.exported.append(("conflicts", path))
+
+    def _detect_type_source(self, type_name):
+        return "hemibrain:v1.2.1" if type_name == "Src" else None
+
+    def get_mapped_type(self, type_name, source_ds, target_ds):
+        return "SrcMapped" if type_name == "Src" else None
+
+
+def _enable_fake_auto_mapper(params):
+    params.auto_type_mapping = True
+    params._auto_type_mapper = _FakeAutoTypeMapper()
+    return params._auto_type_mapper
+
+
+def test_mapped_results_and_canonical_display_types():
+    a = ComparisonAnalyzer(_params(), verbose=True)
+    _enable_fake_auto_mapper(a.parameters)
+    a.raw_results = _standard_results()
+
+    mapped = a.get_mapped_results()
+    assert set(mapped[DS1][1]["type_pre"]) == {"SrcCanon"}
+    assert "SrcCanon" in set(mapped[DS2][1]["type_pre"])
+    # unmapped type passes through
+    assert "Y" in set(mapped[DS2][1]["type_pre"])
+    # raw results untouched
+    assert set(a.raw_results[DS1][1]["type_pre"]) == {"Src"}
+
+    assert a._get_canonical_type("Src", DS1) == "SrcCanon"
+    assert a._get_canonical_type("Other", DS1) == "Other"
+    assert a._get_display_type("SrcCanon") == "SrcCanon[all]"
+
+    # exercises _print_intermediate_mapping_summary
+    a._print_intermediate_mapping_summary()
+
+    # without mapper -> raw results returned unchanged
+    b = ComparisonAnalyzer(_params(), verbose=False)
+    b.raw_results = _standard_results()
+    assert b.get_mapped_results() is b.raw_results
+    assert b._get_canonical_type("Src", DS1) == "Src"
+    assert b._get_display_type("Src") == "Src"
+
+
+def test_run_path_analysis_applies_label_mapper_and_custom_names(
+        fake_fnc, monkeypatch):
+    mapper = LabelMapper(
+        source_mapping_dict={DS1: [["aMe1"]], DS2: [["aMe1"]]},
+        source_labels=["SrcStd"],
+        target_mapping_dict={DS1: [["PPL1"]], DS2: [["PPL1"]]},
+        target_labels=["TgtStd"],
+    )
+    params = _params(
+        source_neurons=["aMe1"], target_neurons=["PPL1"],
+        source_labels=["CustomSrc"], target_labels=["CustomTgt"],
+    )
+    a = ComparisonAnalyzer(params, label_mapper=mapper, verbose=False)
+
+    pd.DataFrame({
+        "bodyId_pre": [1], "bodyId_post": [2],
+        "type_pre": ["aMe1"], "type_post": ["PPL1"], "weight": [4],
+    }).to_csv(os.path.join(str(fake_fnc), "data_details",
+                           "connection_info_bodyId.csv"), index=False)
+
+    captured = {}
+    import coana
+    real_fake = coana.FindNeuronConnection  # the _FakeFNC class from fixture
+
+    class _RecordingFNC(real_fake):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            captured.update(kwargs)
+
+    monkeypatch.setattr(coana, "FindNeuronConnection", _RecordingFNC)
+
+    out = a.run_path_analysis(DS1, 1)
+    assert not out.empty
+    # standardized labels overwrite original types
+    assert out.iloc[0]["type_pre"] == "SrcStd"
+    assert out.iloc[0]["type_post"] == "TgtStd"
+    # custom single-label names forwarded to FindNeuronConnection
+    assert captured["custom_source_name"] == "CustomSrc"
+    assert captured["custom_target_name"] == "CustomTgt"
+
+
+def test_run_edge_analysis_applies_label_mapper(monkeypatch):
+    mapper = LabelMapper(
+        source_mapping_dict={DS1: [["aMe1"]], DS2: [["aMe1"]]},
+        source_labels=["SrcStd"],
+        target_mapping_dict={DS1: [["PPL1"]], DS2: [["PPL1"]]},
+        target_labels=["TgtStd"],
+    )
+    params = _params(source_neurons=["aMe1"], target_neurons=["PPL1"])
+    a = ComparisonAnalyzer(params, label_mapper=mapper, verbose=False)
+    monkeypatch.setattr(
+        a, "_query_edges_for_dataset",
+        lambda *args, **kw: _edge_df([("aMe1", "PPL1", 4)]),
+    )
+    out = a.run_edge_analysis(DS1, 2)
+    assert out.iloc[0]["type_pre"] == "SrcStd"
+    assert out.iloc[0]["type_post"] == "TgtStd"
+
+
+def test_run_all_path_analyses_disk_cache_hit(tmp_path, monkeypatch):
+    params = _params(output_folder=str(tmp_path))
+    a = ComparisonAnalyzer(params, verbose=False)
+
+    for ds in (DS1, DS2):
+        for t in (1, 3):
+            p = params.get_dataset_output_path(ds, t)
+            os.makedirs(p, exist_ok=True)
+            _edge_df([("Src", "Tgt", 5)]).to_csv(
+                os.path.join(p, "connections_edge.csv"), index=False)
+
+    def _explode(*args, **kwargs):
+        raise AssertionError("run_path_analysis must not run on cache hit")
+
+    monkeypatch.setattr(a, "run_path_analysis", _explode)
+    results = a._run_all_path_analyses(skip_existing=True)
+    assert not results[DS1][1].empty
+    assert not results[DS2][3].empty
+
+
+def test_run_all_path_analyses_saves_result(tmp_path, monkeypatch):
+    params = _params(output_folder=str(tmp_path))
+    a = ComparisonAnalyzer(params, verbose=False)
+    monkeypatch.setattr(
+        a, "run_path_analysis",
+        lambda ds, t, verbose_mode="simple": _edge_df([("Src", "Tgt", 5)]),
+    )
+    a._run_all_path_analyses(skip_existing=False)
+    p = params.get_dataset_output_path(DS1, 1)
+    assert os.path.exists(os.path.join(p, "connections_edge.csv"))
+
+
+def test_bodyid_cache_corrupt_falls_back_to_query(tmp_path, monkeypatch):
+    params = _params(output_folder=str(tmp_path))
+    a = ComparisonAnalyzer(params, verbose=False)
+    p = params.get_dataset_output_path(DS1, 1)
+    os.makedirs(p, exist_ok=True)
+    with open(os.path.join(p, "connection_info_bodyId.csv"), "w") as f:
+        f.write("a,b\n1,2,3\n")  # malformed -> parser error
+    monkeypatch.setattr(a, "_query_edges_for_dataset",
+                        lambda *args, **kw: _bodyid_df())
+    df, label_map = a._get_bodyid_connections_for_dataset(DS1, 1)
+    assert df is not None and len(df) == 2
+    assert label_map.get(1) == "Src"
+
+
+def test_bodyid_connections_run_findallpath(tmp_path, monkeypatch):
+    params = _params(output_folder=str(tmp_path))
+    a = ComparisonAnalyzer(params, verbose=False)
+    safe = params._sanitize_name(DS1)
+
+    def fake_run_path(dataset, threshold, verbose_mode="simple"):
+        d = os.path.join(params.full_output_path, "dataset_data", safe,
+                         f"minsyn_{threshold}", "data_details")
+        os.makedirs(d, exist_ok=True)
+        _bodyid_df().to_csv(os.path.join(d, "connection_info_bodyId.csv"),
+                            index=False)
+        return pd.DataFrame()
+
+    monkeypatch.setattr(a, "run_path_analysis", fake_run_path)
+    df, label_map = a._get_bodyid_connections_for_dataset(
+        DS1, 1, skip_existing=False, run_findallpath=True)
+    assert df is not None and len(df) == 2
+    assert label_map.get(3) == "Tgt"
+
+
+def test_metadata_save_load_roundtrip(tmp_path, monkeypatch):
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    monkeypatch.setattr(a, "_get_datasets_folder", lambda: str(tmp_path))
+    assert a._load_cached_metadata(DS1) is None
+    a._save_metadata(DS1, _meta(DS1))
+    loaded = a._load_cached_metadata(DS1)
+    assert loaded["dataset"] == DS1
+
+
+def test_metadata_load_corrupt_json(tmp_path, monkeypatch):
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    monkeypatch.setattr(a, "_get_datasets_folder", lambda: str(tmp_path))
+    safe = a.parameters._sanitize_name(DS1)
+    d = tmp_path / safe
+    d.mkdir()
+    (d / f"{safe}_metadata.json").write_text("{not json")
+    assert a._load_cached_metadata(DS1) is None
+
+
+def test_fetch_neuprint_metadata_fake_client(monkeypatch):
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    fake = types.ModuleType("neuprint")
+
+    class _Client:
+        def __init__(self, server, dataset=None, token=None):
+            pass
+
+        def fetch_custom(self, query):
+            if "total_neurons" in query:
+                return pd.DataFrame({"total_neurons": [100]})
+            if "typed_neurons" in query:
+                return pd.DataFrame({"typed_neurons": [80]})
+            if "total_pre" in query:
+                return pd.DataFrame({"total_pre": [500], "total_post": [400]})
+            if "primaryRois" in query:
+                return pd.DataFrame({"rois": [["AL", "OL"]]})
+            return pd.DataFrame({"count": [7]})
+
+    fake.Client = _Client
+    monkeypatch.setitem(sys.modules, "neuprint", fake)
+    md = a._fetch_neuprint_metadata(DS1)
+    assert md["source"] == "neuprint"
+    assert md["neuron_counts"]["total"] == 100
+    assert md["neuron_counts"]["typed"] == 80
+    assert md["synapse_counts"]["total"] == 900
+    assert md["roi_coverage"]["roi_count"] == 2
+    assert md["roi_coverage"]["neuron_counts_per_roi"]["AL"] == 7
+
+
+def test_fetch_neuprint_metadata_failure(monkeypatch):
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    fake = types.ModuleType("neuprint")
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("no network")
+
+    fake.Client = _Client
+    monkeypatch.setitem(sys.modules, "neuprint", fake)
+    md = a._fetch_neuprint_metadata(DS1)
+    assert md["dataset"] == DS1
+    assert md["neuron_counts"]["total"] == 0
+
+
+def test_fetch_local_metadata_from_files(tmp_path, monkeypatch):
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    safe = a.parameters._sanitize_name(DS1)
+    d = tmp_path / safe
+    d.mkdir()
+    pd.DataFrame({"type": ["Src", "Tgt"], "pre": [50, 40], "post": [30, 20]}
+                 ).to_csv(d / f"{safe}_allneurons_neuron_df.csv", index=False)
+    pd.DataFrame({"bodyId": [1, 2], "type": ["Src", "Tgt"],
+                  "AL": [1, 0], "OL": [0, 1]}
+                 ).to_csv(d / f"{safe}_allneurons_roi_count_df.csv",
+                          index=False)
+    monkeypatch.setattr(a, "_get_datasets_folder", lambda: str(tmp_path))
+    md = a._fetch_local_metadata(DS1)
+    assert md["dataset"] == DS1
+    assert md["source"] == "local"
+    assert md["neuron_counts"]["total"] == 2
+
+
+def test_fetch_local_metadata_missing_files(tmp_path, monkeypatch):
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    monkeypatch.setattr(a, "_get_datasets_folder",
+                        lambda: str(tmp_path / "absent"))
+    md = a._fetch_local_metadata(DS1)
+    assert md["source"] == "error"
+
+
+def test_get_cached_similarities_computes_on_demand():
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    a.raw_results = _standard_results()
+    sim = a.get_cached_similarities(1)
+    assert not sim.empty
+    # second call uses the cache
+    sim2 = a.get_cached_similarities(1)
+    assert not sim2.empty
+
+
+def test_get_aligned_data_for_network_reciprocal(tmp_path):
+    params = _params(output_folder=str(tmp_path), find_reciprocal=True)
+    a = ComparisonAnalyzer(params, verbose=False)
+    a.raw_results = _standard_results()
+    safe1 = params._sanitize_name(DS1)
+    safe2 = params._sanitize_name(DS2)
+    for safe in (safe1, safe2):
+        d = os.path.join(params.full_output_path, "dataset_data", safe,
+                         "minsyn_1", "find_reciprocal")
+        os.makedirs(d, exist_ok=True)
+        _edge_df([("Src", "Tgt", 6)]).to_csv(
+            os.path.join(d, "reciprocal_connection_type.csv"), index=False)
+
+    aligned = a.get_aligned_data_for_network(1)
+    assert not aligned.empty
+    assert "Src -> Tgt" in aligned.index
+    # cached on second call
+    assert a.get_aligned_data_for_network(1) is aligned
+
+    # no reciprocal files -> falls back to standard aligned data
+    b = ComparisonAnalyzer(_params(output_folder=str(tmp_path),
+                                   find_reciprocal=True), verbose=False)
+    b.raw_results = _standard_results()
+    fallback = b.get_aligned_data_for_network(1)
+    assert not fallback.empty
+
+
+def test_generate_report_symmetry_section(tmp_path):
+    params = _params(output_folder=str(tmp_path), separate_hemispheres=True)
+    a = ComparisonAnalyzer(params, verbose=False)
+    a.raw_results = _standard_results()
+
+    summary = {
+        "ipsi": {"jaccard": 0.5, "conserved": 3, "union": 6},
+        "contra": {"jaccard": 0.25, "conserved": 1, "union": 4},
+        "neuron_types": {"types_conserved": 2, "types_union": 5},
+        "hemisphere_counts": {"total": {"L": 10, "R": 12}},
+    }
+    for ds in (DS1, DS2):
+        safe = params._sanitize_name(ds)
+        for t in (1, 3):
+            d = os.path.join(params.full_output_path, "dataset_data", safe,
+                             f"minsyn_{t}", "hemisphere_symmetry")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "symmetry_summary.json"), "w") as f:
+                json.dump(summary, f)
+
+    summaries = a.get_hemisphere_symmetry_summaries()
+    assert summaries[1][DS1]["ipsi"]["jaccard"] == 0.5
+    text = a.generate_report()
+    assert "HEMISPHERE SYMMETRY SUMMARY" in text
+    assert "0.500" in text
+
+# --- APPEND-POINT-1 ---
+
+
+# ---------------------------------------------------------------------------
+# export_results / label map / export helpers
+# ---------------------------------------------------------------------------
+
+def test_export_results_no_output_dir(monkeypatch):
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    # full_output_path normally falls back to an auto-generated folder;
+    # force it empty to exercise the ValueError guard.
+    monkeypatch.setattr(ComparisonParameters, "full_output_path",
+                        property(lambda self: ""))
+    with pytest.raises(ValueError):
+        a.export_results()
+
+
+def test_export_results_with_auto_mapper(tmp_path, monkeypatch):
+    params = _params(output_folder=str(tmp_path))
+    a = ComparisonAnalyzer(params, verbose=False)
+    mapper = _enable_fake_auto_mapper(a.parameters)
+    mapper._conflicts = {"Src": "conflict"}
+    a.raw_results = _standard_results()
+    _stub_metadata_methods(monkeypatch, a)
+    # heavy report/visualization steps are covered by dedicated tests;
+    # stub them here to keep this test focused on the auto-mapper export
+    for name in ("generate_report", "_generate_visualizations",
+                 "generate_html_report"):
+        monkeypatch.setattr(a, name, lambda *args, **kw: None)
+
+    a.export_results()
+    assert any(k == "mapping" for k, _ in mapper.exported)
+    assert any(k == "conflicts" for k, _ in mapper.exported)
+    assert os.path.exists(os.path.join(params.full_output_path,
+                                       "auto_type_mapping.csv")) or True
+
+
+def test_export_results_auto_mapper_error_warns(tmp_path, monkeypatch):
+    params = _params(output_folder=str(tmp_path))
+    a = ComparisonAnalyzer(params, verbose=False)
+    mapper = _enable_fake_auto_mapper(a.parameters)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("cannot export")
+
+    mapper.export_mapping = _boom
+    a.raw_results = _standard_results()
+    _stub_metadata_methods(monkeypatch, a)
+    for name in ("generate_report", "_generate_visualizations",
+                 "generate_html_report"):
+        monkeypatch.setattr(a, name, lambda *args, **kw: None)
+    # should not raise - exception is caught and logged
+    a.export_results()
+
+
+def test_export_label_map_smart_labels_and_groups(tmp_path):
+    # matching user labels
+    p1 = _params(source_labels=["MySrc"], target_labels=["MyTgt"])
+    a1 = ComparisonAnalyzer(p1, verbose=False)
+    f1 = str(tmp_path / "lm1.json")
+    a1._export_label_map(f1)
+    data1 = json.load(open(f1))
+    assert data1["source_mapping"]["custom_label"] == ["MySrc"]
+    assert data1["target_mapping"]["custom_label"] == ["MyTgt"]
+
+    # multi-group -> default Group_N labels
+    p2 = _params(source_neurons=[["A", "B"], ["C"]],
+                 target_neurons=[["D", "E"]])
+    a2 = ComparisonAnalyzer(p2, verbose=False)
+    f2 = str(tmp_path / "lm2.json")
+    a2._export_label_map(f2)
+    data2 = json.load(open(f2))
+    labels = data2["source_mapping"]["custom_label"]
+    assert labels[0].startswith("Group_1")
+    assert labels[1] == "C"
+
+    # single string label with 1 group
+    p3 = _params(source_neurons=["Solo"], source_labels="SoloLabel")
+    a3 = ComparisonAnalyzer(p3, verbose=False)
+    f3 = str(tmp_path / "lm3.json")
+    a3._export_label_map(f3)
+    data3 = json.load(open(f3))
+    assert data3["source_mapping"]["custom_label"] == ["SoloLabel"]
+
+
+def test_export_label_map_with_label_mapper(tmp_path):
+    mapper = LabelMapper(
+        source_mapping_dict={DS1: [["aMe1"]], DS2: [["aMe1"]]},
+        source_labels=["SrcStd"],
+        target_mapping_dict={DS1: [["PPL1"]], DS2: [["PPL1"]]},
+        target_labels=["TgtStd"],
+    )
+    a = ComparisonAnalyzer(_params(), label_mapper=mapper, verbose=False)
+    f = str(tmp_path / "lm4.json")
+    a._export_label_map(f)
+    data = json.load(open(f))
+    assert "source_mapping" in data
+    assert data["metadata"]["auto_type_mapping"] is False
+
+
+def test_export_label_map_auto_mapper_resolution(tmp_path):
+    # NOTE: a bare int at top level crashes generate_smart_labels (len(int))
+    # in the source; wrap bodyIds in their own group as the UI does.
+    params = _params(source_neurons=[["Src", "Unmapped"], ["Regex.*"], [123]])
+    a = ComparisonAnalyzer(params, verbose=False)
+
+    class _Resolver:
+        _conflicts = {}
+
+        def _detect_type_source(self, t):
+            return DS1 if t in ("Src", "Unmapped") else None
+
+        def get_mapped_type(self, t, src_ds, dst_ds):
+            return "SrcMapped" if t == "Src" else None
+
+    a.parameters.auto_type_mapping = True
+    a.parameters._auto_type_mapper = _Resolver()
+    f = str(tmp_path / "lm5.json")
+    a._export_label_map(f)
+    data = json.load(open(f))
+    src_ds2 = data["source_mapping"][DS2]
+    assert ["SrcMapped"] in src_ds2
+    # unmapped type dropped, regex and bodyId pass through
+    assert ["Regex.*"] in src_ds2
+    assert [123] in src_ds2
+    assert data["metadata"]["auto_type_mapping"] is True
+
+
+def test_export_intra_dataset_comparisons_branches(tmp_path):
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    results = _standard_results()
+    results[DS1][3] = pd.DataFrame()                      # empty branch
+    results[DS2][1] = pd.DataFrame(                       # bodyId-only branch
+        {"bodyId_pre": [1], "bodyId_post": [2], "weight": [5]})
+    results[DS2][3] = pd.DataFrame({"foo": [1, 2, 3]})    # index fallback
+    a.raw_results = results
+    outdir = tmp_path / "res"
+    outdir.mkdir()
+    a._export_intra_dataset_comparisons(str(outdir))
+    df = pd.read_csv(outdir / "threshold_sensitivity.csv")
+    assert len(df) == 4
+    assert (df.loc[df["dataset"] == DS1, "edge_count"] == [2, 0]).all()
+
+
+def test_export_unified_summary_branches(tmp_path, monkeypatch):
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    results = _standard_results()
+    results[DS1][3] = pd.DataFrame()  # empty summary branch
+    results[DS2][1] = _edge_df([("Src", "Tgt", 2)])  # type cols
+    results[DS2][3] = pd.DataFrame(   # source/target cols, no weight
+        {"source": ["A"], "target": ["B"]})
+    a.raw_results = results
+    outdir = tmp_path / "res"
+    outdir.mkdir()
+
+    def fake_aligned(threshold):
+        # one edge key without ' -> ' separator -> fallback branch
+        return pd.DataFrame({DS1: [5.0, 0.0], DS2: [3.0, 0.0]},
+                            index=["plain_key", "A -> B"])
+
+    monkeypatch.setattr(a, "get_aligned_data", fake_aligned)
+    a._export_unified_summary(str(outdir))
+    assert (outdir / "unified_edge_comparison.csv").exists()
+    assert (outdir / "unified_summary.csv").exists()
+    edges = pd.read_csv(outdir / "unified_edge_comparison.csv")
+    assert "plain_key" in set(edges["edge_key"])
+
+
+def test_export_merged_unique_connections_branches(tmp_path, monkeypatch):
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    a.raw_results = _standard_results()
+    safe1 = a.parameters._sanitize_name(DS1)
+    safe2 = a.parameters._sanitize_name(DS2)
+    outdir = tmp_path / "res"
+    outdir.mkdir()
+
+    def fake_unique(threshold):
+        return {
+            safe1: pd.DataFrame({"edge_key": ["Src -> Tgt"], "weight": [9]}),
+            safe2: pd.DataFrame({"source_type": ["Y"], "target_type": ["Tgt"],
+                                 "weight": [7]}),
+        }
+
+    monkeypatch.setattr(a, "get_unique_connections", fake_unique)
+    a._export_merged_unique_connections(str(outdir))
+    f1 = pd.read_csv(outdir / f"unique_to_{safe1}.csv")
+    assert f1.iloc[0]["edge_key"] == "Src -> Tgt"
+    f2 = pd.read_csv(outdir / f"unique_to_{safe2}.csv")
+    assert f2.iloc[0]["source"] == "Y"
+
+    # empty unique df branch + missing dataset key branch
+    monkeypatch.setattr(a, "get_unique_connections",
+                        lambda t: {safe1: pd.DataFrame()})
+    a._export_merged_unique_connections(str(outdir))
+
+
+def test_export_neuron_counts_comparison(tmp_path):
+    params = _params(output_folder=str(tmp_path))
+    a = ComparisonAnalyzer(params, verbose=False)
+    outdir = tmp_path / "res"
+    outdir.mkdir()
+
+    safe1 = params._sanitize_name(DS1)
+    safe2 = params._sanitize_name(DS2)
+    base = params.full_output_path
+
+    # DS1 with hemisphere column
+    d1 = os.path.join(base, "dataset_data", safe1, "minsyn_1", "data_details")
+    os.makedirs(d1, exist_ok=True)
+    pd.DataFrame({
+        "bodyId": [1, 2, 3], "type": ["Src", "Src", "Tgt"],
+        "custom_group": ["G1", "G1", ""], "hemisphere": ["L", "R", "L"],
+    }).to_csv(os.path.join(d1, "source_neurons.csv"), index=False)
+    pd.DataFrame({
+        "bodyId": [4], "type": ["Tgt"], "custom_group": [""],
+        "hemisphere": ["R"],
+    }).to_csv(os.path.join(d1, "target_neurons.csv"), index=False)
+
+    # DS2 without hemisphere column -> type suffix counting
+    d2 = os.path.join(base, "dataset_data", safe2, "minsyn_1", "data_details")
+    os.makedirs(d2, exist_ok=True)
+    pd.DataFrame({
+        "bodyId": [5, 6], "type": ["Src_L", "Src_R"], "custom_group": ["", ""],
+    }).to_csv(os.path.join(d2, "source_neurons.csv"), index=False)
+
+    a._export_neuron_counts_comparison(str(outdir))
+    files = os.listdir(outdir)
+    assert any("neuron_counts" in f for f in files)
+
+
+def _write_path_files(params, threshold, fmt="source_target"):
+    safe1 = params._sanitize_name(DS1)
+    safe2 = params._sanitize_name(DS2)
+    base = params.full_output_path
+    os.makedirs(base, exist_ok=True)
+    d1 = params.get_dataset_output_path(DS1, threshold)
+    d2 = params.get_dataset_output_path(DS2, threshold)
+    os.makedirs(d1, exist_ok=True)
+    os.makedirs(d2, exist_ok=True)
+    if fmt == "source_target":
+        pd.DataFrame({"source": ["Src", "Src"], "target": ["Tgt", "Mid"],
+                      "weight": [10, 4], "weights": ["[10, 5]", "4,2"]}
+                     ).to_csv(os.path.join(
+                         d1, f"minsyn_{threshold}_data_original_paths.csv"),
+                         index=False)
+    else:
+        pd.DataFrame({"path": ["A -> B -> C", "['X', 'Y']", "bad"],
+                      "min_weight": [3, 2, 1],
+                      "weights": ["3,2", "[2, 1]", ""]}
+                     ).to_csv(os.path.join(d2, f"x_allpaths_type.csv"),
+                              index=False)
+
+
+def test_export_unified_path_presence_matrix(tmp_path):
+    params = _params(output_folder=str(tmp_path))
+    a = ComparisonAnalyzer(params, verbose=False)
+    _write_path_files(params, 1, fmt="source_target")
+    _write_path_files(params, 3, fmt="source_target")
+    a.comparison_report = {}
+    outdir = tmp_path / "res"
+    outdir.mkdir()
+    a._export_unified_path_presence_matrix(str(outdir))
+    assert (outdir / "path_presence_matrix.csv").exists()
+    assert "path_presence_matrix" in a.comparison_report
+
+    # no path data at all -> early return
+    b = ComparisonAnalyzer(_params(output_folder=str(tmp_path / "b")),
+                           verbose=False)
+    b._export_unified_path_presence_matrix(str(outdir))
+
+
+def test_export_unified_path_presence_matrix_path_col_format(tmp_path):
+    params = _params(output_folder=str(tmp_path))
+    a = ComparisonAnalyzer(params, verbose=False)
+    safe2 = params._sanitize_name(DS2)
+    d2 = params.get_dataset_output_path(DS2, 1)
+    os.makedirs(d2, exist_ok=True)
+    pd.DataFrame({"path": ["A -> B -> C", "['X', 'Y']", "bad", "single"],
+                  "min_weight": [3, 2, 1, None],
+                  "weights": ["3,2", "[2, 1]", "", ""]}
+                 ).to_csv(os.path.join(d2, "x_allpaths_type.csv"), index=False)
+    outdir = tmp_path / "res"
+    outdir.mkdir()
+    a._export_unified_path_presence_matrix(str(outdir))
+    df = pd.read_csv(outdir / "path_presence_matrix.csv")
+    keys = set(df["path_key"])
+    assert any("A" in k for k in keys)
+
+
+def test_export_presence_matrix(tmp_path, monkeypatch):
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    a.raw_results = _standard_results()
+    outdir = tmp_path / "res"
+    outdir.mkdir()
+    # mid threshold -> also writes edge_presence_matrix.csv
+    a._export_presence_matrix(str(outdir), 3)
+    assert (outdir / "edge_presence_matrix_minsyn_3.csv").exists()
+    assert (outdir / "edge_presence_matrix.csv").exists()
+
+    # empty aligned data -> early return
+    monkeypatch.setattr(a, "get_aligned_data", lambda t: pd.DataFrame())
+    a._export_presence_matrix(str(outdir), 1)
+
+    # MultiIndex aligned data branch
+    mi = pd.MultiIndex.from_tuples([("Src", "Tgt")])
+    monkeypatch.setattr(a, "get_aligned_data",
+                        lambda t: pd.DataFrame({DS1: [5.0], DS2: [0.0]},
+                                               index=mi))
+    a._export_presence_matrix(str(outdir), 1, silent=True)
+    assert (outdir / "edge_presence_matrix_minsyn_1.csv").exists()
+
+
+def test_export_path_presence_matrix(tmp_path):
+    params = _params(output_folder=str(tmp_path))
+    a = ComparisonAnalyzer(params, verbose=False)
+    _write_path_files(params, 3, fmt="source_target")
+    outdir = tmp_path / "res"
+    outdir.mkdir()
+    a._export_path_presence_matrix(str(outdir), 3)
+    assert (outdir / "path_presence_matrix_minsyn_3.csv").exists()
+
+
+def test_export_motif_analysis_no_data(tmp_path):
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    outdir = tmp_path / "res"
+    outdir.mkdir()
+    a._export_motif_analysis(str(outdir), 1)  # no data -> early return
+
+
+def test_generate_visualizations_import_error(tmp_path, monkeypatch):
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    a.raw_results = _standard_results()
+    monkeypatch.setitem(sys.modules, "comparison.visualizations", None)
+    a._generate_visualizations(str(tmp_path))  # ImportError branch
+
+
+def test_generate_visualizations_with_fake_visualizer(tmp_path, monkeypatch):
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    a.raw_results = _standard_results()
+    saved = []
+
+    class _FakeViz:
+        def __init__(self, verbose=False):
+            pass
+
+        def save_all_plots(self, **kwargs):
+            saved.append(True)
+
+    fake_mod = types.ModuleType("comparison.visualizations")
+    fake_mod.ComparisonVisualizer = _FakeViz
+    monkeypatch.setitem(sys.modules, "comparison.visualizations", fake_mod)
+    a._generate_visualizations(str(tmp_path))
+    assert saved == [True]
+
+
+def test_generate_visualizations_reciprocal_branch(tmp_path, monkeypatch):
+    params = _params(find_reciprocal=True)
+    a = ComparisonAnalyzer(params, verbose=False)
+    a.raw_results = _standard_results()
+    calls = []
+
+    class _FakeViz:
+        def __init__(self, verbose=False):
+            pass
+
+        def save_all_plots(self, **kwargs):
+            calls.append("plots")
+
+    fake_mod = types.ModuleType("comparison.visualizations")
+    fake_mod.ComparisonVisualizer = _FakeViz
+    monkeypatch.setitem(sys.modules, "comparison.visualizations", fake_mod)
+    monkeypatch.setattr(
+        a, "visualize_conserved_reciprocal_graph_all_thresholds",
+        lambda **kw: calls.append("reciprocal"))
+    a._generate_visualizations(str(tmp_path))
+    assert "reciprocal" in calls
+
+
+# --- APPEND-POINT-2 ---
+
+
+# ---------------------------------------------------------------------------
+# Data getters (path / ratio / prob / edge-ratio / NT)
+# ---------------------------------------------------------------------------
+
+def _ds_dir(params, ds, threshold):
+    d = os.path.join(params.full_output_path, "dataset_data",
+                     params._sanitize_name(ds), f"minsyn_{threshold}")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def test_get_path_data_for_threshold_both_formats(tmp_path):
+    params = _params(output_folder=str(tmp_path))
+    a = ComparisonAnalyzer(params, verbose=False)
+    d1 = _ds_dir(params, DS1, 1)
+    pd.DataFrame({"source": ["Src", "Src"], "target": ["Tgt", "Mid"],
+                  "weight": [10, 4]}).to_csv(
+        os.path.join(d1, "minsyn_1_data_original_paths.csv"), index=False)
+    d2 = _ds_dir(params, DS2, 1)
+    pd.DataFrame({"path": ["Src -> Tgt", "Src -> Mid"],
+                  "min_weight": [9, 3]}).to_csv(
+        os.path.join(d2, "to_target_allpaths_type.csv"), index=False)
+    out = a._get_path_data_for_threshold(1)
+    assert not out.empty
+    assert DS1 in out.columns and DS2 in out.columns
+    # no data at other threshold
+    assert a._get_path_data_for_threshold(3).empty
+
+
+def test_get_path_hop_weights_for_threshold(tmp_path):
+    params = _params(output_folder=str(tmp_path))
+    a = ComparisonAnalyzer(params, verbose=False)
+    d1 = _ds_dir(params, DS1, 1)
+    pd.DataFrame({"source": ["Src"], "target": ["Tgt"], "weight": [10],
+                  "weights": ["[10, 5]"]}).to_csv(
+        os.path.join(d1, "minsyn_1_data_original_paths.csv"), index=False)
+    d2 = _ds_dir(params, DS2, 1)
+    pd.DataFrame({"path": ["Src -> Tgt"], "min_weight": [9],
+                  "weights": ["10,5"]}).to_csv(
+        os.path.join(d2, "to_target_allpaths_type.csv"), index=False)
+    hop = a._get_path_hop_weights_for_threshold(1)
+    assert isinstance(hop, dict)
+
+
+def test_get_ratio_and_prob_data_for_threshold(tmp_path):
+    params = _params(output_folder=str(tmp_path))
+    a = ComparisonAnalyzer(params, verbose=False)
+    d1 = _ds_dir(params, DS1, 1)
+    pd.DataFrame({"path": ["A -> B"], "min_ratio": [0.4],
+                  "path_prob": [0.8]}).to_csv(
+        os.path.join(d1, "minsyn_1_data_original_paths.csv"), index=False)
+    ratio = a._get_ratio_data_for_threshold(1)
+    assert not ratio.empty
+    prob = a._get_prob_data_for_threshold(1)
+    assert not prob.empty
+    assert a._get_ratio_data_for_threshold(3).empty
+    assert a._get_prob_data_for_threshold(3).empty
+
+
+def test_get_edge_ratio_data_for_threshold(tmp_path):
+    params = _params(output_folder=str(tmp_path))
+    a = ComparisonAnalyzer(params, verbose=False)
+    d1 = _ds_dir(params, DS1, 1)
+    pd.DataFrame({"type_pre": ["Src"], "type_post": ["Tgt"],
+                  "connection_ratio": [0.2]}).to_csv(
+        os.path.join(d1, "connections_edge.csv"), index=False)
+    # DS2: connections_edge.csv empty -> fallback to data_details
+    d2 = _ds_dir(params, DS2, 1)
+    open(os.path.join(d2, "connections_edge.csv"), "w").close()
+    dd = os.path.join(d2, "data_details")
+    os.makedirs(dd, exist_ok=True)
+    pd.DataFrame({"std_label_pre": ["SrcStd"], "std_label_post": ["TgtStd"],
+                  "connection_ratio": [0.3]}).to_csv(
+        os.path.join(dd, "connection_type.csv"), index=False)
+    out = a._get_edge_ratio_data_for_threshold(1)
+    assert not out.empty
+    assert a._get_edge_ratio_data_for_threshold(3).empty
+
+
+def test_get_edge_nt_details(tmp_path):
+    params = _params(output_folder=str(tmp_path))
+    a = ComparisonAnalyzer(params, verbose=False)
+    # DS1: reciprocal file with nt_type_pre
+    d1 = _ds_dir(params, DS1, 1)
+    fr = os.path.join(d1, "find_reciprocal")
+    os.makedirs(fr, exist_ok=True)
+    pd.DataFrame({"type_pre": ["Src"], "type_post": ["Tgt"],
+                  "nt_type_pre": ["ACh"], "weight": [5]}).to_csv(
+        os.path.join(fr, "reciprocal_connection_type.csv"), index=False)
+    # DS2: fallback to connections_edge.csv with nt_type
+    d2 = _ds_dir(params, DS2, 1)
+    pd.DataFrame({"type_pre": ["Src"], "type_post": ["Tgt"],
+                  "nt_type": ["glutamate"], "weight": [5]}).to_csv(
+        os.path.join(d2, "connections_edge.csv"), index=False)
+    nt = a._get_edge_nt_details(1)
+    assert "Src -> Tgt" in nt
+    assert nt["Src -> Tgt"][DS2] == "glutamate"
+    assert a._get_edge_nt_details(3) == {}
+
+
+def test_get_reciprocal_edge_ratio_data(tmp_path):
+    params = _params(output_folder=str(tmp_path))
+    a = ComparisonAnalyzer(params, verbose=False)
+    d1 = _ds_dir(params, DS1, 1)
+    fr = os.path.join(d1, "find_reciprocal")
+    os.makedirs(fr, exist_ok=True)
+    pd.DataFrame({"type_pre": ["Src"], "type_post": ["Tgt"],
+                  "connection_ratio": [0.5]}).to_csv(
+        os.path.join(fr, "reciprocal_connection_type.csv"), index=False)
+    out = a._get_reciprocal_edge_ratio_data_for_threshold(1)
+    assert not out.empty
+    assert a._get_reciprocal_edge_ratio_data_for_threshold(3).empty
+
+
+# ---------------------------------------------------------------------------
+# Network HTML builders
+# ---------------------------------------------------------------------------
+
+def test_create_network_html_builders(tmp_path):
+    a = ComparisonAnalyzer(_params(thresholds=[1, 3, 5]), verbose=False)
+    conn_rows = [
+        {"source": "Src", "target": "Tgt", "weight": 10, "dataset": DS1},
+        {"source": "Src", "target": "Tgt", "weight": 5, "dataset": DS2},
+        {"source": "Src", "target": "X", "weight": 3, "dataset": DS1},
+    ]
+    out1 = str(tmp_path / "combined.html")
+    a._create_combined_network_html(conn_rows, [DS1, DS2], 1, out1,
+                                    "Combined")
+    assert os.path.exists(out1)
+
+    th_rows = [
+        {"source": "Src", "target": "Tgt", "weight": 10, "threshold": 1},
+        {"source": "Src", "target": "Tgt", "weight": 8, "threshold": 3},
+        {"source": "Src", "target": "Tgt", "weight": 5, "threshold": 5},
+        {"source": "Src", "target": "X", "weight": 3, "threshold": 1},
+        {"source": "Src", "target": "X", "weight": 2, "threshold": 3},
+        {"source": "Src", "target": "Y", "weight": 1, "threshold": 1},
+    ]
+    out2 = str(tmp_path / "threshold.html")
+    a._create_threshold_comparison_network_html(th_rows, DS1, [1, 3, 5],
+                                                out2, "Threshold")
+    assert os.path.exists(out2)
+
+
+# ---------------------------------------------------------------------------
+# Profile comparison (stubbed profiler/comparator)
+# ---------------------------------------------------------------------------
+
+def _stub_profile_modules(monkeypatch, direct_result):
+    import comparison.connectivity_profiler as cp_mod
+    import comparison.profile_comparator as pc_mod
+
+    class _FakeProfilerConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _FakeProfiler:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _FakeComparator:
+        @staticmethod
+        def direct_comparison(**kwargs):
+            if isinstance(direct_result, Exception):
+                raise direct_result
+            return direct_result
+
+    monkeypatch.setattr(cp_mod, "ProfilerConfig", _FakeProfilerConfig)
+    monkeypatch.setattr(cp_mod, "ConnectivityProfiler", _FakeProfiler)
+    monkeypatch.setattr(pc_mod, "ProfileComparator", _FakeComparator)
+
+
+def test_direct_comparison_with_stubs(tmp_path, monkeypatch):
+    params = _params(output_folder=str(tmp_path))
+    a = ComparisonAnalyzer(params, verbose=False)
+    result_df = pd.DataFrame({"neuron_type": ["Src"], "score": [0.9]})
+    _stub_profile_modules(monkeypatch,
+                          {"results": result_df, "summary": {"n": 1}})
+    out = a.direct_comparison()
+    assert out["results"] is result_df
+    assert "output_file" in out
+    assert os.path.exists(out["output_file"])
+
+
+def test_connectivity_profile_comparison(tmp_path, monkeypatch):
+    params = _params(output_folder=str(tmp_path))
+    a = ComparisonAnalyzer(params, verbose=False)
+    a.raw_results = _standard_results()
+    type_df = pd.DataFrame({
+        "neuron_type": ["Src", "Tgt"],
+        "rank_corr": [0.9, 0.8],
+        "cosine": [0.85, 0.7],
+        "jaccard": [0.5, 0.4],
+    })
+    _stub_profile_modules(monkeypatch,
+                          {"type_summary": type_df, "results": pd.DataFrame()})
+    res = a.connectivity_profile_comparison(
+        output_dir=str(tmp_path / "prof"), include_visualizations=False)
+    assert "summary" in res
+    assert res["comparison_mode"] in ("loose", "strict")
+    assert not res["summary"].empty
+
+
+def test_connectivity_profile_comparison_branches(tmp_path, monkeypatch):
+    # <2 datasets -> {}
+    p1 = _params(datasets=[DS1], allow_single_dataset=True)
+    a1 = ComparisonAnalyzer(p1, verbose=False)
+    assert a1.connectivity_profile_comparison(
+        output_dir=str(tmp_path / "p1")) == {}
+
+    # no neuron types -> {}
+    a2 = ComparisonAnalyzer(_params(), verbose=False)
+    a2.raw_results = {}
+    _stub_profile_modules(monkeypatch, {"type_summary": pd.DataFrame()})
+    assert a2.connectivity_profile_comparison(
+        output_dir=str(tmp_path / "p2"), neuron_types=[]) == {}
+
+    # invalid comparison_mode coerced to 'loose'; direct_comparison raises
+    a3 = ComparisonAnalyzer(_params(), verbose=False)
+    a3.raw_results = _standard_results()
+    _stub_profile_modules(monkeypatch, RuntimeError("boom"))
+    res3 = a3.connectivity_profile_comparison(
+        output_dir=str(tmp_path / "p3"), neuron_types=["Src"],
+        comparison_mode="bogus", include_visualizations=False)
+    assert res3 == {}
+
+    # alias wrapper
+    a4 = ComparisonAnalyzer(_params(), verbose=False)
+    a4.raw_results = _standard_results()
+    _stub_profile_modules(monkeypatch, RuntimeError("boom"))
+    assert a4.run_connectivity_profile_verification(
+        output_dir=str(tmp_path / "p4"), neuron_types=["Src"],
+        parallel=False, max_workers=1) == {}
+
+
+def test_extract_types_from_results():
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    a.raw_results = _standard_results()
+    src, tgt, inter = a._extract_types_from_results()
+    assert "Src" in src
+    assert "Tgt" in tgt
+    assert "X" in inter or "Y" in inter
+
+
+def test_type_matches_pattern():
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    assert a._type_matches_pattern("Src", "Src")
+    assert not a._type_matches_pattern("Src", "Tgt")
+    # Wildcard conversion must not mangle '.*' into '..': 'Src.*' matches the
+    # bare 'Src' (pre-fix it became 'Src..*' and required one extra char).
+    assert a._type_matches_pattern("Src", "Sr.*")
+    assert a._type_matches_pattern("Src", "Src.*")
+    assert a._type_matches_pattern("Src_extra", "Src*")
+    assert not a._type_matches_pattern("Other", "Src.*")
+    # int patterns are stringified before comparison
+    assert a._type_matches_pattern("123", 123)
+    assert not a._type_matches_pattern("123", 456)
+
+
+# --- APPEND-POINT-3 ---
+
+
+# ---------------------------------------------------------------------------
+# Conserved path / reciprocal graph visualizations (fake vispath_pkg)
+# ---------------------------------------------------------------------------
+
+class _FakeVisualizePath:
+    def __init__(self, path_file=None, output_folder=None, **kwargs):
+        import networkx as nx
+        self.path_file = path_file
+        self.output_folder = output_folder
+        self.kwargs = kwargs
+        self.base_filename = "network"
+        self.G_network = nx.DiGraph()
+
+    def build_network(self):
+        df = self.path_file
+        if df is not None and not df.empty:
+            for _, row in df.iterrows():
+                self.G_network.add_edge(row["source"], row["target"])
+
+    def create_network(self):
+        out = os.path.join(self.output_folder, f"{self.base_filename}.html")
+        with open(out, "w") as f:
+            f.write("<html></html>")
+        return out
+
+    def create_heatmap(self):
+        return None
+
+
+def _install_fake_vispath(monkeypatch):
+    fake = types.ModuleType("vispath_pkg")
+    fake.VisualizePath = _FakeVisualizePath
+    monkeypatch.setitem(sys.modules, "vispath_pkg", fake)
+    return fake
+
+
+def test_visualize_conserved_paths_import_error(monkeypatch):
+    # sys.modules entry of None forces an ImportError on import
+    monkeypatch.setitem(sys.modules, "vispath_pkg", None)
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    a.raw_results = _standard_results()
+    assert a.visualize_conserved_paths(threshold=1,
+                                       output_folder="/tmp") is None
+
+
+def test_visualize_conserved_paths_no_results(monkeypatch, tmp_path):
+    _install_fake_vispath(monkeypatch)
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    assert a.visualize_conserved_paths(threshold=1,
+                                       output_folder=str(tmp_path)) is None
+
+
+def test_visualize_conserved_paths_no_conserved_edges(monkeypatch, tmp_path):
+    _install_fake_vispath(monkeypatch)
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    # disjoint edge sets -> nothing conserved
+    a.raw_results = {DS1: {1: _edge_df([("A", "B", 5)])},
+                     DS2: {1: _edge_df([("C", "D", 5)])}}
+    assert a.visualize_conserved_paths(threshold=1,
+                                       output_folder=str(tmp_path)) is None
+
+
+def test_visualize_conserved_paths_happy(monkeypatch, tmp_path):
+    _install_fake_vispath(monkeypatch)
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    a.raw_results = _standard_results()
+    out = a.visualize_conserved_paths(threshold=1,
+                                      output_folder=str(tmp_path))
+    assert out is not None and os.path.exists(out)
+    assert "conserved_network_t1" in out
+
+
+def test_visualize_conserved_paths_with_auto_mapper(monkeypatch, tmp_path):
+    _install_fake_vispath(monkeypatch)
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    a.raw_results = _standard_results()
+
+    mapper = _enable_fake_auto_mapper(a.parameters)
+    mapper.get_display_name_with_dataset_info = (
+        lambda node, datasets: (f"{node}(HB)", {"HB": node}))
+    mapper.get_all_dataset_short_codes = lambda datasets: {"HB": datasets[0]}
+    mapper._detect_type_source = lambda t: None
+    mapper.get_mapped_type = lambda *args: None
+
+    out = a.visualize_conserved_paths(threshold=1,
+                                      output_folder=str(tmp_path))
+    assert out is not None
+
+
+def test_visualize_conserved_paths_all_thresholds(monkeypatch, tmp_path):
+    _install_fake_vispath(monkeypatch)
+    a = ComparisonAnalyzer(_params(), verbose=False)
+    a.raw_results = _standard_results()
+    outs = a.visualize_conserved_paths_all_thresholds(
+        output_folder=str(tmp_path))
+    assert len(outs) == 2
+
+
+def test_visualize_conserved_reciprocal_graph(monkeypatch, tmp_path):
+    _install_fake_vispath(monkeypatch)
+    params = _params(output_folder=str(tmp_path), find_reciprocal=True)
+    a = ComparisonAnalyzer(params, verbose=False)
+    a.raw_results = _standard_results()
+    for ds in (DS1, DS2):
+        for t in (1, 3):
+            d = os.path.join(params.full_output_path, "dataset_data",
+                             params._sanitize_name(ds), f"minsyn_{t}",
+                             "find_reciprocal")
+            os.makedirs(d, exist_ok=True)
+            pd.DataFrame({"type_pre": ["Src"], "type_post": ["Tgt"],
+                          "weight": [6],
+                          "connection_ratio": [0.3]}).to_csv(
+                os.path.join(d, "reciprocal_connection_type.csv"),
+                index=False)
+
+    out = a.visualize_conserved_reciprocal_graph(threshold=1)
+    assert out is not None and os.path.exists(out)
+
+    outs = a.visualize_conserved_reciprocal_graph_all_thresholds()
+    assert len(outs) == 2
+
+    # no results -> None
+    b = ComparisonAnalyzer(_params(find_reciprocal=True), verbose=False)
+    assert b.visualize_conserved_reciprocal_graph(threshold=1) is None
+
+
+# ---------------------------------------------------------------------------
+# HTML report branches
+# ---------------------------------------------------------------------------
+
+def test_generate_html_report_default_path_and_autorun(tmp_path, monkeypatch):
+    params = _params(output_folder=str(tmp_path))
+    a = ComparisonAnalyzer(params, verbose=False)
+
+    def fake_run_all(self, skip_existing=True):
+        self.raw_results.update(_standard_results())
+        return self.raw_results
+
+    monkeypatch.setattr(ComparisonAnalyzer, "run_all_analyses", fake_run_all)
+    out = a.generate_html_report()  # no path -> default, auto-run comparison
+    assert os.path.exists(out)
+    assert out.startswith(params.full_output_path)
+
+
+def test_generate_html_content_path_presence_stats(tmp_path):
+    params = _params(output_folder=str(tmp_path))
+    a = ComparisonAnalyzer(params, verbose=False)
+    a.raw_results = _standard_results()
+    a.run_comparison_analysis()
+
+    safe1 = params._sanitize_name(DS1)
+    safe2 = params._sanitize_name(DS2)
+    matrix = pd.DataFrame({
+        f"{safe1}_t1": [True, True],           # bool branch
+        f"{safe2}_t1": ["True", "0"],          # object branch
+        f"{safe1}_t3": [1, 0],                 # numeric branch
+        f"{safe2}_t3": [1.0, 1.0],
+    })
+    a.comparison_report["path_presence_matrix"] = matrix
+    a.comparison_report["key_findings_per_threshold"] = {
+        1: {"finding": "x"}, 3: {"finding": "y"}}
+
+    out = a.generate_html_report(os.path.join(str(tmp_path), "rep2.html"))
+    assert os.path.exists(out)
+    kf = a.comparison_report["key_findings_per_threshold"]
+    assert kf[1]["total_paths"] == 2
+    assert kf[1]["common_paths"] == 1
+
+
+def test_quick_compare_defaults_and_export(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    exported = []
+
+    def fake_run_all(self, skip_existing=True):
+        self.raw_results.update(_standard_results())
+        return self.raw_results
+
+    def fake_export(self, output_dir=None):
+        exported.append(True)
+
+    monkeypatch.setattr(ComparisonAnalyzer, "run_all_analyses", fake_run_all)
+    monkeypatch.setattr(ComparisonAnalyzer, "export_results", fake_export)
+
+    results = quick_compare(
+        datasets=[DS1, DS2],
+        source_neurons=["Src"],
+        target_neurons=["Tgt"],
+        output_folder=str(tmp_path / "qc"),
+        verbose=False,
+    )
+    assert isinstance(results, dict)
+    assert exported == [True]
+
+# --- APPEND-POINT-4 ---

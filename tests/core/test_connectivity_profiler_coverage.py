@@ -113,8 +113,8 @@ def test_normalize_partner_type_disabled():
     assert normalize_partner_type('T4a_R', cfg) == 'T4a_R'
     assert normalize_partner_type('', cfg) == ''
     assert normalize_partner_type(None, cfg) == ''
-    # NaN round-trips to the string 'nan' when matching is disabled
-    assert normalize_partner_type(np.nan, cfg) == 'nan'
+    # NaN is a missing value: fixed to normalize to '' (was the string 'nan')
+    assert normalize_partner_type(np.nan, cfg) == ''
 
 
 def test_normalize_partner_type_case_insensitive():
@@ -568,8 +568,9 @@ def test_profile_row_roundtrip(profiler):
     assert isinstance(row['upstream_partners'], str)
     restored = profiler._row_to_profile(pd.Series(row))
     assert restored.upstream_partners == {'A': 3.0}
-    # JSON round-trip leaves mapping keys as strings in the raw row
-    assert restored.partner_type_mapping_upstream == {'1': 'A'}
+    # Fixed: mapping keys are restored to ints after the JSON round-trip,
+    # matching from_dict()'s contract.
+    assert restored.partner_type_mapping_upstream == {1: 'A'}
 
 
 # ---------------------------------------------------------------------------
@@ -654,3 +655,800 @@ def test_clear_cache(profiler):
     assert ('todelete', DS) in profiler._memory_cache
     profiler.clear_cache(DS)
     assert ('todelete', DS) not in profiler._memory_cache
+
+
+# ---------------------------------------------------------------------------
+# Appended coverage tests - helpers / fixtures
+# ---------------------------------------------------------------------------
+
+import sys
+import types as _types
+
+
+@pytest.fixture
+def fake_repo(tmp_path, monkeypatch):
+    """Redirect cp_module.__file__ so Path(__file__)-relative datasets/ and
+    neuron_indexes/ paths resolve inside tmp_path (hermetic, no repo data)."""
+    fake_file = tmp_path / 'src' / 'comparison' / 'connectivity_profiler.py'
+    fake_file.parent.mkdir(parents=True)
+    fake_file.write_text('')
+    monkeypatch.setattr(cp_module, '__file__', str(fake_file))
+    return tmp_path
+
+
+def _conn_cache_df():
+    """Small synthetic connection table (pre -> post)."""
+    return pd.DataFrame({
+        'bodyId_pre': [1, 1, 2, 3],
+        'bodyId_post': [10, 11, 10, 12],
+        'type_pre': ['A', 'A', 'B', 'C'],
+        'type_post': ['X', 'X', 'X', 'Y'],
+        'weight': [5.0, 3.0, 2.0, 1.0],
+    })
+
+
+def _conn_indexes():
+    return {
+        'bodyid_pre_index': {'1': [0, 1], '2': [2], '3': [3]},
+        'bodyid_post_index': {'10': [0, 2], '11': [1], '12': [3]},
+    }
+
+
+def _inject_conn_cache(dataset, conn_df=None, with_indexes=True):
+    safe = dataset.replace(':', '_').replace('.', '_')
+    entry = {}
+    if conn_df is not None:
+        entry['conn_df'] = conn_df
+    if with_indexes and conn_df is not None:
+        entry.update(_conn_indexes())
+    cp_module._PROFILER_CONN_CACHE[safe] = entry
+    return safe
+
+
+def _write_neurons_csv(fake_repo, dataset, columns):
+    safe = dataset.replace(':', '_').replace('.', '_')
+    ds_dir = fake_repo / 'datasets' / safe
+    ds_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(columns).to_csv(
+        ds_dir / f'{safe}_allneurons_neuron_df.csv', index=False)
+    return ds_dir
+
+
+# ---------------------------------------------------------------------------
+# Profile cache persistence: consolidation / atomic save / read / stats
+# ---------------------------------------------------------------------------
+
+def test_consolidate_profile_batch_files_polars(profiler):
+    # empty batch dir -> 0
+    assert profiler._consolidate_profile_batch_files(DS) == 0
+
+    profiles = {str(i): _profile(i, upstream={'A': float(i)})
+                for i in (101, 102)}
+    profiler._save_profiles_to_cache_batch(profiles, DS)
+    batch_dir = profiler._get_profile_batch_dir(DS)
+    assert list(batch_dir.glob('*.parquet'))
+
+    count = profiler._consolidate_profile_batch_files(DS)
+    assert count == 1  # one batch file holding 2 profiles
+    assert profiler._get_cache_parquet_path(DS).exists()
+    assert not batch_dir.exists()
+    assert set(profiler._disk_cache_df[DS]['neuron_id']) == {101, 102}
+    assert '101' in profiler._disk_cache_index[DS]
+
+    # empty batch dir (no files) -> 0
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    assert profiler._consolidate_profile_batch_files(DS) == 0
+
+    # merge into existing main cache, keep batch files this time
+    profiler._save_profile_to_batch_file(_profile(103))
+    count2 = profiler._consolidate_profile_batch_files(DS, delete_after=False)
+    assert count2 == 1
+    assert len(profiler._disk_cache_df[DS]) == 3
+    # duplicate neuron_id keeps last occurrence
+    profiler._save_profile_to_batch_file(_profile(103, upstream={'Z': 9.0}))
+    profiler._consolidate_profile_batch_files(DS)
+    assert len(profiler._disk_cache_df[DS]) == 3
+
+
+def test_consolidate_profile_batch_files_pandas_fallback(profiler, monkeypatch):
+    monkeypatch.setitem(sys.modules, 'polars', None)
+    profiles = {str(i): _profile(i) for i in (201, 202)}
+    profiler._save_profiles_to_cache_batch(profiles, DS)
+    count = profiler._consolidate_profile_batch_files(DS)
+    assert count == 1
+    assert profiler._get_cache_parquet_path(DS).exists()
+    assert len(profiler._disk_cache_df[DS]) == 2
+
+
+def test_save_cache_dataframe_atomic(profiler):
+    rows = [profiler._profile_to_row(_profile(i)) for i in (1, 2)]
+    df = pd.DataFrame(rows)
+    profiler._save_cache_dataframe(df, DS)
+    path = profiler._get_cache_parquet_path(DS)
+    assert path.exists()
+    assert not path.with_suffix('.parquet.tmp').exists()
+    assert len(profiler._disk_cache_df[DS]) == 2
+    profiler._disk_cache_df.pop(DS)
+    reloaded = profiler._load_cache_dataframe(DS, force_reload=True)
+    assert len(reloaded) == 2
+
+
+def test_save_cache_dataframe_polars_large(profiler):
+    df = pd.DataFrame({'neuron_id': list(range(5001)),
+                       'dataset': [DS] * 5001})
+    profiler._save_cache_dataframe(df, DS)
+    assert profiler._get_cache_parquet_path(DS).exists()
+    assert len(profiler._disk_cache_df[DS]) == 5001
+
+
+def test_save_profiles_to_cache_batch_variants(profiler):
+    # empty -> early return
+    profiler._save_profiles_to_cache_batch({}, DS)
+    # mixed int/str ids: memory gets both, disk batch file gets int only
+    mixed = {'1': _profile(1), 'T': _profile('T')}
+    profiler._save_profiles_to_cache_batch(mixed, DS, silent=False)
+    assert profiler._memory_cache[('1', DS)].neuron_id == 1
+    assert profiler._memory_cache[('T', DS)].neuron_id == 'T'
+    assert len(list(profiler._get_profile_batch_dir(DS).glob('*.parquet'))) == 1
+    # use_cache disabled -> memory only
+    profiler.config = ProfilerConfig(use_cache=False)
+    profiler._save_profiles_to_cache_batch({'2': _profile(2)}, DS, silent=True)
+    assert ('2', DS) in profiler._memory_cache
+    assert len(list(profiler._get_profile_batch_dir(DS).glob('*.parquet'))) == 1
+    # type-level only -> no disk write
+    profiler.config = ProfilerConfig()
+    profiler._save_profiles_to_cache_batch({'U': _profile('U')}, DS)
+    assert len(list(profiler._get_profile_batch_dir(DS).glob('*.parquet'))) == 1
+
+
+def test_read_cache_and_stats(profiler):
+    assert profiler.read_connectivity_profile_cache(DS) == {}
+    stats0 = profiler.get_cache_stats(DS)
+    assert stats0['total_profiles'] == 0
+    assert stats0['cache_modified'] is None
+
+    profiles = {str(i): _profile(i, top_k_bodyid_used=5) for i in (11, 12, 13)}
+    profiler._save_profiles_to_cache_batch(profiles, DS)
+    profiler.consolidate_profile_cache(DS)
+
+    # slow path: all rows
+    all_profiles = profiler.read_connectivity_profile_cache(DS)
+    assert len(all_profiles) == 3
+    # fast index path with selection + min_top_k pass
+    sel = profiler.read_connectivity_profile_cache(
+        DS, neuron_types=['11', '99'], min_top_k=3)
+    assert set(sel.keys()) == {'11'}
+    assert ('11', DS) in profiler._memory_cache
+    # min_top_k filters everything out
+    sel2 = profiler.read_connectivity_profile_cache(
+        DS, neuron_types=['11'], min_top_k=50)
+    assert sel2 == {}
+
+    stats = profiler.get_cache_stats(DS)
+    assert stats['total_profiles'] == 3
+    assert stats['top_k_distribution'].get(5) == 3
+    assert stats['cache_modified']
+    assert stats['total_size_mb'] >= 0
+    assert len(stats['neuron_types']) == 3
+
+
+# ---------------------------------------------------------------------------
+# Connection data access: neuprint query, FNC cache, disk load, local query
+# ---------------------------------------------------------------------------
+
+class _FakeNeuprintClient:
+    def __init__(self, up_df, down_df, fail=False):
+        self.up_df = up_df
+        self.down_df = down_df
+        self.fail = fail
+        self.queries = []
+
+    def fetch_custom(self, query):
+        self.queries.append(query)
+        if self.fail:
+            raise RuntimeError('query failed')
+        if 'pre.bodyId AS partner_bodyId' in query:
+            return self.up_df
+        return self.down_df
+
+
+def test_query_connections_neuprint(profiler, monkeypatch):
+    up = pd.DataFrame({'partner_bodyId': [1], 'partner_type': ['A'],
+                       'neuron_bodyId': [5], 'weight': [3.0]})
+    down = pd.DataFrame({'partner_bodyId': [2], 'partner_type': ['B'],
+                         'neuron_bodyId': [5], 'weight': [2.0]})
+    client = _FakeNeuprintClient(up, down)
+    monkeypatch.setattr(profiler, '_get_client_for_dataset', lambda d: client)
+
+    u, d = profiler._query_connections_neuprint('MyType', 'hemibrain:v1.2.1')
+    assert len(u) == 1 and len(d) == 1
+    # regex type query
+    profiler._query_connections_neuprint('My.*', 'hemibrain:v1.2.1')
+    assert any("=~" in q for q in client.queries)
+    # bodyId and list queries
+    profiler._query_connections_neuprint(123, 'hemibrain:v1.2.1')
+    profiler._query_connections_neuprint([1, 2], 'hemibrain:v1.2.1')
+    # unsupported neuron type
+    with pytest.raises(ValueError):
+        profiler._query_connections_neuprint(3.5, 'hemibrain:v1.2.1')
+    # query failure -> empty frames
+    client.fail = True
+    u, d = profiler._query_connections_neuprint('X', 'hemibrain:v1.2.1')
+    assert u.empty and d.empty
+    # no client -> empty frames
+    monkeypatch.setattr(profiler, '_get_client_for_dataset', lambda d: None)
+    u, d = profiler._query_connections_neuprint('X', 'hemibrain:v1.2.1')
+    assert u.empty and d.empty
+
+
+def test_get_cached_conn_df_profiler_cache_hit(profiler):
+    df = _conn_cache_df()
+    safe = _inject_conn_cache(DS, conn_df=df, with_indexes=False)
+    try:
+        assert profiler._get_cached_conn_df(DS) is df
+    finally:
+        cp_module._PROFILER_CONN_CACHE.pop(safe, None)
+
+
+def test_get_cached_conn_df_fnc_cache(profiler, monkeypatch):
+    safe = DS.replace(':', '_').replace('.', '_')
+    cp_module._PROFILER_CONN_CACHE.pop(safe, None)
+    df = _conn_cache_df()
+    fake_coana = _types.ModuleType('coana')
+    fake_coana._FNC_CACHE = {
+        safe: {
+            'conn_df': df,
+            'conn_index': {'1': [0, 1], '2': [2], '3': [3]},
+            'conn_index_post': {'10': [0, 2], '11': [1], '12': [3]},
+        }
+    }
+    monkeypatch.setitem(sys.modules, 'coana', fake_coana)
+    try:
+        out = profiler._get_cached_conn_df(DS)
+        assert out is df
+        entry = cp_module._PROFILER_CONN_CACHE[safe]
+        assert entry['bodyid_post_index'] == {'10': [0, 2], '11': [1], '12': [3]}
+
+        # variant without FNC post index -> profiler builds it
+        cp_module._PROFILER_CONN_CACHE.pop(safe, None)
+        fake_coana._FNC_CACHE[safe] = {'conn_df': df.copy(), 'conn_index': {}}
+        profiler._get_cached_conn_df(DS)
+        built = cp_module._PROFILER_CONN_CACHE[safe]['bodyid_post_index']
+        assert sorted(built.keys()) == ['10', '11', '12']
+    finally:
+        cp_module._PROFILER_CONN_CACHE.pop(safe, None)
+
+
+def test_get_cached_conn_df_disk_load(profiler, fake_repo):
+    ds = 'testconn_v1'
+    safe = ds
+    ds_dir = fake_repo / 'datasets' / safe
+    ds_dir.mkdir(parents=True)
+    _conn_cache_df().to_csv(ds_dir / f'{safe}_merged_connections.csv',
+                            index=False)
+    cp_module._PROFILER_CONN_CACHE.pop(safe, None)
+    try:
+        df = profiler._get_cached_conn_df(ds)
+        assert df is not None and len(df) == 4
+        entry = cp_module._PROFILER_CONN_CACHE[safe]
+        assert entry['bodyid_pre_index']['1'] == [0, 1]
+        assert entry['bodyid_post_index']['10'] == [0, 2]
+        # cached on second call
+        assert profiler._get_cached_conn_df(ds) is df
+    finally:
+        cp_module._PROFILER_CONN_CACHE.pop(safe, None)
+
+
+def test_get_cached_conn_df_disk_missing(profiler, fake_repo):
+    ds = 'noconn_v1'
+    cp_module._PROFILER_CONN_CACHE.pop(ds, None)
+    try:
+        assert profiler._get_cached_conn_df(ds) is None
+        assert cp_module._PROFILER_CONN_CACHE[ds]['conn_df'] is None
+    finally:
+        cp_module._PROFILER_CONN_CACHE.pop(ds, None)
+
+
+def test_query_connections_local(profiler):
+    profiler.config.min_synapse_threshold = 0
+    safe = _inject_conn_cache(DS, conn_df=_conn_cache_df())
+    try:
+        # int query: neuron 10 receives from 1 and 2
+        up, down = profiler._query_connections_local(10, DS)
+        assert sorted(up['partner_bodyId'].tolist()) == [1, 2]
+        assert down.empty
+        # neuron 1 sends to 10 and 11
+        up, down = profiler._query_connections_local(1, DS)
+        assert sorted(down['partner_bodyId'].tolist()) == [10, 11]
+        assert up.empty
+        # list query
+        up, down = profiler._query_connections_local([10, 12], DS)
+        assert len(up) == 3
+        # exact type query: 'X' appears in type_post (rows 0,1,2)
+        up, down = profiler._query_connections_local('X', DS)
+        assert len(up) == 3
+        assert down.empty
+        # regex type query: 'A*' matches type_pre 'A' (rows 0,1)
+        up, down = profiler._query_connections_local('A*', DS)
+        assert up.empty
+        assert len(down) == 2
+        # unsupported type
+        with pytest.raises(ValueError):
+            profiler._query_connections_local(3.5, DS)
+    finally:
+        cp_module._PROFILER_CONN_CACHE.pop(safe, None)
+
+
+def test_query_connections_local_no_data(profiler, fake_repo):
+    ds = 'noconn2_v1'
+    cp_module._PROFILER_CONN_CACHE.pop(ds, None)
+    try:
+        up, down = profiler._query_connections_local(1, ds)
+        assert up.empty and down.empty
+    finally:
+        cp_module._PROFILER_CONN_CACHE.pop(ds, None)
+
+
+def test_fetch_2hop_partners(profiler):
+    profiler.config.min_synapse_threshold = 0
+    safe = _inject_conn_cache(DS, conn_df=_conn_cache_df())
+    try:
+        res = profiler._fetch_2hop_partners([10, 99], DS, 'upstream')
+        assert res[99] == ({}, {})
+        weights, ranks = res[10]
+        assert set(weights) == {'A', 'B'}
+        assert weights['A'] == pytest.approx(5.0 / 7.0)
+        assert set(ranks) == {'A', 'B'}
+        # downstream direction
+        res_d = profiler._fetch_2hop_partners([1], DS, 'downstream')
+        w1, _ = res_d[1]
+        assert w1 == {'X': 1.0}
+        # empty input
+        assert profiler._fetch_2hop_partners([], DS, 'upstream') == {}
+    finally:
+        cp_module._PROFILER_CONN_CACHE.pop(safe, None)
+
+
+def test_fetch_2hop_partners_pandas_fallback(profiler, monkeypatch):
+    profiler.config.min_synapse_threshold = 0
+    safe = _inject_conn_cache(DS, conn_df=_conn_cache_df())
+    monkeypatch.setitem(sys.modules, 'polars', None)
+    try:
+        res = profiler._fetch_2hop_partners([10, 99], DS, 'upstream')
+        weights, _ = res[10]
+        assert set(weights) == {'A', 'B'}
+        assert res[99] == ({}, {})
+    finally:
+        cp_module._PROFILER_CONN_CACHE.pop(safe, None)
+
+
+def test_fetch_2hop_partners_missing_columns(profiler):
+    profiler.config.min_synapse_threshold = 0
+    df = pd.DataFrame({'bodyId_pre': [1], 'bodyId_post': [10],
+                       'weight': [1.0]})  # no type columns
+    safe = _inject_conn_cache(DS, conn_df=df, with_indexes=True)
+    try:
+        res = profiler._fetch_2hop_partners([10], DS, 'upstream')
+        assert res == {10: ({}, {})}
+    finally:
+        cp_module._PROFILER_CONN_CACHE.pop(safe, None)
+
+
+def test_fetch_2hop_partners_no_conn_data(profiler, fake_repo):
+    ds = 'noconn3_v1'
+    cp_module._PROFILER_CONN_CACHE.pop(ds, None)
+    try:
+        assert profiler._fetch_2hop_partners([1], ds, 'upstream') == {}
+    finally:
+        cp_module._PROFILER_CONN_CACHE.pop(ds, None)
+
+
+# ---------------------------------------------------------------------------
+# _process_connections edge branches
+# ---------------------------------------------------------------------------
+
+def test_process_connections_untyped_bodyid_cast_fallback(profiler):
+    df = pd.DataFrame({
+        'partner_type': [None, 'A'],
+        'weight': [4.0, 2.0],
+        'partner_bodyId': ['notanumber', 7],
+    })
+    res = profiler._process_connections(df, 'upstream', 5)
+    # untyped bodyId not castable to int -> dropped via fallback loop
+    assert res[9] == {}
+    assert res[10] == {7: 2.0}
+
+
+def test_process_connections_pandas_fallback(profiler, monkeypatch):
+    monkeypatch.setitem(sys.modules, 'polars', None)
+    profiler.config = ProfilerConfig(include_untyped_partners=True)
+    df = pd.DataFrame({
+        'partner_type': ['A', 'A', None, 'B'],
+        'weight': [5.0, 3.0, 2.0, 1.0],
+        'partner_bodyId': [1, 2, 3, 4],
+    })
+    res = profiler._process_connections(df, 'upstream', 10)
+    partners, type_mapping, typed_bodyids = res[0], res[7], res[10]
+    assert partners['A'] == pytest.approx(8.0)
+    assert 'untyped' in partners
+    assert type_mapping == {1: 'A', 2: 'A', 4: 'B'}
+    assert typed_bodyids == {1: 5.0, 2: 3.0, 4: 1.0}
+
+
+# ---------------------------------------------------------------------------
+# get_profiles_batch / _build_profile_from_cache_direct
+# ---------------------------------------------------------------------------
+
+def test_get_profiles_batch_skip_cache(profiler, monkeypatch):
+    up = _conn_df([('A', 10.0, 1)])
+    down = _conn_df([('B', 2.0, 2)])
+    monkeypatch.setattr(profiler, '_get_cached_conn_df', lambda ds: up)
+    monkeypatch.setattr(profiler, '_query_connections_local',
+                        lambda n, ds: (up, down))
+    res = profiler.get_profiles_batch(
+        [1, 2], DS, skip_profile_cache=True, show_progress=False)
+    assert set(res) == {1, 2}
+    assert res[1].neuron_id == 1
+    assert res[1].upstream_partners['A'] == pytest.approx(10.0)
+
+
+def test_get_profiles_batch_via_get_profile_and_errors(profiler, monkeypatch):
+    def fake_get_profile(neuron, dataset, force_refresh=False):
+        if neuron == 'bad':
+            raise RuntimeError('nope')
+        return _profile(neuron)
+    monkeypatch.setattr(profiler, '_get_cached_conn_df', lambda ds: None)
+    monkeypatch.setattr(profiler, 'get_profile', fake_get_profile)
+    res = profiler.get_profiles_batch(['x', 'bad'], DS, show_progress=False)
+    assert set(res) == {'x'}
+
+    # no local data for a local dataset -> _build_profile_from_cache_direct None
+    monkeypatch.setattr(
+        profiler, '_query_connections_local',
+        lambda n, ds: (pd.DataFrame(), pd.DataFrame()))
+    res2 = profiler.get_profiles_batch(
+        [5], DS, skip_profile_cache=True, show_progress=False)
+    assert res2 == {}
+
+
+def test_build_profile_from_cache_direct_type_query(profiler, monkeypatch):
+    up = pd.DataFrame({'partner_type': ['A'], 'weight': [3.0],
+                       'partner_bodyId': [9], 'neuron_bodyId': [77]})
+    down = pd.DataFrame({'partner_type': pd.Series(dtype=str),
+                         'weight': pd.Series(dtype=float),
+                         'partner_bodyId': pd.Series(dtype=int),
+                         'neuron_bodyId': pd.Series(dtype=int)})
+    monkeypatch.setattr(profiler, '_query_connections_local',
+                        lambda n, ds: (up, down))
+    p = profiler._build_profile_from_cache_direct('SomeType', DS)
+    assert p.neuron_type == 'SomeType'
+    assert p.num_neurons_aggregated == 1
+    assert p.upstream_partners['A'] == pytest.approx(3.0)
+
+
+# ---------------------------------------------------------------------------
+# Neuron-table lookups (local files via fake_repo, neuprint via fake client)
+# ---------------------------------------------------------------------------
+
+def test_get_bodyids_for_type_local(profiler, fake_repo):
+    ds = 'flywire_fake_v1'
+    _write_neurons_csv(fake_repo, ds,
+                       {'bodyId': [1, 2, 3], 'type': ['Mi1', 'Mi1', 'T4']})
+    assert profiler.get_bodyids_for_type('Mi1', ds) == [1, 2]
+    assert profiler.get_bodyids_for_type('Nope', ds) == []
+    assert profiler.get_bodyids_for_type('Mi1', 'flywire_absent_v9') == []
+
+
+def test_get_bodyids_for_type_neuprint(profiler, monkeypatch):
+    class C:
+        def fetch_custom(self, q):
+            return pd.DataFrame({'bodyId': ['5', '6']})
+    monkeypatch.setattr(profiler, '_get_client_for_dataset', lambda d: C())
+    assert profiler.get_bodyids_for_type('Mi1', 'hemibrain:v1.2.1') == [5, 6]
+    monkeypatch.setattr(profiler, '_get_client_for_dataset', lambda d: None)
+    assert profiler.get_bodyids_for_type('Mi1', 'hemibrain:v1.2.1') == []
+
+
+def test_get_bodyids_for_type_prioritized_columns(profiler, fake_repo):
+    """Same prioritized column search as the connection tabs: the ``type``
+    column wins, but names living only in ``cell_type`` (FAFB's
+    circadian_clock) still resolve."""
+    ds = 'flywire_fake_v1'
+    _write_neurons_csv(fake_repo, ds, {
+        'bodyId': [1, 2, 3, 4],
+        'type': ['Mi1', 'Mi1', '', ''],
+        'cell_type': ['other', 'other', 'circadian_clock', 'Mi1'],
+    })
+    # Name only present in cell_type resolves via the fallback columns
+    assert profiler.get_bodyids_for_type('circadian_clock', ds) == [3]
+    # Name present in both columns: the type column owns the query
+    assert profiler.get_bodyids_for_type('Mi1', ds) == [1, 2]
+    # Wildcard patterns follow the shared resolver contract too
+    assert profiler.get_bodyids_for_type('circ.*', ds) == [3]
+    # Frame is memoized: repeated lookups reuse the cached read
+    assert profiler._local_neuron_frames
+
+
+def test_progress_bars_disabled(monkeypatch):
+    from comparison.connectivity_profiler import progress_bars_disabled
+
+    assert progress_bars_disabled(False, True) is True
+    assert progress_bars_disabled(True, False) is True
+
+    class FakeTTY:
+        def isatty(self):
+            return True
+
+    class FakePipe:
+        def isatty(self):
+            return False
+
+    monkeypatch.setattr(cp_module.sys, 'stdout', FakeTTY())
+    assert progress_bars_disabled(True, True) is False
+
+    monkeypatch.setattr(cp_module.sys, 'stdout', FakePipe())
+    assert progress_bars_disabled(True, True) is True
+
+    # A stream without isatty() (captured output variants) is treated as
+    # non-TTY rather than crashing the pipeline.
+    monkeypatch.setattr(cp_module.sys, 'stdout', object())
+    assert progress_bars_disabled(True, True) is True
+
+
+def test_list_types_and_load_all(profiler, fake_repo, monkeypatch):
+    ds = 'flywire_fake_v1'
+    _write_neurons_csv(fake_repo, ds,
+                       {'bodyId': [1, 2, 3], 'type': ['Mi1', 'T4', None]})
+    assert profiler.list_types(dataset=ds) == ['Mi1', 'T4']
+    assert profiler.list_types('Mi.*', dataset=ds) == ['Mi1']
+    # invalid regex treated as literal -> no match
+    assert profiler.list_types('(', dataset=ds) == []
+    # missing dataset folder -> []
+    assert profiler.list_types(dataset='flywire_absent_v9') == []
+
+    # neuprint path
+    class C:
+        def fetch_custom(self, q):
+            return pd.DataFrame({'type': ['B', 'A', None]})
+    monkeypatch.setattr(profiler, '_get_client_for_dataset', lambda d: C())
+    assert profiler._load_all_types('hemibrain:v1.2.1') == ['A', 'B']
+    monkeypatch.setattr(profiler, '_get_client_for_dataset', lambda d: None)
+    assert profiler._load_all_types('hemibrain:v1.2.1') == []
+    # list_types with no datasets configured
+    empty = ConnectivityProfiler([], config=ProfilerConfig(),
+                                 cache_dir=str(fake_repo), verbose=False)
+    assert empty.list_types() == []
+
+
+def test_get_type_for_bodyid(profiler, fake_repo, monkeypatch):
+    ds = 'flywire_fake_v1'
+    _write_neurons_csv(fake_repo, ds,
+                       {'bodyId': [1, 2], 'type': ['Mi1', 'T4']})
+    assert profiler.get_type_for_bodyid(2, ds) == 'T4'
+    assert profiler.get_type_for_bodyid(99, ds) is None
+    assert profiler.get_type_for_bodyid(1, 'flywire_absent_v9') is None
+
+    class C:
+        def fetch_custom(self, q):
+            return pd.DataFrame({'type': ['Mi1']})
+
+    class Boom:
+        def fetch_custom(self, q):
+            raise RuntimeError('x')
+
+    monkeypatch.setattr(profiler, '_get_client_for_dataset', lambda d: C())
+    assert profiler.get_type_for_bodyid(1, 'hemibrain:v1.2.1') == 'Mi1'
+    monkeypatch.setattr(profiler, '_get_client_for_dataset', lambda d: Boom())
+    assert profiler.get_type_for_bodyid(1, 'hemibrain:v1.2.1') is None
+    monkeypatch.setattr(profiler, '_get_client_for_dataset', lambda d: None)
+    assert profiler.get_type_for_bodyid(1, 'hemibrain:v1.2.1') is None
+
+
+def test_get_types_for_bodyids(profiler, fake_repo, monkeypatch):
+    assert profiler.get_types_for_bodyids([], DS) == {}
+    ds = 'flywire_fake_v1'
+    _write_neurons_csv(fake_repo, ds,
+                       {'bodyId': [1, 2], 'type': ['Mi1', 'T4']})
+    res = profiler.get_types_for_bodyids([1, 2, 3], ds)
+    assert res == {1: 'Mi1', 2: 'T4', 3: None}
+    assert profiler.get_types_for_bodyids([1], 'flywire_absent_v9') == {1: None}
+
+    class C:
+        def fetch_custom(self, q):
+            return pd.DataFrame({'bodyId': [1], 'type': ['Mi1']})
+
+    class Boom:
+        def fetch_custom(self, q):
+            raise RuntimeError('x')
+
+    monkeypatch.setattr(profiler, '_get_client_for_dataset', lambda d: C())
+    assert profiler.get_types_for_bodyids([1, 2], 'hemibrain:v1.2.1') == {
+        1: 'Mi1', 2: None}
+    monkeypatch.setattr(profiler, '_get_client_for_dataset', lambda d: Boom())
+    assert profiler.get_types_for_bodyids([1], 'hemibrain:v1.2.1') == {1: None}
+    monkeypatch.setattr(profiler, '_get_client_for_dataset', lambda d: None)
+    assert profiler.get_types_for_bodyids([1], 'hemibrain:v1.2.1') == {1: None}
+
+
+def test_get_types_for_label(profiler, fake_repo):
+    ds = 'flywire_fake_v1'
+    _write_neurons_csv(fake_repo, ds, {
+        'bodyId': [1, 2, 3],
+        'type': ['Mi1', 'Mi1', 'T4'],
+        'cell_class': ['Vis', 'Vis', 'Vis'],
+    })
+    res = profiler.get_types_for_label('Vis', ds)
+    assert res == {'Mi1': [1, 2], 'T4': [3]}
+    assert profiler.get_types_for_label('Nope', ds) == {}
+    # non-local dataset -> {}
+    assert profiler.get_types_for_label('Vis', 'hemibrain:v1.2.1') == {}
+    # missing local table -> {}
+    assert profiler.get_types_for_label('Vis', 'flywire_absent_v9') == {}
+
+
+def test_get_type_profile_from_bodyids(profiler, monkeypatch):
+    monkeypatch.setattr(profiler, 'get_bodyids_for_type', lambda t, d: [])
+    p = profiler.get_type_profile_from_bodyids('Mi1', DS)
+    assert p.upstream_partners == {}
+
+    monkeypatch.setattr(profiler, 'get_bodyids_for_type', lambda t, d: [1, 2])
+
+    def boom(neuron, dataset, force_refresh=False):
+        raise RuntimeError('no')
+    monkeypatch.setattr(profiler, 'get_profile', boom)
+    p2 = profiler.get_type_profile_from_bodyids('Mi1', DS)
+    assert p2.upstream_partners == {}
+
+    profs = {
+        1: _profile(1, upstream={'A': 3.0}, downstream={'B': 1.0}),
+        2: _profile(2, upstream={'A': 1.0}, downstream={'C': 2.0}),
+    }
+    monkeypatch.setattr(
+        profiler, 'get_profile',
+        lambda n, d, force_refresh=False: profs[n])
+    agg = profiler.get_type_profile_from_bodyids('Mi1', DS)
+    assert agg.num_neurons_aggregated == 2
+    assert agg.upstream_partners['A'] == pytest.approx(4.0)
+
+
+# ---------------------------------------------------------------------------
+# Vectorized profiles + npz I/O
+# ---------------------------------------------------------------------------
+
+def test_vectorized_profiles_and_io(profiler, monkeypatch, tmp_path):
+    profs = {
+        'T1': _profile('T1', upstream={'A': 3.0, 'B': 1.0},
+                       downstream={'X': 2.0}),
+        'T2': _profile('T2', upstream={'A': 1.0, 'C': 1.0},
+                       downstream={'X': 1.0}),
+    }
+    monkeypatch.setattr(
+        profiler, 'get_profile',
+        lambda n, d, force_refresh=False: profs[n])
+    res_w = profiler.get_vectorized_profiles(
+        ['T1', 'T2'], datasets=[DS], vector_type='weight')
+    assert res_w['matrix'].shape[0] == 2
+    assert 'A' in res_w['vocabulary']
+    res_r = profiler.get_vectorized_profiles(
+        ['T1', 'T2'], datasets=[DS], vector_type='rank',
+        direction='upstream')
+    assert res_r['matrix'].shape[0] == 2
+
+    # failing profile fetch -> empty result
+    def boom(n, d, force_refresh=False):
+        raise RuntimeError('no')
+    monkeypatch.setattr(profiler, 'get_profile', boom)
+    res_e = profiler.get_vectorized_profiles(['T1'], datasets=[DS])
+    assert res_e['matrix'].shape == (0, 0)
+    assert res_e['profiles'] == {}
+
+    # save/load round trip
+    monkeypatch.setattr(
+        profiler, 'get_profile',
+        lambda n, d, force_refresh=False: profs[n])
+    out = profiler.save_vectorized_profiles(
+        tmp_path / 'vecs.npz', ['T1', 'T2'], datasets=[DS])
+    loaded = ConnectivityProfiler.load_vectorized_profiles(out)
+    assert loaded['matrix'].shape[0] == 2
+    assert loaded['vector_type'] == 'weight'
+    assert loaded['direction'] == 'both'
+
+
+def test_clear_cache_all(profiler, tmp_path):
+    profiler._save_to_cache(_profile(111))
+    profiler.clear_cache()
+    assert profiler._memory_cache == {}
+    assert tmp_path.exists()
+
+
+def test_get_available_types(profiler, fake_repo, monkeypatch):
+    ds = 'flywire_fake_v1'
+    ds_dir = fake_repo / 'datasets' / ds
+    ds_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({'bodyId': [1, 2], 'type': ['Mi1', 'T4']}).to_csv(
+        ds_dir / f'{ds}_neuron_df.csv', index=False)
+    assert profiler.get_available_types(ds) == ['Mi1', 'T4']
+    assert profiler.get_available_types('flywire_absent_v9') is None
+    monkeypatch.setattr(profiler, '_get_client_for_dataset', lambda d: None)
+    assert profiler.get_available_types('hemibrain:v1.2.1') is None
+
+
+# ---------------------------------------------------------------------------
+# Round-7 cache build + homolog finders (loose/strict/hybrid)
+# ---------------------------------------------------------------------------
+
+def test_build_connectivity_profile_cache_config_bug(profiler):
+    # BUG (reported): build_connectivity_profile_cache rebuilds ProfilerConfig
+    # with cache_dir/verbose kwargs that ProfilerConfig does not accept, and
+    # also relies on get_all_types which does not exist. Cover the entry
+    # lines and document the failure instead of modifying source.
+    profiler.config.cache_dir = str(profiler.cache_dir)
+    profiler.config.verbose = False
+    with pytest.raises(TypeError):
+        profiler.build_connectivity_profile_cache(DS, neuron_types=['T1'])
+
+
+def test_find_homologs_loose(profiler, monkeypatch):
+    q = _profile('Q', upstream={'A': 3.0, 'B': 1.0}, downstream={'X': 2.0})
+    t1 = _profile('T1', upstream={'A': 2.0, 'B': 2.0}, downstream={'X': 1.0})
+    t2 = _profile('T2', upstream={'C': 1.0})
+    profs = {('Q', 'src_ds'): q, ('T1', 'tgt_ds'): t1, ('T2', 'tgt_ds'): t2}
+    monkeypatch.setattr(
+        profiler, 'get_profile',
+        lambda n, d, force_refresh=False: profs[(n, d)])
+    monkeypatch.setattr(profiler, 'get_all_types',
+                        lambda d: ['T1', 'T2'], raising=False)
+    df = profiler.find_homologs_loose('Q', 'src_ds', 'tgt_ds', top_n=5)
+    assert not df.empty
+    assert df.iloc[0]['target_type'] == 'T1'
+    assert 'weighted_jaccard' in df.columns
+    # weights-based variant
+    df_w = profiler.find_homologs_loose(
+        'Q', 'src_ds', 'tgt_ds', direction='upstream', use_ranks=False)
+    assert not df_w.empty
+    # no candidate types -> empty
+    monkeypatch.setattr(profiler, 'get_all_types', lambda d: [], raising=False)
+    assert profiler.find_homologs_loose('Q', 'src_ds', 'tgt_ds').empty
+
+
+def test_find_homologs_strict(profiler, monkeypatch):
+    q = _profile('Q', upstream={'A': 3.0, 'B': 2.0, 'C': 1.0},
+                 untyped_upstream_2hop={9: {'H': 1.0}})
+    t1 = _profile('T1', upstream={'A': 1.0, 'B': 3.0, 'C': 2.0},
+                  untyped_upstream_2hop={8: {'H': 0.5, 'G': 0.5}})
+    t2 = _profile('T2', upstream={'Z': 1.0})
+    profs = {('Q', 'src_ds'): q, ('T1', 'tgt_ds'): t1, ('T2', 'tgt_ds'): t2}
+    monkeypatch.setattr(
+        profiler, 'get_profile',
+        lambda n, d, force_refresh=False: profs[(n, d)])
+    monkeypatch.setattr(profiler, 'get_all_types',
+                        lambda d: ['T1', 'T2'], raising=False)
+    df = profiler.find_homologs_strict(
+        'Q', 'src_ds', 'tgt_ds', top_n=5, min_common_partners=3)
+    assert len(df) == 1
+    row = df.iloc[0]
+    assert row['target_type'] == 'T1'
+    assert row['jaccard_typed'] == pytest.approx(1.0)
+    assert row['jaccard_2hop'] == pytest.approx(0.5)
+    assert 'combined_score' in df.columns
+    # threshold too high -> nothing passes
+    empty = profiler.find_homologs_strict(
+        'Q', 'src_ds', 'tgt_ds', min_common_partners=10)
+    assert empty.empty
+    # no target types -> empty
+    monkeypatch.setattr(profiler, 'get_all_types', lambda d: [], raising=False)
+    assert profiler.find_homologs_strict('Q', 'src_ds', 'tgt_ds').empty
+
+
+def test_get_hybrid_profile_vector(profiler, monkeypatch):
+    p = _profile('H', upstream={'A': 1.0}, downstream={'B': 1.0},
+                 untyped_upstream_2hop={5: {'Z': 1.0}})
+    monkeypatch.setattr(
+        profiler, 'get_profile',
+        lambda n, d, force_refresh=False: p)
+    hybrid = profiler.get_hybrid_profile_vector('H', DS)
+    assert hybrid['upstream']['typed'] == {'A': 1.0}
+    assert hybrid['upstream']['untyped_2hop'] == {5: {'Z': 1.0}}
+    assert 'downstream' in hybrid
+    up_only = profiler.get_hybrid_profile_vector('H', DS, direction='upstream')
+    assert 'downstream' not in up_only

@@ -1500,9 +1500,18 @@ class ComparisonMetrics:
         
         n = adj_a.shape[0]
         if n < 3:
-            # Too small for meaningful permutation test
-            corr_sim = self.calculate_matrix_correlation(weights_a, weights_b, method)
-            return corr_sim, 1.0
+            # Too small for meaningful permutation test: fall back to the
+            # plain matrix correlation (mapped to [0, 1]) without permutations.
+            a_small = adj_a.flatten()
+            b_small = adj_b.flatten()
+            if method == 'spearman':
+                from scipy.stats import spearmanr
+                small_corr, _ = spearmanr(a_small, b_small)
+            else:
+                small_corr = np.corrcoef(a_small, b_small)[0, 1]
+            if np.isnan(small_corr):
+                return 0.5, 1.0
+            return float((small_corr + 1.0) / 2.0), 1.0
         
         a_flat = adj_a.flatten()
         b_flat = adj_b.flatten()

@@ -376,9 +376,10 @@ def test_body_id_key_variants():
 
 
 def test_normalized_query_numeric_with_dot():
-    # Only a single trailing ".0" is stripped, mirroring _body_id_key.
+    # All trailing zero decimals are stripped, mirroring _body_id_key and
+    # the numeric-search acceptance pattern \d+(?:\.0+)?
     assert ns._normalized_query("100.0") == "100"
-    assert ns._normalized_query("100.00") == "100.00"
+    assert ns._normalized_query("100.00") == "100"
     assert ns._normalized_query("  APL ") == "APL"
     assert ns._normalized_query(None) == ""
 
@@ -654,12 +655,10 @@ def test_apply_structured_filter_contract():
     assert sorted(result["bodyId"].tolist()) == [100, 200]
 
 
-def test_apply_structured_filter_none_frame_documents_behavior():
-    # Latent bug: ``frame is None`` short-circuits into ``frame.copy()``,
-    # which raises instead of returning a graceful result. Reported, not
-    # fixed; this test pins the current behavior.
-    with pytest.raises(AttributeError):
-        ns.apply_structured_filter(None, {"contains": ["x"]})
+def test_apply_structured_filter_none_frame_returns_none():
+    # A missing frame is returned as-is (None) instead of crashing on
+    # ``None.copy()`` — the fixed graceful behavior.
+    assert ns.apply_structured_filter(None, {"contains": ["x"]}) is None
 
 
 # ---------------------------------------------------------------------------

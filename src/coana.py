@@ -7256,7 +7256,15 @@ class FindNeuronConnection:
             conn_db = self._load_connection_db()
             connections_cached = len(conn_db) if conn_db is not None else 0
             if conn_db is not None and 'bodyId_pre' in conn_db.columns:
-                unique_upstream = conn_db['bodyId_pre'].nunique()
+                pre_col = conn_db['bodyId_pre']
+                if hasattr(pre_col, 'n_unique'):
+                    # polars Series: n_unique() counts null as a category;
+                    # subtract it to mirror pandas' nunique() semantics.
+                    unique_upstream = pre_col.n_unique()
+                    if pre_col.null_count() > 0:
+                        unique_upstream -= 1
+                else:
+                    unique_upstream = pre_col.nunique()
         
         # Check in-memory indexes
         index_ready = (
@@ -10848,42 +10856,49 @@ class FindNeuronConnection:
         target_types = [t for t in self.target_df.loc[self.target_df.Checked, 'type'].unique().tolist()
                         if t is not None and (not isinstance(t, float) or not pd.isna(t))]
         
-        # Pan-graph edge limit on the type table first (path integrity:
-        # reachability filter + adaptive dead-end refill; source-outgoing /
-        # target-incoming type edges reserved first).
-        conn_types_trimmed, _r, _t = self._trim_edges_with_path_integrity(
-            conn_types, self.graph_edge_limit_groups, 'type',
-            sources=source_types, targets=target_types,
-            pre_col='type_pre', post_col='type_post',
-        )
-        # Build type-level graph from the trimmed table
-        G_type = FastGraph()
-        G_type.build_from_dataframe(conn_types_trimmed, 'type_pre', 'type_post', 'weight')
-        
-        self._vprint(f'  Type-level graph: {G_type.number_of_nodes()} types, {G_type.number_of_edges()} edges', level='full')
-        
-        # Find paths using DFS on type graph
+        # Guard: with no typed connections (e.g. when no path connects the
+        # source to the target group), conn_types is a columnless empty
+        # DataFrame and the trim/graph steps below would raise
+        # KeyError('type_pre').  Skip the type-level analysis in that case.
         type_paths = []
-        for source_type in source_types:
-            if source_type not in G_type:
-                continue
-            for target_type in target_types:
-                if target_type not in G_type:
+        if conn_types.empty or 'type_pre' not in conn_types.columns:
+            self._vprint('  ⚠️  No type-level connections available; skipping type path analysis', level='full')
+        else:
+            # Pan-graph edge limit on the type table first (path integrity:
+            # reachability filter + adaptive dead-end refill; source-outgoing /
+            # target-incoming type edges reserved first).
+            conn_types_trimmed, _r, _t = self._trim_edges_with_path_integrity(
+                conn_types, self.graph_edge_limit_groups, 'type',
+                sources=source_types, targets=target_types,
+                pre_col='type_pre', post_col='type_post',
+            )
+            # Build type-level graph from the trimmed table
+            G_type = FastGraph()
+            G_type.build_from_dataframe(conn_types_trimmed, 'type_pre', 'type_post', 'weight')
+            
+            self._vprint(f'  Type-level graph: {G_type.number_of_nodes()} types, {G_type.number_of_edges()} edges', level='full')
+            
+            # Find paths using DFS on type graph
+            for source_type in source_types:
+                if source_type not in G_type:
                     continue
-                # Find all simple paths with length <= max_interlayer + 1
-                for path in G_type.all_simple_paths(source_type, target_type, cutoff=self.max_interlayer + 1):
-                    type_paths.append(path)
-        
-        self._vprint(f'  Found {len(type_paths):,} type-level paths', level='full')
-        
-        # Build DataFrame from type paths (no real_layer_map needed - layer-by-layer ensures forward-only)
-        path_df_type = sv.build_path_dataframe_from_paths(
-            paths=type_paths,
-            conn_data=conn_types,
-            targets=target_types,
-            real_layer_map=None,
-            level='type'
-        )
+                for target_type in target_types:
+                    if target_type not in G_type:
+                        continue
+                    # Find all simple paths with length <= max_interlayer + 1
+                    for path in G_type.all_simple_paths(source_type, target_type, cutoff=self.max_interlayer + 1):
+                        type_paths.append(path)
+            
+            self._vprint(f'  Found {len(type_paths):,} type-level paths', level='full')
+            
+            # Build DataFrame from type paths (no real_layer_map needed - layer-by-layer ensures forward-only)
+            path_df_type = sv.build_path_dataframe_from_paths(
+                paths=type_paths,
+                conn_data=conn_types,
+                targets=target_types,
+                real_layer_map=None,
+                level='type'
+            )
         
         # Filter out paths with any zero-weight hops
         # This happens when bodyId-level connections exist but type-level aggregation results in 0 weight
