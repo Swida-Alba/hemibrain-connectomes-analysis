@@ -379,9 +379,15 @@ class TestEditorHandle:
         assert handle._suggest_neurons("aMe") == [("aMe12", "type")]
         assert calls == [("aMe", "male-cns:v1.0", "type", None)]
 
-    def test_suggestion_commit_closes_and_suppresses_refocus(
+    def test_suggestion_commit_adds_chip_and_reoffers_without_closing(
         self, store_patch_for_component, monkeypatch
     ):
+        """Picking a suggestion adds the chip and keeps the list open.
+
+        Mirrors the standard query box: the overlay is re-offered for the still-
+        focused cell instead of being closed (no suppression window is armed), so
+        subsequent focus/typing on the same cell continues to show the list.
+        """
         from ui.components import layer_style_editor as editor_module
 
         client = Client(page(f"/layer-style-suggest-life-{uuid.uuid4().hex}"))
@@ -396,49 +402,98 @@ class TestEditorHandle:
             handle, "_show_neuron_suggestions",
             lambda row_id, text: showed.append((row_id, text)),
         )
+        monkeypatch.setattr(handle, "_refocus_neuron_cell", lambda row_id: None)
 
         # Focusing an empty cell opens suggestions for that cell.
         handle.on_neuron_focus(SimpleNamespace(args={"id": 0}))
         assert showed == [(0, "")]
         assert handle._suggest_row == 0
 
-        # Committing a picked suggestion adds the chip and closes the overlay
-        # (suppress is armed so a synthetic re-focus cannot reopen it).
+        # Committing a picked suggestion adds the chip and re-offers the Recent
+        # list for the still-focused cell (the list stays open, not suppressed).
+        showed.clear()
         handle._commit_neuron_suggestion(0, "aMe12")
         assert handle.rows[0]["neurons"] == ["aMe12"]
-        assert handle._suggest_suppress is True
-
-        # A synthetic re-focus of the SAME row right after commit stays closed.
-        showed.clear()
-        handle.on_neuron_focus(SimpleNamespace(args={"id": 0}))
-        assert showed == []
-        assert handle._suggest_suppress is True
-
-        # A reset empty input-value event on the same row also stays closed.
-        showed.clear()
-        handle.on_neuron_suggest(SimpleNamespace(args={"id": 0, "text": ""}))
-        assert showed == []
-        assert handle._suggest_suppress is True
-
-        # Once the suppression window has elapsed, a genuine same-cell refocus
-        # clears suppression and re-opens the history overlay (not "gone").
-        showed.clear()
-        handle._suggest_suppress_until = time.time() - 1
-        handle.on_neuron_focus(SimpleNamespace(args={"id": 0}))
         assert showed == [(0, "")]
         assert handle._suggest_suppress is False
 
-        # Typing a non-empty query clears the suppression and shows filtered results.
+        # A synthetic re-focus of the same row re-opens (no suppression window).
+        showed.clear()
+        handle.on_neuron_focus(SimpleNamespace(args={"id": 0}))
+        assert showed == [(0, "")]
+
+        # A reset empty input-value event on the same row also re-opens.
+        showed.clear()
+        handle.on_neuron_suggest(SimpleNamespace(args={"id": 0, "text": ""}))
+        assert showed == [(0, "")]
+
+        # Typing a non-empty query shows filtered results for that cell.
         showed.clear()
         handle.on_neuron_suggest(SimpleNamespace(args={"id": 0, "text": "aMe"}))
         assert showed == [(0, "aMe")]
-        assert handle._suggest_suppress is False
 
         # Switching to a different cell is a genuine action: it re-opens there.
         showed.clear()
         handle.on_neuron_focus(SimpleNamespace(args={"id": 1}))
         assert showed == [(1, "")]
         assert handle._suggest_suppress is False
+
+    def test_autosave_gated_on_min_non_empty_rows(
+        self, store_patch_for_component, monkeypatch
+    ):
+        """Auto-save only arms once the table holds >=5 filled rows.
+
+        A handful of scaffolding rows must not create a throwaway draft: below the
+        threshold schedule_autosave does not arm the debounce timer and surfaces a
+        gate status instead, while the manual export path is unaffected.
+        """
+        from ui.components import layer_style_editor as editor_module
+        from ui.components.layer_style_editor import AUTOSAVE_MIN_NON_EMPTY_ROWS
+
+        client, handle = build_editor(store_patch_for_component)
+
+        # Fresh editor starts with 3 empty scaffolding rows.
+        assert handle._non_empty_row_count() == 0
+        # Grow the table so it can hold up to the threshold.
+        while len(handle.rows) < AUTOSAVE_MIN_NON_EMPTY_ROWS:
+            handle.rows.append(handle._empty_logical_row())
+
+        fill = {
+            "color": "", "synapse_color": "",
+            "pre_synaptic_color": "", "post_synaptic_color": "",
+        }
+        # 4 filled rows is still below the threshold.
+        for i in range(AUTOSAVE_MIN_NON_EMPTY_ROWS - 1):
+            handle.rows[i] = {
+                "layer": str(i + 1), "neurons": [f"n{i}"], **fill,
+            }
+        assert handle._non_empty_row_count() == AUTOSAVE_MIN_NON_EMPTY_ROWS - 1
+
+        armed = []
+        class _FakeTimer:
+            def __init__(self, *_a, **_k):
+                pass
+            def cancel(self):
+                pass
+        def _fake_timer(*a, **k):
+            armed.append(a)
+            return _FakeTimer(*a, **k)
+        monkeypatch.setattr(editor_module.ui, "timer", _fake_timer)
+
+        handle.name_input.value = "draft"
+        handle.schedule_autosave()
+        # Below threshold: no debounce timer is armed and the gate status is shown.
+        assert armed == []
+        assert "filled rows" in (handle.status_label.text or "")
+
+        # At exactly the threshold, auto-save arms the debounce timer.
+        handle.rows[AUTOSAVE_MIN_NON_EMPTY_ROWS - 1] = {
+            "layer": str(AUTOSAVE_MIN_NON_EMPTY_ROWS), "neurons": ["n5"], **fill,
+        }
+        assert handle._non_empty_row_count() == AUTOSAVE_MIN_NON_EMPTY_ROWS
+        armed.clear()
+        handle.schedule_autosave()
+        assert len(armed) == 1
 
     def test_suggestion_settings_gate_typing_overlay(
         self, store_patch_for_component, monkeypatch

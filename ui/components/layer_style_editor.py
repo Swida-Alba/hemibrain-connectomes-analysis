@@ -23,6 +23,9 @@ from .. import layer_style_store
 from ..type_suggestions import dataset_suggestions
 
 AUTOSAVE_DELAY = 0.6  # seconds between last edit and disk flush
+# Auto-save is only worth persisting once the table holds a real style; a handful
+# of half-typed scaffolding rows would otherwise create noisy/throwaway drafts.
+AUTOSAVE_MIN_NON_EMPTY_ROWS = 5
 
 
 def _notify(message: str, type: str = "info") -> None:
@@ -247,10 +250,10 @@ window.drocatSuggest = {
     // Keep the anchored row so the scroll listener can re-glue the overlay to it.
     window.__drocatSuggestAnchorRow = rowId;
     drocatSuggestPosition(el, o);
-    // A transparent click-through spacer spans the next row so its cell stays
-    // visible and clickable (clicking it focuses it instead of being swallowed by
-    // a suggestion item); the item list starts below that row.
-    var html = '<div class="drocat-suggest-spacer"></div>';
+    // The list starts flush at the cell; the switch-cell mousedown guard already
+    // distinguishes an item click (pick) from a click on a lower cell (focus
+    // switch), so no transparent spacer is needed and no empty gap is shown.
+    var html = '';
     if (isHistory) {
       html += '<div class="drocat-suggest-header">Recent</div>';
     }
@@ -376,13 +379,17 @@ if (!window.drocatSuggestCellSwitch) {
   document.addEventListener('mousedown', function (ev) {
     var o = document.getElementById('drocat-suggest-overlay');
     if (!o || o.style.display === 'none') return;
-    // A genuine click on a suggestion item / header / remove button is an
-    // intentional pick (or history prune), never a cell switch. The item
-    // overlaps a lower row's cell rect, so decide by element type, not coords.
+    // A click on a suggestion item / header / remove button is an intentional
+    // pick (or history prune), never a cell switch. The item overlaps a lower
+    // row's cell rect, so decide by element type, not coords. preventDefault on
+    // mousedown also stops the focused cell from blurring: the overlay is a
+    // plain div (not a no-focus Quasar menu), so without it the click would drop
+    // focus, firing commit/blur and hiding the list midway through a pick.
     var t = ev.target;
     if (t && t.closest && (t.closest('.drocat-suggest-item') ||
         t.closest('.drocat-suggest-header') ||
         t.closest('.drocat-suggest-remove'))) {
+      ev.preventDefault();
       return;
     }
     var or = o.getBoundingClientRect();
@@ -432,7 +439,8 @@ _BODY_SLOT = r"""
       <div class="drocat-neuron-cell" :id="'neuron-cell-' + props.row.id">
         <q-select v-model="props.row.neurons" :options="props.row.neuron_options"
           multiple use-chips use-input new-value-mode="add-unique"
-          hide-dropdown-icon dense borderless hide-bottom-space
+          hide-dropdown-icon popup-content-class="drocat-native-popup-hidden"
+          dense borderless hide-bottom-space
           placeholder="Neuron"
           @update:model-value="$parent.$emit('layer-cell-change', { id: props.row.id, field: 'neuron', value: $event })"
           @focus="$parent.$emit('layer-cell-focus', { id: props.row.id })"
@@ -512,6 +520,10 @@ class LayerStyleEditorHandle:
         self._suggest_row: Optional[int] = None
         self._suggest_suppress: bool = False
         self._suggest_suppress_until: float = 0.0
+        # Post-pick hold: a refreshed table can emit a synthetic blur right after a
+        # suggestion pick; within this window on_inline_commit keeps the overlay
+        # open (matching the query box, where a pick does not close the list).
+        self._suggest_keep_open_until: float = 0.0
         self._suggest_pick_listener_id: Optional[str] = None
         self._suggest_remove_listener_id: Optional[str] = None
         # Value -> searched column (type/instance) cache for history category tags.
@@ -857,9 +869,12 @@ class LayerStyleEditorHandle:
 
         Validation is deliberately left to run/export, so a half-typed row never
         flashes a red error while the user is still editing. Leaving the cell also
-        dismisses the suggestion overlay.
+        dismisses the suggestion overlay — EXCEPT during a short post-pick window,
+        when the table refresh can emit a synthetic blur; that must not hide the
+        list that was just re-offered (issue: pick/remove should keep it open).
         """
-        self._close_suggest_overlay()
+        if time.time() >= self._suggest_keep_open_until:
+            self._close_suggest_overlay()
         self.on_inline_edit(event)
         self.schedule_autosave()
 
@@ -1047,8 +1062,14 @@ class LayerStyleEditorHandle:
                 pass
 
     def _commit_neuron_suggestion(self, row_id: int, value: str) -> None:
-        """Append a picked suggestion as a chip in the owning cell."""
-        self._close_suggest_overlay()
+        """Append a picked suggestion as a chip, keeping the list open.
+
+        Mirroring the standard query box, picking an entry does not close the
+        overlay: the chip is committed and the Recent/history list is re-offered
+        for the still-focused cell (the existing-chip filter drops the value just
+        added). The overlay is a plain div, so the cell is re-focused explicitly
+        in case the table refresh remounts the q-select and drops focus.
+        """
         if not 0 <= row_id < len(self.rows):
             return
         value = str(value or "").strip()
@@ -1059,8 +1080,27 @@ class LayerStyleEditorHandle:
             # Refresh the table, but ignore the re-render's stale re-emit for a
             # moment so the q-select cannot clobber the chips we just committed.
             self._suppress_neuron_value_until = time.time() + 0.6
+            # Hold the overlay open across the refresh's synthetic blur so the
+            # pick does not close the list (matching the query box).
+            self._suggest_keep_open_until = time.time() + 0.6
             self.refresh_table(preserve_selection=True)
             self.schedule_autosave()
+        self._show_neuron_suggestions(row_id, "")
+        self._refocus_neuron_cell(row_id)
+
+    def _refocus_neuron_cell(self, row_id: int) -> None:
+        """Refocus a neuron cell's input so the overlay stays put after a pick."""
+        try:
+            self.table.client.run_javascript(
+                "(function(){"
+                f"var c=document.getElementById('neuron-cell-{int(row_id)}');"
+                "if(!c)return;"
+                "var inp=c.querySelector('.q-field__input')||c.querySelector('input');"
+                "if(inp){inp.focus();}"
+                "})()"
+            )
+        except Exception:
+            pass
 
     def on_color_pick(self, event) -> None:
         """Open the single-color picker popup for a color cell.
@@ -1122,9 +1162,26 @@ class LayerStyleEditorHandle:
         self.schedule_autosave()
 
     # ------------------------------------------------------------- auto-save
+    def _non_empty_row_count(self) -> int:
+        """Number of rows holding a layer, neuron or colour (scaffolding excluded)."""
+        return sum(
+            1 for row in self.rows
+            if not layer_style_store._logical_is_empty(row)
+        )
+
     def schedule_autosave(self) -> None:
         """Debounce edits, then flush to disk. Outside a live NiceGUI slot
-        (e.g. unit tests) the flush happens immediately."""
+        (e.g. unit tests) the flush happens immediately.
+
+        Auto-save is gated on a minimum number of filled rows so partial tables
+        do not create throwaway drafts. A manual export still flushes explicitly
+        regardless of the row count.
+        """
+        if self._non_empty_row_count() < AUTOSAVE_MIN_NON_EMPTY_ROWS:
+            self._update_status(
+                f"Auto-save needs {AUTOSAVE_MIN_NON_EMPTY_ROWS} filled rows"
+            )
+            return
         self._update_status("Editing… (auto-save pending)")
         try:
             if self._timer is not None:

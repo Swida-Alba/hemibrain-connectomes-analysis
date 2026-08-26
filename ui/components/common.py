@@ -178,6 +178,16 @@ _SUGGEST_KEYNAV_SCRIPT = """
     event.stopPropagation();
     window.__drocatSuggestEnterPick = false;
   }, true);
+  // A real (cursor) click on a suggestion row is portaled to <body>, so it would
+  // blur the host QSelect editor and close the list. preventDefault the mousedown
+  // so the editor keeps focus and the menu stays open after a pick; the row's
+  // own click handler still fires (preventDefault only stops the focus move).
+  document.addEventListener('mousedown', function (ev) {
+    var t = ev.target;
+    if (!t || typeof t.closest !== 'function') return;
+    if (!t.closest('.drocat-suggest-menu')) return;
+    ev.preventDefault();
+  }, true);
 })();
 </script>
 """
@@ -1256,8 +1266,18 @@ def neuron_list_input(
                     )
                 except Exception:
                     pass
+                # The field is still in use after a pick: keep it marked focused so
+                # the finished-input handler re-offers the Recent list instead of
+                # closing it. Without this the very FIRST pick (before the field is
+                # already flagged focused) could close the menu while later picks
+                # keep it open.
+                _focused["value"] = True
                 sync_options(merged)
                 chip_input.set_value(merged)
+                # Keep the editor focused after a pick so focus does not escape to
+                # <body> (the menu is portaled); the finished-input handler then
+                # re-offers the Recent list instead of closing it.
+                chip_input.run_method("focus")
             pending_input["value"] = ""
             _reset_candidate_state()
             update_status()

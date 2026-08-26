@@ -1349,12 +1349,6 @@ html, body {
        suggestion items (pointer-events:auto) capture a click to commit. */
     pointer-events: none;
 }
-.drocat-suggest-spacer {
-    pointer-events: none;
-    /* Spans the row below the focused cell (48px table rows) so that cell stays
-       visible + clickable instead of being covered by the suggestion items. */
-    height: 48px;
-}
 .drocat-suggest-item {
     display: flex;
     align-items: center;
@@ -2355,9 +2349,21 @@ def main_page():
         # Offer any auto-saved (uncommitted) layer style draft only when the
         # user switches to the Skeleton tab, so the recovery dialog does not
         # pop up on app load or while the user is on another tab.
-        nav_panels.on_value_change(
-            lambda event: skeleton_recovery() if event.value == "Skeleton" else None
-        )
+        # Offer the auto-saved layer-style draft only on the FIRST Skeleton tab
+        # activation after app start (a crash/quit recovery). Later in-page
+        # switches to the tab do not prompt: the editor keeps its loaded rows
+        # (a default "continue").
+        skeleton_recovery_offered = {"value": False}
+
+        def _on_nav(value):
+            if value != "Skeleton":
+                return
+            if skeleton_recovery_offered["value"]:
+                return
+            skeleton_recovery_offered["value"] = True
+            skeleton_recovery()
+
+        nav_panels.on_value_change(lambda event: _on_nav(event.value))
 
     # --- Token warning dialog -------------------------------------------
     # When no NeuPrint token is configured, pop a warning once the page is
