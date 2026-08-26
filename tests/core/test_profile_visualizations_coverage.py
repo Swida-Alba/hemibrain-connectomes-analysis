@@ -400,3 +400,231 @@ def test_save_all_visualizations_minimal(tmp_path):
     )
     assert "html_report" in saved
     assert os.path.exists(saved["html_report"])
+
+
+# ---------------------------------------------------------------------------
+# Additional branch coverage (appended)
+# ---------------------------------------------------------------------------
+
+def test_plot_profile_comparison_top12_truncation():
+    """direction='both' with >12 partners triggers [:12] truncation."""
+    up = {f"P{i:02d}": float(i + 1) for i in range(15)}
+    profs = {"dsA": _profile("dsA", "big", up, {"sLNv": 1.0})}
+    fig = ProfileVisualizer.plot_profile_comparison(
+        profs, "big", direction="both"
+    )
+    assert fig is not None
+
+
+def test_plot_profile_comparison_single_direction_top15_and_savefig(tmp_path):
+    """Single direction with >15 partners + output_path savefig branch."""
+    down = {f"Q{i:02d}": float(i + 1) for i in range(18)}
+    profs = {"dsA": _profile("dsA", "big", {"LNV5": 2.0}, down)}
+    out = str(tmp_path / "single_dir.png")
+    fig = ProfileVisualizer.plot_profile_comparison(
+        profs, "big", direction="downstream", output_path=out
+    )
+    assert fig is not None
+    assert os.path.exists(out)
+
+
+def test_inter_type_heatmap_clustering_failure(tmp_path, monkeypatch):
+    """cluster=True with a failing squareform falls back to original order."""
+    import scipy.spatial.distance as sd
+
+    def _boom(*args, **kwargs):
+        raise ValueError("bad condensed matrix")
+
+    monkeypatch.setattr(sd, "squareform", _boom)
+    mat = pd.DataFrame(
+        [[1.0, 0.6, 0.3], [0.6, 1.0, 0.5], [0.3, 0.5, 1.0]],
+        index=["t1", "t2", "t3"], columns=["t1", "t2", "t3"],
+    )
+    out = str(tmp_path / "inter_fail.html")
+    path = ProfileVisualizer.generate_inter_type_similarity_heatmap(
+        mat, out, cluster=True
+    )
+    assert path == out
+    assert os.path.exists(out)
+
+
+def test_plotly_heatmap_div_scipy_import_error(monkeypatch):
+    """scipy unavailable -> clustering skipped, div still generated."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "scipy.cluster.hierarchy", None)
+    monkeypatch.setitem(sys.modules, "scipy.spatial.distance", None)
+    df = pd.DataFrame(
+        [[1.0, 0.5, 0.2], [0.5, 1.0, 0.4], [0.2, 0.4, 1.0]],
+        index=["a", "b", "c"], columns=["a", "b", "c"],
+    )
+    div = ProfileVisualizer._generate_plotly_heatmap_div(df, title="T")
+    assert "<div" in div or "plotly" in div.lower()
+
+
+def test_plotly_heatmap_div_clustering_exception(monkeypatch, capsys):
+    """linkage failure -> prints message and uses original order."""
+    import scipy.cluster.hierarchy as sch
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("linkage exploded")
+
+    monkeypatch.setattr(sch, "linkage", _boom)
+    df = pd.DataFrame(
+        [[1.0, 0.5, 0.2], [0.5, 1.0, 0.4], [0.2, 0.4, 1.0]],
+        index=["a", "b", "c"], columns=["a", "b", "c"],
+    )
+    div = ProfileVisualizer._generate_plotly_heatmap_div(df)
+    assert "Clustering failed" in capsys.readouterr().out
+    assert "<div" in div or "plotly" in div.lower()
+
+
+def test_plotly_heatmap_div_plotly_import_error(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "plotly.graph_objects", None)
+    df = pd.DataFrame([[1.0, 0.5], [0.5, 1.0]],
+                      index=["a", "b"], columns=["a", "b"])
+    div = ProfileVisualizer._generate_plotly_heatmap_div(df)
+    assert "Plotly not installed" in div
+
+
+def test_plotly_heatmap_div_generic_exception(monkeypatch):
+    import plotly.offline as po
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("plot failed")
+
+    monkeypatch.setattr(po, "plot", _boom)
+    df = pd.DataFrame([[1.0, 0.5], [0.5, 1.0]],
+                      index=["a", "b"], columns=["a", "b"])
+    div = ProfileVisualizer._generate_plotly_heatmap_div(df)
+    assert "Error generating heatmap" in div
+
+
+def test_html_report_colored_cell_branches(tmp_path):
+    """Exercise score/jaccard colored-cell + score-bar edge branches."""
+    rows = [
+        {"neuron_type": "tPos", "role": "source", "verification_status": "verified",
+         "avg_rank_corr": 0.8, "rank_correlation": 0.8,
+         "avg_rank_corr_upstream": -0.3, "avg_rank_corr_downstream": np.nan,
+         "avg_jaccard": 0.6, "avg_jaccard_both": 0.6,
+         "avg_jaccard_upstream": 0.25, "avg_jaccard_downstream": "n/a",
+         "datasets_found": 2, "total_datasets": 2},
+        {"neuron_type": "tNa", "role": "target", "verification_status": "error",
+         "avg_rank_corr": 0.2, "rank_correlation": "bad",
+         "avg_rank_corr_upstream": "err", "avg_rank_corr_downstream": 0.1,
+         "avg_jaccard": np.nan, "avg_jaccard_both": np.nan,
+         "avg_jaccard_upstream": 0.55, "avg_jaccard_downstream": 0.15,
+         "datasets_found": 2, "total_datasets": 2},
+        {"neuron_type": "tNeg", "role": "intermediate",
+         "verification_status": "verified",
+         "avg_rank_corr": -0.4, "rank_correlation": -0.4,
+         "avg_rank_corr_upstream": 0.9, "avg_rank_corr_downstream": -0.9,
+         "avg_jaccard": 0.05, "avg_jaccard_both": 0.05,
+         "avg_jaccard_upstream": 0.35, "avg_jaccard_downstream": 0.21,
+         "datasets_found": 1, "total_datasets": 2},
+    ]
+    summary = pd.DataFrame(rows)
+    out = str(tmp_path / "cells_report.html")
+    path = ProfileVisualizer.generate_html_report(
+        {"summary": summary}, output_path=out
+    )
+    html = open(path, encoding="utf-8").read()
+    # negative / green rank-corr cells
+    assert "-0.300" in html
+    assert "0.900" in html
+    # NaN jaccard cell rendered as dash
+    assert "#f5f5f5" in html
+    # non-convertible values rendered raw
+    assert ">err<" in html or "err" in html
+    assert "n/a" in html
+    # NaN primary score -> grey N/A bar
+    assert "N/A" in html
+    assert "#ccc" in html
+    # negative primary score -> red bar
+    assert "-0.400" in html
+
+
+def test_html_report_no_directional_jaccard(tmp_path):
+    """Summary without directional jaccard columns -> single Jaccard column."""
+    summary = pd.DataFrame([
+        {"neuron_type": "tOnly", "role": "source",
+         "verification_status": "verified",
+         "avg_rank_corr": 0.5,
+         "avg_jaccard": 0.55, "avg_jaccard_both": 0.55,
+         "datasets_found": 2, "total_datasets": 2},
+    ])
+    out = str(tmp_path / "nojaccard_report.html")
+    path = ProfileVisualizer.generate_html_report(
+        {"summary": summary}, output_path=out
+    )
+    html = open(path, encoding="utf-8").read()
+    assert "<th>Jaccard</th>" in html
+    assert "Jaccard (Up)" not in html
+    assert "Up&uarr;" not in html and "Up↑" not in html
+
+
+def test_html_report_dataset_pair_summary_thresholds(tmp_path):
+    """Dataset-pair summary: negative mean, NaN jaccard, all thresholds."""
+    sim = pd.DataFrame({
+        "p1_pos": [0.8, 0.6, 0.7],
+        "p2_neg": [-0.5, -0.2, -0.3],
+        "p3_nan": [0.1, 0.0, -0.1],
+        "p4_j025": [0.2, 0.3, 0.25],
+        "p5_j015": [0.1, 0.2, 0.15],
+        "p6_j005": [0.05, 0.0, 0.1],
+    }, index=["t1", "t2", "t3"])
+    jac = pd.DataFrame({
+        "p1_pos": [0.6, 0.7],       # mean 0.65 -> >0.5 dark green
+        "p2_neg": [0.35, 0.4],      # mean 0.375 -> >0.3 green
+        "p3_nan": [np.nan, np.nan], # all NaN -> '-'
+        "p4_j025": [0.25],          # mean 0.25 -> >0.2 yellow
+        "p5_j015": [0.15],          # mean 0.15 -> >0.1 orange
+        "p6_j005": [0.05],          # mean 0.05 -> else red
+    }, index=["t1", "t2"])
+    summary = pd.DataFrame([
+        {"neuron_type": "t1", "role": "source", "avg_rank_corr": 0.5,
+         "datasets_found": 2, "total_datasets": 2},
+    ])
+    out = str(tmp_path / "pairsum_report.html")
+    path = ProfileVisualizer.generate_html_report(
+        {"summary": summary},
+        similarity_matrix=sim,
+        metric_matrices={"jaccard": jac, "cosine": jac},
+        output_path=out,
+    )
+    html = open(path, encoding="utf-8").read()
+    assert "Dataset Pair Similarity Summary" in html
+    assert "p1_pos" in html and "p2_neg" in html and "p6_j005" in html
+    # negative average rendered with red background
+    assert "-0.333" in html
+    # NaN jaccard pair shows dash
+    assert "p3_nan" in html
+
+
+def test_save_all_visualizations_profile_chart_exception(tmp_path):
+    """A profile entry that breaks charting is skipped (except pass)."""
+    saved = ProfileVisualizer.save_all_visualizations(
+        {"summary": pd.DataFrame()},
+        profiles={"bad": {"dsA": object()}},
+        output_dir=str(tmp_path / "viz"),
+        generate_inter_type_heatmaps=False,
+    )
+    assert "html_report" in saved
+    assert not any(k.startswith("profile_") for k in saved)
+
+
+def test_save_all_visualizations_matplotlib_missing(tmp_path, monkeypatch):
+    """ImportError inside save_all_visualizations -> warning + html only."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "matplotlib.pyplot", None)
+    saved = ProfileVisualizer.save_all_visualizations(
+        {"summary": pd.DataFrame()},
+        output_dir=str(tmp_path / "viz2"),
+        generate_inter_type_heatmaps=False,
+    )
+    assert "html_report" in saved
+    assert os.path.exists(saved["html_report"])
+    assert "summary" not in saved
