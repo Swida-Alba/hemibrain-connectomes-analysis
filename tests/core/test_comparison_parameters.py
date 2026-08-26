@@ -223,3 +223,356 @@ def test_aggregate_and_find_paths_shortest_flags_only_shortest_route():
     flags_all = {(r['type_pre'], r['type_post']): bool(r['has_valid_path'])
                  for _, r in res_all.iterrows()}
     assert all(flags_all.values()), flags_all
+
+
+# ===========================================================================
+# Extended coverage tests (appended)
+# ===========================================================================
+
+import os  # noqa: E402
+
+import pytest  # noqa: E402
+
+from comparison.label_mapper import LabelMapper  # noqa: E402
+
+DS1 = 'hemibrain:v1.2.1'
+DS2 = 'male-cns:v0.9'
+
+
+def _basic(**overrides):
+    defaults = dict(
+        datasets=[DS1, DS2],
+        source_neurons=['Src'],
+        target_neurons=['Tgt'],
+        thresholds=[1, 3],
+        output_folder='',
+        auto_type_mapping=False,
+        verbose=False,
+    )
+    defaults.update(overrides)
+    return ComparisonParameters(**defaults)
+
+
+def _mapper(source_ds=DS1, target_ds=DS1):
+    return LabelMapper(
+        source_mapping_dict={source_ds: [['aMe1']]},
+        source_labels=['SrcStd'],
+        target_mapping_dict={target_ds: [['PPL1']]},
+        target_labels=['TgtStd'],
+    )
+
+
+def test_scalar_inputs_coerced_to_lists():
+    p = ComparisonParameters(
+        datasets=DS1, allow_single_dataset=True,
+        source_neurons='Src', target_neurons='Tgt',
+        source_labels='L1', target_labels='L2',
+        intermediate_labels='IL', verbose=False,
+    )
+    assert p.datasets == [DS1]
+    assert p.source_neurons == ['Src']
+    assert p.target_neurons == ['Tgt']
+    assert p.source_labels == ['L1']
+    assert p.target_labels == ['L2']
+    assert p.intermediate_labels == ['IL']
+
+
+def test_overall_mapper_conflicts_raise():
+    mapper = _mapper()
+    with pytest.raises(ValueError):
+        ComparisonParameters(datasets=[DS1, DS2],
+                             overall_label_mapper=mapper,
+                             source_neurons=['X'],
+                             thresholds=[1], verbose=False)
+    with pytest.raises(ValueError):
+        ComparisonParameters(datasets=[DS1, DS2],
+                             overall_label_mapper=mapper,
+                             target_neurons=['Y'],
+                             thresholds=[1], verbose=False)
+    with pytest.raises(ValueError):
+        ComparisonParameters(datasets=[DS1, DS2],
+                             overall_label_mapper=mapper,
+                             source_neurons=_mapper(),
+                             thresholds=[1], verbose=False)
+
+
+def test_overall_mapper_populates_labels():
+    mapper = _mapper()
+    p = ComparisonParameters(datasets=[DS1, DS2],
+                             overall_label_mapper=mapper,
+                             thresholds=[1], verbose=False)
+    assert p.source_labels == ['SrcStd']
+    assert p.target_labels == ['TgtStd']
+    assert p._source_mapper is mapper
+    assert p._target_mapper is mapper
+
+
+def test_source_target_mappers_merged_into_overall():
+    src_mapper = LabelMapper(source_mapping_dict={DS1: [['aMe1']]},
+                             source_labels=['SrcStd'])
+    tgt_mapper = LabelMapper(target_mapping_dict={DS1: [['PPL1']]},
+                             target_labels=['TgtStd'])
+    p = ComparisonParameters(datasets=[DS1, DS2],
+                             source_neurons=src_mapper,
+                             target_neurons=tgt_mapper,
+                             thresholds=[1], verbose=False)
+    assert p.overall_label_mapper is not None
+    assert p.source_neurons == []
+    assert p.target_neurons == []
+    assert p.source_labels == ['SrcStd']
+    assert p.target_labels == ['TgtStd']
+
+
+def test_keep_only_conserved_requires_separate_hemispheres():
+    p = _basic(keep_only_hemisphere_conserved_connections=True,
+               separate_hemispheres=False)
+    assert p.keep_only_hemisphere_conserved_connections is False
+
+
+def test_validation_errors():
+    with pytest.raises(ValueError):
+        _basic(comparison_mode='bogus')
+    with pytest.raises(ValueError):
+        _basic(datasets=[])
+    with pytest.raises(ValueError):
+        # allow_single_dataset defaults to True, so disable it explicitly
+        _basic(datasets=[DS1], allow_single_dataset=False)
+    with pytest.raises(ValueError):
+        _basic(thresholds=[])
+
+
+def test_verbose_init_prints(capsys):
+    # source/target None -> all-neurons warning + verbose summary
+    ComparisonParameters(datasets=[DS1, DS2], source_neurons=None,
+                         target_neurons=None, thresholds=[1],
+                         verbose=True)
+    out = capsys.readouterr().out
+    assert 'Initialization Summary' in out
+
+    # overall mapper + intermediate labels verbose branches
+    mapper = _mapper()
+    ComparisonParameters(datasets=[DS1, DS2],
+                         overall_label_mapper=mapper,
+                         intermediate_labels=['IL'],
+                         thresholds=[1], verbose=True)
+    out2 = capsys.readouterr().out
+    assert 'Defined by LabelMapper' in out2
+
+    # empty list neurons branch
+    ComparisonParameters(datasets=[DS1, DS2], source_neurons=[],
+                         target_neurons=[], thresholds=[1], verbose=True)
+    out3 = capsys.readouterr().out
+    assert 'All typed neurons' in out3
+
+
+def test_label_mapper_consistency_warnings(capsys):
+    mapper = LabelMapper(
+        source_mapping_dict={DS1: [['aMe1']]},
+        source_labels=['SrcStd'],
+        target_mapping_dict={DS2: [['PPL1']]},
+        target_labels=['TgtStd'],
+    )
+    ComparisonParameters(datasets=[DS1, DS2, 'weird-ds:v1'],
+                         overall_label_mapper=mapper,
+                         thresholds=[1], verbose=False)
+    out = capsys.readouterr().out
+    assert 'missing from LabelMapper' in out
+    assert 'Inconsistent datasets' in out
+    assert 'Source only' in out
+    assert 'Target only' in out
+
+
+def test_neuron_abbreviation_branches():
+    p = _basic()
+    assert p._get_neuron_abbreviation(['X'], labels=['Lbl']) == 'Lbl'
+    assert p._get_neuron_abbreviation(['X'], labels=['A', 'B']) == 'A_etc'
+
+    mapper = _mapper()
+    assert p._get_neuron_abbreviation(mapper) == 'SrcStd'
+
+    assert p._get_neuron_abbreviation({'contains': 'DN.*'}) == 'DN'
+    assert p._get_neuron_abbreviation(
+        {'startswith': ['Abc', 'Def']}) == 'Abc_etc'
+    assert p._get_neuron_abbreviation(
+        {'contains': 'VeryLongPatternName'}) == 'VeryLongPa'
+    assert p._get_neuron_abbreviation({'unknown_op': 1}) == 'filter'
+
+    assert p._get_neuron_abbreviation(['X.*']) == 'X'
+    assert p._get_neuron_abbreviation(['A', 'B']) == 'A_etc'
+    assert p._get_neuron_abbreviation([['Nested']]) == 'Nested'
+    assert p._get_neuron_abbreviation([]) == 'ALL'
+    assert p._get_neuron_abbreviation(None) == 'ALL'
+
+
+def test_unknown_dataset_codes_and_nicknames():
+    p = ComparisonParameters(datasets=['weird-ds:v1'],
+                             allow_single_dataset=True,
+                             thresholds=[1], verbose=False)
+    assert p._get_dataset_short_codes() == 'W'
+    assert p.get_display_nickname('weird-ds:v1') == 'WEIRD'
+
+
+def test_saveas_and_path_properties(tmp_path):
+    p = _basic(saveas='myname', output_folder=str(tmp_path))
+    assert p.output_name == 'myname'
+    assert p.comparison_results_path == os.path.join(
+        p.full_output_path, 'comparison_results')
+    assert p.visualizations_path == os.path.join(
+        p.comparison_results_path, 'visualizations')
+
+
+def test_mapper_based_neuron_resolution():
+    mapper = _mapper(source_ds=DS1, target_ds=DS2)
+    p = ComparisonParameters(datasets=[DS1, DS2],
+                             overall_label_mapper=mapper,
+                             thresholds=[1], verbose=False)
+    assert p.get_source_neurons_for_dataset(DS1) == ['aMe1']
+    assert p.get_target_neurons_for_dataset(DS2) == ['PPL1']
+    assert isinstance(p.get_source_neurons_for_dataset_filtered(DS1), list)
+    assert isinstance(p.get_target_neurons_for_dataset_filtered(DS2), list)
+
+
+def test_ensure_flat_list_and_grouped():
+    p = _basic()
+    assert p._ensure_flat_list(None) is None
+    assert p._ensure_flat_list([]) == []
+    assert p._ensure_flat_list(['A', ['B', ['C']]]) == ['A', 'B', 'C']
+    assert p._ensure_flat_list([[], 'A']) == ['A']
+    assert p._ensure_grouped(None) == [[]]
+    assert p._ensure_grouped([]) == [[]]
+    assert p._ensure_grouped(['A', 'B']) == [['A', 'B']]
+    assert p._ensure_grouped([['A'], ['B']]) == [['A'], ['B']]
+
+
+def test_create_output_directories(tmp_path):
+    p = _basic(output_folder=str(tmp_path))
+    p.create_output_directories()
+    assert os.path.isdir(p.full_output_path)
+    assert os.path.isdir(p.comparison_results_path)
+    assert os.path.isdir(p.visualizations_path)
+    assert os.path.isdir(p.get_dataset_output_path(DS1, 1))
+
+
+def test_resolve_token(monkeypatch):
+    p = _basic(token='abc')
+    assert p.resolve_token() == 'abc'
+    p2 = _basic()
+    monkeypatch.setenv('NEUPRINT_APPLICATION_TOKEN', 'envtok')
+    assert p2.resolve_token() == 'envtok'
+
+
+def test_auto_mapping_workspace_missing(monkeypatch):
+    real_exists = os.path.exists
+
+    def fake_exists(path):
+        if str(path).endswith('male-cns_v1_0_allneurons_neuron_df.csv'):
+            return False
+        return real_exists(path)
+
+    monkeypatch.setattr(os.path, 'exists', fake_exists)
+    p = _basic(auto_type_mapping=True, verbose=True)
+    assert p._auto_type_mapper is None
+
+
+def test_auto_mapping_with_fake_mapper(monkeypatch):
+    import comparison.cross_dataset_type_mapper as cdtm
+
+    class _FakeCTM:
+        load_result = True
+
+        def __init__(self, workspace_path=None, verbose=False):
+            self.workspace_path = workspace_path
+
+        def load(self):
+            return _FakeCTM.load_result
+
+    monkeypatch.setattr(cdtm, 'CrossDatasetTypeMapper', _FakeCTM)
+
+    real_exists = os.path.exists
+
+    def fake_exists(path):
+        if str(path).endswith('male-cns_v1_0_allneurons_neuron_df.csv'):
+            return True
+        return real_exists(path)
+
+    monkeypatch.setattr(os.path, 'exists', fake_exists)
+
+    _FakeCTM.load_result = True
+    p = _basic(auto_type_mapping=True)
+    assert isinstance(p._auto_type_mapper, _FakeCTM)
+
+    _FakeCTM.load_result = False
+    p2 = _basic(auto_type_mapping=True)
+    assert p2._auto_type_mapper is None
+
+
+class _FakeTypeMapper:
+    def __init__(self):
+        self.exported_paths = []
+
+    def _detect_type_source(self, t):
+        return DS1 if t in ('Src', 'NoMap') else None
+
+    def get_mapped_type(self, t, src_ds, dst_ds):
+        return 'SrcMapped' if t == 'Src' else None
+
+    def export_mapping(self, path, **kwargs):
+        self.exported_paths.append(path)
+
+
+def test_resolve_neurons_with_auto_mapping():
+    p = _basic()
+    p._auto_type_mapper = _FakeTypeMapper()
+    neurons = ['Src', 'NoMap', 'Regex.*', 123]
+    out = p._resolve_neurons_with_auto_mapping(neurons, DS2)
+    assert out == ['SrcMapped', 'NoMap', 'Regex.*', 123]
+    out_rm = p._resolve_neurons_with_auto_mapping(neurons, DS2,
+                                                  remove_unmapped=True)
+    assert out_rm == ['SrcMapped', 'Regex.*', 123]
+    # None and [] pass through
+    assert p._resolve_neurons_with_auto_mapping(None, DS2) is None
+    assert p._resolve_neurons_with_auto_mapping([], DS2) == []
+    # no mapper -> passthrough
+    p2 = _basic()
+    assert p2._resolve_neurons_with_auto_mapping(['Src'], DS2) == ['Src']
+
+
+def test_print_neuron_mapping_summary(capsys):
+    p = _basic()
+    p._auto_type_mapper = _FakeTypeMapper()
+    p._auto_type_mapper.get_source_target_mapping_summary = (
+        lambda types, datasets: {
+            'different_mappings': [('Src', {DS1: 'Src', DS2: 'SrcAlt'})],
+            'n_to_1_warnings': [
+                ('T1', DS1, DS2, {'T1', 'T2'}),
+                ('T3', DS1, DS2, {'T4', 'T5'}),
+            ],
+            'one_to_n_warnings': [('S1', DS1, DS2, {'S1a', 'S1b'})],
+        })
+    p._print_neuron_mapping_summary(['Src', 'T1', 42], [DS1, DS2])
+    out = capsys.readouterr().out
+    assert 'Auto-mapped types' in out
+    assert 'N-to-1 type mapping detected' in out
+    assert '1-to-N type mapping detected' in out
+
+    # no mapper -> early return
+    p2 = _basic()
+    assert p2._print_neuron_mapping_summary(['Src'], [DS1, DS2]) is None
+
+
+def test_get_auto_type_mapper_and_export(tmp_path):
+    p = _basic()
+    assert p.get_auto_type_mapper() is None
+    assert p.export_auto_mapping() is None
+
+    fake = _FakeTypeMapper()
+    p._auto_type_mapper = fake
+    out_path = p.export_auto_mapping(str(tmp_path / 'map.csv'))
+    assert out_path == str(tmp_path / 'map.csv')
+    assert fake.exported_paths == [str(tmp_path / 'map.csv')]
+
+    default_path = p.export_auto_mapping()
+    assert default_path == os.path.join(p.full_output_path,
+                                        'auto_type_mapping.csv')
+
+# --- PARAMS-APPEND-DONE ---

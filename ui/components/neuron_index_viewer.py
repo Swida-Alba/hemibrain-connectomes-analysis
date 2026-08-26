@@ -150,6 +150,8 @@ def _render_index(
     query_edit: Callable[[str], object] | None = None,
     add_to_query: Callable[[List[str]], object] | None = None,
     query_label: str = "Current query",
+    defer_apply: bool = False,
+    apply_holder: dict | None = None,
 ) -> None:
     """Render the current dataset's index or its cache-missing state."""
     content.clear()
@@ -219,7 +221,9 @@ def _render_index(
                     with ui.row().classes("w-full items-center justify-between gap-2"):
                         with ui.row().classes("items-center gap-2"):
                             ui.icon("playlist_add_check", color="primary").classes("text-lg")
-                            ui.label(f"Current query · {query_label}").classes(
+                            ui.label(
+                                f"{'Selected' if defer_apply else 'Current query'} · {query_label}"
+                            ).classes(
                                 "text-subtitle2 font-bold"
                             )
                         with ui.row().classes("items-center gap-1"):
@@ -228,7 +232,10 @@ def _render_index(
                             ).props("flat dense").classes(
                                 "drocat-query-preview-expand-btn"
                             )
-                            ui.badge("mirrors input", color="primary").props("outline")
+                            ui.badge(
+                                "selected" if defer_apply else "mirrors input",
+                                color="primary",
+                            ).props("outline")
                     with ui.element("div").classes(
                         "w-full drocat-neuron-query-preview-list "
                         "drocat-neuron-query-preview-collapsed"
@@ -241,7 +248,13 @@ def _render_index(
                     ).classes("text-caption drocat-muted mt-1")
 
                     def refresh_query_preview() -> None:
-                        values = _query_preview_values(query_values_getter)
+                        # Deferred mode shows the in-panel pending selection; the
+                        # live mode mirrors the owning input's committed values.
+                        values = (
+                            selected_query_values()
+                            if defer_apply
+                            else _query_preview_values(query_values_getter)
+                        )
                         query_preview.clear()
                         query_preview_empty.set_visibility(not values)
                         query_preview_toggle.set_visibility(bool(values))
@@ -267,8 +280,6 @@ def _render_index(
                                         ).props("flat round dense").classes(
                                             "drocat-neuron-query-chip-remove"
                                         ).tooltip("Remove from this query")
-
-                    refresh_query_preview()
 
                     def edit_query_value(value: str) -> None:
                         """Remove the value from viewer selection, then edit it."""
@@ -629,11 +640,25 @@ def _render_index(
                     seen.add(body_id)
             return values
 
+        # Deferred apply (layer editor): hold the selection in the panel, then
+        # commit it once when the dialog closes. Live mode pushes on every toggle.
+        if defer_apply:
+            def apply_pending_selection() -> None:
+                if query_selection is not None:
+                    query_selection(selected_query_values())
+                if query_resolution is not None:
+                    query_resolution(selected_query_body_ids())
+            if apply_holder is not None:
+                apply_holder["fn"] = apply_pending_selection
+        if query_values_getter is not None:
+            refresh_query_preview()
+
         def sync_query_selection() -> None:
-            if query_callback is not None:
-                query_callback(selected_query_values())
-            if query_resolution is not None:
-                query_resolution(selected_query_body_ids())
+            if not defer_apply:
+                if query_callback is not None:
+                    query_callback(selected_query_values())
+                if query_resolution is not None:
+                    query_resolution(selected_query_body_ids())
             if query_values_getter is not None:
                 refresh_query_preview()
 
@@ -807,7 +832,7 @@ def _render_index(
             refresh_table_selection()
 
         def remove_query_value(value: str) -> None:
-            """Remove one value from the mirrored query and selection state."""
+            """Remove one value from the mirrored/Selected preview and selection state."""
             value = str(value or "").strip()
             if not value:
                 return
@@ -816,7 +841,9 @@ def _render_index(
                 if str(body_id or "").strip() == value:
                     selected_body_ids.pop(key, None)
             sync_query_selection()
-            if query_remove is not None:
+            # In live mode the 'x' also removes from the owning input; in
+            # deferred mode it only prunes the pending in-panel selection.
+            if not defer_apply and query_remove is not None:
                 query_remove(value)
             if query_values_getter is not None:
                 refresh_query_preview()
@@ -1355,6 +1382,7 @@ def create_neuron_index_viewer_link(
     query_edit: Callable[[str], object] | None = None,
     add_to_query: Callable[[List[str]], object] | None = None,
     query_label: str = "Current query",
+    defer_apply: bool = False,
 ):
     """Create a link-like control that opens the cached-index viewer.
 
@@ -1367,11 +1395,29 @@ def create_neuron_index_viewer_link(
     one value at a time; ``query_edit`` lets a double-click return that value
     to the owning chip editor.
 
+    With ``defer_apply=True`` (the layer editor), matching values are NOT
+    pushed to the caller on every toggle. Instead they accumulate in the
+    panel's "Selected" preview (which shows ``selected_query_values()`` and is
+    renamed from "Current query"/"mirrors input") and are committed once, when
+    the dialog closes via its OK or 'x' button. The preview chips' 'x' then only
+    prunes the pending selection rather than the caller's value list.
+
     ``on_open`` runs immediately before the viewer resolves its dataset. It is
     useful for callers that need to start a fresh selection session without
     changing the viewer's query-selection semantics.
     """
     dialog = ui.dialog()
+    # Deferred apply: the OK / 'x' buttons commit the latest pending selection
+    # once, then close. ``_render_index`` (re)sets the apply callback per open.
+    _apply_holder: dict = {"fn": None}
+
+    def finish() -> None:
+        try:
+            if _apply_holder["fn"] is not None:
+                _apply_holder["fn"]()
+        finally:
+            dialog.close()
+
     with dialog:
         with ui.card().classes(
             "w-[min(98vw,1800px)] max-w-none drocat-neuron-viewer-card"
@@ -1386,7 +1432,13 @@ def create_neuron_index_viewer_link(
                     header_meta = ui.row().classes(
                         "items-center gap-2 flex-wrap min-w-0 drocat-neuron-header-meta"
                     )
-                ui.button(icon="close", on_click=dialog.close).props("flat round dense")
+                # OK finishes the selection and exits the panel; the 'x' is a
+                # secondary dismiss. Both commit any deferred (pending) selection.
+                ui.button(
+                    "OK", icon="check",
+                    on_click=finish,
+                ).props("color=primary dense").classes("drocat-neuron-ok")
+                ui.button(icon="close", on_click=finish).props("flat round dense")
             dataset_picker_slot = ui.row().classes("w-full items-center")
             content = ui.column().classes(
                 "w-full gap-2 drocat-neuron-viewer-content"
@@ -1448,6 +1500,8 @@ def create_neuron_index_viewer_link(
             query_edit=query_edit,
             add_to_query=add_to_query,
             query_label=query_label,
+            defer_apply=defer_apply,
+            apply_holder=_apply_holder,
         )
 
     link = ui.button(label, icon="table_view", on_click=open_viewer).props(
