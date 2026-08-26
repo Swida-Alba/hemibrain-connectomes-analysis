@@ -976,3 +976,439 @@ def test_convenience_functions(tmp_path, monkeypatch):
     listed = fld.list_flylight_files("R10A06")
     assert len(listed) == 1
     assert len(_FakeDownloader.instances) == 2
+
+
+# ---------------------------------------------------------------------------
+# Appended coverage batch: boto3 discovery, auto-discover init, VT page
+# parsing, R-line branches, generic S3 early-exit, simple-mode fallback,
+# download flows, image summaries and search_lines edge branches.
+# ---------------------------------------------------------------------------
+
+
+def test_discover_s3_collections_boto3(monkeypatch, isolated_collection_globals):
+    class _FakeClient:
+        def list_objects_v2(self, **kwargs):
+            return {"CommonPrefixes": [
+                {"Prefix": "Gen1/"},
+                {"Prefix": "content/"},
+                {"Prefix": "Other Collection/"},
+            ]}
+
+    class _FakeBoto3:
+        @staticmethod
+        def client(*args, **kwargs):
+            return _FakeClient()
+
+    monkeypatch.setattr(fld, "HAS_BOTO3", True)
+    monkeypatch.setattr(fld, "boto3", _FakeBoto3)
+    monkeypatch.setattr(fld, "Config", lambda **kw: object())
+    monkeypatch.setattr(fld, "UNSIGNED", "UNSIGNED")
+
+    assert discover_s3_collections(verbose=True) == ["Gen1", "Other Collection"]
+
+
+def test_discover_s3_collections_boto3_error_falls_back(monkeypatch, isolated_collection_globals):
+    class _BoomBoto3:
+        @staticmethod
+        def client(*args, **kwargs):
+            raise RuntimeError("no s3 access")
+
+    monkeypatch.setattr(fld, "HAS_BOTO3", True)
+    monkeypatch.setattr(fld, "boto3", _BoomBoto3)
+    monkeypatch.setattr(fld, "Config", lambda **kw: object())
+    monkeypatch.setattr(fld, "UNSIGNED", "UNSIGNED")
+    monkeypatch.setattr(fld.urllib.request, "urlopen",
+                        lambda *a, **k: _Response(_DISCOVER_XML))
+
+    assert discover_s3_collections(verbose=True) == ["Gen1", "Split-GAL4 Omnibus Broad"]
+
+
+def test_auto_discover_updates_categories(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(fld, "discover_s3_collections",
+                        lambda verbose=False: ["BrandNewColl"])
+    monkeypatch.setattr(fld, "update_collection_categories",
+                        lambda names: calls.append(list(names)))
+    FlyLightDownloader(output_dir=str(tmp_path / "out"), auto_discover=True,
+                       use_boto3=False, verbose=False)
+    assert calls == [["BrandNewColl"]]
+
+    # empty discovery result -> no category update
+    calls.clear()
+    monkeypatch.setattr(fld, "discover_s3_collections", lambda verbose=False: [])
+    FlyLightDownloader(output_dir=str(tmp_path / "out"), auto_discover=True,
+                       use_boto3=False, verbose=False)
+    assert calls == []
+
+
+_VT_PAGE_HTML = (
+    '<a href="download.cgi?id=111&sid=abcdef12">session</a>'
+    "<h3>Brain</h3>"
+    '<img src="https://flimg.janelia.org/flylight-image/external-data/adult/secdata/'
+    'projections/20200101/VT000770_custombrain/VT000770_x.jpg">'
+    '<a href="download.cgi?id=222">other</a>'
+    "<h3>Misc</h3>"
+    '<img src="https://flimg.janelia.org/flylight-image/external-data/adult/secdata/'
+    'projections/20200101/VT000770_miscz/VT000770_y.jpg">'
+)
+
+
+def test_parse_vt_page_region_inference(tmp_path, monkeypatch):
+    d = _downloader(tmp_path)
+    monkeypatch.setattr(fld.urllib.request, "urlopen",
+                        lambda *a, **k: _Response(_VT_PAGE_HTML))
+    samples, sid = d._parse_vt_page("VT000770")
+    assert sid == "abcdef12"
+    assert [s.region for s in samples] == ["brain", "unknown"]
+    assert [s.sample_id for s in samples] == ["111", "222"]
+
+
+def test_get_vt_files_cache_miss_then_hit(tmp_path, monkeypatch):
+    d = _downloader(tmp_path)
+    sample = VTSampleInfo(sample_id="1", line_name="VT000770", region="brain",
+                          date="20200101", sample_path="VT000770-fA00b")
+    calls = []
+
+    def fake_parse(name):
+        calls.append(name)
+        return [sample], "sid123"
+
+    monkeypatch.setattr(d, "_parse_vt_page", fake_parse)
+    files = d._get_vt_files("VT000770")
+    assert calls == ["VT000770"]
+    assert files and all(f.source == "http" for f in files)
+    # second call must hit the cache (no extra parse)
+    d._get_vt_files("VT000770")
+    assert calls == ["VT000770"]
+
+
+_RLINE_HTML = (
+    '<img src="https://flimg.janelia.org/flylight-image/external-data/adult/secdata/'
+    'projections/20200101/R78H08custom/R78H08_pattern.jpg">'
+)
+
+
+def test_get_r_line_files_unknown_region(tmp_path, monkeypatch):
+    d = _downloader(tmp_path)
+    monkeypatch.setattr(fld.urllib.request, "urlopen",
+                        lambda *a, **k: _Response(_RLINE_HTML))
+    files = d._get_r_line_files("R78H08")
+    assert len(files) == 1
+    assert "/unknown/" in files[0].key
+    assert files[0].collection == "Gen1 GAL4"
+
+
+def test_verify_vt_file_exists_error(tmp_path, monkeypatch):
+    d = _downloader(tmp_path)
+    monkeypatch.setattr(
+        fld.urllib.request, "urlopen",
+        lambda *a, **k: (_ for _ in ()).throw(urllib.error.URLError("boom")))
+    f = _file("VT GAL4/VT1/brain/x.jpg", source="http", http_url="https://x/y.jpg")
+    assert d._verify_vt_file_exists(f) is False
+
+
+def test_list_vt_files_mcfo_merged(tmp_path, monkeypatch):
+    d = _downloader(tmp_path)
+    gal4 = _file("VT GAL4/VT000770/brain/a.jpg", source="http",
+                 http_url="https://x/a.jpg", line_name="VT000770")
+    mcfo = _file("Gen1 MCFO/VT000770/brain/b.jpg", source="http",
+                 http_url="https://x/b.jpg", line_name="VT000770",
+                 collection="Gen1 MCFO")
+    monkeypatch.setattr(d, "_get_vt_files", lambda name: [gal4])
+    monkeypatch.setattr(d, "_get_vt_mcfo_files", lambda name: [mcfo])
+    files = d.list_vt_files("VT000770", verify=False, include_mcfo=True)
+    assert files == [gal4, mcfo]
+
+
+def test_list_bucket_http_short_keys(tmp_path, monkeypatch):
+    d = _downloader(tmp_path)
+    xml = (
+        '<?xml version="1.0"?>'
+        '<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+        "<Contents><Key>root.png</Key><Size>1</Size>"
+        "<LastModified>now</LastModified></Contents>"
+        "<Contents><Key>Coll/x.png</Key><Size>2</Size>"
+        "<LastModified>now</LastModified></Contents>"
+        "</ListBucketResult>"
+    )
+    monkeypatch.setattr(fld.urllib.request, "urlopen",
+                        lambda *a, **k: _Response(xml))
+    files = d._list_bucket_http("prefix/")
+    assert [f.line_name for f in files] == ["", ""]
+    assert files[0].collection == ""
+    assert files[1].collection == "Coll"
+
+
+def test_r_line_boto3_branches(tmp_path, monkeypatch):
+    # GAL4/LEXA R-line: CDM lookup via boto3
+    d = _downloader(tmp_path, collections=["Gen1", "Gen1 MCFO"],
+                    collection_category="GAL4/LEXA")
+    d._s3_client = object()
+    calls = []
+
+    def fake_boto3_list(prefix, *args):
+        calls.append(prefix)
+        if prefix == "Gen1/CDM/R78H08/":
+            return [_file("Gen1/CDM/R78H08/x.png", line_name="R78H08")]
+        return []
+
+    monkeypatch.setattr(d, "_list_bucket_boto3", fake_boto3_list)
+    monkeypatch.setattr(d, "_get_r_line_files", lambda name: [])
+    files = d.list_files("R78H08", use_cache=False)
+    assert calls == ["Gen1/CDM/R78H08/"]
+    assert len(files) == 1
+
+    # RawImages R-line: non-MCFO collections skipped, MCFO listed via boto3
+    d2 = _downloader(tmp_path, collections=["Gen1", "Gen1 MCFO"],
+                     collection_category="RawImages")
+    d2._s3_client = object()
+    calls2 = []
+
+    def fake_boto3_list2(prefix, *args):
+        calls2.append(prefix)
+        return [_file("Gen1 MCFO/R78H08/raw.lsm", line_name="R78H08",
+                      collection="Gen1 MCFO")]
+
+    monkeypatch.setattr(d2, "_list_bucket_boto3", fake_boto3_list2)
+    files2 = d2.list_files("R78H08", use_cache=False)
+    assert calls2 == ["Gen1 MCFO/R78H08/"]
+    assert len(files2) == 1
+
+
+def test_generic_s3_boto3_and_early_exit(tmp_path, monkeypatch):
+    # direct hit via boto3, then early-exit break (>3 collections, no MCFO ahead)
+    d = _downloader(tmp_path, collections=["CollA", "CollB", "CollC", "CollD"],
+                    simple_mode=False)
+    d._s3_client = object()
+    calls = []
+
+    def fake_list(prefix, *args):
+        calls.append(prefix)
+        if prefix == "CollA/SS00001/":
+            return [_file("CollA/SS00001/x.png", collection="CollA",
+                          line_name="SS00001")]
+        return []
+
+    monkeypatch.setattr(d, "_list_bucket_boto3", fake_list)
+    files = d.list_files("SS00001", use_cache=False)
+    assert calls == ["CollA/SS00001/"]
+    assert len(files) == 1
+
+    # MCFO collection ahead -> keep searching (continue), then break
+    d2 = _downloader(tmp_path,
+                     collections=["CollA", "Gen1 MCFO", "CollC", "CollD"],
+                     simple_mode=False)
+    d2._s3_client = object()
+    calls2 = []
+
+    def fake_list2(prefix, *args):
+        calls2.append(prefix)
+        if prefix in ("CollA/SS00001/", "Gen1 MCFO/SS00001/"):
+            return [_file(prefix + "x.png", collection=prefix.split("/")[0],
+                          line_name="SS00001")]
+        return []
+
+    monkeypatch.setattr(d2, "_list_bucket_boto3", fake_list2)
+    files2 = d2.list_files("SS00001", use_cache=False)
+    assert calls2 == ["CollA/SS00001/", "Gen1 MCFO/SS00001/"]
+    assert len(files2) == 2
+
+    # CDM fallback via boto3 when the direct path is empty
+    d3 = _downloader(tmp_path, collections=["CollX"])
+    d3._s3_client = object()
+    calls3 = []
+
+    def fake_list3(prefix, *args):
+        calls3.append(prefix)
+        if prefix == "CollX/CDM/SS00001/":
+            return [_file("CollX/CDM/SS00001/y.png", collection="CollX",
+                          line_name="SS00001")]
+        return []
+
+    monkeypatch.setattr(d3, "_list_bucket_boto3", fake_list3)
+    files3 = d3.list_files("SS00001", use_cache=False)
+    assert calls3 == ["CollX/SS00001/", "CollX/CDM/SS00001/"]
+    assert len(files3) == 1
+
+
+def test_simple_mode_fallback_chain(tmp_path, monkeypatch):
+    d = _downloader(tmp_path, collections=["Gen1"], simple_mode=True,
+                    simple_mode_min_files=2, automatic_fallback=False,
+                    verbose=True)
+    line_files = {
+        "SS00001": [],  # empty pre-filter list -> skipped entirely
+        "SS00002": [_file(f"Gen1/SS00002/mc{i}_multichannel_mip.png",
+                          line_name="SS00002") for i in range(3)],
+        "SS00003": [_file("Gen1/SS00003/a_mip.png", line_name="SS00003"),
+                     _file("Gen1/SS00003/b.png", line_name="SS00003"),
+                     _file("Gen1/SS00003/c.png", line_name="SS00003")],
+    }
+    monkeypatch.setattr(d, "list_files",
+                        lambda name, use_cache=True: line_files[name])
+    monkeypatch.setattr(d, "apply_simple_mode_filter", lambda files: [])
+
+    result = d.get_filtered_files(["SS00001", "SS00002", "SS00003"])
+    names = [f.filename for f in result]
+    # SS00002: two multichannel_mip files (break once min reached)
+    assert names[:2] == ["mc0_multichannel_mip.png", "mc1_multichannel_mip.png"]
+    # SS00003: one _mip file, then last-resort first other file
+    assert names[2:] == ["a_mip.png", "b.png"]
+
+
+def test_download_file_http_ssl_exhaustion_and_zero_retries(tmp_path, monkeypatch):
+    d = _downloader(tmp_path)
+    f = _file("Gen1/R1/x.png", source="http", http_url="https://cdn/x.png")
+    monkeypatch.setattr(fld.urllib.request, "urlretrieve",
+                        lambda *a, **k: (_ for _ in ()).throw(ssl.SSLError("eof")))
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    out = tmp_path / "x.png"
+    assert d._download_file_http(f, out, max_retries=2) is False
+    # zero retries -> loop body never runs, tail return False
+    assert d._download_file_http(f, out, max_retries=0) is False
+
+
+def test_download_file_dispatch(tmp_path, monkeypatch):
+    d = _downloader(tmp_path)
+    f = _file("Gen1/SS00001/x.png", line_name="SS00001")
+
+    class _FakeS3:
+        def download_file(self, bucket, key, path):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text("data")
+
+    d._s3_client = _FakeS3()
+    result = d.download_file(f)
+    assert result is not None and result.exists()
+
+    # no S3 client -> HTTP fallback dispatch
+    d2 = _downloader(tmp_path / "b")
+    monkeypatch.setattr(d2, "_download_file_http", lambda file, path: True)
+    result2 = d2.download_file(f, flat_structure=True)
+    assert result2 == Path(d2.output_dir) / "SS00001" / "x.png"
+
+    # failed download -> None
+    d3 = _downloader(tmp_path / "c")
+    monkeypatch.setattr(d3, "_download_file_http", lambda file, path: False)
+    assert d3.download_file(f) is None
+
+
+def test_download_flows(tmp_path, monkeypatch):
+    # comma-separated input, <=3 joined name, timestamped folder,
+    # parallel download with callback
+    d = _downloader(tmp_path, max_workers=2, verbose="pbar")
+    files = [_file("Gen1/SS1/a.png", line_name="SS1"),
+             _file("Gen1/SS2/b.png", line_name="SS2")]
+    monkeypatch.setattr(d, "get_filtered_files",
+                        lambda name, max_files_per_line=None: files)
+    monkeypatch.setattr(d, "download_file",
+                        lambda f, out, flat: Path(out) / f.filename)
+    events = []
+    downloaded = d.download(
+        "SS1, SS2",
+        on_file_downloaded=lambda p, n: events.append((str(p), n)),
+        add_timestamp=True)
+    assert len(downloaded) == 2
+    assert all(name == "SS1_SS2" for _, name in events)
+    assert all("flylight-downloads_SS1_SS2_" in str(p) for p in downloaded)
+
+    # sequential download with pbar + summary generation, >3 lines _etc name
+    d2 = _downloader(tmp_path / "seq", max_workers=1, verbose="pbar")
+    monkeypatch.setattr(d2, "get_filtered_files",
+                        lambda name, max_files_per_line=None: files)
+    monkeypatch.setattr(d2, "download_file",
+                        lambda f, out, flat: Path(out) / f.filename)
+    summary_calls = []
+    monkeypatch.setattr(d2, "_generate_image_summary",
+                        lambda **kw: summary_calls.append(kw))
+    downloaded2 = d2.download(["L1", "L2", "L3", "L4"],
+                              generate_summary="pdf", add_timestamp=False)
+    assert len(downloaded2) == 2
+    assert summary_calls and summary_calls[0]["line_name"] == "L1_L2_L3_etc4"
+
+
+def test_generate_image_summary_formats(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    d = _downloader(tmp_path)
+    img = tmp_path / "a.png"
+    img.write_text("x")
+    files = [img]
+
+    # pdf success via fake neuronbridge_finder
+    nbf = types.ModuleType("neuronbridge_finder")
+    pdf_calls = []
+    nbf.create_image_pdf = lambda **kw: pdf_calls.append(kw)
+    monkeypatch.setitem(sys.modules, "neuronbridge_finder", nbf)
+    d._generate_image_summary(files, tmp_path, "L", "T", "pdf")
+    assert len(pdf_calls) == 1
+
+    # list input + generic Exception during pdf creation
+    nbf.create_image_pdf = lambda **kw: (_ for _ in ()).throw(RuntimeError("boom"))
+    d._generate_image_summary(files, tmp_path, "L", "T", ["pdf"])
+    assert len(pdf_calls) == 1
+
+    # pdf ImportError branch (module entry halted)
+    monkeypatch.setitem(sys.modules, "neuronbridge_finder", None)
+    d._generate_image_summary(files, tmp_path, "L", "T", "pdf")
+
+    # pptx success via fake utils.report_utils; True -> ['pdf', 'pptx']
+    ru = types.ModuleType("utils.report_utils")
+    pptx_calls = []
+    ru.img2pptx = lambda **kw: pptx_calls.append(kw)
+    monkeypatch.setitem(sys.modules, "utils.report_utils", ru)
+    d._generate_image_summary(files, tmp_path, "L", "T", True)
+    assert len(pptx_calls) == 1
+
+    # pptx ImportError branch (both import paths halted)
+    monkeypatch.setitem(sys.modules, "utils.report_utils", None)
+    monkeypatch.setitem(sys.modules, "src.utils.report_utils", None)
+    d._generate_image_summary(files, tmp_path, "L", "T", "pptx")
+
+    # pptx generic Exception branch
+    ru2 = types.ModuleType("utils.report_utils")
+    ru2.img2pptx = lambda **kw: (_ for _ in ()).throw(RuntimeError("pptx boom"))
+    monkeypatch.setitem(sys.modules, "utils.report_utils", ru2)
+    d._generate_image_summary(files, tmp_path, "L", "T", "pptx")
+
+    # falsy summary value -> formats fall through and return
+    d._generate_image_summary(files, tmp_path, "L", "T", False)
+
+
+def test_get_metadata_non_janelia_success(tmp_path, monkeypatch):
+    d = _downloader(tmp_path)
+    files = [_file("Coll/VT1/VT1-meta.json", source="http",
+                   http_url="https://other.example.com/meta.json",
+                   line_name="VT000770")]
+    monkeypatch.setattr(d, "get_filtered_files", lambda name, **k: files)
+    monkeypatch.setattr(fld.urllib.request, "urlopen",
+                        lambda *a, **k: _Response(json.dumps({"k": 1})))
+    assert d.get_metadata("VT000770") == [{"k": 1}]
+
+
+def test_search_lines_error_and_walk_branches(tmp_path, monkeypatch):
+    # boto3 client errors everywhere -> caught in _collect and level-1 walk
+    class _ErrS3:
+        def list_objects_v2(self, **kw):
+            raise RuntimeError("s3 down")
+
+    d = _downloader(tmp_path, collections=["Gen1"])
+    d._s3_client = _ErrS3()
+    assert d.search_lines("R78") == []
+
+    # flat collection (>30 level-1 prefixes) is skipped during the walk
+    class _FlatS3:
+        def list_objects_v2(self, **kw):
+            if kw.get("Prefix") == "Gen1/":
+                return {"CommonPrefixes": [
+                    {"Prefix": f"Gen1/sub{i}/"} for i in range(31)]}
+            return {}
+
+    d2 = _downloader(tmp_path, collections=["Gen1"])
+    d2._s3_client = _FlatS3()
+    assert d2.search_lines("ZZZ") == []
+
+    # no S3 client -> prefix _collect uses HTTP, walk skipped entirely
+    d3 = _downloader(tmp_path, collections=["Gen1"])
+    monkeypatch.setattr(d3, "_list_bucket_http", lambda prefix, *a: [])
+    assert d3.search_lines("ZZZ") == []
