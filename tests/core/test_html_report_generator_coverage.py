@@ -704,3 +704,543 @@ def test_generate_html_report_empty_data(empty_analyzer):
     assert "<html" in html
     assert "</html>" in html
     assert "No data available" in html
+
+
+# ---------------------------------------------------------------------------
+# Appended branch-coverage tests
+# ---------------------------------------------------------------------------
+
+DS3 = ["ds_one", "ds_two", "ds_three"]
+NICK3 = {"ds_one": "D1", "ds_two": "D2", "ds_three": "D3"}
+
+
+class _WeirdRatioProbAnalyzer(FakeAnalyzer):
+    """Summary-section edge cases: zero / raising / bad-dtype ratio+prob data."""
+
+    def _get_edge_ratio_data_for_threshold(self, t):
+        if t == 1:
+            return pd.DataFrame({"ds_one": [0.0, 0.0], "ds_two": [0.0, 0.0]},
+                                index=["A -> B", "B -> C"])
+        if t == 5:
+            raise RuntimeError("ratio fetch failed")
+        return pd.DataFrame({"ds_one": ["x", "y"], "ds_two": [0.4, 0.1]},
+                            index=["A -> B", "B -> C"])
+
+    def _get_prob_data_for_threshold(self, t):
+        if t == 1:
+            return pd.DataFrame({"ds_one": [0.0], "ds_two": [0.0]},
+                                index=["A -> B -> C"])
+        raise RuntimeError("prob fetch failed")
+
+
+def test_summary_section_ratio_prob_edge_cases(tmp_path):
+    fa = _WeirdRatioProbAnalyzer(tmp_path)
+    html = hrg._generate_summary_section(
+        fa, DATASETS, [1, 5, 10], [], {}, NICKNAME_MAP
+    )
+    assert "Key Findings" in html or "edgeCountChart" in html
+
+
+class _RaisingTypeMapperGetter:
+    def __call__(self):
+        raise RuntimeError("no mapper available")
+
+
+def test_neuron_counts_section_no_type_mapper(tmp_path, monkeypatch):
+    import comparison.cross_dataset_type_mapper as cdtm
+
+    monkeypatch.setattr(cdtm, "get_type_mapper", _RaisingTypeMapperGetter())
+    fa = FakeAnalyzer(tmp_path)
+    # row with empty type is skipped; group row with 0/NaN renders '-'
+    fa._neuron_type_counts = pd.DataFrame(
+        [
+            {"type": "", "ds_one_source": 1, "ds_two_source": 0},
+            {"type": "A", "ds_one_source": 3, "ds_two_source": 2},
+        ]
+    )
+    fa._neuron_group_counts = pd.DataFrame(
+        [
+            {"custom_group": "G1", "role": "source", "ds_one": 0,
+             "ds_two": np.nan},
+            {"custom_group": "G2", "role": "target", "ds_one": 2, "ds_two": 1},
+        ]
+    )
+    html = hrg._generate_neuron_counts_section(fa, DATASETS, NICKNAME_MAP)
+    assert "Neuron Counts by Type" in html
+    assert 'class="absent"' in html
+
+
+class _DisplayNameMapper:
+    def load(self):
+        pass
+
+    def get_display_name(self, name, datasets):
+        if name == "BAD":
+            raise RuntimeError("mapper error")
+        if name == "MTe07":
+            return "MeVPLo2 (MTe07)"
+        return name
+
+
+def test_neuron_counts_section_with_type_mapper(tmp_path, monkeypatch):
+    import comparison.cross_dataset_type_mapper as cdtm
+
+    monkeypatch.setattr(cdtm, "get_type_mapper", lambda: _DisplayNameMapper())
+    fa = FakeAnalyzer(tmp_path)
+    fa._neuron_type_counts = pd.DataFrame(
+        [
+            {"type": "MTe07", "ds_one_source": 1, "ds_two_source": 0},
+            {"type": "MeVPLo2", "ds_one_source": 0, "ds_two_source": 1},
+            {"type": "BAD", "ds_one_source": 0, "ds_two_target": 2},
+        ]
+    )
+    html = hrg._generate_neuron_counts_section(fa, DATASETS, NICKNAME_MAP)
+    assert "MeVPLo2" in html
+    assert "(MTe07)" in html  # dataset-specific name appended
+
+
+class _RaisingPathDataAnalyzer(FakeAnalyzer):
+    def _get_path_data_for_threshold(self, t):
+        raise RuntimeError("path data unavailable")
+
+
+def test_similarity_section_path_data_and_csv_failures(tmp_path):
+    fa = _RaisingPathDataAnalyzer(tmp_path)
+    # Pre-existing FILE at the csv dir path forces makedirs to fail
+    (tmp_path / "similarity_matrices").write_text("blocker")
+    html = hrg._generate_similarity_section(fa, DATASETS, THRESHOLDS, NICKNAME_MAP)
+    assert "Similarity Matrices" in html
+
+
+class _SymPartialAnalyzer(FakeAnalyzer):
+    def __init__(self, output_path):
+        super().__init__(output_path, separate_hemispheres=True)
+
+    def get_hemisphere_symmetry_summaries(self):
+        full = _symmetry_summaries()
+        return {t: {"ds_one": v["ds_one"]} for t, v in full.items()}
+
+
+def test_hemisphere_symmetry_missing_dataset(tmp_path):
+    html = hrg._generate_hemisphere_symmetry_section(
+        _SymPartialAnalyzer(tmp_path), DATASETS, THRESHOLDS, NICKNAME_MAP
+    )
+    assert "Ipsi Jaccard" in html
+    assert "D2" not in html  # dataset without summary is skipped
+
+
+class _SelfEdgeAnalyzer(FakeAnalyzer):
+    def __init__(self, output_path, with_label_mapper=True):
+        super().__init__(output_path, source_neurons=("A",), target_neurons=("A",))
+        if not with_label_mapper:
+            self.label_mapper = None
+
+    def get_aligned_data(self, t):
+        df = _aligned_df()
+        df.loc["A -> A"] = [4.0, 4.0]
+        return df
+
+
+def test_networks_section_no_mapper_with_self_edges(tmp_path):
+    html = hrg._generate_networks_section(
+        _SelfEdgeAnalyzer(tmp_path, with_label_mapper=False),
+        DATASETS, THRESHOLDS, NICKNAME_MAP,
+    )
+    assert "Self-edges detected" in html
+    assert "Network Visualizations" in html
+
+
+class _RaisingNetworkAnalyzer(FakeAnalyzer):
+    def __init__(self, output_path):
+        super().__init__(output_path, source_neurons=("A",), target_neurons=("A",))
+        self.label_mapper = None
+        self.parameters._ensure_flat_list = lambda v: (_ for _ in ()).throw(
+            RuntimeError("flat list fail"))
+
+
+def test_networks_section_self_edge_count_failure(tmp_path):
+    html = hrg._generate_networks_section(
+        _RaisingNetworkAnalyzer(tmp_path), DATASETS, THRESHOLDS, NICKNAME_MAP
+    )
+    assert "Network Visualizations" in html
+    assert "Self-edges detected" not in html
+
+
+def test_extract_edges_from_paths_unparseable():
+    df = pd.DataFrame(
+        {"ds_one": [7.0, 3.0], "ds_two": [5.0, 3.0]},
+        index=["A -> B -> C", "justANode"],
+    )
+    edges = hrg._extract_edges_from_paths(df, DATASETS, max_paths=10)
+    assert "A -> B" in edges
+    assert "B -> C" in edges
+
+
+def test_filter_aligned_by_paths_expansion():
+    # Many duplicate paths sharing edges -> expansion loop fires
+    n = 20
+    path_df = pd.DataFrame(
+        {"ds_one": [1.0] * n, "ds_two": [1.0] * n},
+        index=["A -> B -> C"] * n,
+    )
+    aligned = pd.DataFrame(
+        {"ds_one": [10.0, 7.0], "ds_two": [8.0, 6.0]},
+        index=["A -> B", "B -> C"],
+    )
+    out = hrg._filter_aligned_by_paths(aligned, path_df, DATASETS, max_edges=5)
+    assert list(out.index) == ["A -> B", "B -> C"]
+
+
+class _ConservationExceptionAnalyzer(FakeAnalyzer):
+    def __init__(self, output_path):
+        super().__init__(output_path)
+
+    def _get_path_data_for_threshold(self, t):
+        raise RuntimeError("no paths")
+
+    def get_aligned_data(self, t):
+        df = _aligned_df()
+        df.loc["noarrow"] = [1.0, 1.0]      # skipped: no ' -> '
+        df.loc["X -> E"] = [2.0, 2.0]       # X becomes a dead-end source
+        return df
+
+
+def test_conservation_network_exceptions_and_dead_end(tmp_path):
+    fa = _ConservationExceptionAnalyzer(tmp_path)
+    fa.parameters._ensure_flat_list = lambda v: (_ for _ in ()).throw(
+        RuntimeError("flat list fail"))
+    html = hrg._generate_conservation_network(fa, DATASETS, 1, NICKNAME_MAP)
+    assert "Conservation" in html
+    assert "dead-end" in html
+
+
+class _ThreeDSAnalyzer(FakeAnalyzer):
+    def __init__(self, output_path):
+        super().__init__(output_path, dataset_names=tuple(DS3))
+
+    def get_aligned_data(self, t):
+        return pd.DataFrame(
+            {
+                "ds_one": [10.0, 6.0, 0.0, 4.0],
+                "ds_two": [9.0, 0.0, 5.0, 3.0],
+                "ds_three": [8.0, 5.0, 0.0, 2.0],
+            },
+            index=["A -> B", "B -> C", "C -> D", "E -> F"],
+        )
+
+
+def test_conservation_network_partial_three_datasets(tmp_path):
+    fa = _ThreeDSAnalyzer(tmp_path)
+    html = hrg._generate_conservation_network(fa, DS3, 1, NICK3)
+    assert "Partial" in html
+    assert "Unique" in html
+
+
+class FakeAutoTypeMapper:
+    def get_all_dataset_short_codes(self, datasets):
+        return {"D1": "ds_one", "D2": "ds_two"}
+
+    def get_display_name_with_dataset_info(self, name, datasets):
+        if name == "B":
+            return "B (F:B1)", {"F": "B1"}
+        if name == "GNG588":
+            return "GNG588 (CB0038)", {"F": "GNG588"}
+        if name == "NEW":
+            return "CAN (F:N1)", {"F": "N1"}
+        if name == "DUPA":
+            return "CAN (F:N2)", {"F": "N2"}
+        if name == "NEWT":
+            return "CAN2 (H:N2)", {"H": "N2"}
+        if name == "DUPT":
+            return "CAN2 (H:N3)", {"H": "N3"}
+        if name in ("BALT", "TALT"):
+            # display label already present as a transformed edge node
+            return "B (F:B1)", {}
+        return name, {}
+
+
+def test_conservation_network_type_mapper(tmp_path):
+    fa = FakeAnalyzer(
+        tmp_path, auto_type_mapping=True,
+        source_neurons=("A", "NEW", "DUPA", "BALT", "PAT*"),
+        target_neurons=("B", "NEWT", "DUPT", "TALT", "TPAT*"),
+    )
+    fa.parameters._auto_type_mapper = FakeAutoTypeMapper()
+    df = _aligned_df()
+    df.loc["GNG588(CB0038) -> B"] = [3.0, 2.0]
+    fa.get_aligned_data = lambda t: df
+    fa.get_aligned_data_for_network = lambda t: df
+    # no path data -> custom edges are not filtered away
+    fa._get_path_data_for_threshold = lambda t: pd.DataFrame()
+    html = hrg._generate_conservation_network(fa, DATASETS, 1, NICKNAME_MAP)
+    assert "B (F:B1)" in html
+    assert "CAN (F:N" in html
+    assert "CAN2 (H:N" in html
+    assert "Dataset codes in node names" in html
+    assert "Names by dataset" in html
+
+
+def test_conservation_network_is_represented_branches(tmp_path):
+    fa = FakeAnalyzer(
+        tmp_path,
+        source_neurons=("aMe12", "MeVPLo2", "Leg", "aMe", "MTe07", "Var",
+                        "X1", "ISO_SRC", "PAT*"),
+        target_neurons=("Q", "TGT_ISO", "TPAT*"),
+    )
+    idx = [
+        "aMe12_L -> Q",
+        "MeVPLo2 (F:MTe07) -> Q",
+        "Leg(X1) -> Q",
+        "aMe_L (F:aMe) -> Q",
+        "Base(F:MTe07/H:Var) -> Q",
+        "Base2(X1) -> Q",
+    ]
+    df = pd.DataFrame(
+        {"ds_one": [1.0] * len(idx), "ds_two": [1.0] * len(idx)}, index=idx
+    )
+    fa.get_aligned_data = lambda t: df
+    fa.get_aligned_data_for_network = lambda t: df
+    # no path data -> aligned edges are not filtered away
+    fa._get_path_data_for_threshold = lambda t: pd.DataFrame()
+    html = hrg._generate_conservation_network(fa, DATASETS, 1, NICKNAME_MAP)
+    assert "ISO_SRC" in html    # isolated source node added
+    assert "TGT_ISO" in html    # isolated target node added
+
+
+class _MultiThresholdAnalyzer(FakeAnalyzer):
+    def __init__(self, output_path, raise_paths=False):
+        super().__init__(output_path)
+        self._raise_paths = raise_paths
+
+    def get_aligned_data(self, t):
+        data = {
+            1: pd.DataFrame(
+                {"ds_one": [10.0, 5.0, 3.0, 1.0],
+                 "ds_two": [8.0, 4.0, 0.0, 1.0]},
+                index=["A -> B", "B -> C", "C -> D", "noarrow"]),
+            5: pd.DataFrame(
+                {"ds_one": [9.0, 4.0], "ds_two": [7.0, 3.0]},
+                index=["A -> B", "B -> C"]),
+            10: pd.DataFrame(
+                {"ds_one": [8.0, 2.0, 1.0], "ds_two": [6.0, 0.0, 2.0]},
+                index=["A -> B", "A -> B", "E -> F"]),
+        }
+        return data.get(t, pd.DataFrame())
+
+    def _get_path_data_for_threshold(self, t):
+        if self._raise_paths:
+            raise RuntimeError("no paths")
+        return pd.DataFrame()
+
+
+def test_dataset_network_branches(tmp_path):
+    fa = _MultiThresholdAnalyzer(tmp_path, raise_paths=True)
+    html = hrg._generate_dataset_network(
+        fa, "ds_one", [1, 5, 10], NICKNAME_MAP, max_edges=2
+    )
+    assert "D1" in html
+    assert "thresholds" in html
+
+
+def test_dataset_network_no_label_mapper(tmp_path):
+    fa = _MultiThresholdAnalyzer(tmp_path)
+    fa.label_mapper = None
+    html = hrg._generate_dataset_network(fa, "ds_one", [1, 5], NICKNAME_MAP)
+    assert "D1" in html
+
+
+def test_dataset_network_params_failure(tmp_path):
+    fa = _MultiThresholdAnalyzer(tmp_path)
+    fa.label_mapper = None
+    fa.parameters._ensure_flat_list = lambda v: (_ for _ in ()).throw(
+        RuntimeError("fail"))
+    html = hrg._generate_dataset_network(fa, "ds_one", [1, 5], NICKNAME_MAP)
+    assert "D1" in html
+
+
+class _EdgeTableAnalyzer(FakeAnalyzer):
+    def get_aligned_data(self, t):
+        if t == 1:
+            return pd.DataFrame()
+        return pd.DataFrame(
+            {"ds_one": [10.0, 5.0, 7.0], "ds_two": [8.0, 4.0, 6.0]},
+            index=["A -> B", "B -> C", "A -> B"],
+        )
+
+
+def test_edge_dataset_table_fallback_and_series(tmp_path):
+    html = hrg._generate_edge_dataset_table(
+        _EdgeTableAnalyzer(tmp_path), "ds_one", [1, 5], NICKNAME_MAP
+    )
+    assert "A -> B" in html
+
+
+class _PathTableAnalyzer(FakeAnalyzer):
+    def _get_path_data_for_threshold(self, t):
+        if t == 1:
+            return pd.DataFrame()
+        return pd.DataFrame(
+            {"ds_one": [7.0, 3.0, 5.0], "ds_two": [5.0, 3.0, 4.0]},
+            index=["A -> B -> C", "A -> C -> D", "A -> B -> C"],
+        )
+
+
+def test_path_dataset_table_fallback_and_series(tmp_path):
+    html = hrg._generate_path_dataset_table(
+        _PathTableAnalyzer(tmp_path), "ds_one", [1, 5], NICKNAME_MAP
+    )
+    assert "A -> B -> C" in html
+
+
+def test_path_presence_table_no_datasets(analyzer):
+    df = pd.DataFrame({"other": [1]}, index=["A -> B -> C"])
+    html = hrg._generate_path_presence_table(
+        analyzer, df, DATASETS, NICKNAME_MAP, threshold=1
+    )
+    assert "No datasets available" in html
+
+
+class _ConsFailAnalyzer(FakeAnalyzer):
+    def __init__(self, output_path):
+        super().__init__(output_path, dataset_names=tuple(DS3))
+        self.comparison_report = {"path_presence_matrix": ["not", "a", "df"]}
+
+    def get_mapped_results(self):
+        raise RuntimeError("no mapped results")
+
+    def get_aligned_data(self, t):
+        return pd.DataFrame(
+            {
+                "ds_one": [10.0, 6.0, 4.0],
+                "ds_two": [9.0, 5.0, 0.0],
+                "ds_three": [8.0, 0.0, 0.0],
+            },
+            index=["A -> B", "B -> C", "C -> D"],
+        )
+
+
+def test_conservation_section_failures(tmp_path):
+    html = hrg._generate_conservation_section(
+        _ConsFailAnalyzer(tmp_path), DS3, THRESHOLDS, _key_findings(), NICK3
+    )
+    assert "Conservation Analysis" in html
+    assert "In 2 datasets" in html
+    assert "plotData = null" in html  # plotly generation failed -> fallback
+
+
+class _ConsThreeAnalyzer(FakeAnalyzer):
+    def __init__(self, output_path):
+        super().__init__(output_path, dataset_names=tuple(DS3))
+        self.comparison_report = {
+            "path_presence_matrix": pd.DataFrame(
+                {
+                    "ds_one_t1": ["True", "True", "True"],
+                    "ds_two_t1": ["True", "True", False],
+                    "ds_three_t1": ["True", False, False],
+                },
+                index=["p1", "p2", "p3"],
+            )
+        }
+
+    def get_aligned_data(self, t):
+        return pd.DataFrame(
+            {
+                "ds_one": [10.0, 6.0],
+                "ds_two": [9.0, 5.0],
+                "ds_three": [8.0, 0.0],
+            },
+            index=["A -> B", "B -> C"],
+        )
+
+
+def test_conservation_section_three_datasets_labels(tmp_path):
+    html = hrg._generate_conservation_section(
+        _ConsThreeAnalyzer(tmp_path), DS3, [1], _key_findings(), NICK3
+    )
+    assert "In 2 datasets" in html  # edges + paths in exactly 2 of 3
+    assert "Unique (1)" in html
+
+
+class _OverlapPathFailAnalyzer(FakeAnalyzer):
+    def _get_path_data_for_threshold(self, t):
+        raise RuntimeError("no paths")
+
+
+def test_overlap_matrices_empty_datasets(analyzer):
+    html = hrg._generate_overlap_matrices_section(
+        analyzer, [], THRESHOLDS, {}
+    )
+    assert "No datasets configured" in html
+
+
+def test_overlap_matrices_path_failure(tmp_path):
+    html = hrg._generate_overlap_matrices_section(
+        _OverlapPathFailAnalyzer(tmp_path), DATASETS, THRESHOLDS, NICKNAME_MAP
+    )
+    assert "Dataset Overlap Matrices" in html
+
+
+class _TrendFailAnalyzer(FakeAnalyzer):
+    def __init__(self, output_path, mode):
+        super().__init__(output_path)
+        self._mode = mode
+
+    def get_aligned_data(self, t):
+        if self._mode == "raise":
+            raise RuntimeError("aligned fail")
+        if self._mode == "none":
+            return None
+        return super().get_aligned_data(t)
+
+    def _get_path_data_for_threshold(self, t):
+        if self._mode == "raise":
+            raise RuntimeError("path fail")
+        if self._mode == "none":
+            return None
+        return super()._get_path_data_for_threshold(t)
+
+
+def test_trend_plots_empty_data(empty_analyzer):
+    html1 = hrg._generate_jaccard_similarity_plot(
+        empty_analyzer, DATASETS, THRESHOLDS, NICKNAME_MAP)
+    html2 = hrg._generate_edge_rank_correlation_plot(
+        empty_analyzer, DATASETS, THRESHOLDS, NICKNAME_MAP)
+    assert "Jaccard" in html1
+    assert "Edge Rank" in html2
+
+
+def test_trend_plots_raising_and_none(tmp_path):
+    raising = _TrendFailAnalyzer(tmp_path, "raise")
+    none = _TrendFailAnalyzer(tmp_path, "none")
+    assert "Cosine" in hrg._generate_cosine_similarity_trend_plot(
+        raising, DATASETS, THRESHOLDS, NICKNAME_MAP)
+    assert "Cosine" in hrg._generate_cosine_similarity_trend_plot(
+        none, DATASETS, THRESHOLDS, NICKNAME_MAP)
+    assert "Path" in hrg._generate_path_rank_correlation_plot(
+        raising, DATASETS, THRESHOLDS, NICKNAME_MAP)
+    assert "Path" in hrg._generate_path_rank_correlation_plot(
+        none, DATASETS, THRESHOLDS, NICKNAME_MAP)
+
+
+class _StatsTableAnalyzer(FakeAnalyzer):
+    def __init__(self, output_path, mode):
+        super().__init__(output_path)
+        self._mode = mode
+
+    def get_aligned_data(self, t):
+        if self._mode == "foreign":
+            return pd.DataFrame({"other_ds": [1.0, 2.0]},
+                                index=["A -> B", "B -> C"])
+        return pd.DataFrame(
+            {"ds_one": [10.0, 0.0], "ds_two": [0.0, 5.0]},
+            index=["A -> B", "B -> C"],
+        )
+
+
+def test_stats_table_no_datasets_and_low_overlap(tmp_path):
+    html1 = hrg._generate_stats_table(
+        _StatsTableAnalyzer(tmp_path, "foreign"), DATASETS, 1, NICKNAME_MAP)
+    assert "No datasets available" in html1
+    html2 = hrg._generate_stats_table(
+        _StatsTableAnalyzer(tmp_path, "sparse"), DATASETS, 1, NICKNAME_MAP)
+    assert "0.000" in html2  # rank corr falls back to 0 with <2 shared edges
