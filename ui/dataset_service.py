@@ -511,8 +511,16 @@ class DatasetService:
 
         # Fast path: use server metadata if we have it
         if self._server_datasets and dataset in self._server_datasets:
-            info.available = True
             server_info = self._server_datasets[dataset]
+            # Hidden datasets (e.g. banc:v888) are listed by the server but
+            # not queryable through the API, so they stay unavailable here.
+            if isinstance(server_info, dict) and str(
+                    server_info.get("hidden", "")).lower() == "true":
+                info.error = (
+                    "Hidden on the NeuPrint server (not queryable through the API)"
+                )
+                return info
+            info.available = True
             info.metadata = {
                 "server": self.NEUPRINT_SERVER,
                 "last_mod": server_info.get("last-mod", ""),

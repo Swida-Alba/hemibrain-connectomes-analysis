@@ -8745,18 +8745,35 @@ class ConnectivityProfileComparer:
         
         # Process type names/patterns
         for item_str in type_items:
-            # It's a type name or pattern - get all bodyIds for this type
-            body_ids = self.profiler.get_bodyids_for_type(item_str, dataset)
-            if body_ids:
-                if effective_aggregation == 'bodyid':
-                    # every bodyId of the type is its own row
-                    for bid in body_ids:
-                        neurons[f"{bid}_{item_str}"] = [bid]
-                else:
-                    neurons[item_str] = body_ids
-            elif self._looks_like_pattern(item_str):
-                # aggregation_level='type': expand the pattern into its
-                # matched types, each becoming an INDEPENDENT row
+            # 1) Coarse-taxonomy / fine-type expansion.  get_types_for_label
+            #    groups matching rows by their real neuron type, so a cell
+            #    class / cell type label (e.g. FAFB's 'circadian_clock') maps
+            #    to several real types, each becoming an INDEPENDENT comparison
+            #    row — mirroring the network tab's multi-column resolution.
+            #    This must run before the union lookup in get_bodyids_for_type,
+            #    which would otherwise collapse the whole label into a single
+            #    row and trip the "Need at least 2 type profiles" guard.
+            label_resolver = getattr(self.profiler, 'get_types_for_label', None)
+            label_groups = (
+                label_resolver(item_str, dataset) if label_resolver else {}
+            )
+            if label_groups:
+                for real_type, ids in label_groups.items():
+                    if effective_aggregation == 'bodyid':
+                        for bid in ids:
+                            neurons[f"{bid}_{real_type}"] = [bid]
+                    else:
+                        if real_type not in neurons:
+                            neurons[real_type] = []
+                        neurons[real_type].extend(
+                            int(bid) if isinstance(bid, str) and bid.isdigit()
+                            else bid for bid in ids)
+                continue
+
+            # 2) Regex pattern: expand into its matched types, each an
+            #    INDEPENDENT row (get_types_for_label only matches an exact
+            #    label, so patterns reach this branch untouched).
+            if self._looks_like_pattern(item_str):
                 matched_types = self.profiler.list_types(item_str, dataset)
                 if matched_types:
                     for tname in matched_types:
@@ -8771,32 +8788,21 @@ class ConnectivityProfileComparer:
                 else:
                     # No exact type and no pattern match: keep the raw item
                     neurons[item_str] = [item_str]
-            else:
-                # Single type with no exact bodyIds: it may be a coarse taxonomy
-                # label (cell class / cell type, e.g. 'circadian_clock') that the
-                # dataset maps to several real types.  Expand it into one
-                # independent row per real type, mirroring the network tab's
-                # multi-column query resolution.  A label with a single real type
-                # still becomes that single row; only a true miss keeps the raw
-                # literal so the user sees the unresolved query.
-                label_resolver = getattr(self.profiler, 'get_types_for_label', None)
-                label_groups = (
-                    label_resolver(item_str, dataset) if label_resolver else {}
-                )
-                if label_groups:
-                    for real_type, ids in label_groups.items():
-                        if effective_aggregation == 'bodyid':
-                            for bid in ids:
-                                neurons[f"{bid}_{real_type}"] = [bid]
-                        else:
-                            if real_type not in neurons:
-                                neurons[real_type] = []
-                            neurons[real_type].extend(
-                                int(bid) if isinstance(bid, str) and bid.isdigit()
-                                else bid for bid in ids)
+                continue
+
+            # 3) Union lookup: an exact type (or a NeuPrint dataset with no
+            #    local taxonomy table).  All matching bodyIds form one row.
+            body_ids = self.profiler.get_bodyids_for_type(item_str, dataset)
+            if body_ids:
+                if effective_aggregation == 'bodyid':
+                    # every bodyId of the type is its own row
+                    for bid in body_ids:
+                        neurons[f"{bid}_{item_str}"] = [bid]
                 else:
-                    # No exact type, no pattern, no taxonomy match: keep raw item
-                    neurons[item_str] = [item_str]
+                    neurons[item_str] = body_ids
+            else:
+                # No exact type, no pattern, no taxonomy match: keep raw item
+                neurons[item_str] = [item_str]
         
         return neurons
     

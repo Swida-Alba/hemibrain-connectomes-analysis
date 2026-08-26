@@ -139,6 +139,20 @@ class TestHiddenDatasetFilter:
         available = svc.fetch_neuprint_datasets()
         assert set(available) == NEUPRINT_EXPECTED
 
+    def test_probe_marks_hidden_dataset_unavailable(self):
+        svc = DatasetService()
+        svc._token = "tok"
+        svc._cave_token = "cav"
+        svc._server_datasets = dict(self.SERVER_META)
+
+        hidden = svc._probe_neuprint_dataset("banc:v888")
+        assert hidden.available is False
+        assert hidden.error
+
+        visible = svc._probe_neuprint_dataset("male-cns:v0.9")
+        assert visible.available is True
+        assert visible.error is None
+
 
 class TestTokenConfigJson:
     """_load_tokens reads the tokens section of config.json (the only

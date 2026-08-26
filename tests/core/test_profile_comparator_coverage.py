@@ -2127,6 +2127,40 @@ def test_comparer_get_neurons_to_compare_variants(tmp_path):
     assert comp._get_neurons_to_compare(query=['zz.*']) == {'zz.*': ['zz.*']}
 
 
+def test_comparer_coarse_label_expands_before_union_lookup(tmp_path):
+    """A coarse taxonomy label that maps to several real types must expand
+    into one comparison row per type, even when the single-column union
+    lookup would also return bodyIds (FAFB 'circadian_clock' case)."""
+    comp = _comparer(['circadian_clock'], tmp_path)
+    fake = _FakeProfilerFull(
+        bodyids={
+            ('circadian_clock', DS_A): [1, 2, 3, 4, 5],  # union result
+            ('aMe12', DS_A): [1, 2],
+        },
+    )
+    fake.label_groups[('circadian_clock', DS_A)] = {
+        's-LNv': [1, 2], 'DN1pC': [3, 4],
+    }
+    comp.profiler = fake
+
+    # Multi-type taxonomy label: per-real-type rows win over the union row
+    assert comp._get_neurons_to_compare(query=['circadian_clock']) == \
+        {'s-LNv': [1, 2], 'DN1pC': [3, 4]}
+
+    # bodyid aggregation still produces per-neuron rows under real types
+    assert comp._get_neurons_to_compare(
+        query=['circadian_clock'], aggregation_level='bodyid') == \
+        {'1_s-LNv': [1], '2_s-LNv': [2], '3_DN1pC': [3], '4_DN1pC': [4]}
+
+    # An exact type (single taxonomy group) is still one row
+    fake.label_groups[('Mi1', DS_A)] = {'Mi1': [7, 8]}
+    assert comp._get_neurons_to_compare(query=['Mi1']) == {'Mi1': [7, 8]}
+
+    # No taxonomy grouping (e.g. NeuPrint): the union lookup keeps one row
+    assert comp._get_neurons_to_compare(query=['aMe12']) == \
+        {'aMe12': [1, 2]}
+
+
 def test_comparer_ensure_connection_cache(tmp_path, monkeypatch):
     _install_fake_coana(monkeypatch)
     comp = _comparer(['T1'], tmp_path)

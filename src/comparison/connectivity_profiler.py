@@ -4409,29 +4409,7 @@ class ConnectivityProfiler:
                 or 'banc' in dataset_lower):
             return {}
 
-        src_dir = Path(__file__).parent.parent
-        project_root = src_dir.parent
-        safe_name = dataset.replace(':', '_').replace('.', '_')
-        dataset_path = project_root / 'datasets' / safe_name
-        neurons_files = [
-            dataset_path / f'{safe_name}_allneurons_neuron_df.parquet',
-            dataset_path / f'{safe_name}_allneurons_neuron_df.csv',
-            dataset_path / f'{safe_name}_neurons.parquet',
-            dataset_path / f'{safe_name}_neurons.csv',
-            dataset_path / 'neurons.parquet',
-            dataset_path / 'neurons.csv',
-        ]
-        df = None
-        for neurons_file in neurons_files:
-            if neurons_file.exists():
-                try:
-                    if str(neurons_file).endswith('.parquet'):
-                        df = pd.read_parquet(neurons_file)
-                    else:
-                        df = pd.read_csv(neurons_file)
-                    break
-                except Exception:
-                    df = None
+        df = self._load_local_neuron_frame(dataset)
         if df is None or df.empty:
             return {}
 
