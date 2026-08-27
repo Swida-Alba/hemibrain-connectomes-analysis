@@ -9899,17 +9899,18 @@ class VisualizeSkeleton:
                             connectors=self.show_connectors if not isinstance(neuron_vols, navis.Volume) else False,
                         )
                     fig_traces = fig_layer.data
-                    for j, trace in enumerate(fig_traces):
-                        existing_name = getattr(trace, 'name', None)
-                        if existing_name:
-                            neuron_id = str(existing_name)
-                        elif j < len(neuron_vols):
-                            neuron_id = str(neuron_vols[j].id)
-                        else:
-                            neuron_id = f"neuron_{j}"
-
+                    # Companion traces without their own name (soma meshes)
+                    # must resolve to their owning neuron, not to whichever
+                    # bodyId happens to sit at the trace's list position.
+                    identities = self._resolve_plotly_trace_identities(
+                        neuron_vols, fig_traces,
+                    )
+                    for (trace, (neuron_id, source_index)) in zip(
+                            fig_traces, identities):
                         neuron_color = self._resolve_neuron_color(neuron_id, i)
-                        trace_entries.append((trace, neuron_id, j, neuron_color))
+                        trace_entries.append(
+                            (trace, neuron_id, source_index, neuron_color)
+                        )
 
                 # Build a mapping of neuron ID to type for 'type' legend mode
                 neuron_type_map = {}
@@ -14834,6 +14835,74 @@ class VisualizeSkeleton:
             except Exception as e:
                 self._vprint(f'\\n⚠️  Failed to save k3d plot: {e}')
     
+    @staticmethod
+    def _resolve_plotly_trace_identities(neuron_vols, fig_traces):
+        """Map each navis-generated trace to its owning neuron.
+
+        navis names skeleton and connector traces after their neuron but
+        leaves companion meshes (soma spheres) unnamed. A positional
+        fallback counts traces rather than neurons, so once a companion
+        mesh appears every later identity slips onto a neighboring bodyId
+        and the soma ends up with a different legend label than its own
+        skeleton. Match names against the plotted neuron identities first;
+        otherwise give named traces their legacy positional entry and let
+        unnamed companions inherit whatever named trace immediately
+        precedes them. Leading orphan meshes fall back to pure position.
+
+        Returns a list of ``(neuron_id, source_index)`` aligned with
+        ``fig_traces``.
+        """
+        identity_keys = {}
+        for pos, vol in enumerate(neuron_vols or []):
+            for key in (getattr(vol, 'id', None), getattr(vol, 'name', None)):
+                if key is not None:
+                    identity_keys.setdefault(str(key), pos)
+
+        fig_traces = list(fig_traces)
+
+        resolved = []
+        # Identity of the most recent named trace. navis emits each neuron's
+        # skeleton first, then its unnamed companions (soma meshes), so an
+        # unnamed trace belongs to whatever named trace precedes it -- even
+        # when that name did not map back to a plotted neuron identity.
+        last_named_identity = None
+        for j, trace in enumerate(fig_traces):
+            existing_name = getattr(trace, 'name', None)
+            pos = None
+            if existing_name:
+                pos = identity_keys.get(str(existing_name))
+                identity = (
+                    str(existing_name), pos if pos is not None else j,
+                )
+                resolved.append(identity)
+                last_named_identity = identity
+            elif last_named_identity is not None:
+                resolved.append(last_named_identity)
+            elif j < len(neuron_vols or []):
+                resolved.append((
+                    str(getattr(neuron_vols[j], 'id', f'neuron_{j}')), j,
+                ))
+            else:
+                resolved.append((f'neuron_{j}', j))
+
+        return resolved
+
+    @staticmethod
+    def _dedupe_profile_name(safe_name, taken):
+        """Suffix a sanitized profile stem until it does not collide.
+
+        Distinct legend keys can sanitize to the same filename; without
+        this the later export silently overwrites the earlier one.
+        """
+        base = safe_name or 'individual'
+        candidate = base
+        suffix = 2
+        while candidate in taken:
+            candidate = f'{base}_{suffix}'
+            suffix += 1
+        taken.add(candidate)
+        return candidate
+
     def plot_neurons(self):
         import time
         start_time = time.time()
@@ -15186,6 +15255,11 @@ class VisualizeSkeleton:
             while '__' in safe_name:
                 safe_name = safe_name.replace('__', '_')
             return safe_name.rstrip('_')
+
+        # Distinct legend keys can sanitize to the same filename; keep every
+        # exported profile instead of letting the later one overwrite the
+        # earlier one.
+        taken_profile_names = set()
         
         from tqdm import tqdm
         legend_names = list(legend_entries.keys())
@@ -15253,7 +15327,9 @@ class VisualizeSkeleton:
             if 'html' in output_format:
                 for legend_name in tqdm(legend_names, desc='Exporting HTML files'):
                     trace_indices = legend_entries[legend_name]
-                    safe_name = _sanitize_filename(legend_name)
+                    safe_name = self._dedupe_profile_name(
+                        _sanitize_filename(legend_name), taken_profile_names,
+                    )
                     
                     # Set visibility for this individual
                     for idx in range(n_traces):
@@ -15298,7 +15374,9 @@ class VisualizeSkeleton:
                     continue
                 
                 trace_indices = legend_entries[legend_name]
-                safe_name = _sanitize_filename(legend_name)
+                safe_name = self._dedupe_profile_name(
+                    _sanitize_filename(legend_name), taken_profile_names,
+                )
                 
                 # Hide all neuron traces, show only this legend's traces + background
                 for idx in range(n_traces):

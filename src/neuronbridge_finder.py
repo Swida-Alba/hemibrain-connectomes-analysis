@@ -7186,9 +7186,13 @@ class NeuronBridgeFinder:
                     )
                 )
                 
-                legend_mode = viz_settings.get(
-                    'legend_mode', 'layer' if visualize_by == 'type' else 'single'
-                )
+                # Legend grouping follows ``visualize_by`` and deliberately
+                # ignores the shared panel's legend preference: result
+                # scenes need one entry per rank/type layer ('type' search)
+                # or per bodyId ('bodyId' search). Honouring a saved mode
+                # let the app-wide default 'type' collapse every legend into
+                # bare type names, as previously hit in Find Homologs.
+                legend_mode = 'layer' if visualize_by == 'type' else 'single'
                 
                 # Determine whether to show VNC mesh based on region and dataset
                 # Show VNC when dataset is manc, male-cns, or region is VNC/All

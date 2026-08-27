@@ -1835,6 +1835,33 @@ def test_visualize_top_types_paths(finder, tmp_path, monkeypatch):
     assert "mesh_color" not in kw
 
 
+def test_visualize_top_types_legend_mode_ignores_saved_preference(
+        finder, tmp_path, monkeypatch):
+    """The saved app-wide legend preference must not rewrite the mode
+    derived from ``visualize_by`` (homolog-style regression)."""
+    finder._neuron_dfs["hemibrain_v1_2_1"] = HEMIBRAIN_DF
+    _block_network_pulls(finder, monkeypatch)
+    combined = pd.DataFrame({
+        "bodyId": ["5813128953", "1234"],
+        "type": ["MBON01", "LH173"],
+        "score": [45000.0, 38000.0],
+        "dataset": ["hemibrain:v1.2.1"] * 2,
+    })
+    instances = _install_fake_visualize_skeleton(monkeypatch)
+
+    saved = {"legend_mode": "single"}  # arbitrary saved global preference
+
+    finder._visualize_top_types(
+        combined, 5, str(tmp_path / "t"), visualize_by="type",
+        visualization_settings=dict(saved))
+    assert instances[0].kwargs["legend_mode"] == "layer"
+
+    finder._visualize_top_types(
+        combined, 5, str(tmp_path / "b"), visualize_by="bodyId",
+        visualization_settings=dict(saved))
+    assert instances[1].kwargs["legend_mode"] == "single"
+
+
 def test_neuron_to_lines_flows(finder_with_client, monkeypatch):
     finder = finder_with_client
     finder._neuron_dfs["hemibrain_v1_2_1"] = HEMIBRAIN_DF

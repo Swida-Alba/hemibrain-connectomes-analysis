@@ -6279,6 +6279,12 @@ class MorphologyComparer:
                     continue
                 if key == "mesh_color" and value == "auto":
                     continue
+                if key == "legend_mode":
+                    # Derived from ``visualize_by`` above. Letting the shared
+                    # panel's global preference (app default 'type') rewrite
+                    # it collapsed per-bodyId legends into bare type names,
+                    # exactly like the Find Homologs regression.
+                    continue
                 viz_kwargs[key] = value
 
             # The shared panel returns None when its analysis default is

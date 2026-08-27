@@ -1840,6 +1840,57 @@ def test_visualize_top_results_paths(tmp_path, monkeypatch):
     comparer._visualize_top_results(pd.DataFrame(), query_df=None)
 
 
+def test_visualize_top_results_legend_mode_not_overridden(tmp_path, monkeypatch):
+    """The shared panel's global legend preference must not rewrite the
+    mode derived from ``visualize_by`` (homolog-style regression)."""
+    _downloader_guard(monkeypatch)
+    dataset = "hemibrain:v1.2.1"
+    _write_neuron_table(tmp_path, dataset, {
+        "bodyId": [1, 2, 3],
+        "type": ["T1", "T2", "T2"],
+        "instance": ["", "", ""],
+    })
+    _seed_cache(tmp_path, [1, 2, 3])
+    _patch_getneurons(monkeypatch, [1], types=["T1"])
+    results_df = pd.DataFrame({
+        "target_bodyId": [2, 3],
+        "target_type": ["T2", "T2"],
+        "similarity": [0.9, 0.8],
+        "is_intra_type": [False, False],
+    })
+    query_df = pd.DataFrame({"bodyId": [1], "type": ["T1"],
+                             "instance": [""]})
+
+    created = []
+
+    class FakeVisualizer:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            created.append(self)
+
+        def plot_neurons(self):
+            pass
+
+    monkeypatch.setattr(M, "_import_visualizer", lambda: FakeVisualizer)
+
+    settings = {"legend_mode": "type"}  # matches the app-wide default
+
+    comparer = _comparer(tmp_path, visualize_top_n=2, visualize_by="type",
+                         saveas="legend_type",
+                         visualization_settings=dict(settings))
+    comparer.output_folder = str(Path(tmp_path) / "outputs" / "legend_type")
+    comparer._visualize_top_results(results_df, query_df=query_df)
+    assert created and created[-1].kwargs["legend_mode"] == "layer"
+
+    created.clear()
+    comparer = _comparer(tmp_path, visualize_top_n=2, visualize_by="bodyid",
+                         saveas="legend_bodyid",
+                         visualization_settings=dict(settings))
+    comparer.output_folder = str(Path(tmp_path) / "outputs" / "legend_bodyid")
+    comparer._visualize_top_results(results_df, query_df=query_df)
+    assert created and created[-1].kwargs["legend_mode"] == "single"
+
+
 def test_enrich_homolog_results_paths(tmp_path, monkeypatch):
     _seed_cache(tmp_path, [1, 2], dataset="hemibrain:v1.2.1")
     _seed_cache(tmp_path, [10, 11], dataset="male-cns:v1.0")
