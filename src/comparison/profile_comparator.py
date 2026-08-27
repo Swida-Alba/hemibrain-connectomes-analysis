@@ -6052,7 +6052,15 @@ class HomologFinder:
         self._log(f"📁 Output folder: {combined_path}")
 
         all_dfs: List[pd.DataFrame] = []
+        # (idx, query_type, real_type, per_source, per_type_output_path, unit_df)
+        fetched: List[Tuple[int, str, Optional[str], Union[str, int], Path, pd.DataFrame]] = []
         skipped = 0
+
+        # ---- Phase 1: fetch homologs for EVERY resolved type (no visualization).
+        # Per-type visualization is deferred until every query type has been
+        # fetched, so all connection/profile pulls are batched before the
+        # (potentially slow) render phase instead of interleaving
+        # fetch→viz→fetch→viz per input type.
         for idx, unit in enumerate(units):
             query_type = str(unit['query'])
             real_type = unit['type']
@@ -6068,6 +6076,7 @@ class HomologFinder:
             ).strip("_")
             safe_sub = safe_sub[:60] or f"type_{idx + 1}"
             per_type_saveas = f"{combined_name}/by_type/{safe_sub}"
+            per_type_output_path = Path(output_dir) / per_type_saveas
             per_source = real_type if real_type is not None else query_type
 
             if use_fast:
@@ -6087,7 +6096,7 @@ class HomologFinder:
                     run_shuffle_test=run_shuffle_test,
                     n_shuffles=n_shuffles,
                     shuffle_seed=shuffle_seed,
-                    visualize_skeleton=visualize_skeleton,
+                    visualize_skeleton=False,  # deferred to phase 2
                     visualize_top_n=visualize_top_n,
                     similarity_metric=similarity_metric,
                 )
@@ -6108,14 +6117,15 @@ class HomologFinder:
                     run_shuffle_test=run_shuffle_test,
                     n_shuffles=n_shuffles,
                     shuffle_seed=shuffle_seed,
-                    visualize_skeleton=visualize_skeleton,
+                    visualize_skeleton=False,  # deferred to phase 2
                     visualize_top_n=visualize_top_n,
                     vector_prune_fraction=vector_prune_fraction,
                 )
             if unit_df is not None and not unit_df.empty:
-                unit_df = unit_df.copy()
-                unit_df['query_type'] = query_type
-                all_dfs.append(unit_df)
+                fetched.append((idx, query_type, real_type, per_source, per_type_output_path, unit_df))
+                tagged = unit_df.copy()
+                tagged['query_type'] = query_type
+                all_dfs.append(tagged)
 
         if skipped == len(units):
             self._log("ERROR: None of the queries could be resolved to neurons")
@@ -6124,6 +6134,32 @@ class HomologFinder:
         if not all_dfs:
             self._log("No homolog results produced for any query type")
             return pd.DataFrame()
+
+        # ---- Phase 2: visualizations per resolved type, after ALL fetching.
+        # The per-type save (phase 1) already wrote results/type_summary.csv,
+        # so the renderer reuses it to stay identical to the inline path.
+        if visualize_skeleton and fetched:
+            self._log(f"Fetch complete; generating visualizations for {len(fetched)} resolved type(s)...")
+            for (idx, query_type, real_type, per_source, per_type_output_path, unit_df) in fetched:
+                self._log(f"--- visualize type {idx + 1}: {query_type} ---")
+                viz_dir = per_type_output_path / 'visualization'
+                type_summary = None
+                summary_path = per_type_output_path / 'results' / 'type_summary.csv'
+                if summary_path.exists():
+                    try:
+                        type_summary = pd.read_csv(summary_path)
+                    except Exception:
+                        type_summary = None
+                self._visualize_homolog_candidates(
+                    results_df=unit_df,
+                    query=per_source,
+                    source_dataset=source_dataset,
+                    target_dataset=target_dataset,
+                    visualization_dir=viz_dir,
+                    top_n=visualize_top_n,
+                    files_saved=[],
+                    type_summary=type_summary,
+                )
 
         combined_df = pd.concat(all_dfs, ignore_index=True)
 

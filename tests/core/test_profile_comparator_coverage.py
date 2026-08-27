@@ -1025,6 +1025,57 @@ def test_find_homologs_multi_writes_combined_grouped_output(finder, tmp_path, mo
     assert sorted(out['query_type'].drop_duplicates().tolist()) == ['T2', 'cellclass']
 
 
+def test_find_homologs_multi_fetches_all_then_visualizes(finder, tmp_path, monkeypatch):
+    """Refinement: all per-type searches are fetched first (visualization
+    disabled), then each resolved type is visualized in a second phase."""
+    fake = _FakeProfilerForFinder(
+        bodyids={('T1', DS_A): [11, 12], ('T2', DS_A): [20]},
+    )
+    fake.get_types_for_label = lambda label, ds: {}
+    finder.profiler = fake
+    finder.source_dataset = DS_A
+    finder.target_dataset = DS_B
+
+    fetch_calls = []
+
+    def fake_fast(**kwargs):
+        fetch_calls.append((kwargs.get('source'), kwargs.get('visualize_skeleton')))
+        return pd.DataFrame({
+            'source_bodyId': [1],
+            'source_type': [kwargs.get('source')],
+            'target_bodyId': [101],
+            'target_type': ['X'],
+            'rank_corr': [0.5],
+            'rank_union': [0.1],
+            'jaccard': [0.2],
+            'cosine': [0.3],
+        })
+
+    monkeypatch.setattr(finder, 'find_homologs_fast', fake_fast)
+    viz_calls = []
+    monkeypatch.setattr(
+        finder, '_visualize_homolog_candidates',
+        lambda **kw: viz_calls.append((kw['query'], str(kw['visualization_dir']))),
+    )
+
+    out = finder.find_homologs_multi(
+        source=['T1', 'T2'], output_dir=str(tmp_path), saveas='combined',
+        visualize_skeleton=True, visualize_top_n=2,
+    )
+
+    # Phase 1: every type fetched with visualization disabled.
+    assert [src for src, _viz in fetch_calls] == ['T1', 'T2']
+    assert all(viz is False for _src, viz in fetch_calls)
+
+    # Phase 2: one visualization per resolved type, in its by_type folder.
+    assert [q for q, _d in viz_calls] == ['T1', 'T2']
+    for q, viz_dir in viz_calls:
+        assert viz_dir.endswith(f'/by_type/{q}/visualization')
+
+    # Combined output is unaffected.
+    assert set(out['query_type']) == {'T1', 'T2'}
+
+
 def test_save_multi_results_writes_combined_files(tmp_path):
     """The combined saver writes per-query-type grouped CSV outputs."""
     from comparison.profile_comparator import HomologFinder
