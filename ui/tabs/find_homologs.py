@@ -100,6 +100,9 @@ def create_find_homologs_tab():
                     top_n_hint="Number of top homolog candidates to render as 3D skeletons.",
                     default_visualize_by="type",
                     show_high_quality_warning=True,
+                    # Homolog searches render many candidates at once; do not
+                    # pop the figure open unless the user asks for it here.
+                    default_show_fig=False,
                     dataset_provider=lambda: [
                         source_dataset.value,
                         target_dataset.value,

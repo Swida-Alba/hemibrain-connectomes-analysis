@@ -742,7 +742,13 @@ def create_skeleton_tab():
                     )
                 with ui.row().classes("gap-4"):
                     show_fig = checkbox_input(
-                        "Show Figure", get_user_default("show_fig_skeleton"),
+                        "Show Figure",
+                        # The Skeleton tab is the one place that still opens
+                        # the figure by default; the global default (and all
+                        # analysis tabs) start unchecked unless the user saved
+                        # an explicit override here in Settings.
+                        get_user_default("show_fig_skeleton")
+                        if has_user_default("show_fig_skeleton") else True,
                         hint="Open the 3D HTML visualization after rendering.",
                     )
                     export_views = checkbox_input(

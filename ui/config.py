@@ -377,7 +377,10 @@ DEFAULTS = {
     "smooth_skeleton": False,
     "show_soma": True,
     "show_connectors": False,
-    "show_fig_skeleton": True,
+    # Show Figure defaults OFF globally; only the Visualization > Skeleton
+    # tab still opens the figure by default (unless the user saves an
+    # explicit override in Settings).
+    "show_fig_skeleton": False,
     "export_views": True,
     "legend_mode": "type",
     "background": "white",
@@ -702,7 +705,10 @@ DEFAULT_SETTING_SPECS = {
         "label": "Show Figure (Skeleton renders)",
         "group": "skeleton_render",
         "kind": "bool",
-        "hint": "Open the 3D HTML visualization after rendering.",
+        "hint": "Default Show Figure state for skeleton renders. The "
+                "Visualization > Skeleton tab ignores this built-in default "
+                "(it opens the figure by default) unless you save an "
+                "override; analysis tabs start unchecked.",
     },
     "export_views": {
         "label": "Export Views",
