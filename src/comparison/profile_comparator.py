@@ -2312,6 +2312,7 @@ class HomologFinder:
         vector_prefiltering: bool = False,
         min_shared_partners: int = 2,
         vector_prune_fraction: float = 0.05,
+        prefilter_rank_metric: str = 'cosine',
         morphological_enrichment: bool = True,
         use_auto_type_mapping: bool = True,
         ensure_cache_complete: bool = False,
@@ -2360,12 +2361,18 @@ class HomologFinder:
             score_weights: (Deprecated) Retained for backward compatibility only.
             verbose: Print progress messages
             token: API token for NeuPrint (if empty, FNC auto-handles from env vars)
+            vector_prefiltering: Keep only the most similar candidates before
+                full scoring (default False).
             min_shared_partners: Minimum shared partners for adjacency-expansion
                 candidate discovery (default: 2). Lower = looser search
                 (1 = any single shared partner makes a candidate).
             vector_prune_fraction: Fraction of cosine-positive candidates kept by
-                vector pre-filtering (default: 0.05 = top 5% by adjacency score).
+                vector pre-filtering (default: 0.05 = top 5%).
                 1.0 keeps ALL cosine-positive candidates (loosest search).
+            prefilter_rank_metric: Ranking key used by the pre-filter prune:
+                'cosine' (default) keeps candidates with the highest weighted
+                profile cosine; 'adjacency' ranks by the shared partner-type
+                count (legacy behaviour).
             use_auto_type_mapping: Enable automatic type mapping for cross-dataset
                 comparison (default: True). When enabled, partner types are
                 standardized to their canonical (male-cns) names before comparison.
@@ -2433,10 +2440,18 @@ class HomologFinder:
 
         # Loose-search knobs: candidate discovery requires at least
         # min_shared_partners shared partners; vector pre-filtering keeps the
-        # top vector_prune_fraction of candidates by adjacency score among
-        # the cosine-positive set (0.05 = 5%, 1.0 = keep all / loosest).
+        # top vector_prune_fraction of candidates among the cosine-positive
+        # set, ranked by prefilter_rank_metric ('cosine' = weighted profile
+        # cosine, 'adjacency' = legacy shared partner-type count).
         self.min_shared_partners = min_shared_partners
         self.vector_prune_fraction = vector_prune_fraction
+        metric_norm = str(prefilter_rank_metric or 'cosine').strip().lower()
+        if metric_norm not in {'cosine', 'adjacency'}:
+            raise ValueError(
+                f"prefilter_rank_metric must be 'cosine' or 'adjacency', got "
+                f"{prefilter_rank_metric!r}"
+            )
+        self.prefilter_rank_metric = metric_norm
 
         # After ranking, attach vector-based morphological similarity
         # (morph_cosine / morph_pearson) to the final result rows. This runs
@@ -2614,6 +2629,49 @@ class HomologFinder:
                 self._log(f"  Partner types will be standardized to canonical (male-cns) names")
         
         return self._type_mapper if self._type_mapper._loaded else None
+
+    def _compute_same_type_candidates(
+        self,
+        query_type_names,
+        target_type_lookup: Dict[int, str],
+        type_mapper: Optional[CrossDatasetTypeMapper],
+        target_dataset: str,
+    ) -> set:
+        """Target bodyIds whose (canonical) type matches the query type name(s).
+
+        Cross-dataset candidate discovery is connectivity-based, so neurons of
+        the queried type itself can be pruned by vector prefiltering when the
+        two datasets label their partner types differently (the adjacency
+        score counts shared partner TYPES).  Those same-name homologs are the
+        primary answer to a named-type search, so they are re-added to the
+        candidate pool and exempted from prefilter pruning.
+        """
+        names = {str(n).strip() for n in query_type_names if n and str(n).strip()}
+        names.discard('')
+        if not names:
+            return set()
+
+        raw_types = sorted({
+            str(t) for t in target_type_lookup.values()
+            if t and not pd.isna(t) and str(t).strip()
+        })
+        matched_types: set = {t for t in raw_types if t in names}
+        if type_mapper is not None:
+            # Standardize exactly like batch_compare_cross_dataset does so a
+            # target type counts as "same" whenever the scoring would treat
+            # it as the canonical query name.
+            standardized = type_mapper.standardize_partner_types(
+                {t: 1.0 for t in raw_types}, target_dataset
+            )
+            matched_types.update(
+                raw for raw, canon in standardized.items() if canon in names
+            )
+
+        if not matched_types:
+            return set()
+        return {
+            int(bid) for bid, t in target_type_lookup.items() if t in matched_types
+        }
 
     # ------------------------------------------------------------------
     # Shared bodyId-level type comparison core (for ComparisonAnalyzer)
@@ -4550,15 +4608,24 @@ class HomologFinder:
         include_intra_type: bool = True,
         vector_prefiltering: bool = False,
         vector_prune_fraction: float = 0.05,
-        type_mapper: Optional[CrossDatasetTypeMapper] = None
+        type_mapper: Optional[CrossDatasetTypeMapper] = None,
+        guaranteed_candidates: Optional[Dict[int, set]] = None,
+        prefilter_rank_metric: str = 'cosine'
     ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, List[int]], Dict[str, List[int]], Dict[int, 'ConnectivityStatus'], Dict[int, 'ConnectivityStatus'], Dict[str, int]]: # 
         """
         Shared bodyId comparison core used by find_homologs and find_homologs_fast.
-        
+
         Args:
             type_mapper: Optional CrossDatasetTypeMapper for standardizing partner types
                         during cross-dataset comparison. When provided, partner types
                         are mapped to their canonical (male-cns) names before comparison.
+            guaranteed_candidates: Optional per-source sets of target bodyIds that
+                        must be compared even when vector prefiltering would prune
+                        them (used for same-name homologs of the queried type).
+            prefilter_rank_metric: Ranking key for the prune step when vector
+                        prefiltering is enabled: 'cosine' keeps the highest
+                        weighted-profile cosine candidates; 'adjacency' ranks
+                        by the shared partner-type count.
         """
         from .connectivity_profiler import ConnectivityStatus
 
@@ -4629,13 +4696,19 @@ class HomologFinder:
 
                 cos_kept = len(cos_filtered)
 
-                # Then keep the top fraction of TOTAL candidates by adjacency
-                # score among the cosine-positive set. vector_prune_fraction
-                # >= 1.0 disables the prune (loosest search): every
+                # Then keep the top fraction of TOTAL candidates among the
+                # cosine-positive set. The ranking key is selectable:
+                # 'cosine' ranks by the weighted profile cosine itself
+                # (weight-aware, robust to hub types that inflate the plain
+                # shared-type count); 'adjacency' keeps the legacy behaviour
+                # of ranking by the shared partner-type count. Pruning is a
+                # fraction >= 1.0 -> disabled (loosest search): every
                 # cosine-positive candidate is kept.
                 if cos_kept > 0 and vector_prune_fraction < 1.0:
                     top_k = max(1, math.ceil(total_candidates * vector_prune_fraction))
-                    top_candidates = dict(heapq.nlargest(top_k, cos_filtered.items(), key=lambda x: x[1][0]))
+                    rank_slot = 1 if prefilter_rank_metric == 'cosine' else 0
+                    top_candidates = dict(heapq.nlargest(
+                        top_k, cos_filtered.items(), key=lambda x: x[1][rank_slot]))
                     source_candidates = {bid: shared for bid, (shared, _) in top_candidates.items()}
                 elif cos_kept > 0:
                     source_candidates = {bid: shared for bid, (shared, _) in cos_filtered.items()}
@@ -4644,13 +4717,35 @@ class HomologFinder:
 
                 if self.verbose and show_progress:
                     keep_label = (
-                        f"top {vector_prune_fraction * 100:.0f}% of total"
+                        f"top {vector_prune_fraction * 100:.0f}% of total by "
+                        f"{prefilter_rank_metric}"
                         if vector_prune_fraction < 1.0
                         else "all"
                     )
                     self._log(
                         f"Prefiltered {total_candidates}→{cos_kept} (cos>0) →{len(source_candidates)} ({keep_label}) for source {source_bid}"
                     )
+
+            # Same-name homologs (e.g. FAFB l-LNv for a male-cns l-LNv query)
+            # must never be lost to prefilter pruning: adjacency scores count
+            # shared partner TYPES, which across datasets can be far sparser
+            # than true similarity.  Re-add them with their original score.
+            guaranteed = (guaranteed_candidates or {}).get(source_bid)
+            if guaranteed:
+                base_scores = candidate_map.get(source_bid, {})
+                merged = dict(source_candidates)
+                restored = 0
+                for bid in guaranteed:
+                    if bid not in merged and bid in target_profiles_cache:
+                        merged[bid] = int(base_scores.get(bid, 0))
+                        restored += 1
+                if restored:
+                    source_candidates = merged
+                    if self.verbose:
+                        self._log(
+                            f"Restored {restored} same-type candidates skipped by "
+                            f"prefiltering for source {source_bid}"
+                        )
 
             if not source_candidates:
                 continue
@@ -4974,6 +5069,7 @@ class HomologFinder:
         top_n: Optional[int] = None,
         min_shared_partners: Optional[int] = None,
         vector_prune_fraction: Optional[float] = None,
+        prefilter_rank_metric: Optional[str] = None,
         min_weight: int = 3,
         show_progress: bool = True,
         output_dir: Optional[str] = None,
@@ -5025,8 +5121,11 @@ class HomologFinder:
             min_shared_partners: Minimum shared partners to be a candidate
                 (default: 2). Lower = looser search (1 = any shared partner).
             vector_prune_fraction: Fraction of cosine-positive candidates kept by
-                vector pre-filtering (default: 0.05 = top 5% by adjacency score).
+                vector pre-filtering (default: 0.05 = top 5%).
                 1.0 keeps ALL cosine-positive candidates (loosest search).
+            prefilter_rank_metric: Ranking key for the pre-filter prune
+                ('cosine' = highest weighted profile cosine, default;
+                'adjacency' = legacy shared partner-type count).
             min_weight: Minimum synapse weight for candidate discovery (default: 3)
             show_progress: Show progress bar
             output_dir: Directory to save results. Uses self.output_dir if not provided.
@@ -5093,7 +5192,10 @@ class HomologFinder:
         top_n = top_n if top_n is not None else self.top_n
         min_shared_partners = min_shared_partners if min_shared_partners is not None else self.min_shared_partners
         vector_prune_fraction = vector_prune_fraction if vector_prune_fraction is not None else self.vector_prune_fraction
-        
+        prefilter_rank_metric = (
+            str(prefilter_rank_metric or self.prefilter_rank_metric).strip().lower()
+        )
+
         # Validate required parameters
         if query is None:
             raise ValueError("No source neuron specified. Set 'source' parameter or self.source.")
@@ -5363,6 +5465,7 @@ class HomologFinder:
             # Track which target bodyIds we need profiles for
             all_candidate_bodyids: set = set()
             candidate_map: Dict[int, Dict[int, int]] = {}  # source_bid -> {target_bid: shared_count}
+            guaranteed_candidates: Dict[int, set] = {}  # source_bid -> never-prune same-type bids
             
             # For both cross-dataset and same-dataset: use adjacency expansion
             # Cross-dataset: find target neurons by TYPE matching (source partner types → target bodyIds)
@@ -5458,7 +5561,32 @@ class HomologFinder:
                 untyped_candidates = all_candidate_bodyids - typed_candidates
                 
                 self._log(f"Cross-dataset candidates: A'={len(set_a_prime)}, B'={len(set_b_prime)}, C={len(set_c)}, D={len(set_d)} → {len(all_candidate_bodyids)} unique ({len(typed_candidates)} typed, {len(untyped_candidates)} untyped)")
-                
+
+                # Same-named homologs bypass candidate pruning: target neurons
+                # of the queried type are guaranteed comparison candidates even
+                # if their cross-dataset adjacency score would lose to hub
+                # types under vector prefiltering.
+                guaranteed_candidates: Dict[int, set] = {}
+                same_type_bids: set = set()
+                if is_cross_dataset:
+                    same_type_bids = self._compute_same_type_candidates(
+                        [str(query)],
+                        target_type_lookup,
+                        self._get_type_mapper_for_comparison(is_cross_dataset),
+                        target_dataset,
+                    )
+                    if same_type_bids:
+                        newly_added = len(same_type_bids - all_candidate_bodyids)
+                        all_candidate_bodyids |= same_type_bids
+                        self._log(
+                            f"Guaranteed inclusion of {len(same_type_bids)} "
+                            f"same-type targets for '{query}' "
+                            f"({newly_added} outside adjacency expansion)"
+                        )
+                    guaranteed_candidates = {
+                        source_bid: same_type_bids for source_bid in source_bodyids
+                    }
+
                 # For cross-dataset, all source neurons compare against same candidate pool
                 # Compute adjacency_score as the count of partner-type overlaps per candidate
                 # (shared upstream/downstream partner types relative to the source partner sets)
@@ -5572,6 +5700,8 @@ class HomologFinder:
                 vector_prefiltering=self.vector_prefiltering,
             vector_prune_fraction=vector_prune_fraction,
                 type_mapper=type_mapper,
+                guaranteed_candidates=guaranteed_candidates,
+                prefilter_rank_metric=prefilter_rank_metric,
             )
 
             # Log skipped and warned sources by status
@@ -5686,6 +5816,7 @@ class HomologFinder:
 
         candidate_map: Dict[int, Dict[int, int]] = {}
         all_candidate_bodyids: set = set()
+        guaranteed_candidates: Dict[int, set] = {}
 
         if is_cross_dataset:
             # Cross-dataset: use partner TYPE overlap to expand candidates, then map to bodyIds
@@ -5760,6 +5891,30 @@ class HomologFinder:
                 shared_upstream = len(upstream_sets_by_bodyid.get(bid, set()) & all_downstream_types)
                 candidate_scores[bid] = shared_downstream + shared_upstream
             candidate_map[source_bid] = candidate_scores
+
+            # Same-named homologs bypass candidate pruning (see the type-query
+            # branch): the query bodyId's own type is a guaranteed candidate.
+            self_guaranteed: set = set()
+            if is_cross_dataset:
+                self_guaranteed = self._compute_same_type_candidates(
+                    [getattr(source_profile, 'neuron_type', '') or ''],
+                    target_type_lookup,
+                    self._get_type_mapper_for_comparison(is_cross_dataset),
+                    target_dataset,
+                )
+                if self_guaranteed:
+                    newly_added = len(self_guaranteed - all_candidate_bodyids)
+                    all_candidate_bodyids |= self_guaranteed
+                    for bid in self_guaranteed - candidate_scores.keys():
+                        shared_downstream = len(downstream_sets_by_bodyid.get(bid, set()) & all_upstream_types)
+                        shared_upstream = len(upstream_sets_by_bodyid.get(bid, set()) & all_downstream_types)
+                        candidate_scores[bid] = shared_downstream + shared_upstream
+                    self._log(
+                        f"Guaranteed inclusion of {len(self_guaranteed)} "
+                        f"same-type targets for '{source_profile.neuron_type}' "
+                        f"({newly_added} outside adjacency expansion)"
+                    )
+            guaranteed_candidates = {source_bid: self_guaranteed}
         else:
             # Same-dataset: adjacency expansion using shared partner types
             from collections import defaultdict
@@ -5844,6 +5999,8 @@ class HomologFinder:
             vector_prefiltering=self.vector_prefiltering,
         vector_prune_fraction=vector_prune_fraction,
             type_mapper=type_mapper,
+            guaranteed_candidates=guaranteed_candidates,
+            prefilter_rank_metric=prefilter_rank_metric,
         )
 
         # Log skipped and warned sources by status
@@ -5965,6 +6122,7 @@ class HomologFinder:
         top_n: Optional[int] = None,
         min_shared_partners: Optional[int] = None,
         vector_prune_fraction: Optional[float] = None,
+        prefilter_rank_metric: Optional[str] = None,
         min_weight: int = 3,
         show_progress: bool = True,
         output_dir: Optional[str] = None,
@@ -6087,6 +6245,7 @@ class HomologFinder:
                     top_n=top_n,
                     min_shared_partners=min_shared_partners,
                     vector_prune_fraction=vector_prune_fraction,
+                    prefilter_rank_metric=prefilter_rank_metric,
                     min_weight=min_weight,
                     show_progress=show_progress,
                     output_dir=output_dir,
@@ -7118,18 +7277,29 @@ class HomologFinder:
                         
                         # Generate individual plots for each bodyId using plot_individuals()
                         # This efficiently toggles visibility rather than re-fetching data
-                        vs_bodyid.plot_individuals(
+                        profiles_out = vs_bodyid.plot_individuals(
                             output_format=['png', 'html'],
                             views=['front'],
                             summary_format=['pdf'],  # Generate PDF summary
                             neuron_alpha=0.2,
                         )
-                        
+
                         if files_saved is not None:
-                            for name in bodyid_layer_names:
-                                files_saved.append(f'visualization/bodyId_level/individual_profiles/front_{name}.png')
-                                files_saved.append(f'visualization/bodyId_level/individual_profiles/{name}.html')
-                            files_saved.append('visualization/bodyId_level/individual_profiles.pdf')
+                            # Record what was actually produced instead of
+                            # assuming exactly one file per requested layer name.
+                            if profiles_out and Path(profiles_out).is_dir():
+                                for profile_path in sorted(
+                                        Path(profiles_out).iterdir()):
+                                    if profile_path.is_file():
+                                        files_saved.append(
+                                            'visualization/bodyId_level/'
+                                            f'individual_profiles/{profile_path.name}'
+                                        )
+                            for summary_path in sorted(
+                                    bodyid_dir.glob('individual_profiles*.pdf')):
+                                files_saved.append(
+                                    f'visualization/bodyId_level/{summary_path.name}'
+                                )
                         
                         self._log(
                             f"    Saved: bodyId_level/ ({len(bodyid_layers)} layers, "
@@ -7266,7 +7436,7 @@ class HomologFinder:
                     vs_type.plot_neurons()
 
                     # Generate individual plots for each type
-                    vs_type.plot_individuals(
+                    profiles_out = vs_type.plot_individuals(
                         output_format=['png', 'html'],
                         views=['front'],
                         summary_format=['pdf'],
@@ -7274,10 +7444,21 @@ class HomologFinder:
                     )
 
                     if files_saved is not None:
-                        for name in type_layer_names:
-                            files_saved.append(f'visualization/type_level/individual_profiles/front_{name}.png')
-                            files_saved.append(f'visualization/type_level/individual_profiles/{name}.html')
-                        files_saved.append('visualization/type_level/individual_profiles.pdf')
+                        # Record what was actually produced instead of
+                        # assuming exactly one file per requested layer name.
+                        if profiles_out and Path(profiles_out).is_dir():
+                            for profile_path in sorted(
+                                    Path(profiles_out).iterdir()):
+                                if profile_path.is_file():
+                                    files_saved.append(
+                                        'visualization/type_level/'
+                                        f'individual_profiles/{profile_path.name}'
+                                    )
+                        for summary_path in sorted(
+                                type_dir.glob('individual_profiles*.pdf')):
+                            files_saved.append(
+                                f'visualization/type_level/{summary_path.name}'
+                            )
 
                     self._log(
                         f"    Saved: type_level/ ({len(type_layers)} layers, "
@@ -7346,19 +7527,31 @@ class HomologFinder:
                         vs_source.plot_neurons()
                         
                         # Also generate individual source neuron plots
-                        vs_source.plot_individuals(
+                        profiles_out = vs_source.plot_individuals(
                             output_format=['png', 'html'],
                             views=['front'],
                             summary_format=['pdf'],
                             neuron_alpha=0.2,
                         )
-                        
+
                         if files_saved is not None:
                             files_saved.append(f'visualization/source_neurons/{safe_name}.html')
                             files_saved.append(f'visualization/source_neurons/{safe_name}.png')
-                            for name in source_layer_names:
-                                files_saved.append(f'visualization/source_neurons/individual_profiles/front_{name}.png')
-                                files_saved.append(f'visualization/source_neurons/individual_profiles/{name}.html')
+                            # Record what was actually produced instead of
+                            # assuming exactly one file per requested layer name.
+                            if profiles_out and Path(profiles_out).is_dir():
+                                for profile_path in sorted(
+                                        Path(profiles_out).iterdir()):
+                                    if profile_path.is_file():
+                                        files_saved.append(
+                                            'visualization/source_neurons/'
+                                            f'individual_profiles/{profile_path.name}'
+                                        )
+                            for summary_path in sorted(
+                                    source_dir.glob('individual_profiles*.pdf')):
+                                files_saved.append(
+                                    f'visualization/source_neurons/{summary_path.name}'
+                                )
                         
                         self._log(f"    Saved: source_neurons/{safe_name}.html ({len(source_layers)} neurons with individual profiles)")
                     else:
@@ -7402,7 +7595,14 @@ class HomologFinder:
     ) -> Dict[str, Any]:
         """Build renderer kwargs for the individual-visualization fallbacks."""
         options = dict(defaults or {})
-        options.update(self.visualization_settings or {})
+        settings = dict(self.visualization_settings or {})
+        # Rendering semantics owned by a call site must win over user
+        # preferences: the homolog outputs promise one legend entry per layer
+        # named ``{type}_{bodyId}``, which requires the site's explicit
+        # legend_mode instead of the app-wide default ('type').
+        if 'legend_mode' in options:
+            settings.pop('legend_mode', None)
+        options.update(settings)
         options.pop('visualize_top_n', None)
         options.pop('visualize_by', None)
         options.pop('use_default_simplification', None)
@@ -7498,11 +7698,12 @@ class HomologFinder:
                         'show_fig': False,
                         'brain_mesh': 'template',
                         'neuron_alpha': 0.2,
-                        'legend_mode': 'single',
+                        'legend_mode': 'layer',
                         'verbose': 'simple',
                     },
                     dataset=vis_target_dataset,
                     neuron_layers=layers,
+                    custom_layer_names=[safe_name],
                     saveas=safe_name,
                     output_dir=str(bodyid_dir),
                     client=target_client,

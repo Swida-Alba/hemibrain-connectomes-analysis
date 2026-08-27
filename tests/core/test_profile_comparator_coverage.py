@@ -1715,6 +1715,133 @@ def test_compare_candidates_core_vector_prefilter_and_min_score(finder):
     assert (results_min['rank_corr'] >= 0.999).all()
 
 
+def test_compare_candidates_core_guaranteed_same_type(finder):
+    """Same-type homologs bypass vector-prefilter pruning."""
+    src_profiles, status, tgt_profiles = _core_inputs()
+    # Give 102 strictly lower cosine than 101 (same partners as the source
+    # plus a dominant unrelated ones), so the default cosine-ranked prune
+    # deterministically drops it (top 50% of 2 -> keep 1).
+    tgt_profiles[102] = _profile(
+        102, DS_B,
+        upstream={'U1': 9.0, 'U2': 8.0, 'W1': 60.0},
+        downstream={'D1': 7.0, 'D2': 6.0, 'W2': 50.0})
+    # Prune keeps only the top candidate (101), but 102 is flagged same-type
+    # under pruning.
+    candidate_map = {5: {101: 3, 102: 1}}
+    results, *_ = finder._compare_candidates_core(
+        source_bodyids=[5], source_profiles_cache=src_profiles,
+        source_status_map=status, target_profiles_cache=tgt_profiles,
+        target_type_lookup={101: 'Cand', 102: 'Q'},
+        source_type_lookup={5: 'Q'}, candidate_map=candidate_map,
+        is_cross_dataset=True, target_dataset=DS_B, show_progress=False,
+        similarity_metric='rank_corr', top_n=5,
+        vector_prefiltering=True, vector_prune_fraction=0.5,
+        guaranteed_candidates={5: {102}})
+    assert set(results['target_bodyId']) == {101, 102}
+    row = results[results['target_bodyId'] == 102].iloc[0]
+    # adjacency_score preserved from the original candidate map
+    assert int(row['adjacency_score']) == 1
+    assert bool(row['is_same_type'])
+
+    # Guaranteed bids absent from the profile cache are silently ignored.
+    results2, *_ = finder._compare_candidates_core(
+        source_bodyids=[5], source_profiles_cache=src_profiles,
+        source_status_map=status, target_profiles_cache=tgt_profiles,
+        target_type_lookup={101: 'Cand', 102: 'Q'},
+        source_type_lookup={5: 'Q'}, candidate_map=candidate_map,
+        is_cross_dataset=True, target_dataset=DS_B, show_progress=False,
+        similarity_metric='rank_corr', top_n=5,
+        vector_prefiltering=True, vector_prune_fraction=0.5,
+        guaranteed_candidates={5: {102, 999}})
+    assert set(results2['target_bodyId']) == {101, 102}
+
+    # Without prefiltering nothing changes for the unflagged candidates.
+    results3, *_ = finder._compare_candidates_core(
+        source_bodyids=[5], source_profiles_cache=src_profiles,
+        source_status_map=status, target_profiles_cache=tgt_profiles,
+        target_type_lookup={101: 'Cand', 102: 'Q'},
+        source_type_lookup={5: 'Q'}, candidate_map=candidate_map,
+        is_cross_dataset=True, target_dataset=DS_B, show_progress=False,
+        similarity_metric='rank_corr', top_n=5,
+        vector_prefiltering=False,
+        guaranteed_candidates=None)
+    assert set(results3['target_bodyId']) == {101, 102}
+
+
+def test_compare_candidates_core_prefilter_rank_metric(finder):
+    """The prune step ranks by weighted cosine by default; 'adjacency' opts out."""
+    src = _profile(9, DS_A,
+                   upstream={'U1': 100.0, 'U2': 90.0},
+                   downstream={'D1': 80.0, 'D2': 70.0})
+    # Hub candidate: shares all four source partner TYPES (adjacency 4) but
+    # its weight mass sits on unrelated partners -> low cosine.
+    hub = _profile(101, DS_B,
+                   upstream={'U1': 1.0, 'U2': 1.0, 'X1': 5000.0},
+                   downstream={'D1': 1.0, 'D2': 1.0, 'X2': 4000.0})
+    # Near candidate: shares fewer types (adjacency 2) but with matching
+    # weights -> high cosine.
+    near = _profile(102, DS_B,
+                    upstream={'U1': 95.0, 'U3': 40.0},
+                    downstream={'D1': 85.0, 'D4': 35.0})
+    cos_hub = ProfileComparator.weighted_cosine_similarity(src, hub, 'both')
+    cos_near = ProfileComparator.weighted_cosine_similarity(src, near, 'both')
+    assert cos_near > cos_hub
+
+    common = dict(
+        source_bodyids=[9], source_profiles_cache={9: src},
+        source_status_map={9: src.connectivity_status},
+        source_type_lookup={9: 'Q'},
+        target_profiles_cache={101: hub, 102: near},
+        target_type_lookup={101: 'Hub', 102: 'Near'},
+        candidate_map={9: {101: 4, 102: 2}},
+        is_cross_dataset=True, target_dataset=DS_B, show_progress=False,
+        similarity_metric='rank_corr', top_n=5,
+        vector_prefiltering=True, vector_prune_fraction=0.5)
+
+    res_cos, *_ = finder._compare_candidates_core(**common)
+    assert list(res_cos['target_bodyId']) == [102]
+
+    res_adj, *_ = finder._compare_candidates_core(
+        **common, prefilter_rank_metric='adjacency')
+    assert list(res_adj['target_bodyId']) == [101]
+
+    # Invalid metric names are rejected at construction time.
+    from comparison.profile_comparator import HomologFinder
+    with pytest.raises(ValueError):
+        HomologFinder(output_dir=str(finder.output_dir),
+                      prefilter_rank_metric='cosnie')
+
+
+def test_compute_same_type_candidates(finder):
+    """The helper matches raw names plus mapper-standardized canon names."""
+
+    class _StubMapper:
+        def standardize_partner_types(self, partner_types, source_dataset):
+            return {
+                t: ('MeVPLo2' if t == 'MTe07' else t)
+                for t in partner_types
+            }
+
+    lookup = {
+        1: 'l-LNv',          # verbatim match
+        2: 'MTe07',          # maps to canonical 'MeVPLo2'
+        3: '',               # untyped
+        4: None,             # untyped
+        5: 'Other',
+    }
+    out = finder._compute_same_type_candidates(
+        ['l-LNv', 'MeVPLo2'], lookup, _StubMapper(), DS_A)
+    assert out == {1, 2}
+
+    # Without a mapper only verbatim matches count.
+    out_raw = finder._compute_same_type_candidates(
+        ['l-LNv'], lookup, None, DS_A)
+    assert out_raw == {1}
+
+    # Empty query names yield no guarantees.
+    assert finder._compute_same_type_candidates([''], lookup, None, DS_A) == set()
+
+
 def test_compare_candidates_core_intra(finder):
     profiles = {
         5: _rich_profile(5, DS_A),
