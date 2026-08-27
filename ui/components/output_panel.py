@@ -191,11 +191,16 @@ class OutputPanel:
                 self.log_area = FreeLog(max_lines=500).classes(
                     "w-full h-full font-mono text-xs"
                 ).style(
+                    # Both axes scroll: long output stays on its own single
+                    # line (white-space: pre is inherited by every pushed
+                    # line) and is reached through the horizontal bar instead
+                    # of wrapping onto the next visual line.
                     # overflow-anchor is disabled because free_log.js
                     # compensates for head trims itself (Safari has no
                     # native scroll anchoring, and double compensation in
                     # Chromium would jitter).
-                    "overflow-y: auto; overflow-x: hidden; overflow-anchor: none; word-break: break-word;"
+                    "overflow-y: auto; overflow-x: auto; overflow-anchor: none;"
+                    " white-space: pre;"
                 )
             ui.separator()
             ui.label("Output Files").classes("drocat-mini-label")
