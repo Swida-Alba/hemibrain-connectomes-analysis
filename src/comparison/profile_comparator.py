@@ -35,6 +35,7 @@ import warnings
 import math
 import heapq
 import json
+import re
 try:
     from ..utils.naming_utils import dataset_abbrev
 except ImportError:
@@ -3538,6 +3539,74 @@ class HomologFinder:
         
         return self._bodyids_by_type_cache[dataset][neuron_type]
     
+    def _resolve_queries_to_types(
+        self,
+        queries: List[Union[str, int]],
+        source_dataset: str,
+    ) -> List[Dict[str, Any]]:
+        """Expand a set of raw queries into per-real-type search units.
+
+        Each returned unit drives one independent homolog search so results can
+        be grouped by query type. Handles:
+
+        - bodyId items -> one unit with a single bodyId.
+        - Coarse taxonomy / higher-category labels (cell class, subclass, or
+          another string column that maps to several real types) -> one unit
+          per real type, mirroring the network/connectivity tabs' query
+          expansion via ``get_types_for_label``.
+        - Plain exact type names -> one unit holding all bodyIds of the type.
+        - Unresolvable items -> a placeholder unit with no bodyIds (skipped by
+          the caller with a warning).
+
+        Returns an ordered list of ``{'query', 'type', 'bodyids'}`` dicts.
+        """
+        units: List[Dict[str, Any]] = []
+        label_resolver = getattr(self.profiler, 'get_types_for_label', None)
+
+        for item in queries:
+            is_bodyid = isinstance(item, int) or (
+                isinstance(item, str) and str(item).isdigit()
+            )
+            if is_bodyid:
+                units.append({'query': str(item), 'type': None, 'bodyids': [int(item)]})
+                continue
+
+            raw = str(item).strip()
+            if not raw:
+                continue
+
+            # 1) Coarse-taxonomy / higher-category expansion.  get_types_for_label
+            #    groups matching rows by their real neuron type, so a cell class /
+            #    cell type label maps to several real types.  This must run before
+            #    the union lookup in get_bodyids_for_type, which would otherwise
+            #    collapse the whole label into a single unit.
+            if label_resolver is not None:
+                try:
+                    label_groups = label_resolver(raw, source_dataset)
+                except Exception:
+                    label_groups = {}
+                if label_groups:
+                    for real_type, ids in label_groups.items():
+                        bodyids = [
+                            int(bid) if isinstance(bid, str) and bid.isdigit() else bid
+                            for bid in ids
+                        ]
+                        if bodyids:
+                            units.append({
+                                'query': raw, 'type': real_type, 'bodyids': bodyids,
+                            })
+                    continue
+
+            # 2) Exact type: all bodyIds of the type form one unit.
+            bodyids = self.get_bodyids_for_type(raw, source_dataset)
+            if bodyids:
+                units.append({'query': raw, 'type': raw, 'bodyids': bodyids})
+            else:
+                # 3) Unresolvable: placeholder, skipped by the caller.
+                units.append({'query': raw, 'type': raw, 'bodyids': []})
+
+        return units
+    
     def find_homologs(
         self,
         source: Optional[Union[str, int]] = None,
@@ -5887,7 +5956,300 @@ class HomologFinder:
         )
 
         return results_df
-    
+
+    def find_homologs_multi(
+        self,
+        source: Optional[Union[str, int, List[Union[str, int]]]] = None,
+        source_dataset: Optional[str] = None,
+        target_dataset: Optional[str] = None,
+        top_n: Optional[int] = None,
+        min_shared_partners: Optional[int] = None,
+        vector_prune_fraction: Optional[float] = None,
+        min_weight: int = 3,
+        show_progress: bool = True,
+        output_dir: Optional[str] = None,
+        saveas: Optional[str] = None,
+        include_partner_details: bool = True,
+        top_n_details: int = 10,
+        run_shuffle_test: bool = False,
+        n_shuffles: int = 100,
+        shuffle_seed: Optional[int] = None,
+        visualize_skeleton: Optional[bool] = None,
+        visualize_top_n: Optional[int] = None,
+        similarity_metric: Optional[str] = None,
+        use_fast: bool = True,
+    ) -> pd.DataFrame:
+        """Run homolog discovery for several types / higher-category labels and
+        aggregate all results into one combined output folder grouped by query
+        type.
+
+        This is the multi-query entry point used by the Homolog Finding tab.
+        Each input item is expanded into its real types (coarse taxonomy labels
+        expand into one search per real type), every resolved type is searched
+        with the same logic as ``find_homologs_fast``, and the results are
+        written to a single output folder::
+
+            <output_dir>/<combined_name>/
+                README.txt
+                results/
+                    bodyid_results.csv   # all rows, grouped per query_type
+                    type_summary.csv     # per (query_type, source_type, target_type)
+                    homolog_results.csv  # legacy, sorted by metric
+                by_type/<query_type>/    # full per-type output incl. visualization/
+
+        Args: same as ``find_homologs_fast`` except ``source`` may be a list.
+
+        Returns: the combined bodyId-level results DataFrame (with a
+        ``query_type`` column), or an empty DataFrame when nothing resolves.
+        """
+        query = source if source is not None else self.source
+        source_dataset = source_dataset if source_dataset is not None else self.source_dataset
+        target_dataset = target_dataset if target_dataset is not None else self.target_dataset
+        output_dir = output_dir if output_dir is not None else self.output_dir
+        saveas = saveas if saveas is not None else self.saveas
+        visualize_skeleton = visualize_skeleton if visualize_skeleton is not None else self.visualize_skeleton
+        visualize_top_n = visualize_top_n if visualize_top_n is not None else self.visualize_top_n
+        similarity_metric = similarity_metric if similarity_metric is not None else self.similarity_metric
+        top_n = top_n if top_n is not None else self.top_n
+        min_shared_partners = min_shared_partners if min_shared_partners is not None else self.min_shared_partners
+        vector_prune_fraction = vector_prune_fraction if vector_prune_fraction is not None else self.vector_prune_fraction
+
+        if source_dataset is None:
+            raise ValueError("No source_dataset specified. Set 'source_dataset' parameter or self.source_dataset.")
+        if target_dataset is None:
+            raise ValueError("No target_dataset specified. Set 'target_dataset' parameter or self.target_dataset.")
+
+        # Normalize to a list of queries so a single coarse label also expands.
+        queries = query if isinstance(query, (list, tuple)) else [query]
+        if not queries:
+            raise ValueError("No source neuron(s) specified. Set 'source' parameter or self.source.")
+
+        self._log(f"Multi-type homolog search: {len(queries)} query item(s) from {source_dataset} → {target_dataset}")
+
+        units = self._resolve_queries_to_types(list(queries), source_dataset)
+        if not units:
+            self._log("ERROR: No query item could be resolved")
+            return pd.DataFrame()
+
+        # Compute the single combined folder name once.
+        if saveas:
+            combined_name = saveas
+        else:
+            safe_parts = []
+            for unit in units:
+                label = str(unit['type'] if unit['type'] is not None else unit['query'])
+                safe = re.sub(r"[^A-Za-z0-9._-]+", "_", label).strip("_")
+                if safe:
+                    safe_parts.append(safe)
+            safe_queries = "_".join(safe_parts)[:60] or "multi"
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            combined_name = (
+                f"{self.output_folder_prefix}_{dataset_abbrev(source_dataset)}"
+                f"_to_{dataset_abbrev(target_dataset)}_{safe_queries}_{timestamp}"
+            )
+
+        combined_path = Path(output_dir) / combined_name
+        self._log(f"📁 Output folder: {combined_path}")
+
+        all_dfs: List[pd.DataFrame] = []
+        skipped = 0
+        for idx, unit in enumerate(units):
+            query_type = str(unit['query'])
+            real_type = unit['type']
+            if not unit['bodyids']:
+                skipped += 1
+                self._log(f"WARNING: Could not resolve query '{query_type}' to any neurons; skipping")
+                continue
+
+            self._log(f"--- type {idx + 1}/{len(units)}: {query_type} ---")
+            safe_sub = re.sub(
+                r"[^A-Za-z0-9._-]+", "_",
+                str(real_type if real_type is not None else query_type),
+            ).strip("_")
+            safe_sub = safe_sub[:60] or f"type_{idx + 1}"
+            per_type_saveas = f"{combined_name}/by_type/{safe_sub}"
+            per_source = real_type if real_type is not None else query_type
+
+            if use_fast:
+                unit_df = self.find_homologs_fast(
+                    source=per_source,
+                    source_dataset=source_dataset,
+                    target_dataset=target_dataset,
+                    top_n=top_n,
+                    min_shared_partners=min_shared_partners,
+                    vector_prune_fraction=vector_prune_fraction,
+                    min_weight=min_weight,
+                    show_progress=show_progress,
+                    output_dir=output_dir,
+                    saveas=per_type_saveas,
+                    include_partner_details=include_partner_details,
+                    top_n_details=top_n_details,
+                    run_shuffle_test=run_shuffle_test,
+                    n_shuffles=n_shuffles,
+                    shuffle_seed=shuffle_seed,
+                    visualize_skeleton=visualize_skeleton,
+                    visualize_top_n=visualize_top_n,
+                    similarity_metric=similarity_metric,
+                )
+            else:
+                unit_df = self.find_homologs(
+                    source=per_source,
+                    source_dataset=source_dataset,
+                    target_dataset=target_dataset,
+                    top_n=top_n,
+                    metric=similarity_metric,
+                    direction='both',
+                    min_score=0.0,
+                    show_progress=show_progress,
+                    output_dir=output_dir,
+                    saveas=per_type_saveas,
+                    include_partner_details=include_partner_details,
+                    top_n_details=top_n_details,
+                    run_shuffle_test=run_shuffle_test,
+                    n_shuffles=n_shuffles,
+                    shuffle_seed=shuffle_seed,
+                    visualize_skeleton=visualize_skeleton,
+                    visualize_top_n=visualize_top_n,
+                    vector_prune_fraction=vector_prune_fraction,
+                )
+            if unit_df is not None and not unit_df.empty:
+                unit_df = unit_df.copy()
+                unit_df['query_type'] = query_type
+                all_dfs.append(unit_df)
+
+        if skipped == len(units):
+            self._log("ERROR: None of the queries could be resolved to neurons")
+            return pd.DataFrame()
+
+        if not all_dfs:
+            self._log("No homolog results produced for any query type")
+            return pd.DataFrame()
+
+        combined_df = pd.concat(all_dfs, ignore_index=True)
+
+        # Sort grouped by query_type, then the selected similarity metric.
+        sort_metric = similarity_metric if similarity_metric in combined_df.columns else 'rank_union'
+        if sort_metric not in combined_df.columns:
+            for fallback in ['rank_corr', 'rank_union', 'jaccard', 'cosine']:
+                if fallback in combined_df.columns:
+                    sort_metric = fallback
+                    break
+        combined_df = combined_df.sort_values(
+            ['query_type', sort_metric], ascending=[True, False], na_position='last'
+        )
+
+        self._save_multi_results(
+            combined_df=combined_df,
+            combined_path=combined_path,
+            source_dataset=source_dataset,
+            target_dataset=target_dataset,
+            queries=[str(u['query']) for u in units],
+            similarity_metric=similarity_metric,
+        )
+
+        return combined_df
+
+    def _save_multi_results(
+        self,
+        combined_df: pd.DataFrame,
+        combined_path: Path,
+        source_dataset: str,
+        target_dataset: str,
+        queries: List[str],
+        similarity_metric: str,
+    ) -> None:
+        """Write the combined, per-query-type aggregated outputs into one folder."""
+        results_dir = combined_path / 'results'
+        results_dir.mkdir(parents=True, exist_ok=True)
+
+        numeric_cols = [
+            'rank_corr', 'rank_union', 'rank_union_raw', 'jaccard', 'cosine',
+            'adjacency_score', 'shared_type_count', 'union_type_count',
+        ]
+        rounded = combined_df.copy()
+        for col in numeric_cols:
+            if col in rounded.columns:
+                rounded[col] = rounded[col].round(4)
+
+        # 1) homolog_results.csv (legacy, sorted by the selected metric).
+        sort_metric = similarity_metric if similarity_metric in rounded.columns else 'rank_union'
+        if sort_metric not in rounded.columns:
+            for fallback in ['rank_corr', 'rank_union', 'jaccard', 'cosine']:
+                if fallback in rounded.columns:
+                    sort_metric = fallback
+                    break
+        results_by_score = rounded.sort_values(sort_metric, ascending=False, na_position='last')
+        results_by_score.to_csv(results_dir / 'homolog_results.csv', index=False)
+
+        # 2) bodyid_results.csv (grouped per query_type).
+        bodyid_cols = [
+            'query_type', 'source_bodyId', 'source_type', 'target_bodyId',
+            'target_type', 'rank_corr', 'rank_union', 'rank_union_raw',
+            'jaccard', 'cosine', 'adjacency_score', 'shared_type_count',
+            'union_type_count', 'is_same_type', 'is_same_dataset',
+            'source_status', 'target_status', 'weak_source', 'weak_target',
+            'source_partner_count', 'target_partner_count',
+        ]
+        available = [c for c in bodyid_cols if c in rounded.columns]
+        bodyid_df = rounded[available].copy()
+        bodyid_df.to_csv(results_dir / 'bodyid_results.csv', index=False)
+
+        # 3) type_summary.csv aggregated per (query_type, source_type, target_type).
+        valid = (
+            rounded[rounded['rank_corr'].notna()].copy()
+            if 'rank_corr' in rounded.columns else rounded.copy()
+        )
+        type_summary = pd.DataFrame()
+        if not valid.empty and {'query_type', 'source_type'} <= set(valid.columns):
+            target_col = 'target_type' if 'target_type' in valid.columns else 'target'
+            agg_dict = {'rank_corr': ['mean', 'count']}
+            for m in ['jaccard', 'rank_union', 'cosine', 'adjacency_score',
+                      'shared_type_count', 'union_type_count']:
+                if m in valid.columns:
+                    agg_dict[m] = 'mean'
+            group_cols = ['query_type', 'source_type', target_col]
+            type_summary = valid.groupby(group_cols).agg(agg_dict).round(4)
+            type_summary.columns = [
+                '_'.join(col).strip() if isinstance(col, tuple) else col
+                for col in type_summary.columns.values
+            ]
+            type_summary = type_summary.reset_index()
+            rename_map = {
+                'rank_corr_mean': 'avg_rank_corr',
+                'rank_corr_count': 'n_bodyid_comparisons',
+                'jaccard_mean': 'avg_jaccard',
+                'rank_union_mean': 'avg_rank_union',
+                'cosine_mean': 'avg_cosine',
+                'adjacency_score_mean': 'avg_adjacency_score',
+                'shared_type_count_mean': 'avg_shared_type_count',
+                'union_type_count_mean': 'avg_union_type_count',
+            }
+            type_summary = type_summary.rename(columns=rename_map)
+            sort_by = f'avg_{sort_metric}' if f'avg_{sort_metric}' in type_summary.columns else 'avg_rank_corr'
+            type_summary = type_summary.sort_values(sort_by, ascending=False, na_position='last')
+            type_summary.insert(0, 'source_dataset', source_dataset)
+            type_summary.insert(0, 'query', ','.join(queries))
+        type_summary.to_csv(results_dir / 'type_summary.csv', index=False)
+
+        # 4) README.txt summarizing all query types.
+        readme = combined_path / 'README.txt'
+        with open(readme, 'w') as f:
+            f.write("=" * 70 + "\n")
+            f.write("  HOMOLOG FINDING RESULTS (MULTI-QUERY)\n")
+            f.write("=" * 70 + "\n\n")
+            f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Query Types: {', '.join(queries)}\n")
+            f.write(f"Source Dataset: {source_dataset}\n")
+            f.write(f"Target Dataset: {target_dataset}\n")
+            f.write(f"Total matches: {len(combined_df)}\n\n")
+            f.write("  OUTPUT STRUCTURE\n")
+            f.write("  results/\n")
+            f.write("    ├── bodyid_results.csv  Combined results grouped per query_type\n")
+            f.write("    ├── type_summary.csv    Aggregated per (query_type, source_type, target_type)\n")
+            f.write("    └── homolog_results.csv Legacy format sorted by metric\n")
+            f.write("  by_type/<query_type>/     Full per-type output (results, visualization)\n")
+        self._log(f"Saved combined multi-query results to {combined_path}")
+
     def find_homologs_intra_dataset(
         self,
         query: Union[str, int],

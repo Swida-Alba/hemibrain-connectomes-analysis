@@ -194,6 +194,7 @@ TOOL_REGISTRY: Dict[str, dict] = {
         "methods": {
             "find_homologs_fast": "finder.find_homologs_fast()",
             "find_homologs": "finder.find_homologs()",
+            "find_homologs_multi": "finder.find_homologs_multi(**method_params)",
         },
     },
     "inter_dataset": {

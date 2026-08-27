@@ -7,6 +7,7 @@ directly in memory. No profiler network methods are exercised.
 import numpy as np
 import pandas as pd
 import pytest
+from pathlib import Path
 
 from comparison.connectivity_profiler import ConnectivityProfile, compute_ranks
 from comparison.profile_comparator import (
@@ -917,6 +918,146 @@ def test_homolog_finder_get_neuron_info(finder):
 
     # no FNC available -> empty frame
     assert finder.get_neuron_info([1], DS_B).empty
+
+
+def test_resolve_queries_to_types_expands_coarse_label(finder):
+    """A coarse / higher-category label must expand into one unit per type."""
+    fake = _FakeProfilerForFinder(
+        bodyids={('T1', DS_A): [11, 12], ('T2', DS_A): [20]},
+    )
+    fake.get_types_for_label = lambda label, ds: (
+        {'R1': [1, 2], 'R2': [3]} if label == 'cellclass' else {}
+    )
+    finder.profiler = fake
+
+    units = finder._resolve_queries_to_types(['cellclass'], DS_A)
+    assert [u['type'] for u in units] == ['R1', 'R2']
+    assert units[0]['query'] == 'cellclass'
+    assert units[0]['bodyids'] == [1, 2]
+    assert units[1]['bodyids'] == [3]
+
+    # Plain exact type -> one unit holding all bodyIds of the type.
+    units2 = finder._resolve_queries_to_types(['T1'], DS_A)
+    assert len(units2) == 1
+    assert units2[0]['type'] == 'T1'
+    assert units2[0]['bodyids'] == [11, 12]
+
+    # bodyId item -> one unit with a single bodyId.
+    units3 = finder._resolve_queries_to_types([123], DS_A)
+    assert units3[0]['type'] is None
+    assert units3[0]['bodyids'] == [123]
+
+    # Unresolvable item -> placeholder with no bodyIds (skipped downstream).
+    units4 = finder._resolve_queries_to_types(['NoSuch'], DS_A)
+    assert units4[0]['bodyids'] == []
+
+    # Mixed list keeps order and expands the coarse label inline.
+    units5 = finder._resolve_queries_to_types(['cellclass', 'T1', 'NoSuch'], DS_A)
+    assert [u['type'] for u in units5] == ['R1', 'R2', 'T1', 'NoSuch']
+
+
+def test_find_homologs_multi_writes_combined_grouped_output(finder, tmp_path, monkeypatch):
+    """find_homologs_multi runs one search per resolved type and writes a single
+    combined output folder grouped per query_type, with per-type subfolders."""
+    fake = _FakeProfilerForFinder(
+        bodyids={('T1', DS_A): [11, 12], ('T2', DS_A): [20]},
+    )
+    # 'cellclass' is a coarse label that expands into two real types.
+    fake.get_types_for_label = lambda label, ds: (
+        {'R1': [1, 2], 'R2': [3]} if label == 'cellclass' else {}
+    )
+    finder.profiler = fake
+    finder.source_dataset = DS_A
+    finder.target_dataset = DS_B
+
+    seen_sources = []
+
+    def fake_fast(**kwargs):
+        src = kwargs.get('source')
+        seen_sources.append(src)
+        # Mimic the real per-type writer: create the by_type/<slug>/ folders
+        # (results + visualization) that each per-type run produces.
+        base = Path(kwargs['output_dir']) / kwargs['saveas']
+        (base / 'results').mkdir(parents=True, exist_ok=True)
+        (base / 'results' / 'bodyid_results.csv').write_text('dummy\n', encoding='utf-8')
+        (base / 'visualization').mkdir(parents=True, exist_ok=True)
+        return pd.DataFrame({
+            'source_bodyId': [1, 2],
+            'source_type': [src, src],
+            'target_bodyId': [101, 102],
+            'target_type': ['X', 'X'],
+            'rank_corr': [0.9, 0.8],
+            'jaccard': [0.7, 0.6],
+            'cosine': [0.5, 0.4],
+            'rank_union': [0.3, 0.2],
+        })
+
+    monkeypatch.setattr(finder, 'find_homologs_fast', fake_fast)
+
+    out = finder.find_homologs_multi(
+        source=['cellclass', 'T2'], output_dir=str(tmp_path), saveas='combined'
+    )
+
+    # Every resolved real type was searched (cellclass -> R1, R2; plus T2).
+    assert seen_sources == ['R1', 'R2', 'T2']
+
+    combined_path = tmp_path / 'combined'
+    # Combined top-level outputs (written by the real _save_multi_results).
+    assert (combined_path / 'README.txt').exists()
+    assert (combined_path / 'results' / 'bodyid_results.csv').exists()
+    assert (combined_path / 'results' / 'type_summary.csv').exists()
+    assert (combined_path / 'results' / 'homolog_results.csv').exists()
+
+    body_df = pd.read_csv(combined_path / 'results' / 'bodyid_results.csv')
+    assert 'query_type' in body_df.columns
+    summary_df = pd.read_csv(combined_path / 'results' / 'type_summary.csv')
+    assert 'query_type' in summary_df.columns
+    assert 'source_type' in summary_df.columns
+    assert 'target_type' in summary_df.columns
+
+    # Per-type subfolders for every resolved type, each with per-type visualization.
+    for sub in ['R1', 'R2', 'T2']:
+        assert (combined_path / 'by_type' / sub / 'results').is_dir()
+        assert (combined_path / 'by_type' / sub / 'visualization').is_dir()
+
+    # The combined frame is grouped by query_type.
+    assert set(out['query_type']) == {'cellclass', 'T2'}
+    assert sorted(out['query_type'].drop_duplicates().tolist()) == ['T2', 'cellclass']
+
+
+def test_save_multi_results_writes_combined_files(tmp_path):
+    """The combined saver writes per-query-type grouped CSV outputs."""
+    from comparison.profile_comparator import HomologFinder
+
+    finder = HomologFinder(output_dir=str(tmp_path), verbose=False)
+    df = pd.DataFrame({
+        'query_type': ['T1', 'T1', 'T2'],
+        'source_bodyId': [1, 2, 20],
+        'source_type': ['T1', 'T1', 'T2'],
+        'target_bodyId': [101, 102, 201],
+        'target_type': ['X', 'X', 'Y'],
+        'rank_corr': [0.9, 0.8, 0.7],
+        'jaccard': [0.7, 0.6, 0.5],
+        'cosine': [0.5, 0.4, 0.3],
+        'rank_union': [0.3, 0.2, 0.1],
+    })
+    combined_path = tmp_path / 'combined'
+    finder._save_multi_results(
+        df, combined_path, DS_A, DS_B, ['T1', 'T2'], 'rank_corr'
+    )
+
+    assert (combined_path / 'results' / 'bodyid_results.csv').exists()
+    assert (combined_path / 'results' / 'type_summary.csv').exists()
+    assert (combined_path / 'results' / 'homolog_results.csv').exists()
+    assert (combined_path / 'README.txt').exists()
+
+    body_df = pd.read_csv(combined_path / 'results' / 'bodyid_results.csv')
+    assert 'query_type' in body_df.columns
+
+    summary_df = pd.read_csv(combined_path / 'results' / 'type_summary.csv')
+    assert 'query_type' in summary_df.columns
+    assert 'source_type' in summary_df.columns
+    assert 'target_type' in summary_df.columns
 
 
 def test_compare_types_bodyid_core(finder):

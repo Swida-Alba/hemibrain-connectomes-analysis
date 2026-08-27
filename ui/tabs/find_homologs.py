@@ -1,7 +1,5 @@
 """FindHomologs Tab - Cross-dataset homolog finding."""
 
-import re
-
 from nicegui import ui
 from ..config import SIMILARITY_METRICS, get_user_default
 from ..components.common import (
@@ -54,7 +52,9 @@ def create_find_homologs_tab():
                 suggestions=_type_suggest,
                 available_neurons=lambda: source_dataset.value
                 if source_dataset is not None else "",
-                hint="Enter one or more neuron types or bodyIds. Each input is searched independently.",
+                hint="Enter one or more neuron types, bodyIds, or higher-category "
+                     "labels (e.g. cell class). All inputs are expanded per type "
+                     "and aggregated into one grouped output folder.",
             ).classes("drocat-fixed-neuron-input")
 
         with ui.card().classes("w-full drocat-card"):
@@ -143,7 +143,12 @@ def create_find_homologs_tab():
         if visualize.value:
             visualization_settings.warn_empty_custom_palettes()
 
-        base_params = {
+        # Single combined run: pass the full list of source neurons so the
+        # backend resolves each into its real types (coarse labels / other
+        # string-column queries expand per type) and writes one output folder
+        # grouped by query type.
+        constructor_params = {
+            "source": sources,
             "source_dataset": source_dataset.value,
             "target_dataset": target_dataset.value,
             "output_dir": output_dir.value,
@@ -165,73 +170,35 @@ def create_find_homologs_tab():
             "use_auto_type_mapping": use_auto_type_mapping.value,
             "ensure_cache_complete": full_cache.value,
         }
-
-        method_name = "find_homologs_fast" if use_fast.value else "find_homologs"
-        results = []
-        files_by_path = {}
-        last_output_folder = None
-
-        def _saveas_for_query(index, query):
-            """Keep user-named multi-query runs in separate folders."""
-            base = saveas.value.strip()
-            if not base or len(sources) == 1:
-                return base
-            safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(query)).strip("_")
-            safe = safe[:60] or f"query_{index + 1}"
-            return f"{base}_{index + 1}_{safe}"
+        method_params = {"use_fast": use_fast.value}
 
         try:
-            for index, source in enumerate(sources):
-                if len(sources) > 1:
-                    output_panel.log(
-                        f"--- Homolog query {index + 1}/{len(sources)}: {source} ---",
-                        "system",
-                    )
-                constructor_params = dict(base_params)
-                constructor_params.update({
-                    "source": source,
-                    "saveas": _saveas_for_query(index, source),
-                })
-                result = await output_panel.run(
-                    runner, "find_homologs", constructor_params, method_name,
-                    output_dir=output_dir.value,
-                )
-                results.append(result)
-                # A completed per-query run means the source resolved in the
-                # source dataset; keep it in the query history (raw chip,
-                # pre-pattern) like the pathfinding tabs do.
-                if result.get("returncode") == 0:
-                    from ..history_store import record as _record_history
-                    _record_history(
-                        [str(source)],
-                        datasets=[source_dataset.value]
-                        if source_dataset.value else [],
-                    )
-                last_output_folder = result.get("output_folder") or last_output_folder
-                for file_info in result.get("files", []):
-                    path = file_info.get("path")
-                    if path:
-                        files_by_path[path] = file_info
-                if result.get("cancelled"):
-                    break
-
-            cancelled = any(result.get("cancelled") for result in results)
-            succeeded = bool(results) and all(
-                result.get("returncode") == 0 for result in results
+            result = await output_panel.run(
+                runner, "find_homologs", constructor_params,
+                "find_homologs_multi", method_params=method_params,
+                output_dir=output_dir.value,
             )
-            if cancelled:
+            if result.get("cancelled"):
                 output_panel.set_status("Cancelled", "red")
-            else:
-                output_panel.set_status(
-                    "Completed" if succeeded else "Failed",
-                    "green" if succeeded else "red",
+                return
+            succeeded = result.get("returncode") == 0
+            output_panel.set_status(
+                "Completed" if succeeded else "Failed",
+                "green" if succeeded else "red",
+            )
+            if succeeded:
+                from ..history_store import record as _record_history
+                _record_history(
+                    [str(s) for s in sources],
+                    datasets=[source_dataset.value]
+                    if source_dataset.value else [],
                 )
-            if files_by_path:
-                display_dir = (
-                    output_dir.value if len(sources) > 1
-                    else last_output_folder or output_dir.value
+            files = result.get("files", [])
+            if files:
+                output_panel.show_files(
+                    list(files),
+                    result.get("output_folder") or output_dir.value,
                 )
-                output_panel.show_files(list(files_by_path.values()), display_dir)
         finally:
             output_panel.set_running(False)
 
