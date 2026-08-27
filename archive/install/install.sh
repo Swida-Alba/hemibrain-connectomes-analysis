@@ -255,9 +255,31 @@ run_in_env() {
     "$CONDA_BIN" run -n "$ENV_NAME" --no-capture-output "$@"
 }
 
+run_in_env_pip_retry() {
+    # Transient PyPI connectivity degradation (slow downloads, incomplete
+    # index-metadata responses) makes pip report "from versions: none" and
+    # fail an otherwise-correct install. pip's built-in --retries covers
+    # connection resets but NOT a failed index-metadata response, so retry
+    # here as well. The installer is idempotent and uses a project-local pip
+    # cache, so re-runs reuse the env and already-downloaded wheels.
+    local attempt
+    for attempt in 1 2 3; do
+        if run_in_env python -m pip install --retries 5 --timeout 60 "$@"; then
+            return 0
+        fi
+        if [[ "$attempt" -eq 3 ]]; then
+            printf "%bDependency install failed after 3 attempts - likely a transient PyPI network/index error. Re-running the installer resumes safely (the environment and already-downloaded wheels are reused).%b\n" "$RED" "$NC" >&2
+            return 1
+        fi
+        printf "%bDependency install failed (attempt %s of 3) - likely a transient PyPI network or index error. Retrying in %s seconds...%b\n" \
+            "$YELLOW" "$attempt" "$((attempt * 5))" "$NC"
+        sleep "$((attempt * 5))"
+    done
+}
+
 printf "\n%b[3/5] Installing pinned dependencies...%b\n" "$BLUE" "$NC"
 cd "$PROJECT_ROOT"
-run_in_env python -m pip install --upgrade pip setuptools wheel
+run_in_env_pip_retry --upgrade pip setuptools wheel
 
 # Releases before this one installed the upstream client with an incompatible
 # Pydantic constraint. DROCAT now bundles its API client, so remove the stale
@@ -266,10 +288,10 @@ if run_in_env python -m pip show neuronbridge-python >/dev/null 2>&1; then
     printf '%s\n' "Removing legacy neuronbridge-python dependency..."
     run_in_env python -m pip uninstall -y neuronbridge-python
 fi
-run_in_env python -m pip install --upgrade -r requirements.txt -r ui/requirements.txt
+run_in_env_pip_retry --upgrade -r requirements.txt -r ui/requirements.txt
 
 printf "\n%b[4/5] Installing DROCAT...%b\n" "$BLUE" "$NC"
-run_in_env python -m pip install -e . --no-deps
+run_in_env_pip_retry -e . --no-deps
 
 printf "\n%b[5/5] Verifying the environment...%b\n" "$BLUE" "$NC"
 run_in_env python -m pip check
@@ -291,7 +313,7 @@ for attempt in 1 2; do
             fi
         fi
         rm -rf "$pip_cache_dir/wheels"
-        run_in_env python -m pip install --upgrade -r requirements.txt -r ui/requirements.txt
+        run_in_env_pip_retry --upgrade -r requirements.txt -r ui/requirements.txt
     fi
     if run_in_env python skills/drocat-install/scripts/verify_install.py --project "$PROJECT_ROOT"; then
         VERIFY_OK=1

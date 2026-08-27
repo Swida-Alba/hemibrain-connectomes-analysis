@@ -114,6 +114,31 @@ pip install --upgrade --force-reinstall -r requirements.txt
 
 ---
 
+#### "Could Not Find a Version That Satisfies the Requirement" ("from versions: none")
+
+**Symptom:**
+```
+ERROR: Could not find a version that satisfies the requirement xlsxwriter<4,>=3.1.0 (from versions: none)
+ERROR: No matching distribution found for xlsxwriter<4,>=3.1.0
+ERROR conda.cli.main_run:execute(49): `conda run python -m pip install ...` failed.
+```
+
+**Cause:** Transient PyPI connectivity degradation (slow downloads, repeatedly
+interrupted downloads, incomplete or empty index-metadata responses). "from
+versions: none" is what pip reports when its index query for a package returns
+an empty version list - it is not a packaging problem, and a different package
+may fail on each run until the network recovers.
+
+**Solution:** Simply re-run the one-click installer. It is idempotent and
+reuses the created environment plus the project-local pip cache
+(`<repo>/cache/pip`), so a re-run is cheap. Manual repair with pip's own
+resilience flags:
+```bash
+python -m pip install --retries 5 --timeout 60 -r requirements-windows.txt -r ui/requirements.txt
+```
+
+---
+
 ### Platform-Specific Issues
 
 #### PyQt5 Installation Issues
@@ -134,6 +159,25 @@ pip install PyQt5
 **Windows:**
 ```bash
 pip install PyQt5
+```
+
+---
+
+#### Leftover Conda Env Directory After `conda env remove` (Windows)
+
+**Symptom:**
+```
+DirectoryNotACondaEnvironmentError
+```
+
+**Cause:** After `conda env remove -n drocat-4.5.0` (cleanup), the environment
+directory (`C:\Users\<user>\anaconda3\envs\drocat-4.5.0`) can remain on disk
+as a stub containing only a `Scripts` folder. A second `conda env remove` then
+fails with `DirectoryNotACondaEnvironmentError`.
+
+**Solution:** Delete the leftover directory manually, then re-create the env:
+```powershell
+Remove-Item -Recurse -Force "$env:USERPROFILE\anaconda3\envs\drocat-4.5.0"
 ```
 
 ---

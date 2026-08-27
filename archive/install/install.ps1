@@ -176,6 +176,28 @@ function Invoke-InEnvironment([string[]]$Command) {
     }
 }
 
+function Invoke-PipWithRetry([string[]]$Command, [int]$MaxAttempts = 3) {
+    # Transient PyPI connectivity degradation (slow downloads, incomplete
+    # index-metadata responses) makes pip report "from versions: none" and
+    # fail an otherwise-correct install. pip's built-in --retries covers
+    # connection resets but NOT a failed index-metadata response, so retry
+    # here as well. The installer is idempotent and uses a project-local pip
+    # cache, so re-runs reuse the env and already-downloaded wheels.
+    for ($Attempt = 1; $Attempt -le $MaxAttempts; $Attempt++) {
+        try {
+            Invoke-InEnvironment $Command
+            return
+        } catch {
+            if ($Attempt -eq $MaxAttempts) {
+                throw "Dependency install failed after $MaxAttempts attempts: $($_.Exception.Message) This may be a transient PyPI network/index error; re-running the installer resumes safely (the environment and already-downloaded wheels are reused)."
+            }
+            $WaitSeconds = 5 * $Attempt
+            Write-Host "Dependency install failed (attempt $Attempt of $MaxAttempts) - likely a transient PyPI network or index error. Retrying in $WaitSeconds seconds..." -ForegroundColor Yellow
+            Start-Sleep -Seconds $WaitSeconds
+        }
+    }
+}
+
 Write-Host ""
 Write-Host "DROCAT - Drosophila Connectome Analysis Toolkit" -ForegroundColor Cyan
 Write-Host "One-Click Installer for Windows" -ForegroundColor Cyan
@@ -255,7 +277,7 @@ if (-not $EnvOverride) { Set-ConfigEnvOverride $DrocatVersion $script:EnvName }
 
 Set-Location $ProjectRoot
 Write-Step "3/5" "Installing pinned dependencies"
-Invoke-InEnvironment @("python", "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel")
+Invoke-PipWithRetry @("python", "-m", "pip", "install", "--upgrade", "--retries", "5", "--timeout", "60", "pip", "setuptools", "wheel")
 
 # Probe for the legacy neuronbridge-python distribution. On a fresh install
 # pip prints "WARNING: Package(s) not found" to stderr, which Windows
@@ -272,10 +294,10 @@ if ($LegacyNeuronbridge) {
     Write-Host "Removing legacy neuronbridge-python dependency..."
     Invoke-InEnvironment @("python", "-m", "pip", "uninstall", "-y", "neuronbridge-python")
 }
-Invoke-InEnvironment @("python", "-m", "pip", "install", "--upgrade", "-r", "requirements-windows.txt", "-r", "ui\requirements.txt")
+Invoke-PipWithRetry @("python", "-m", "pip", "install", "--upgrade", "--retries", "5", "--timeout", "60", "-r", "requirements-windows.txt", "-r", "ui\requirements.txt")
 
 Write-Step "4/5" "Installing DROCAT"
-Invoke-InEnvironment @("python", "-m", "pip", "install", "-e", ".", "--no-deps")
+Invoke-PipWithRetry @("python", "-m", "pip", "install", "--retries", "5", "--timeout", "60", "-e", ".", "--no-deps")
 
 Write-Step "5/5" "Verifying the environment"
 Invoke-InEnvironment @("python", "-m", "pip", "check")
@@ -289,7 +311,7 @@ for ($Attempt = 1; $Attempt -le 2 -and -not $Verified; $Attempt++) {
     if ($Attempt -eq 2) {
         Write-Host "Verification failed; clearing the pip wheel cache and rebuilding dependencies once." -ForegroundColor Yellow
         Remove-Item (Join-Path $PipCacheDir "wheels") -Recurse -Force -ErrorAction SilentlyContinue
-        Invoke-InEnvironment @("python", "-m", "pip", "install", "--upgrade", "-r", "requirements-windows.txt", "-r", "ui\requirements.txt")
+        Invoke-PipWithRetry @("python", "-m", "pip", "install", "--upgrade", "--retries", "5", "--timeout", "60", "-r", "requirements-windows.txt", "-r", "ui\requirements.txt")
     }
     try {
         Invoke-InEnvironment @("python", "skills\drocat-install\scripts\verify_install.py", "--project", $ProjectRoot)
