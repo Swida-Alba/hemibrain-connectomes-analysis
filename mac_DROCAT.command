@@ -167,18 +167,42 @@ main() {
         done
     }
 
+    # Resolve the Python binary inside a named conda env without going through
+    # `conda run`.  `conda run` allocates a pseudo-TTY, which fails when macOS
+    # exhausts its PTY pool (kern.tty.ptmx_max, default 255/511) with
+    # `[forkpty: Device not configured]` / `[Could not create a new process and
+    # open a pseudo-tty.]`, so the env's python is invoked directly instead
+    # (it imports the env's site-packages identically).  The conda base is
+    # resolved via `conda info --base` (non-interactive, never allocates a PTY),
+    # with a prefix-derivation fallback for non-standard/symlinked conda paths.
+    env_bin_python() {
+        # $1 = env name; prints the env's python path when it exists, else nothing.
+        local base py
+        base="$("$CONDA_BIN" info --base 2>/dev/null || true)"
+        if [[ -z "$base" ]]; then
+            base="$(dirname "$(dirname "$CONDA_BIN")")"
+        fi
+        py="$base/envs/$1/bin/python"
+        if [[ -x "$py" ]]; then
+            printf '%s\n' "$py"
+        fi
+        return 0
+    }
+
     env_exists() {
-        # $1 = env name. conda env list is authoritative; fall back to the
-        # standard envs/ directory layout when conda plugins misbehave.
-        "$CONDA_BIN" env list | awk 'NF && $1 !~ /^#/ {print $1}' | grep -Fxq "$1" \
-            || [[ -d "$(dirname "$(dirname "$CONDA_BIN")")/envs/$1" ]]
+        # $1 = env name. Pure filesystem check (no conda subprocess, so no PTY
+        # is allocated); the env's python path is authoritative for existence.
+        local py
+        py="$(env_bin_python "$1")"
+        [[ -n "$py" ]]
     }
 
     resolve_env() {
-        local index candidate
+        local index candidate py
         ENV_NAME=""
         if [[ -n "$ENV_OVERRIDE" ]]; then
-            if "$CONDA_BIN" run -n "$ENV_OVERRIDE" python -c \
+            py="$(env_bin_python "$ENV_OVERRIDE")"
+            if [[ -n "$py" ]] && "$py" -c \
                 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' \
                 >/dev/null 2>&1; then
                 ENV_NAME="$ENV_OVERRIDE"
@@ -205,7 +229,8 @@ main() {
             else
                 candidate="${ENV_BASE}-$((index + 1))"
             fi
-            if "$CONDA_BIN" run -n "$candidate" python -c \
+            py="$(env_bin_python "$candidate")"
+            if [[ -n "$py" ]] && "$py" -c \
                 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' \
                 >/dev/null 2>&1; then
                 ENV_NAME="$candidate"
@@ -244,11 +269,12 @@ main() {
         update_config_env "$DROCAT_VERSION" "$ENV_NAME" "$CONFIG_LOCAL"
     fi
 
-    # An older environment can have importable packages while still containing
-    # incompatible distributions. Repair it through the same pinned installer.
-    if ! "$CONDA_BIN" run -n "$ENV_NAME" python -c \
-        'import nicegui, numpy, pandas, neuprint, neuronbridge_client' >/dev/null 2>&1 \
-        || ! "$CONDA_BIN" run -n "$ENV_NAME" python -m pip check >/dev/null 2>&1; then
+    local py
+    py="$(env_bin_python "$ENV_NAME")"
+    if [[ -z "$py" ]] \
+        || ! "$py" -c \
+            'import nicegui, numpy, pandas, neuprint, neuronbridge_client' >/dev/null 2>&1 \
+        || ! "$py" -m pip check >/dev/null 2>&1; then
         printf '%s\n' "Repairing dependencies in $ENV_NAME..."
         "$INSTALLER"
         resolve_env || return 1
@@ -270,6 +296,20 @@ main() {
         printf '%s\n' "Tip: the NeuPrint token is not configured yet - set it in the UI Settings tab or in config.json (the CAVE token is optional; only needed for FlyWire FAFB online fetching)."
         printf '%s\n' "     Get a NeuPrint token from: https://neuprint.janelia.org/account"
         printf '%s\n' "     Get a CAVE token from: https://codex.flywire.ai/auth_token"
+    fi
+
+    # --- PTY-pressure warning --------------------------------------------
+    # `[forkpty: Device not configured]` happens when macOS's pseudo-terminal
+    # pool (kern.tty.ptmx_max, default 255/511) is exhausted, e.g. too many
+    # terminals or `conda run` processes are open.  Warn before launch so the
+    # user can raise the limit rather than hitting a confusing failure.
+    local ptmx_max=0 pty_count=0
+    ptmx_max="$(sysctl -n kern.tty.ptmx_max 2>/dev/null || printf '0')"
+    pty_count="$(lsof -n 2>/dev/null | grep -c '/dev/ttys' || printf '0')"
+    if [[ "$ptmx_max" =~ ^[0-9]+$ ]] && [[ "$ptmx_max" -gt 0 ]] \
+        && [[ "$pty_count" =~ ^[0-9]+$ ]] && [[ "$pty_count" -ge $((ptmx_max - 25)) ]]; then
+        printf '%s\n' "Warning: $pty_count of $ptmx_max pseudo-terminals are in use. If you see '[forkpty: Device not configured]', raise the PTY limit:" >&2
+        printf '%s\n' "    sudo sysctl -w kern.tty.ptmx_max=1024" >&2
     fi
 
     # --- Port-conflict guard ---------------------------------------------
@@ -300,11 +340,16 @@ main() {
     }
 
     launch_ui() {
-        local port="${1:-$APP_PORT}"
+        local port="${1:-$APP_PORT}" py
         printf 'Starting DROCAT v%s in %s at http://127.0.0.1:%s...\n' "$DROCAT_VERSION" "$ENV_NAME" "$port"
+        py="$(env_bin_python "$ENV_NAME")"
+        if [[ -z "$py" ]]; then
+            printf '%s\n' "ERROR: Python not found in environment '$ENV_NAME'." >&2
+            return 1
+        fi
         cd "$SCRIPT_DIR"
         export DROCAT_UI_PORT="$port"
-        exec "$CONDA_BIN" run -n "$ENV_NAME" --no-capture-output python ui/app.py
+        exec "$py" ui/app.py
     }
 
     if port_in_use; then
