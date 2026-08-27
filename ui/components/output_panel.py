@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 
 from ..runner import open_folder, open_file
+from .free_log import FreeLog
 from .page_progress import PageProgress
 
 
@@ -114,7 +115,8 @@ class OutputPanel:
     def __init__(self, title: str = "Output"):
         self.title = title
         self._dom_id = f"drocat-results-{id(self)}"
-        self.log_area: Optional[ui.log] = None
+        self.log_wrapper: Optional[ui.element] = None
+        self.log_area: Optional[FreeLog] = None
         self.files_container = None
         self.status_label: Optional[ui.badge] = None
         self.progress_bar = None
@@ -178,15 +180,23 @@ class OutputPanel:
             # The log window is pointer-resizable (drag the bottom edge): the
             # wrapper owns the CSS resize handle and carries a definite
             # initial height, while the inner log fills it (h-full) so it
-            # tracks every drag. Kept as a plain, light console that streams
-            # reliably; only the height range is capped.
+            # tracks every drag. FreeLog keeps streaming reliable like
+            # ui.log but scrolls freely: it follows the newest line only
+            # while the view already rests at the bottom, so output can be
+            # read anywhere in the history without being yanked back down.
             self.log_wrapper = ui.element("div").classes("w-full").style(
                 "resize: vertical; overflow: hidden; height: 400px; min-height: 100px; max-height: 1800px;"
             )
             with self.log_wrapper:
-                self.log_area = ui.log(max_lines=500).classes(
+                self.log_area = FreeLog(max_lines=500).classes(
                     "w-full h-full font-mono text-xs"
-                ).style("overflow-y: auto; word-break: break-word;")
+                ).style(
+                    # overflow-anchor is disabled because free_log.js
+                    # compensates for head trims itself (Safari has no
+                    # native scroll anchoring, and double compensation in
+                    # Chromium would jitter).
+                    "overflow-y: auto; overflow-x: hidden; overflow-anchor: none; word-break: break-word;"
+                )
             ui.separator()
             ui.label("Output Files").classes("drocat-mini-label")
             self.files_container = ui.column().classes("w-full gap-2")

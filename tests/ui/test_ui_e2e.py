@@ -6007,6 +6007,34 @@ class TestComponents:
         panel.log("resizable log line", "stdout")
         assert panel.log_area.default_slot.children[0].text == "resizable log line"
 
+    def test_output_panel_log_scrolls_freely(self):
+        """The execution log must not force-jump to the newest line.
+
+        NiceGUI's stock ui.log snaps the viewport to the bottom on every
+        pushed line, which makes a streaming log unreadable anywhere but at
+        the tail. OutputPanel therefore wires the FreeLog drop-in, which
+        keeps the full ui.log API (push/max_lines/clear) while only its
+        client-side scroll policy differs.
+        """
+        from nicegui import Client
+        from nicegui.elements.log import Log
+        from nicegui.page import page
+        from ui.components.free_log import FreeLog
+        from ui.components.output_panel import OutputPanel
+
+        client = Client(page("/output-panel-free-scroll-test"))
+        with client:
+            panel = OutputPanel("Test")
+            panel.create()
+
+        assert isinstance(panel.log_area, FreeLog)
+        assert isinstance(panel.log_area, Log)  # push/max_lines/callers' API preserved
+        assert panel.log_area.max_lines == 500
+
+        # Streaming still works after the swap.
+        panel.log("free scroll line", "stdout")
+        assert panel.log_area.default_slot.children[0].text == "free scroll line"
+
     def _collect_panel_texts(self, container):
         """Recursively collect all label texts inside a UI container."""
         texts = []
