@@ -577,6 +577,12 @@ print(
 )
 '''
 
+        # A tool method string may pass method-level kwargs via
+        # ``**method_params`` (e.g. find_homologs_multi(use_fast=...)), so the
+        # generated script always defines the variable in scope, defaulting to
+        # an empty dict when the caller supplied none.
+        mp_value = _format_value(method_params or {})
+
         script = f'''#!/usr/bin/env python
 """Auto-generated DROCAT runner script for {tool_name}."""
 import sys
@@ -599,7 +605,8 @@ warnings.filterwarnings("ignore")
 )
 
 # Initialize (if needed)
-{init_call}# Run the method
+{init_call}method_params = {mp_value}
+# Run the method
 {method_call}
 
 print("[DROCAT] Done.")

@@ -68,6 +68,23 @@ class TestRunner:
         for name in expected:
             assert "label" in TOOL_REGISTRY[name], f"missing UI label for {name}"
 
+    def test_standard_script_defines_method_params(self):
+        """A standard tool method that uses **method_params (e.g.
+        find_homologs_multi) must have method_params defined in the generated
+        script, or the call raises NameError at runtime (regression for the
+        Homolog Finding tab)."""
+        from ui.runner import ScriptRunner, TOOL_REGISTRY
+        sr = ScriptRunner()
+        script = sr._generate_script(
+            "find_homologs",
+            {"source": ["s-LNv"], "source_dataset": "male-cns:v1.0"},
+            "find_homologs_multi",
+            {"use_fast": True},
+        )
+        assert "method_params = {'use_fast': True}" in script
+        assert "finder.find_homologs_multi(**method_params)" in script
+        assert "find_homologs_multi" in TOOL_REGISTRY["find_homologs"]["methods"]
+
     def test_streaming_logs_emit_lines_and_progress_immediately(self):
         """Partial lines and \\r progress must reach the log before the run ends."""
         import asyncio
