@@ -35,11 +35,9 @@ neuron_indexes/*
 !neuron_indexes/flywire_BANC_v888/neuron_index.parquet
 !neuron_indexes/flywire_BANC_v888/neuron_index_search.parquet
 
-# Raw ROI-sensitive segmentation downloads and generated visualizations.
-# Keep the reproducibility plan under version control while ignoring the
-# potentially large API artifacts.
-preliminary_ROI_sensitive_segmentation/*
-!preliminary_ROI_sensitive_segmentation/plan.md
+# Raw ROI-sensitive segmentation downloads, generated visualizations, and
+# the local reproducibility plan. Kept on disk only, never committed.
+preliminary_ROI_sensitive_segmentation/
 
 # Deprecated folders (removed November 2025)
 navis_roi_meshes_json/
