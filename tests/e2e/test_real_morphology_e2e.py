@@ -126,7 +126,7 @@ def off_diag_mean(d, type_name, metric="cosine"):
     return float((m.sum() - n) / (n * (n - 1)))
 
 
-def run_query(query, level, output_dir, method="vector", **kw):
+def run_query(query, level, output_dir, method="vector_v2", **kw):
     return morph.MorphologyComparer(
         query=query, dataset=DATASET, level=level, method=method,
         metric="cosine", output_dir=str(output_dir),
@@ -311,7 +311,7 @@ class TestProfileFirstPath:
         skipped when the live fetch fails."""
         out = tmp_path_factory.mktemp("e2e_out")
         comparer = morph.MorphologyComparer(
-            query=911332304, dataset=DATASET, level="bodyid", method="vector",
+            query=911332304, dataset=DATASET, level="bodyid", method="vector_v2",
             metric="cosine", output_dir=str(out),
             project_root=str(PROJECT_ROOT), candidate_source="auto",
             verbose=False,
@@ -338,7 +338,7 @@ class TestOutputsAndAutoLevel:
         bodyId-level and type_summary.csv always type-level."""
         out = tmp_path_factory.mktemp("e2e_out")
         c_type = morph.MorphologyComparer(
-            query="aMe12", dataset=DATASET, level="auto", method="vector",
+            query="aMe12", dataset=DATASET, level="auto", method="vector_v2",
             metric="cosine", output_dir=str(out),
             project_root=str(PROJECT_ROOT), candidate_source="cache",
             verbose=False,
@@ -356,7 +356,7 @@ class TestOutputsAndAutoLevel:
 
         out2 = tmp_path_factory.mktemp("e2e_out")
         c_bid = morph.MorphologyComparer(
-            query=911332304, dataset=DATASET, level="auto", method="vector",
+            query=911332304, dataset=DATASET, level="auto", method="vector_v2",
             metric="cosine", output_dir=str(out2),
             project_root=str(PROJECT_ROOT), candidate_source="cache",
             verbose=False,
@@ -376,7 +376,7 @@ class TestOutputsAndAutoLevel:
         within that screened candidate set."""
         out = tmp_path_factory.mktemp("e2e_out")
         comparer = morph.MorphologyComparer(
-            query="aMe12", dataset=DATASET, level="type", method="vector",
+            query="aMe12", dataset=DATASET, level="type", method="vector_v2",
             metric="cosine", output_dir=str(out),
             project_root=str(PROJECT_ROOT), candidate_source="profile",
             verbose=False,
@@ -402,7 +402,7 @@ class TestOutputsAndAutoLevel:
         """Every run writes results.csv (bodyId) + type_summary.csv (type)."""
         out = tmp_path_factory.mktemp("e2e_out")
         comparer = morph.MorphologyComparer(
-            query=5813058431, dataset=DATASET, level="bodyid", method="vector",
+            query=5813058431, dataset=DATASET, level="bodyid", method="vector_v2",
             metric="cosine", output_dir=str(out),
             project_root=str(PROJECT_ROOT), candidate_source="cache",
             verbose=False,
@@ -427,7 +427,7 @@ class TestVisualization:
         results."""
         out = tmp_path_factory.mktemp("e2e_out")
         comparer = morph.MorphologyComparer(
-            query="aMe12", dataset=DATASET, level="type", method="vector",
+            query="aMe12", dataset=DATASET, level="type", method="vector_v2",
             metric="cosine", output_dir=str(out),
             project_root=str(PROJECT_ROOT), candidate_source="cache",
             visualize_top_n=3, visualize_by="type", verbose=False,
@@ -444,7 +444,7 @@ class TestVisualization:
     def test_bodyid_mode_renders_top_rows(self, tmp_path_factory):
         out = tmp_path_factory.mktemp("e2e_out")
         comparer = morph.MorphologyComparer(
-            query=911332304, dataset=DATASET, level="bodyid", method="vector",
+            query=911332304, dataset=DATASET, level="bodyid", method="vector_v2",
             metric="cosine", output_dir=str(out),
             project_root=str(PROJECT_ROOT), candidate_source="cache",
             visualize_top_n=2, visualize_by="bodyId", verbose=False,

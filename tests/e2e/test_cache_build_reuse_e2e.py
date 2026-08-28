@@ -219,6 +219,16 @@ class TestVisualizationCacheBuildReuse:
 # PAM08_e: median pairwise cosine 0.072 across its 10 cached members).
 MIN_INTRA_TYPE_COHERENCE = 0.45
 
+# The legacy V1 raw vector cache was retired when "vector_v2" became the
+# only vector method: these hemibrain tests were seeded from that retired
+# production cache. Build/reuse e2e coverage for the current pipeline lives
+# in tests/e2e/test_similar_bodyid_e2e.py (live male-cns run) and in
+# tests/core/test_morphology_coverage.py (sandboxed fetch -> persist ->
+# reuse unit flows).
+V1_CACHE_RETIRED = pytest.mark.skip(
+    reason="legacy V1 raw vector cache retired; vector_v2 cache build/reuse "
+           "is covered by test_similar_bodyid_e2e.py and core tests")
+
 
 def _type_coherence(X: np.ndarray, row_idxs) -> float:
     """Median pairwise standardized cosine among a type's cached members."""
@@ -268,6 +278,7 @@ def _pick_uncached_bid(seed=3):
 
 
 class TestSimilarFindingCacheBuildReuse:
+    @V1_CACHE_RETIRED
     def test_query_builds_vector_then_reuses_it(self, tmp_path,
                                                 neuprint_client, monkeypatch):
         bid, qtype = _pick_uncached_bid()
@@ -375,7 +386,7 @@ class TestSimilarFindingCacheBuildReuse:
         monkeypatch.setattr(morph, "fetch_skeleton_on_demand", forbidden_fetch)
         out = tmp_path / "similar"
         comparer = morph.MorphologyComparer(
-            query=bid, dataset=DATASET, level="bodyid", method="vector",
+            query=bid, dataset=DATASET, level="bodyid", method="vector_v2",
             candidate_source="cache", output_dir=str(out),
             project_root=str(PROJECT_ROOT), verbose=False,
         )
@@ -400,10 +411,12 @@ class TestUncachedBidSelection:
         ortho = np.eye(3)
         assert abs(_type_coherence(ortho, [0, 1, 2]) - 0.0) < 1e-9
 
+    @V1_CACHE_RETIRED
     def test_selection_is_deterministic(self):
         # The test never mutates the cache, so the seeded pick is stable.
         assert _pick_uncached_bid() == _pick_uncached_bid()
 
+    @V1_CACHE_RETIRED
     def test_selected_type_is_coherent_and_has_uncached_member(self):
         bid, qtype = _pick_uncached_bid()
         vc = morph.find_similar_raw_cache(
