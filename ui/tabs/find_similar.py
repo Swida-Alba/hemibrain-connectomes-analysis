@@ -89,6 +89,11 @@ def create_find_similar_tab():
                     "⚠️ BANC morphological similarity is unavailable because "
                     "FlyWire does not provide BANC skeletons. Select a non-BANC dataset."
                 ).classes("text-caption text-amber-8").set_visibility(False)
+                morph_best_dataset_warning = ui.label(
+                    "⚠️ Morphological similarity works best with the "
+                    "male-cns:v1.0 dataset; results on other datasets may be "
+                    "less reliable."
+                ).classes("text-caption text-amber-8").set_visibility(False)
 
             with ui.card().classes("w-full drocat-card").props('id="card-findsimilar-morphology-neurons"'):
                 section_header("Query", "search")
@@ -453,6 +458,9 @@ def create_find_similar_tab():
 
         def on_dataset_change(_e=None):
             morph_dataset_warning.set_visibility(is_banc_dataset(dataset.value))
+            morph_best_dataset_warning.set_visibility(
+                str(dataset.value or "").strip().lower() != "male-cns:v1.0"
+            )
             refresh_coverage()
             refresh_roi_options()
 

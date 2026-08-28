@@ -44,3 +44,32 @@ def test_morphology_tab_shows_persistent_banc_warning_when_selected():
 
     morph_selector.set_value("flywire_BANC_v626")
     assert warning.visible is True
+
+
+def test_morphology_tab_warns_when_dataset_is_not_male_cns():
+    """Morphological similarity is tuned for male-cns:v1.0; the tab says so
+    whenever another dataset is selected."""
+    from ui.tabs.find_similar import create_find_similar_tab
+
+    client = Client(page("/similar-best-dataset-warning"))
+    with client:
+        create_find_similar_tab()
+
+    morph_selector = next(
+        element
+        for element in client.elements.values()
+        if getattr(element, "_props", {}).get("label") == "Dataset"
+    )
+    warning = next(
+        element
+        for element in client.elements.values()
+        if "works best with the male-cns:v1.0" in str(
+            getattr(element, "text", "")
+        )
+    )
+
+    morph_selector.set_value("flywire_FAFB_v783")
+    assert warning.visible is True
+
+    morph_selector.set_value("male-cns:v1.0")
+    assert warning.visible is False
