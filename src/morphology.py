@@ -129,6 +129,82 @@ VECTOR_DIM = len(MORPHOMETRIC_FEATURES) + PERSISTENCE_DIM
 VECTOR_CACHE_VERSION = 1
 RAW_SKELETON_CACHE_VERSION = 2
 
+# =============================================================================
+# V2 spatial/topological vectorization (opt-in method="vector_v2")
+# =============================================================================
+# The V1 124-dim vector is purely shape-statistical: two neurons with the
+# same global size/branching but arborized in different brain regions score
+# identically.  The V2 schema appends three blocks to the SAME V1 features
+# (nothing is removed, so "vector" results remain reproducible):
+#   spatial  — an arbor ellipsoid (PCA of node coordinates: centroid,
+#              spread, principal axis, anisotropy) plus a cable-mass
+#              histogram over a POPULATION-FIXED bounding box, so absolute
+#              position in the shared template space is preserved;
+#   topology — the leading eigenvalues of the normalized graph Laplacian
+#              (an LLE-family spectral descriptor of branching structure,
+#              scale-normalized and rotation/translation invariant).
+# A fourth, ROI-expansion block (Hellinger pre/post synapse fractions over
+# the primary ROIs) is composed at runtime from ``RoiProfileStore`` when the
+# dataset provides one — FAFB/FlyWire runs simply omit it.
+SPATIAL_ELLIPSOID_FEATURES: List[str] = [
+    "sp_com_x", "sp_com_y", "sp_com_z",
+    "sp_ax1_len", "sp_ax2_len", "sp_ax3_len",
+    "sp_ax1_x", "sp_ax1_y", "sp_ax1_z",
+    "sp_anisotropy", "sp_flatness", "sp_radius",
+]
+SPATIAL_HIST_BINS = (6, 4, 4)          # x/y/z over the population bbox
+SPATIAL_HIST_DIM = SPATIAL_HIST_BINS[0] * SPATIAL_HIST_BINS[1] * SPATIAL_HIST_BINS[2]
+LAPLACIAN_DIM = 24
+# Full-resolution skeletons (FAFB healed bundle) can exceed 100k nodes;
+# eigsh on graphs that large dominates vectorization time. Beyond the cap
+# the graph is stride-subsampled deterministically, keeping the spectrum
+# stable across runs at a bounded cost.
+LAPLACIAN_NODE_CAP = 5000
+# FAFB bundle population seeding: cache-direct FlyWire searches only see
+# locally vectorized neurons, so a representative random sample of the
+# whole-brain skeleton bundle is vectorized once (and cached) whenever the
+# population falls below this target.
+# FAFB bundle population seeding is DISABLED by default: the search is
+# candidate-list-first (connectivity screen -> fetch -> vectorize), so the
+# cache no longer defines the search population. Set a positive target to
+# opt back into a pre-seeded exploratory pool for cache-direct browsing.
+FAFB_BUNDLE_SAMPLE_TARGET = 0
+SPATIAL_BLOCK_DIM = len(SPATIAL_ELLIPSOID_FEATURES) + SPATIAL_HIST_DIM
+VECTOR_V2_DIM = VECTOR_DIM + SPATIAL_BLOCK_DIM + LAPLACIAN_DIM   # 124+108+24
+
+# Column slices of the fixed V2 schema (the optional ROI block is appended
+# beyond the fixed width and carried separately at scoring time).
+V2_SHAPE_SLICE = (0, VECTOR_DIM)
+V2_SPATIAL_SLICE = (VECTOR_DIM, VECTOR_DIM + SPATIAL_BLOCK_DIM)
+V2_TOPOLOGY_SLICE = (VECTOR_V2_DIM - LAPLACIAN_DIM, VECTOR_V2_DIM)
+
+# Per-block weights of the V2 score: sum(weight * cosine_block). When the
+# ROI block is available its weight is added and ALL weights are renor-
+# malized, so the defaults below describe the ROI-less (FAFB) case.
+# Topology stays deliberately light: its spectrum is a COARSE summary and
+# is satisfied by many unrelated arbors (measured cross-p90 ~0.7 on
+# male-cns), so it must not drive the ranking.
+DEFAULT_V2_BLOCK_WEIGHTS = {"shape": 0.50, "spatial": 0.40, "topology": 0.10}
+DEFAULT_V2_ROI_WEIGHT = 0.2
+
+# Two-pass type reevaluation (vector_v2): after the first scoring pass, the
+# remaining (screen-ranked) members of the top-ranked candidate types join
+# the pool and every type is re-aggregated on real coverage — a type's
+# score must not be decided by 1-2 lucky screen survivors. The coverage
+# weighting itself is continuous: similarity * sqrt(type_coverage), see
+# ``_coverage_factor``.
+DEFAULT_EXPAND_TOP_TYPES = 20
+DEFAULT_EXPAND_PER_TYPE = 10
+
+# Minimum standardized rows required to fit a population ZCA whitener; below
+# this the V2 comparison falls back to z-scored per-block cosine.
+MIN_ROWS_FOR_WHITENING = 64
+
+VECTOR_CACHE_V2_VERSION = 3   # 3 = lateral norm + fast (no shift-invert) topology spectra
+
+# Bump when the whitening fit changes so persisted matrices are refit.
+WHITEN_FIT_VERSION = 2
+
 # Step-progress totals reported to the web UI during a similarity run
 # (see the [DROCAT][progress] event protocol in ui/components/output_panel.py).
 PROFILE_FIRST_TOTAL_STEPS = 6   # candidate-screen-first (NeuPrint) pipeline
@@ -444,6 +520,321 @@ def compute_persistence_vector(neuron) -> np.ndarray:
         return np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0).astype(float)
     except Exception:
         return np.zeros(PERSISTENCE_DIM)
+
+
+# =============================================================================
+# V2 spatial/topological feature extraction (method="vector_v2")
+# =============================================================================
+
+def _neuron_points(neuron) -> np.ndarray:
+    """Node (skeleton) or vertex (mesh) coordinates as an (n, 3) array."""
+    if hasattr(neuron, "nodes") and neuron.nodes is not None and len(neuron.nodes):
+        return np.asarray(neuron.nodes[["x", "y", "z"]].to_numpy(), dtype=float)
+    if hasattr(neuron, "vertices") and neuron.vertices is not None \
+            and len(neuron.vertices):
+        return np.asarray(neuron.vertices, dtype=float)
+    return np.zeros((0, 3), dtype=float)
+
+
+def _sign_stable(vec: np.ndarray) -> np.ndarray:
+    """Flip a vector so its largest-magnitude component is positive.
+
+    Eigenvectors have arbitrary sign; this makes the stored axis deterministic
+    for a given geometry (comparisons must not depend on LAPACK sign choices).
+    """
+    v = np.asarray(vec, dtype=float).ravel()
+    if not v.size or not np.isfinite(v).all():
+        return np.zeros_like(v)
+    return -v if v[np.argmax(np.abs(v))] < 0 else v
+
+
+def compute_spatial_ellipsoid(neuron) -> np.ndarray:
+    """12-dim arbor-spread descriptor from the PCA of neuron coordinates.
+
+    [centroid(3), axis spreads sqrt(eigenvalues)(3), principal axis(3),
+    anisotropy, flatness, radius(rms distance to the centroid)]. Captures
+    WHERE the arbor sits in the template space and HOW it expands — the
+    expansion signal V1 lacks. Zeros when no coordinates are available.
+    """
+    pts = _neuron_points(neuron)
+    out = np.zeros(len(SPATIAL_ELLIPSOID_FEATURES))
+    if len(pts) < 3:
+        return out
+    com = pts.mean(axis=0)
+    centered = pts - com
+    cov = (centered.T @ centered) / max(len(pts) - 1, 1)
+    try:
+        evals, evecs = np.linalg.eigh(cov)
+    except np.linalg.LinAlgError:
+        return out
+    evals = np.clip(evals, 0.0, None)
+    order = np.argsort(evals)[::-1]          # descending: a1 >= a2 >= a3
+    evals = evals[order]
+    evecs = evecs[:, order]
+    spread = np.sqrt(evals)                   # units of the template space
+    a1, a2, a3 = (float(s) for s in spread)
+    axis1 = _sign_stable(evecs[:, 0])
+    radius = float(np.sqrt((centered ** 2).sum(axis=1).mean()))
+    out[:] = [
+        com[0], com[1], com[2],
+        a1, a2, a3,
+        axis1[0], axis1[1], axis1[2],
+        (a1 - a2) / a1 if a1 > 0 else 0.0,
+        (a2 - a3) / a1 if a1 > 0 else 0.0,
+        radius,
+    ]
+    return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _neuron_edges(neuron):
+    """(coords, edge index pairs) of the skeleton graph.
+
+    Mirrors ``compute_morphometrics``: the parent column is ``parent_id``
+    and roots are parents that are not themselves nodes (SWC parent ids are
+    0-based, so ``parent_id == 0`` can be a VALID edge)."""
+    df = neuron.nodes
+    coords = df[["x", "y", "z"]].to_numpy(dtype=float)
+    node_ids = df["node_id"].to_numpy()
+    parent = df["parent_id"].to_numpy(dtype=np.int64)
+    id_to_idx = {int(n): i for i, n in enumerate(node_ids)}
+    edges = []
+    for i, p in enumerate(parent):
+        j = id_to_idx.get(int(p), -1)
+        if j < 0:
+            continue   # root (or dangling parent): no edge
+        edges.append((j, i))
+    return coords, edges
+
+
+def _cable_mass_points(neuron) -> Tuple[np.ndarray, np.ndarray]:
+    """Edge midpoints and lengths carrying the neuron's cable mass.
+
+    Skeletons weight each parent->child edge by its length (mass = cable);
+    meshes fall back to unit-weight vertex counts (surface sampling).
+    """
+    if hasattr(neuron, "nodes") and neuron.nodes is not None \
+            and len(neuron.nodes) and "parent_id" in neuron.nodes.columns:
+        coords, edges = _neuron_edges(neuron)
+        if not edges:
+            return coords, np.ones(len(coords))
+        mids = np.asarray([(coords[a] + coords[b]) / 2.0 for a, b in edges])
+        lens = np.asarray([float(np.linalg.norm(coords[a] - coords[b]))
+                           for a, b in edges])
+        lens[lens <= 0] = 1.0
+        return mids, lens
+    pts = _neuron_points(neuron)
+    return pts, np.ones(len(pts))
+
+
+def compute_spatial_histogram_abs(neuron,
+                                  bounds: Optional[np.ndarray] = None
+                                  ) -> np.ndarray:
+    """Cable-mass histogram over a POPULATION-FIXED bounding box.
+
+    ``bounds`` is [lo(3), hi(3)] shared by every neuron of a dataset (cache
+    meta), so bin k means the same brain region for all neurons — unlike a
+    per-neuron normalized grid, absolute position is preserved. Weights are
+    cable length (skeletons) or unit vertex mass (meshes), L1-normalized and
+    sqrt-transformed (Hellinger) for cosine. Zeros when bounds are unknown.
+    """
+    hist = np.zeros(SPATIAL_HIST_DIM)
+    if bounds is None:
+        return hist
+    bounds = np.asarray(bounds, dtype=float)
+    if bounds.shape != (2, 3):
+        return hist
+    mids, weights = _cable_mass_points(neuron)
+    if not len(mids):
+        return hist
+    lo, hi = bounds[0], bounds[1]
+    span = np.where(hi - lo > 0, hi - lo, 1.0)
+    total = float(weights.sum())
+    if total <= 0:
+        return hist
+    frac = np.clip((mids - lo) / span, 0.0, 1.0 - 1e-9)
+    idx = np.floor(frac * np.asarray(SPATIAL_HIST_BINS)).astype(np.int64)
+    idx = np.clip(idx, 0, np.asarray(SPATIAL_HIST_BINS) - 1)
+    flat = (idx[:, 0] * SPATIAL_HIST_BINS[1]
+            + idx[:, 1]) * SPATIAL_HIST_BINS[2] + idx[:, 2]
+    hist = np.bincount(flat, weights=weights / total,
+                       minlength=SPATIAL_HIST_DIM)
+    return np.sqrt(np.maximum(hist, 0.0))
+
+
+def _skeleton_laplacian_spectrum(neuron, k: int = LAPLACIAN_DIM) -> np.ndarray:
+    """Leading eigenvalues of the normalized graph Laplacian (skeletons).
+
+    The skeleton graph (nodes joined by parent edges) is scale-normalized by
+    dividing edge weights by the median edge length, so the spectrum isolates
+    BRANCHING TOPOLOGY from overall size (already covered by the shape
+    block). The first ``k`` eigenvalues ascend from the algebraic
+    connectivity; they are the LLE-family spectral summary of the arbor.
+    """
+    import scipy.sparse as sp
+    from scipy.sparse.linalg import eigsh
+
+    out = np.full(k, 2.0)   # eigenvalues of a normalized Laplacian are <= 2
+    df = neuron.nodes
+    if df is None or not len(df) or "parent_id" not in df.columns:
+        return out
+    n = len(df)
+    if n < 3:
+        return out
+    coords, edges = _neuron_edges(neuron)
+    if not edges:
+        return out
+    if n > LAPLACIAN_NODE_CAP:
+        # Deterministic stride subsample: bounds eigsh cost on
+        # full-resolution skeletons while staying reproducible.
+        stride = int(np.ceil(n / LAPLACIAN_NODE_CAP))
+        sel = np.arange(0, n, stride)
+        sel_set = {int(x) for x in sel}
+        remap = {int(x): new for new, x in enumerate(sel)}
+        edges = [(remap[int(a)], remap[int(b)]) for a, b in edges
+                 if int(a) in sel_set and int(b) in sel_set]
+        coords = coords[sel]
+        n = len(sel)
+        if not edges:
+            return out
+    rows = [a for a, _ in edges] + [b for _, b in edges]
+    cols = [b for _, b in edges] + [a for a, _ in edges]
+    edge_lens = [float(np.linalg.norm(coords[a] - coords[b])) for a, b in edges]
+    med = float(np.median(edge_lens)) or 1.0
+    vals = [l / med for l in edge_lens] * 2
+    adj = sp.coo_matrix((vals, (rows, cols)), shape=(n, n)).tocsr()
+    deg = np.asarray(adj.sum(axis=1)).ravel()
+    deg[deg <= 0] = 1.0
+    d_inv_sqrt = sp.diags(1.0 / np.sqrt(deg))
+    lap = sp.identity(n, format="csr") - d_inv_sqrt @ adj @ d_inv_sqrt
+    k_eff = min(k, n - 2)
+    if k_eff < 1:
+        return out
+    try:
+        # Smallest eigenvalues of the normalized Laplacian without the
+        # costly shift-invert factorization: they equal
+        # 2 - (largest eigenvalues of 2I - L), which plain Lanczos
+        # ('LA') computes directly on the sparse graph.
+        eigvals = 2.0 - eigsh(2.0 * sp.identity(n, format="csr") - lap,
+                              k=k_eff, which="LA",
+                              return_eigenvectors=False)
+    except Exception:
+        return out
+    eigvals = np.sort(np.real(eigvals))
+    out[:len(eigvals)] = eigvals
+    return np.nan_to_num(out, nan=2.0, posinf=2.0, neginf=2.0)
+
+
+def _mesh_laplacian_spectrum(neuron, k: int = LAPLACIAN_DIM,
+                             n_sample: int = 2000, knn: int = 8) -> np.ndarray:
+    """kNN-graph Laplacian spectrum for meshes (vertices subsampled)."""
+    import scipy.sparse as sp
+    from scipy.sparse.linalg import eigsh
+
+    out = np.full(k, 2.0)
+    pts = _neuron_points(neuron)
+    n = len(pts)
+    if n < 3:
+        return out
+    if n > n_sample:
+        rng = np.random.default_rng(0)
+        sel = np.sort(rng.choice(n, n_sample, replace=False))
+        pts = pts[sel]
+        n = n_sample
+    dist = np.linalg.norm(pts[:, None, :] - pts[None, :, :], axis=2)
+    np.fill_diagonal(dist, np.inf)
+    rows = np.repeat(np.arange(n), knn)
+    cols = np.argpartition(dist, knn, axis=1)[:, :knn].ravel()
+    med = float(np.median(dist[rows, cols])) or 1.0
+    vals = np.ones(len(rows))          # unit weights: shape-only topology
+    adj = sp.coo_matrix((vals, (rows, cols)), shape=(n, n)).tocsr()
+    adj = adj.maximum(adj.T)
+    deg = np.asarray(adj.sum(axis=1)).ravel()
+    deg[deg <= 0] = 1.0
+    d_inv_sqrt = sp.diags(1.0 / np.sqrt(deg))
+    lap = sp.identity(n, format="csr") - d_inv_sqrt @ adj @ d_inv_sqrt
+    k_eff = min(k, n - 2)
+    if k_eff < 1:
+        return out
+    try:
+        # Smallest eigenvalues of the normalized Laplacian without the
+        # costly shift-invert factorization: they equal
+        # 2 - (largest eigenvalues of 2I - L), which plain Lanczos
+        # ('LA') computes directly on the sparse graph.
+        eigvals = 2.0 - eigsh(2.0 * sp.identity(n, format="csr") - lap,
+                              k=k_eff, which="LA",
+                              return_eigenvectors=False)
+    except Exception:
+        return out
+    eigvals = np.sort(np.real(eigvals))
+    out[:len(eigvals)] = eigvals
+    return np.nan_to_num(out, nan=2.0, posinf=2.0, neginf=2.0)
+
+
+def compute_laplacian_spectrum(neuron, k: int = LAPLACIAN_DIM) -> np.ndarray:
+    """Laplacian-spectrum topology block; dispatches skeleton vs mesh."""
+    if hasattr(neuron, "nodes") and neuron.nodes is not None and len(neuron.nodes):
+        return _skeleton_laplacian_spectrum(neuron, k)
+    return _mesh_laplacian_spectrum(neuron, k)
+
+
+def _lateral_reflected(neuron, mid_x: float):
+    """View of ``neuron`` reflected about the x = mid_x plane.
+
+    Returns a lightweight object whose node/vertex table carries the
+    reflected x coordinates; the input neuron is never mutated. The V1
+    shape features are reflection-invariant, so only the spatial features
+    are computed from this view."""
+    if hasattr(neuron, "nodes") and neuron.nodes is not None:
+        import types
+        nodes = neuron.nodes.copy()
+        nodes["x"] = 2.0 * mid_x - nodes["x"]
+        return types.SimpleNamespace(nodes=nodes)
+    if hasattr(neuron, "vertices") and neuron.vertices is not None:
+        import types
+        verts = np.asarray(neuron.vertices, dtype=float).copy()
+        verts[:, 0] = 2.0 * mid_x - verts[:, 0]
+        return types.SimpleNamespace(vertices=verts)
+    return neuron
+
+
+def vectorize_neuron_v2(neuron,
+                        spatial_bounds: Optional[np.ndarray] = None,
+                        lateral_normalize: bool = False
+                        ) -> Tuple[Dict[str, float], np.ndarray]:
+    """Return (24-feature dict, 256-dim V2 vector).
+
+    The first 124 dims are the V1 vector (identical schema and values); the
+    appended blocks carry spatial expansion (ellipsoid + population-bbox
+    histogram) and topology (Laplacian spectrum). ``spatial_bounds`` comes
+    from the cache's population estimate; without it the histogram block is
+    zeros (ellipsoid/topology still apply).
+
+    ``lateral_normalize`` reflects right-hemisphere arbors (centroid x past
+    the bounds midline) onto the left BEFORE the spatial features are
+    computed. Stored this way, every neuron of a dataset is represented on
+    one hemisphere, so type-level aggregation can no longer average L and R
+    positions into a midline blur; L/R homologs compare directly. The V1
+    prefix is reflection-invariant and unaffected, and the topology block
+    (a Laplacian spectrum) is reflection-invariant too.
+    """
+    morph, v1 = vectorize_neuron(neuron)
+    spatial_view = neuron
+    if lateral_normalize and spatial_bounds is not None:
+        mid_x = 0.5 * (float(spatial_bounds[0][0]) + float(spatial_bounds[1][0]))
+        pts = _neuron_points(neuron)
+        if len(pts) and float(np.mean(pts[:, 0])) > mid_x:
+            spatial_view = _lateral_reflected(neuron, mid_x)
+    vector = np.concatenate([
+        v1,
+        compute_spatial_ellipsoid(spatial_view),
+        compute_spatial_histogram_abs(spatial_view, spatial_bounds),
+        compute_laplacian_spectrum(neuron),
+    ])
+    if vector.shape[0] != VECTOR_V2_DIM:   # defensive: never mis-slice blocks
+        raise ValueError(
+            f"V2 vectorization produced {vector.shape[0]} dims, "
+            f"expected {VECTOR_V2_DIM}")
+    return morph, vector
 
 
 # =============================================================================
@@ -863,6 +1254,58 @@ def _vectorize_one_swc(body_id: int
             vector[len(MORPHOMETRIC_FEATURES):].tolist(), "skeleton")
 
 
+# V2 workers (method="vector_v2"): same sources, full 256-dim schema. The
+# population spatial bounds travel through the pool initializer / argument
+# so every worker bins the histogram identically.
+_V2_WORKER_BOUNDS = None
+
+
+def _init_v2_swc_worker(source_path: str, zip_path: Optional[str], bounds):
+    global _FAFB_WORKER_BUNDLE, _V2_WORKER_BOUNDS
+    _init_fafb_zip_worker(source_path, zip_path)
+    _V2_WORKER_BOUNDS = bounds
+
+
+def _vectorize_one_file_v2(path: str,
+                           bounds=None
+                           ) -> Optional[Tuple[int, List[float], str]]:
+    """Module-level V2 worker for one cached skeleton/mesh file."""
+    global _V2_WORKER_BOUNDS
+    try:
+        neuron = _load_cached_skeleton_file(path)
+        stored = getattr(neuron, "_drocat_simplification", 0)
+        if stored != DEFAULT_SIMPLIFICATION:
+            try:
+                neuron = _relevel_for_target(neuron, stored, DEFAULT_SIMPLIFICATION)
+            except Exception:
+                pass
+        used_bounds = bounds if bounds is not None else _V2_WORKER_BOUNDS
+        _, vector = vectorize_neuron_v2(neuron, used_bounds,
+                                        lateral_normalize=True)
+        rep = _neuron_rep(neuron)
+    except Exception:
+        return None
+    return (_skeleton_body_id(path), vector.tolist(), rep)
+
+
+def _vectorize_one_swc_v2(body_id: int) -> Optional[Tuple[int, List[float], str]]:
+    """Module-level V2 worker for one healed-bundle skeleton."""
+    global _FAFB_WORKER_BUNDLE, _V2_WORKER_BOUNDS
+    import io
+
+    try:
+        content = _FAFB_WORKER_BUNDLE.get(int(body_id))
+        if content is None:
+            return None
+        neuron = navis.read_swc(io.StringIO(content))
+        neuron.units = "nm"
+        _, vector = vectorize_neuron_v2(neuron, _V2_WORKER_BOUNDS,
+                                        lateral_normalize=True)
+    except Exception:
+        return None
+    return (int(body_id), vector.tolist(), "skeleton")
+
+
 def _fafb_bundle(dataset: str,
                  project_root: Optional[str] = None):
     """Healed-bundle reader for FAFB v783: .zst first, ZIP fallback (lazy).
@@ -1186,6 +1629,202 @@ def pairwise_similarity_matrix(matrix: np.ndarray,
         scores[zero, :] = 0.0
         scores[:, zero] = 0.0
     return scores
+
+
+# =============================================================================
+# V2 comparison: ZCA whitening + block-weighted similarity
+# =============================================================================
+
+def fit_zca_whitener(X_std: np.ndarray,
+                     relative_floor: float = 1e-2,
+                     max_amplification: float = 10.0
+                     ) -> np.ndarray:
+    """Truncated ZCA whitening matrix from standardized population rows.
+
+    W = V diag(s) Vᵀ over the covariance Σ = V Λ Vᵀ of the standardized
+    population, with
+
+        s_j = min(1/sqrt(λ_j), max_amplification)   if λ_j >= floor
+        s_j = 1                                     otherwise
+        floor = relative_floor * λ_max
+
+    High-variance directions are compressed (s < 1) and mid-range ones
+    whitened (s ≈ 1), which decorrelates the feature space so a few
+    high-variance shape dims can no longer dominate the cosine. Directions
+    whose variance is below ``relative_floor`` of the largest carry only
+    population noise: they are passed through UNCHANGED (s = 1) instead of
+    being amplified — the plain eps-regularized version scaled a
+    near-constant direction by 1/sqrt(eps), and that shared constant then
+    dominated every vector, collapsing all cosines toward 1. The
+    ``max_amplification`` cap bounds the same pathology for mid-low
+    directions. Use :func:`apply_whitening` on standardized rows.
+    """
+    values = np.asarray(X_std, dtype=float)
+    d = values.shape[1] if values.ndim == 2 else 0
+    if d == 0:
+        return np.eye(0)
+    sigma = np.cov(values, rowvar=False)
+    sigma = np.atleast_2d(sigma)
+    try:
+        evals, evecs = np.linalg.eigh(sigma)
+    except np.linalg.LinAlgError:
+        return np.eye(d)
+    evals = np.clip(evals, 0.0, None)
+    lam_max = float(evals.max())
+    floor = relative_floor * lam_max
+    keep = evals >= floor
+    scale = np.where(keep, 1.0 / np.sqrt(np.maximum(evals, 1e-12)), 1.0)
+    scale = np.minimum(scale, max_amplification)
+    W = (evecs * scale) @ evecs.T
+    return np.nan_to_num(W, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def apply_whitening(W: np.ndarray, X: np.ndarray) -> np.ndarray:
+    """Whiten rows: X @ Wᵀ (W symmetric, so row order is preserved)."""
+    W = np.asarray(W, dtype=float)
+    values = np.asarray(X, dtype=float)
+    if W.size == 0 or values.shape[-1] != W.shape[0]:
+        return values
+    return values @ W.T
+
+
+def _block_cosine_one(q: np.ndarray, m: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Cosine of one query block against the matrix rows' matching block.
+
+    Returns (scores, valid): ``valid`` is False for rows whose block is all
+    zeros on either side — those rows exclude the block from their weighted
+    mean instead of being forced to 0 (a neuron with no arbor in a region
+    must not be scored as "maximally dissimilar there", it just carries no
+    evidence for that block).
+    """
+    q = np.asarray(q, dtype=float).ravel()
+    m = np.asarray(m, dtype=float)
+    qn = float(np.linalg.norm(q))
+    rows_n = np.linalg.norm(m, axis=1)
+    if qn <= 1e-12:
+        return np.zeros(len(m)), rows_n <= 1e-12
+    scores = m @ q / (qn * np.maximum(rows_n, 1e-12))
+    valid = rows_n > 1e-12
+    return np.where(valid, scores, 0.0), valid
+
+
+def _mirror_spatial_block(block: np.ndarray) -> np.ndarray:
+    """Mirror a spatial block across the brain midline (x-axis flip).
+
+    The ellipsoid's x-signed features (centroid x, principal-axis x) flip
+    sign; the histogram's x-bin order reverses. Applied to standardized/
+    whitened vectors this is an approximation of scoring in the mirrored
+    space — exact when the population statistics are LR-symmetric, which a
+    full-brain population approximately is (the ROI screen makes the same
+    assumption).
+    """
+    values = np.asarray(block, dtype=float)
+    single = values.ndim == 1
+    m = np.atleast_2d(values).copy()
+    n_ell = len(SPATIAL_ELLIPSOID_FEATURES)
+    m[:, 0] = -m[:, 0]    # sp_com_x
+    m[:, 6] = -m[:, 6]    # sp_ax1_x
+    hist = m[:, n_ell:].reshape(-1, SPATIAL_HIST_BINS[0],
+                                SPATIAL_HIST_BINS[1], SPATIAL_HIST_BINS[2])
+    m[:, n_ell:] = np.flip(hist, axis=1).reshape(len(m), -1)
+    return m[0] if single else m
+
+
+def v2_similarity_matrix(query: np.ndarray, matrix: np.ndarray,
+                         block_weights: Dict[str, float],
+                         extra_blocks: Optional[List[Tuple[str, float, np.ndarray, np.ndarray]]] = None,
+                         spatial_overlap: Optional[Dict[str, np.ndarray]] = None,
+                         query_index: Optional[int] = None
+                         ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    """Block-weighted V2 similarity of one query against matrix rows.
+
+    Fixed blocks (shape / spatial / topology) are column slices of the full
+    V2 schema; ``extra_blocks`` carries run-composed blocks as
+    ``(name, weight, query_block, candidate_matrix)`` — the ROI-expansion
+    block, whose width depends on the dataset's ROI count. Each block
+    contributes ``weight * cosine_block`` over the rows where the block is
+    defined on both sides; the total renormalizes by the weights actually
+    used per row.
+
+    The spatial block additionally blends a **mass-overlap term**
+    (50/50): ``sum(min(q_hist, candidate_hist))`` over the RAW Hellinger
+    histograms supplied via ``spatial_overlap`` =
+    ``{"members": (n_query, 96), "centroid": (96,), "pool": (n_pool, 96)}``.
+    The stored histograms are L1-style proportions, so the intersection is
+    the fraction of the query's arbor distribution the candidate actually
+    shares — cosine alone is proportion-blind (a neuron with the same
+    *shape* of distribution but far less arbor in the query's region scores
+    identically). ``query_index`` selects the query member's histogram;
+    without it the pooled centroid histogram is used. Returns
+    (total scores, per-block scores dict).
+    """
+    q = np.asarray(query, dtype=float).ravel()
+    m = np.asarray(matrix, dtype=float)
+    n = len(m)
+    total_w = np.zeros(n)
+    total = np.zeros(n)
+    per_block: Dict[str, np.ndarray] = {}
+
+    def _accumulate(name, weight, q_block, m_block):
+        nonlocal total_w, total
+        scores, valid = _block_cosine_one(q_block, m_block)
+        if name == "spatial" and spatial_overlap is not None:
+            pool = spatial_overlap["pool"]
+            qh = (spatial_overlap["members"][query_index]
+                  if query_index is not None
+                  else spatial_overlap["centroid"])
+            if qh is not None and len(pool) == n:
+                inter = np.minimum(qh, pool).sum(axis=1)
+                scores = 0.5 * scores + 0.5 * inter
+        per_block[name] = scores
+        total += weight * np.where(valid, scores, 0.0)
+        total_w += np.where(valid, weight, 0.0)
+
+    for name, (a, b) in (("shape", V2_SHAPE_SLICE),
+                         ("spatial", V2_SPATIAL_SLICE),
+                         ("topology", V2_TOPOLOGY_SLICE)):
+        weight = float(block_weights.get(name, 0.0))
+        if weight <= 0 or b > q.shape[0]:
+            continue
+        _accumulate(name, weight, q[a:b], m[:, a:b])
+    for name, weight, q_block, m_block in (extra_blocks or []):
+        weight = float(weight)
+        if weight <= 0 or not len(m_block):
+            continue
+        _accumulate(name, weight, q_block, m_block)
+    result = np.divide(total, np.maximum(total_w, 1e-12),
+                       out=np.zeros(n), where=total_w > 1e-12)
+    return result, per_block
+
+
+def v2_pairwise_matrix(matrix: np.ndarray,
+                       block_weights: Dict[str, float]) -> np.ndarray:
+    """Pairwise block-weighted similarity over the rows of ``matrix``.
+
+    Used for intra-type reference values. Only the fixed schema blocks
+    participate (the ROI-expansion block is aligned to one run's id order,
+    not to an arbitrary row subset).
+    """
+    values = np.asarray(matrix, dtype=float)
+    n = len(values)
+    total_w = np.zeros((n, n))
+    total = np.zeros((n, n))
+    for name, (a, b) in (("shape", V2_SHAPE_SLICE),
+                         ("spatial", V2_SPATIAL_SLICE),
+                         ("topology", V2_TOPOLOGY_SLICE)):
+        weight = float(block_weights.get(name, 0.0))
+        if weight <= 0 or b > values.shape[1]:
+            continue
+        block = values[:, a:b]
+        norms = np.linalg.norm(block, axis=1)
+        valid = norms > 1e-12
+        normalized = block / np.maximum(norms[:, None], 1e-12)
+        scores = normalized @ normalized.T
+        v = valid[:, None] & valid[None, :]
+        total += weight * np.where(v, scores, 0.0)
+        total_w += np.where(v, weight, 0.0)
+    return np.divide(total, np.maximum(total_w, 1e-12),
+                     out=np.zeros((n, n)), where=total_w > 1e-12)
 
 
 def _sorted_candidates(candidates: pd.DataFrame) -> pd.DataFrame:
@@ -1781,9 +2420,9 @@ class SkeletonVectorCache:
     def _write_meta(self, stats: Dict[str, List[float]], n_rows: int,
                     rep: str = "", vector_basis: str = VECTOR_BASIS_RAW):
         meta = {
-            "version": VECTOR_CACHE_VERSION,
+            "version": self._cache_version(),
             "dataset": self.dataset,
-            "feature_columns": MORPHOMETRIC_FEATURES,
+            "feature_columns": self._feature_columns(),
             "persistence_dim": PERSISTENCE_DIM,
             "n_rows": n_rows,
             "rep": rep,
@@ -2129,6 +2768,37 @@ class SkeletonVectorCache:
         cols = MORPHOMETRIC_FEATURES + [f"pv_{i}" for i in range(PERSISTENCE_DIM)]
         return df[cols].to_numpy(dtype=float)
 
+    def _feature_columns(self) -> List[str]:
+        """Parquet feature columns of this cache's vector schema (V1 124)."""
+        return MORPHOMETRIC_FEATURES + [f"pv_{i}" for i in range(PERSISTENCE_DIM)]
+
+    def _cache_version(self) -> int:
+        return VECTOR_CACHE_VERSION
+
+    def _meta_extra(self) -> dict:
+        """Extra meta keys stamped on append-created caches (schema hook)."""
+        return {}
+
+    def _default_basis(self) -> str:
+        """Vector basis recorded when a cache is created (schema hook)."""
+        return VECTOR_BASIS_RAW
+
+    def _file_level_ok(self, neuron) -> bool:
+        """Whether a locally cached skeleton may feed this cache's basis.
+
+        V1 (raw basis): only level-0 files — simplified files are skipped
+        (their vectors come from the vector cache / raw fetches instead).
+        """
+        return getattr(neuron, "_drocat_simplification", 0) == 0
+
+    def _vector_dim(self) -> int:
+        """Width of this cache's vectors (schema hook for the V2 cache)."""
+        return VECTOR_DIM
+
+    def _vectorize_neuron(self, neuron):
+        """Vector-schema hook: (feature dict, flat vector) for one neuron."""
+        return vectorize_neuron(neuron)
+
     def load(self) -> Optional[dict]:
         """Load the cache: meta + raw df + standardized matrix + index arrays.
 
@@ -2225,8 +2895,11 @@ class SkeletonVectorCache:
 
     # ------------------------------------------------------------ append
     def append_vectors(self, records: List[Tuple[int, np.ndarray, str]],
-                       vector_basis: str = VECTOR_BASIS_RAW) -> int:
+                       vector_basis: Optional[str] = None) -> int:
         """Persist freshly-computed vectors (raw feature rows) into the cache.
+
+        ``vector_basis=None`` resolves to the cache's own default basis
+        (raw for V1, simp90 for the V2 schema cache).
 
         Called when a vector was computed from a cached skeleton file or from
         an online-fetched skeleton that was NOT persisted: the VECTOR is
@@ -2248,6 +2921,7 @@ class SkeletonVectorCache:
         """
         if not records:
             return 0
+        vector_basis = vector_basis or self._default_basis()
         # Cross-process safety: UI runs execute in separate subprocesses, so
         # the pending read-append-write is guarded with an advisory file lock
         # (POSIX; best-effort elsewhere).
@@ -2273,10 +2947,8 @@ class SkeletonVectorCache:
                     continue
                 seen.add(bid)
                 row = {"bodyId": bid, "rep": rep}
-                for i, name in enumerate(MORPHOMETRIC_FEATURES):
+                for i, name in enumerate(self._feature_columns()):
                     row[name] = float(vec[i])
-                for i in range(PERSISTENCE_DIM):
-                    row[f"pv_{i}"] = float(vec[len(MORPHOMETRIC_FEATURES) + i])
                 row["type"] = type_map.get(bid, "") if type_map else ""
                 row["instance"] = (instance_map or {}).get(bid, "") if instance_map else ""
                 rows_new.append(row)
@@ -2320,6 +2992,8 @@ class SkeletonVectorCache:
             meta["n_rows"] = (self._vector_row_count()
                                if self.parquet_path.exists() else len(combined))
             meta["pending_appends"] = int(meta.get("pending_appends") or 0) + 1
+            meta.setdefault("version", self._cache_version())
+            meta.update(self._meta_extra())
             meta["built_at"] = datetime.now().isoformat(timespec="seconds")
             if "rep" not in meta and len(df_new) and "rep" in df_new.columns:
                 meta["rep"] = str(df_new["rep"].iloc[0])
@@ -2365,9 +3039,9 @@ class SkeletonVectorCache:
         body_ids = [self._canonical_body_id(b) for b in body_ids]
         data = self.load()
         known: Dict[int, int] = {}
-        X = np.zeros((0, VECTOR_DIM))
+        X = np.zeros((0, self._vector_dim()))
         dataset_rep = ""
-        basis = VECTOR_BASIS_RAW
+        basis = self._default_basis()
         if data is not None:
             known = {
                 self._canonical_body_id(b): i
@@ -2376,9 +3050,9 @@ class SkeletonVectorCache:
             X = data["X"]
             dataset_rep = data.get("dataset_rep", "")
             basis = ((data.get("meta") or {}).get("vector_basis")
-                     or VECTOR_BASIS_RAW)
+                     or self._default_basis())
 
-        result = np.full((len(body_ids), VECTOR_DIM), np.nan)
+        result = np.full((len(body_ids), self._vector_dim()), np.nan)
         reps = [""] * len(body_ids)
         computed: List[Tuple[int, np.ndarray, str]] = []
         for j, bid in enumerate(body_ids):
@@ -2399,10 +3073,9 @@ class SkeletonVectorCache:
                 if pkl is not None:
                     try:
                         neuron = _load_cached_skeleton_file(pkl)
-                        # Per-file level guard: simplified on-disk skeletons
-                        # are never vectorized into the raw-basis cache (their
-                        # vectors come from the vector cache / raw fetches).
-                        if getattr(neuron, "_drocat_simplification", 0) != 0:
+                        # Per-file level guard: only files matching the
+                        # cache's basis are vectorized (V1: level 0 only).
+                        if not self._file_level_ok(neuron):
                             continue
                         row_rep = _neuron_rep(neuron)
                         if self.raw_only and row_rep != "skeleton":
@@ -2411,7 +3084,7 @@ class SkeletonVectorCache:
                             continue
                         if dataset_rep and row_rep != dataset_rep:
                             continue  # different representation: never mix
-                        _, vec = vectorize_neuron(neuron)
+                        _, vec = self._vectorize_neuron(neuron)
                         result[j] = vec
                         reps[j] = row_rep
                         # Persist the vector: later queries reuse it without
@@ -2485,6 +3158,532 @@ def find_similar_dataset_cache(
     return find_similar_raw_cache(
         dataset, project_root=project_root, n_workers=n_workers,
         verbose=verbose)
+
+
+class SkeletonVectorCacheV2(SkeletonVectorCache):
+    """V2 (spatial/topological) vector cache: same skeletons, richer schema.
+
+    Shares the raw skeleton store with the V1 cache (one download serves
+    both vector schemas — V1 rows also stay available for the vector-cache
+    prefilter and ``enrich_homolog_results``) but keeps SEPARATE
+    parquet/meta/pending files. Vectors are :data:`VECTOR_V2_DIM`-dim (V1's
+    124 features + spatial + topology blocks). Meta additionally records
+    the population spatial bounds used by the histogram block; a ZCA
+    whitening matrix fitted on the standardized population lives in a
+    ``*_whiten_v2.npz`` sidecar and is (re)computed lazily when the
+    population outgrows the last fit.
+    """
+
+    def __init__(self, dataset: str, project_root: Optional[str] = None,
+                 n_workers: int = 8, verbose: bool = True,
+                 raw_format: str = "swc.zst", representation: Optional[str] = None,
+                 bundle_sample_target: int = FAFB_BUNDLE_SAMPLE_TARGET):
+        super().__init__(dataset, project_root=project_root,
+                         n_workers=n_workers, verbose=verbose,
+                         raw_only=str(representation or "").lower() != "mesh",
+                         raw_format=raw_format,
+                         representation=representation)
+        # FAFB only: when the vector population falls below this target,
+        # build() seeds a representative random sample of the whole-brain
+        # healed skeleton bundle so cache-direct searches have a meaningful
+        # candidate pool.
+        self.bundle_sample_target = max(0, int(bundle_sample_target))
+        # Re-point every schema-bearing file at the *_v2 namespace; the
+        # skeleton dirs (raw SWCs / meshes) stay shared with V1.
+        suffix = "_v2"
+        stem = "mesh" if self.mesh_only else "skeleton"
+        self.parquet_path = self.morph_dir / f"{stem}__vectors{suffix}.parquet"
+        self.meta_path = self.morph_dir / (
+            f"mesh_meta{suffix}.json" if self.mesh_only else f"meta{suffix}.json")
+        self.pending_path = self.morph_dir / f"{stem}__vectors{suffix}_pending.parquet"
+        self.whiten_path = self.morph_dir / (
+            f"mesh_whiten{suffix}.npz" if self.mesh_only else f"whiten{suffix}.npz")
+        self._spatial_bounds: Optional[np.ndarray] = None
+        self._bounds_resolved = False
+
+    # ------------------------------------------------------- schema hooks
+    @staticmethod
+    def _raw_matrix(df: pd.DataFrame) -> np.ndarray:
+        cols = (MORPHOMETRIC_FEATURES + [f"pv_{i}" for i in range(PERSISTENCE_DIM)]
+                + SPATIAL_ELLIPSOID_FEATURES
+                + [f"sh_{i}" for i in range(SPATIAL_HIST_DIM)]
+                + [f"lp_{i}" for i in range(LAPLACIAN_DIM)])
+        return df[cols].to_numpy(dtype=float)
+
+    def _vector_dim(self) -> int:
+        return VECTOR_V2_DIM
+
+    def _default_basis(self) -> str:
+        # V2 vectorizes whatever the shared skeleton store holds, releveled
+        # to the canonical simp90 level (the fetch pipeline's default), so
+        # the full local population is usable without online fetches. Every
+        # row is releveled identically -> one consistent basis.
+        return VECTOR_BASIS_SIMP90
+
+    def _file_level_ok(self, neuron) -> bool:
+        return True   # any stored level; releveled in _vectorize_neuron
+
+    def _feature_columns(self) -> List[str]:
+        return (MORPHOMETRIC_FEATURES + [f"pv_{i}" for i in range(PERSISTENCE_DIM)]
+                + SPATIAL_ELLIPSOID_FEATURES
+                + [f"sh_{i}" for i in range(SPATIAL_HIST_DIM)]
+                + [f"lp_{i}" for i in range(LAPLACIAN_DIM)])
+
+    def _cache_version(self) -> int:
+        return VECTOR_CACHE_V2_VERSION
+
+    def _vectorize_neuron(self, neuron):
+        stored = getattr(neuron, "_drocat_simplification", 0)
+        if stored != DEFAULT_SIMPLIFICATION:
+            try:
+                neuron = _relevel_for_target(neuron, stored, DEFAULT_SIMPLIFICATION)
+            except Exception:
+                pass   # tiny/degenerate arbors: vectorize at the stored level
+        return vectorize_neuron_v2(neuron, self.spatial_bounds(),
+                                   lateral_normalize=True)
+
+    def _meta_extra(self) -> dict:
+        """Extra meta keys stamped on every append (schema hook)."""
+        return {"lateral_normalize": True}
+
+    def _is_stale(self) -> bool:
+        """Whether persisted V2 rows predate the current vector semantics.
+
+        True when rows exist whose meta lacks the current schema version or
+        the lateral-normalization marker: such rows must be re-vectorized,
+        never mixed with newer ones."""
+        meta = self._load_meta()
+        if meta is None:
+            return False   # nothing persisted: nothing to invalidate
+        return (int(meta.get("version") or 0) != self._cache_version()
+                or meta.get("lateral_normalize") is not True)
+
+    # ------------------------------------------------------ spatial bounds
+    def spatial_bounds(self) -> Optional[np.ndarray]:
+        """Population bounding box for the histogram block: [lo(3), hi(3)].
+
+        Estimated once from up to 200 locally cached skeletons and persisted
+        in meta, so every neuron of the dataset is binned identically (2%
+        padding; outliers clip at the edges). None when no skeletons are
+        locally available — the histogram block is then zeros everywhere.
+        """
+        if self._bounds_resolved:
+            return self._spatial_bounds
+        self._bounds_resolved = True
+        meta = self._load_meta() or {}
+        stored = meta.get("spatial_bounds")
+        if (isinstance(stored, list) and len(stored) == 2
+                and all(len(row) == 3 for row in stored)):
+            self._spatial_bounds = np.asarray(stored, dtype=float)
+            return self._spatial_bounds
+        files = self._discover_skeleton_files()
+        if len(files) > 200:
+            rng = np.random.default_rng(0)
+            files = [files[i] for i in
+                     rng.choice(len(files), 200, replace=False)]
+        lo = np.full(3, np.inf)
+        hi = np.full(3, -np.inf)
+        seen = 0
+        for path in files:
+            try:
+                neuron = _load_cached_skeleton_file(path)
+                pts = _neuron_points(neuron)
+            except Exception:
+                continue
+            if not len(pts):
+                continue
+            lo = np.minimum(lo, pts.min(axis=0))
+            hi = np.maximum(hi, pts.max(axis=0))
+            seen += 1
+        if not seen:
+            return None
+        pad = 0.02 * np.maximum(hi - lo, 0.0)
+        bounds = np.vstack([lo - pad, hi + pad])
+        self._spatial_bounds = bounds
+        try:
+            meta = self._load_meta() or {}
+            meta["spatial_bounds"] = bounds.tolist()
+            self.meta_path.parent.mkdir(parents=True, exist_ok=True)
+            self.meta_path.write_text(json.dumps(meta, indent=2))
+        except OSError:
+            pass
+        return self._spatial_bounds
+
+    def _write_meta(self, stats: Dict[str, List[float]], n_rows: int,
+                    rep: str = "", vector_basis: str = VECTOR_BASIS_RAW):
+        meta = {
+            "version": self._cache_version(),
+            "dataset": self.dataset,
+            "feature_columns": self._feature_columns(),
+            "persistence_dim": PERSISTENCE_DIM,
+            "spatial_bounds": (self._spatial_bounds.tolist()
+                               if self._spatial_bounds is not None
+                               else (self._load_meta() or {}).get("spatial_bounds")),
+            "lateral_normalize": True,
+            "block_weights": dict(DEFAULT_V2_BLOCK_WEIGHTS),
+            "n_rows": n_rows,
+            "rep": rep,
+            "vector_basis": VECTOR_BASIS_SIMP90,
+            "raw_format": self.raw_format if self.raw_only else None,
+            "built_at": datetime.now().isoformat(timespec="seconds"),
+            "mean": stats["mean"],
+            "std": stats["std"],
+        }
+        self.meta_path.write_text(json.dumps(meta, indent=2))
+
+    # ---------------------------------------------------------- whitening
+    def _whitener(self, X_std: np.ndarray) -> np.ndarray:
+        """Load or fit the population ZCA whitener (identity below the
+        minimum population). Fitted on standardized rows; callers apply it
+        AFTER standardization. The sidecar records the fit version — a
+        whitener saved by an older algorithm is refit, never reused."""
+        d = X_std.shape[1] if X_std.ndim == 2 else VECTOR_V2_DIM
+        if len(X_std) < MIN_ROWS_FOR_WHITENING:
+            return np.eye(d)
+        if self.whiten_path.exists():
+            try:
+                with np.load(self.whiten_path, allow_pickle=False) as data:
+                    if int(data["fit_version"]) == WHITEN_FIT_VERSION:
+                        W = data["W"]
+                        if W.shape == (d, d):
+                            return W
+            except Exception:
+                pass
+        W = fit_zca_whitener(X_std)
+        try:
+            self.whiten_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.whiten_path.with_suffix(".npy.tmp")
+            # File handle: np.savez would otherwise append ".npz" to the
+            # temp name and break the atomic replace below.
+            with open(tmp, "wb") as handle:
+                np.savez(handle, W=W, fit_version=WHITEN_FIT_VERSION)
+            tmp.replace(self.whiten_path)
+        except OSError:
+            pass
+        return W
+
+    def load(self) -> Optional[dict]:
+        if self._is_stale():
+            # Rows written under older vector semantics would silently mix
+            # with new ones; treat the cache as absent so callers rebuild
+            # (ensure() routes through build() for the same reason).
+            return None
+        data = super().load()
+        if data is None:
+            return None
+        data["whiten"] = self._whitener(data["X"])
+        return data
+
+    def ensure(self, fetch_missing: int = 0) -> dict:
+        if self._is_stale():
+            self._log("[SkeletonVectorCacheV2] Cache predates the current "
+                      "vector semantics; rebuilding.")
+            return self.build(fetch_missing=fetch_missing)
+        return super().ensure(fetch_missing=fetch_missing)
+
+    # --------------------------------------------------------------- build
+    def _vectorize_parallel_swc_v2(self, source_path: str,
+                                   zip_path: Optional[str], bids: List[int],
+                                   bounds) -> List[Tuple[int, List[float], str]]:
+        """Bundle skeletons -> V2 vectors in a worker pool (FAFB sampling)."""
+        ctx = mp.get_context("fork") if hasattr(mp, "get_context") and "fork" in mp.get_all_start_methods() else mp.get_context()
+        with ProcessPoolExecutor(max_workers=self.n_workers, mp_context=ctx,
+                                 initializer=_init_v2_swc_worker,
+                                 initargs=(source_path, zip_path, bounds)) as ex:
+            return list(ex.map(_vectorize_one_swc_v2, bids, chunksize=8))
+
+    def _vectorize_swc_serial_v2(self, source_path: str,
+                                 zip_path: Optional[str], bids: List[int],
+                                 bounds) -> List[Tuple[int, List[float], str]]:
+        global _FAFB_WORKER_BUNDLE, _V2_WORKER_BOUNDS
+        _init_v2_swc_worker(source_path, zip_path, bounds)
+        try:
+            return [_vectorize_one_swc_v2(b) for b in bids]
+        finally:
+            if _FAFB_WORKER_BUNDLE is not None:
+                _FAFB_WORKER_BUNDLE.close()
+                _FAFB_WORKER_BUNDLE = None
+
+    def _bundle_population_rows(self, need: int,
+                                skip_ids: set) -> List[Tuple[int, List[float], str]]:
+        """Vectorize a seeded random sample of the FAFB healed skeleton
+        bundle into V2 rows. Bounds are (re-)estimated from a small
+        coordinate pre-sample of the bundle so the whole brain shares one
+        histogram binning; the estimate is persisted by ``_write_meta``."""
+        bundle = _fafb_bundle(self.dataset, str(self.project_root))
+        if bundle is None:
+            return []
+        try:
+            import io
+            all_ids = sorted(int(b) for b in bundle.ids())
+            all_ids = [b for b in all_ids if b not in skip_ids]
+            if not all_ids:
+                return []
+            rng = np.random.default_rng(0)
+            pre = [int(b) for b in rng.choice(all_ids,
+                                              size=min(60, len(all_ids)),
+                                              replace=False)]
+            lo = np.full(3, np.inf)
+            hi = np.full(3, -np.inf)
+            for bid in pre:
+                content = bundle.get(bid)
+                if not content:
+                    continue
+                try:
+                    nrn = navis.read_swc(io.StringIO(content))
+                    pts = nrn.nodes[["x", "y", "z"]].to_numpy(dtype=float)
+                except Exception:
+                    continue
+                lo = np.minimum(lo, pts.min(axis=0))
+                hi = np.maximum(hi, pts.max(axis=0))
+            if not np.isfinite(lo).all():
+                return []
+            pad = 0.02 * (hi - lo)
+            bounds = np.vstack([lo - pad, hi + pad])
+            self._spatial_bounds = bounds
+            self._bounds_resolved = True
+            rng.shuffle(all_ids)
+            picks = sorted(all_ids[:need])
+            self._log(f"[SkeletonVectorCacheV2] Seeding {len(picks)} bundle "
+                      f"skeletons (whole-brain sample of {len(all_ids) + len(skip_ids)})...")
+            source_path = str(bundle.bundle_path)
+            zip_path = str(bundle.zip_path) if bundle.zip_path else None
+            if self.n_workers > 1:
+                try:
+                    rows = self._vectorize_parallel_swc_v2(
+                        source_path, zip_path, picks, bounds.tolist())
+                except Exception:
+                    rows = self._vectorize_swc_serial_v2(
+                        source_path, zip_path, picks, bounds)
+            else:
+                rows = self._vectorize_swc_serial_v2(
+                    source_path, zip_path, picks, bounds)
+            return [r for r in rows if r is not None]
+        finally:
+            try:
+                bundle.close()
+            except Exception:
+                pass
+    def build(self, fetch_missing: int = 0) -> Dict[str, int]:
+        """Vectorize all cached skeletons into the V2 schema (incremental).
+
+        Mirrors the V1 build's discovery/merge structure but vectorizes with
+        :func:`vectorize_neuron_v2` and records the population spatial
+        bounds in meta. Optional ``fetch_missing`` extends the skeleton
+        store first (raw files land in the SHARED skeleton dir; the V1
+        vector cache is warmed too, never the V2 files).
+        """
+        self.morph_dir.mkdir(parents=True, exist_ok=True)
+        self.skeleton_dir.mkdir(parents=True, exist_ok=True)
+        if fetch_missing and fetch_missing > 0:
+            index_path = (self.project_root / "neuron_indexes"
+                          / _dataset_folder(self.dataset)
+                          / "neuron_index.parquet")
+            index: List[int] = []
+            if index_path.exists() and _has_local_dataset_presence(
+                    self.dataset, Path(self.project_root)):
+                try:
+                    idx_df = pd.read_parquet(index_path, columns=["bodyId"])
+                    index = ([normalize_flywire_body_id(b)
+                              for b in idx_df["bodyId"].tolist()]
+                             if self._flywire_ids else
+                             [int(b) for b in idx_df["bodyId"].tolist()])
+                except Exception:
+                    index = []
+            if index:
+                existing_ids = {
+                    self._canonical_body_id(_skeleton_body_id(f))
+                    for f in self._discover_skeleton_files()
+                    if isinstance(_skeleton_body_id(f), (int, np.integer))
+                    or self._flywire_ids
+                }
+                try:
+                    df_old = pd.read_parquet(self.parquet_path)
+                    existing_ids |= {
+                        self._canonical_body_id(b) for b in df_old["bodyId"]}
+                except Exception:
+                    pass
+                missing = [b for b in index
+                           if self._canonical_body_id(b) not in existing_ids]
+                if missing:
+                    fetch_skeletons_on_demand_batch(
+                        self.dataset, missing[:fetch_missing],
+                        project_root=str(self.project_root),
+                        persist=True, level=VECTOR_BASIS_RAW,
+                        raw_cache=self,
+                        vector_cache=self._v1_counterpart_cache(),
+                    )
+
+        files = self._discover_skeleton_files()
+        existing: Dict[int, dict] = {}
+        if self._is_stale():
+            # Rows written under older vector semantics are never reused.
+            self._log("[SkeletonVectorCacheV2] Existing rows are stale; "
+                      "rebuilding from local skeletons.")
+        elif self.parquet_path.exists():
+            try:
+                df_old = pd.read_parquet(self.parquet_path)
+                existing = {self._canonical_body_id(r["bodyId"]): r
+                            for r in df_old.to_dict("records")}
+            except Exception:
+                existing = {}
+        if self.pending_path.exists() and not self._is_stale():
+            try:
+                for r in pd.read_parquet(self.pending_path).to_dict("records"):
+                    existing.setdefault(self._canonical_body_id(r["bodyId"]), r)
+            except Exception:
+                pass
+        pending = [f for f in files
+                   if self._canonical_body_id(_skeleton_body_id(f))
+                   not in existing]
+
+        if not pending:
+            self._log("[SkeletonVectorCacheV2] No skeletons available to "
+                      "vectorize.")
+            return {"rows": len(existing), "new": 0, "fetched": 0}
+        # Population bounds must exist BEFORE vectorization so every row of
+        # the build shares one histogram binning.
+        bounds = self.spatial_bounds()
+        bounds_list = bounds.tolist() if bounds is not None else None
+        self._log(f"[SkeletonVectorCacheV2] Vectorizing {len(pending)} "
+                  f"skeletons ({self.dataset}, bounds="
+                  f"{'estimated' if bounds is not None else 'unavailable'})...")
+        started = time.time()
+        rows: List[Optional[Tuple[int, List[float], str]]] = []
+        if self.n_workers > 1:
+            ctx = mp.get_context("fork") if hasattr(mp, "get_context") and \
+                "fork" in mp.get_all_start_methods() else mp.get_context()
+            try:
+                with ProcessPoolExecutor(max_workers=self.n_workers,
+                                         mp_context=ctx) as ex:
+                    futures = [ex.submit(_vectorize_one_file_v2, f, bounds_list)
+                               for f in pending]
+                    rows = [f.result() for f in futures]
+            except Exception:
+                rows = [_vectorize_one_file_v2(f, bounds_list)
+                        for f in pending]
+        else:
+            rows = [_vectorize_one_file_v2(f, bounds_list) for f in pending]
+        elapsed = time.time() - started
+        self._log(f"[SkeletonVectorCacheV2] Vectorized {len(pending)} neurons "
+                  f"in {elapsed:.1f}s "
+                  f"({elapsed / max(len(pending), 1) * 1000:.1f} ms/neuron)")
+
+        ok_rows = [r for r in rows if r is not None]
+        # FAFB: the local raw_skeletons only hold neurons a user has already
+        # touched. The healed skeleton bundle carries the WHOLE-BRAIN
+        # population — seed a representative random sample (once, cached)
+        # so cache-direct searches have a meaningful candidate pool.
+        if (is_fafb_dataset(self.dataset) and not self.mesh_only
+                and self.bundle_sample_target > 0):
+            covered = {int(self._canonical_body_id(k)) for k in existing}
+            covered |= {int(r[0]) for r in ok_rows}
+            need = self.bundle_sample_target - len(existing) - len(ok_rows)
+            if need > 0:
+                t_bundle = time.time()
+                bundle_rows = self._bundle_population_rows(need, covered)
+                ok_rows.extend(bundle_rows)
+                self._log(f"[SkeletonVectorCacheV2] Bundle sample: "
+                          f"+{len(bundle_rows)} neurons in "
+                          f"{time.time() - t_bundle:.1f}s "
+                          f"(target {self.bundle_sample_target})")
+        rep = ""
+        if ok_rows:
+            from collections import Counter
+            rep = ("skeleton" if self.raw_only else
+                   Counter(r[2] for r in ok_rows).most_common(1)[0][0])
+            foreign = sum(1 for r in ok_rows if r[2] != rep)
+            if foreign:
+                self._log(f"[SkeletonVectorCacheV2] Skipping {foreign} files "
+                          f"of a different representation than {rep}.")
+            rows = [r if r is None or r[2] == rep else None for r in rows]
+
+        records = []
+        for bid, rec in existing.items():
+            row = {k: v for k, v in rec.items() if k not in ("type", "instance")}
+            row["bodyId"] = self._canonical_body_id(bid)
+            records.append(row)
+        columns = self._feature_columns()
+        for row in rows:
+            if row is None:
+                continue
+            bid, vec, row_rep = row
+            record = {"bodyId": self._canonical_body_id(bid), "rep": row_rep}
+            for name, val in zip(columns, vec):
+                record[name] = float(val)
+            records.append(record)
+        if not records:
+            self._log("[SkeletonVectorCacheV2] No usable skeletons.")
+            return {"rows": 0, "new": 0, "fetched": 0}
+
+        df = pd.DataFrame(records)
+        if self._flywire_ids:
+            normalize_flywire_id_columns(df, ["bodyId"])
+        df = df.sort_values("bodyId").reset_index(drop=True)
+        type_map, instance_map = _load_neuron_type_map(
+            self.dataset, str(self.project_root))
+        df["type"] = df["bodyId"].map(type_map).fillna("") if type_map else ""
+        df["instance"] = (df["bodyId"].map(instance_map or {}).fillna("")
+                          if instance_map else "")
+
+        self._atomic_parquet(df, self.parquet_path)
+        mat = self._raw_matrix(df)
+        mean = mat.mean(axis=0).tolist()
+        std = mat.std(axis=0).tolist()
+        std = [s if s > 0 else 1.0 for s in std]
+        self._write_meta({"mean": mean, "std": std}, len(df), rep=rep,
+                         vector_basis=VECTOR_BASIS_SIMP90)
+        # A fresh population invalidates the fitted whitener.
+        try:
+            self.whiten_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        self._clear_pending()
+        self._log(f"[SkeletonVectorCacheV2] Cache ready: {len(df)} rows "
+                  f"({len(ok_rows)} new) -> {self.parquet_path}")
+        return {"rows": len(df), "new": len(ok_rows), "fetched": 0}
+
+    def _v1_counterpart_cache(self) -> SkeletonVectorCache:
+        """The V1 cache sharing this dataset's skeleton store.
+
+        Online fetches vectorize into the V1 cache (it stays warm for the
+        default method); the V2 schema is always computed locally from the
+        shared raw files, never from the fetcher's V1 pipeline.
+        """
+        try:
+            if self.mesh_only:
+                return find_similar_flywire_mesh_cache(
+                    self.dataset, project_root=str(self.project_root),
+                    n_workers=self.n_workers, verbose=False)
+            return find_similar_raw_cache(
+                self.dataset, project_root=str(self.project_root),
+                n_workers=self.n_workers, verbose=False)
+        except Exception:
+            return self
+
+
+def find_similar_dataset_cache_v2(
+        dataset: str,
+        project_root: Optional[str] = None,
+        n_workers: int = 8,
+        verbose: bool = True,
+        ) -> SkeletonVectorCacheV2:
+    """Return the dataset-native V2 (spatial/topological) cache manager.
+
+    FAFB uses a SKELETON-representation cache fed by the local healed
+    skeleton bundle (the whole-brain skeleton population is available
+    offline); other FlyWire datasets keep the prepared-mesh cache.
+    """
+    if is_fafb_dataset(dataset):
+        return SkeletonVectorCacheV2(dataset, project_root=project_root,
+                                     n_workers=n_workers, verbose=verbose,
+                                     representation="skeleton")
+    if is_flywire_dataset(dataset):
+        return SkeletonVectorCacheV2(dataset, project_root=project_root,
+                                     n_workers=n_workers, verbose=verbose,
+                                     representation="mesh")
+    return SkeletonVectorCacheV2(dataset, project_root=project_root,
+                                 n_workers=n_workers, verbose=verbose)
 
 
 def cache_fetched_skeleton_vectors(
@@ -3995,6 +5194,19 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
 # MorphologyComparer (runner-facing)
 # =============================================================================
 
+def _coverage_factor(coverage: float) -> float:
+    """Continuous coverage weight of a type statistic: sqrt(coverage).
+
+    A gentle, monotone penalty with no thresholds: a fully covered type
+    passes through untouched (factor 1), a quarter-sampled type keeps half
+    its statistic, a barely-sampled type is strongly damped but never
+    zeroed or excluded. Applies only when the population size is known.
+    """
+    if not np.isfinite(coverage):
+        return 1.0   # population unknown: no basis to weight
+    return float(np.sqrt(min(max(float(coverage), 0.0), 1.0)))
+
+
 class MorphologyComparer:
     """Query-vs-all morphological similarity search for one dataset.
 
@@ -4008,7 +5220,7 @@ class MorphologyComparer:
         query: Optional[Union[str, int]] = None,
         dataset: Optional[str] = None,
         level: str = "auto",
-        method: str = "vector",
+        method: str = "vector_v2",
         metric: str = "cosine",
         # The two size knobs shared by EVERY candidate source mode:
         # ``candidate_cap`` bounds how many screen candidates enter the
@@ -4024,6 +5236,23 @@ class MorphologyComparer:
         min_weight: int = 3,
         min_shared_partners: int = 2,
         roi_filter: Optional[List[str]] = None,
+        # V2 (method="vector_v2") knobs: per-block score weights over the
+        # fixed schema blocks and the weight of the runtime-composed
+        # ROI-expansion block (NeuPrint datasets only; ignored elsewhere).
+        v2_block_weights: Optional[Dict[str, float]] = None,
+        v2_roi_weight: float = DEFAULT_V2_ROI_WEIGHT,
+        # Two-pass type reevaluation: after the first scoring pass, the
+        # remaining members of the top `expand_top_types` candidate types
+        # join the pool (up to `expand_per_type` screen-ranked members per
+        # type) and the type aggregation re-runs on the fuller coverage.
+        # 0 disables the expansion pass.
+        expand_top_types: int = DEFAULT_EXPAND_TOP_TYPES,
+        expand_per_type: int = DEFAULT_EXPAND_PER_TYPE,        # Coverage-aware type aggregation (V2): the type statistic is
+        # scaled by the continuous factor sqrt(type_coverage) — gentle,
+        # monotone, threshold-free. type_agg picks the statistic: "mean"
+        # (typical member) or "max" (best member — "does the type contain
+        # a similar neuron").
+        type_agg: str = "mean",
         visualization_settings: Optional[Dict[str, object]] = None,
         output_dir: Optional[str] = None,
         saveas: Optional[str] = None,
@@ -4040,6 +5269,10 @@ class MorphologyComparer:
         self.level = str(level).lower()
         self.method = str(method).lower()
         self.metric = str(metric).lower()
+        # V2 routes through the same search pipelines but swaps the cache
+        # schema (SkeletonVectorCacheV2) and the scorer (block-weighted,
+        # whitened); everything else (screening, pooling, output) is shared.
+        self._is_v2 = self.method == "vector_v2"
         self.candidate_cap = int(candidate_cap)
         self.candidate_source = str(candidate_source).lower()
         # Lazily-built ROI profile store for 'roi'/'combined' screens.
@@ -4060,8 +5293,37 @@ class MorphologyComparer:
 
         if self.level not in ("auto", "bodyid", "type"):
             raise ValueError(f"Invalid level: {self.level} (auto|bodyid|type)")
-        if self.method not in ("vector", "nblast"):
-            raise ValueError(f"Invalid method: {self.method} (vector|nblast)")
+        if self.method not in ("vector_v2", "nblast"):
+            raise ValueError(
+                f"Invalid method: {self.method} (vector_v2|nblast)")
+        weights = dict(DEFAULT_V2_BLOCK_WEIGHTS)
+        for name, value in (v2_block_weights or {}).items():
+            if name in weights:
+                weights[name] = float(value)
+        if self.method == "vector_v2" and DEFAULT_V2_ROI_WEIGHT:
+            weights.setdefault("roi", 0.0)
+            weights["roi"] = float(v2_roi_weight)
+        self._v2_weights = weights
+        self.expand_top_types = int(expand_top_types)
+        self.expand_per_type = int(expand_per_type)
+        self.type_agg = str(type_agg).lower()
+        if self.expand_top_types < 0 or self.expand_per_type < 0:
+            raise ValueError(
+                "expand_top_types/expand_per_type must be >= 0")
+        if self.type_agg not in ("mean", "max"):
+            raise ValueError(
+                f"Invalid type_agg: {self.type_agg} (mean|max)")
+        # Run-scoped V2 state: extra (ROI-expansion) blocks aligned to the
+        # scoring pool, set by ``_prepare_v2_scoring``; the V1 counterpart
+        # cache that online fetches warm with V1 vectors.
+        self._v2_extra_blocks: Optional[List[Tuple[str, float, np.ndarray, np.ndarray]]] = None
+        self._fetch_vector_cache_obj: Optional[SkeletonVectorCache] = None
+        # V2 run state: raw Hellinger histograms for the spatial-overlap
+        # term — per query member, the pooled query centroid, and the pool.
+        self._v2_spatial_overlap: Optional[Dict[str, np.ndarray]] = None
+        # NBLAST runs: whether NBLAST scores actually replaced the vector
+        # prefilter (False = dotprops unavailable, vector scores were kept).
+        self.nblast_applied: Optional[bool] = None
         if self.metric not in ("cosine", "pearson"):
             raise ValueError(f"Invalid metric: {self.metric} (cosine|pearson)")
         if self.candidate_source not in ("auto", "roi", "combined", "profile",
@@ -4103,6 +5365,143 @@ class MorphologyComparer:
             print(f"[DROCAT][progress] {int(step)}/{int(total)} {label}".rstrip(),
                   flush=True)
 
+    # ------------------------------------------------------------ V2 scoring
+    def _similarity_matrix(self, query: np.ndarray, matrix: np.ndarray,
+                           extra_subset=None, query_index: Optional[int] = None) -> np.ndarray:
+        """Metric dispatcher: V1 metric, or the whitened block-weighted V2
+        score. ``extra_subset`` (bool mask or index array) selects which
+        pool rows the run-composed ROI-expansion blocks must be sliced to."""
+        if self._is_v2:
+            total, _ = self._similarity_matrix_with_blocks(
+                query, matrix, extra_subset=extra_subset,
+                query_index=query_index)
+            return total
+        return similarity_matrix(query, matrix, self.metric)
+
+    def _similarity_matrix_with_blocks(self, query: np.ndarray,
+                                       matrix: np.ndarray, extra_subset=None,
+                                       query_index: Optional[int] = None):
+        """As ``_similarity_matrix`` but also returns per-block scores."""
+        if self._is_v2:
+            return v2_similarity_matrix(
+                query, matrix, self._v2_weights,
+                self._slice_extra_blocks(extra_subset),
+                spatial_overlap=self._slice_spatial_overlap(extra_subset),
+                query_index=query_index)
+        return similarity_matrix(query, matrix, self.metric), {}
+
+    def _pairwise_similarity(self, matrix: np.ndarray) -> np.ndarray:
+        if self._is_v2:
+            return v2_pairwise_matrix(matrix, self._v2_weights)
+        return pairwise_similarity_matrix(matrix, self.metric)
+
+    def _slice_extra_blocks(self, subset):
+        """Extra blocks sliced to the rows a scoring call selected.
+
+        Extra blocks (the ROI-expansion matrix) are aligned to the FULL
+        scoring pool; ``X_c[keep]``-style subsetting must slice them
+        identically or query/candidate rows would misalign."""
+        extras = self._v2_extra_blocks
+        if not extras:
+            return None
+        if subset is None:
+            return extras
+        sliced = []
+        for name, weight, q_block, m_block in extras:
+            if isinstance(subset, np.ndarray) and subset.dtype == bool:
+                sliced.append((name, weight, q_block, m_block[subset]))
+            else:
+                sliced.append((name, weight, q_block,
+                               m_block[np.asarray(subset, dtype=int)]))
+        return sliced
+
+    def _vector_dim_for(self, cache_data: Optional[dict]) -> int:
+        """Vector width of this run's cache (124 for V1, 256 for V2)."""
+        if cache_data is not None and getattr(cache_data.get("X"), "ndim", 0) == 2:
+            return int(cache_data["X"].shape[1])
+        return VECTOR_V2_DIM if self._is_v2 else VECTOR_DIM
+
+    def _fetch_vector_cache(self) -> SkeletonVectorCache:
+        """V1 counterpart cache warming during V2 online fetches.
+
+        The batch fetcher vectorizes into the V1 cache (kept warm for the
+        default method); V2 rows are always computed locally from the shared
+        raw files, never written by the fetcher's V1 pipeline."""
+        if self._fetch_vector_cache_obj is None:
+            self._fetch_vector_cache_obj = find_similar_dataset_cache(
+                self.dataset, project_root=str(self.project_root),
+                n_workers=self.n_workers, verbose=False)
+        return self._fetch_vector_cache_obj
+
+    def _maybe_roi_store(self) -> Optional[RoiProfileStore]:
+        """The ROI store for the V2 expansion block, when it is cheaply
+        available (NeuPrint datasets with an ROI table). Never raises."""
+        if self._is_flywire():
+            return None
+        if self._roi_store is not None:
+            return self._roi_store
+        try:
+            self._roi_store = RoiProfileStore(
+                self.dataset, project_root=str(self.project_root),
+                verbose=False, log=self._log,
+            ).ensure()
+            return self._roi_store
+        except Exception:
+            return None
+
+    def _prepare_v2_scoring(self, cache_data: Optional[dict],
+                            X_q: np.ndarray, X_c: np.ndarray,
+                            mask_q: np.ndarray, mask_c: np.ndarray,
+                            query_ids: List, pool_ids: List) -> None:
+        """Whiten the standardized snapshot and compose the ROI block.
+
+        Runs once per search, after standardization and before any scoring:
+        applies the population ZCA whitener to the query/candidate rows (and
+        the cache snapshot, so intra-type fallbacks live in the same space),
+        then aligns the Hellinger pre/post expansion block to the pool.
+        """
+        W = (cache_data or {}).get("whiten")
+        if W is None or not getattr(W, "size", 0):
+            W = np.eye(X_q.shape[1] if X_q.ndim == 2 else VECTOR_V2_DIM)
+        if cache_data is not None:
+            cache_data["X"] = apply_whitening(W, cache_data["X"])
+        if mask_q.any():
+            X_q[mask_q] = apply_whitening(W, X_q[mask_q])
+        if mask_c.any():
+            X_c[mask_c] = apply_whitening(W, X_c[mask_c])
+
+        self._v2_extra_blocks = None
+        self._v2_spatial_overlap = self._build_spatial_overlap(
+            cache_data, query_ids, pool_ids)
+        if float(self._v2_weights.get("roi", 0.0)) <= 0:
+            return
+        store = self._maybe_roi_store()
+        if store is None:
+            self._log("V2: no ROI store available; scoring without the "
+                      "ROI-expansion block.")
+            return
+        try:
+            found_ids, block = store.expansion_rows(list(query_ids) + list(pool_ids))
+        except Exception:
+            return
+        if not len(found_ids):
+            return
+        row_of = {int(b): i for i, b in enumerate(found_ids)}
+        width = block.shape[1]
+        q_block = np.zeros((len(query_ids), width))
+        for i, bid in enumerate(query_ids):
+            row = row_of.get(int(self._body_id(bid)))
+            if row is not None:
+                q_block[i] = block[row]
+        q_centroid = q_block.mean(axis=0)
+        c_block = np.zeros((len(pool_ids), width))
+        for i, bid in enumerate(pool_ids):
+            row = row_of.get(int(self._body_id(bid)))
+            if row is not None:
+                c_block[i] = block[row]
+        self._v2_extra_blocks = [("roi", float(self._v2_weights["roi"]),
+                                  q_centroid, c_block)]
+
     # ------------------------------------------------------ candidate source
     def _is_flywire(self) -> bool:
         """FlyWire/CAVE datasets cache MeshNeurons and use cache-direct search."""
@@ -4125,11 +5524,23 @@ class MorphologyComparer:
         # NeuPrint datasets screen candidates from the per-neuron primary-ROI
         # distributions: every neuron is reachable, while the connection-cache
         # screen can never find neurons without shared partners. FlyWire
-        # datasets have no ROI table and search the vector cache directly.
+        # datasets have no ROI table; FAFB carries a merged connection cache,
+        # so it runs the connectivity screen FIRST and only then fetches and
+        # vectorizes the skeletons of the selected candidates — the vector
+        # cache is a store, not the definition of the search population.
+        # Datasets without a connection cache fall back to searching the
+        # local vector population directly.
         if self._is_flywire():
+            if is_fafb_dataset(self.dataset) and self._connection_cache_available():
+                return "profile"
             return "cache"
         return "roi" if self._roi_screening_ready(allow_backfill=True) \
             else "profile"
+
+    def _connection_cache_available(self) -> bool:
+        """Cheap probe: does this dataset have a merged connection cache?"""
+        return (Path(self.project_root) / "cache" / _dataset_folder(self.dataset)
+                / "connections.parquet").exists()
 
     def _roi_screening_ready(self, allow_backfill: bool) -> bool:
         """Cheap local probe for the ROI screen's prerequisites.
@@ -4238,10 +5649,13 @@ class MorphologyComparer:
             self.level = self._resolve_level(query_df)
             self._log(f"Level auto-resolved to: {self.level} "
                       f"({'type-to-type' if self.level == 'type' else 'bodyId-to-bodyId'})")
-        cache = find_similar_dataset_cache(
+        cache = (find_similar_dataset_cache_v2(
             self.dataset, project_root=str(self.project_root),
             n_workers=self.n_workers, verbose=self.verbose,
-        )
+        ) if self._is_v2 else find_similar_dataset_cache(
+            self.dataset, project_root=str(self.project_root),
+            n_workers=self.n_workers, verbose=self.verbose,
+        ))
 
         if source in CANDIDATE_SCREEN_SOURCES:
             bodyid_df, type_df = self._profile_first_search(query_df, cache,
@@ -4265,7 +5679,7 @@ class MorphologyComparer:
                                    "Loading vector cache (fallback)")
                     self._progress(3, CACHE_DIRECT_TOTAL_STEPS,
                                    self._scoring_step_label())
-                    if self.method == "vector":
+                    if self._is_v2:
                         bodyid_df, type_df = self._vector_search(query_df, data)
                     else:
                         bodyid_df, type_df = self._nblast_search(query_df, data)
@@ -4304,8 +5718,10 @@ class MorphologyComparer:
                     level=VECTOR_BASIS_RAW,
                     max_threads=min(NEUPRINT_FETCH_MAX_THREADS,
                                     max(1, int(self.n_workers))),
-                    raw_cache=cache,
-                    vector_cache=cache,
+                    raw_cache=(self._fetch_vector_cache() if self._is_v2
+                               else cache),
+                    vector_cache=(self._fetch_vector_cache() if self._is_v2
+                                  else cache),
                 )
                 # Keep the vector-mode contract even for integrations that
                 # override the batch fetch seam and return neurons without
@@ -4315,12 +5731,12 @@ class MorphologyComparer:
                     try:
                         if _neuron_rep(neuron) != "skeleton":
                             continue
-                        _, vec = vectorize_neuron(neuron)
+                        _, vec = cache._vectorize_neuron(neuron)
                         rows.append((self._body_id(bid), vec, "skeleton"))
                     except Exception:
                         continue
                 if rows:
-                    cache.append_vectors(rows, vector_basis=VECTOR_BASIS_RAW)
+                    cache.append_vectors(rows, vector_basis=cache._default_basis())
                 data = cache.load()
             if data is None or len(data["bodyIds"]) == 0:
                 raise ValueError(
@@ -4328,7 +5744,7 @@ class MorphologyComparer:
                     "build the shared raw vector cache first."
                 )
             self._progress(3, CACHE_DIRECT_TOTAL_STEPS, self._scoring_step_label())
-            if self.method == "vector":
+            if self._is_v2:
                 bodyid_df, type_df = self._vector_search(query_df, data)
             else:
                 bodyid_df, type_df = self._nblast_search(query_df, data)
@@ -4357,7 +5773,7 @@ class MorphologyComparer:
         """Label for the scoring step (vector vs NBLAST refinement)."""
         if self.method == "nblast":
             return "Building dotprops & NBLAST scoring"
-        return "Scoring similarity (vector)"
+        return "Scoring similarity (vector: shape + spatial + topology)"
 
     # ---------------------------------------------------- profile-first
     def _connection_cache_candidates(self, query_df: pd.DataFrame,
@@ -4388,8 +5804,8 @@ class MorphologyComparer:
         import polars as pl
 
         min_weight = self.min_weight if min_weight is None else int(min_weight)
-        min_shared_partners = self.min_shared_partners \
-            if min_shared_partners is None else int(min_shared_partners)
+        min_shared_partners \
+            = self.min_shared_partners if min_shared_partners is None else int(min_shared_partners)
         roi_filter = self.roi_filter if roi_filter is None else roi_filter
 
         conn_path = (Path(self.project_root) / "cache"
@@ -4397,72 +5813,79 @@ class MorphologyComparer:
         if not conn_path.exists():
             self._log("Connection cache missing; no candidates discoverable.")
             return pd.DataFrame()
-        try:
-            conn = pl.read_parquet(conn_path)
-        except Exception as exc:
-            self._log(f"Connection cache unreadable: {exc}")
-            return pd.DataFrame()
 
-        has_roi = "roi" in conn.columns and \
-            bool(conn.filter(pl.col("roi").is_not_null() & (pl.col("roi") != "")).height)
-        if has_roi and roi_filter:
+        # Lazy scan with projection/predicate pushdown: only the needed
+        # columns are read, min_weight is applied inside the scan, and the
+        # shared-partner counting uses hash semi/anti JOINS — is_in filters
+        # over a materialized frame degrade badly on FlyWire-sized caches
+        # (string bodyIds, ~20M rows).
+        needed = ["bodyId_pre", "bodyId_post", "weight"]
+        if roi_filter:
+            needed.append("roi")
+        conn = (pl.scan_parquet(conn_path)
+                .select(needed)
+                .filter(pl.col("weight") >= min_weight))
+        if roi_filter:
             if roi_filter == ["*"] or roi_filter == "*":
-                conn = conn.filter(pl.col("roi").is_not_null() & (pl.col("roi") != ""))
+                conn = conn.filter(pl.col("roi").is_not_null()
+                                   & (pl.col("roi") != ""))
             else:
-                conn = conn.filter(pl.col("roi").is_in(pl.Series("roi_filter", roi_filter).implode()))
+                conn = conn.filter(pl.col("roi").is_in(
+                    pl.Series("roi_filter", roi_filter).implode()))
 
         query_ids = self._body_ids(query_df["bodyId"].tolist())
         id_dtype = pl.Utf8 if self._is_flywire() else pl.Int64
-        q = pl.Series("q", query_ids, dtype=id_dtype)
-        # implode() marks the Series unambiguously as a single membership
-        # collection (polars >=1.30 deprecates same-dtype scalar semantics).
-        q_coll = q.implode()
-        if self._is_flywire():
+        try:
+            # The laziness defers ALL file access to collect(); a corrupt or
+            # truncated cache must still degrade to an empty candidate list
+            # (readers contract), so the whole computation is guarded here.
             conn = conn.with_columns([
-                pl.col("bodyId_pre").cast(pl.Utf8, strict=False),
-                pl.col("bodyId_post").cast(pl.Utf8, strict=False),
-            ])
-        else:
-            conn = conn.with_columns([
-                pl.col("bodyId_pre").cast(pl.Int64, strict=False),
-                pl.col("bodyId_post").cast(pl.Int64, strict=False),
-            ])
-        conn = conn.drop_nulls(["bodyId_pre", "bodyId_post"])
-        conn = conn.filter(pl.col("weight") >= min_weight)
+                pl.col("bodyId_pre").cast(id_dtype, strict=False),
+                pl.col("bodyId_post").cast(id_dtype, strict=False),
+            ]).drop_nulls(["bodyId_pre", "bodyId_post"])
 
-        up = conn.filter(pl.col("bodyId_post").is_in(q_coll))      # partners -> query
-        down = conn.filter(pl.col("bodyId_pre").is_in(q_coll))     # query -> partners
+            q_df = pl.DataFrame({"q": query_ids}).with_columns(
+                pl.col("q").cast(id_dtype)).lazy()
+            up = conn.join(q_df, left_on="bodyId_post", right_on="q",
+                           how="semi")
+            down = conn.join(q_df, left_on="bodyId_pre", right_on="q",
+                             how="semi")
 
-        def _shared(partner_col: str, candidate_col: str, partner_ids) -> "pl.DataFrame":
-            if len(partner_ids) == 0:
-                return pl.DataFrame({candidate_col: [], "n_shared": []})
-            shared = (conn
-                      .filter(pl.col(partner_col).is_in(partner_ids.implode())
-                              & ~pl.col(candidate_col).is_in(q_coll))
-                      .group_by([candidate_col, partner_col])
-                      .agg(pl.len().alias("_w"))
-                      .group_by(candidate_col)
-                      .agg(pl.len().alias("n_shared")))
-            return shared
+            def _shared(partner_col: str, candidate_col: str,
+                        partners: "pl.LazyFrame") -> "pl.DataFrame":
+                p_df = partners.select(pl.col(partner_col).unique())
+                return (conn
+                        .join(p_df, left_on=partner_col,
+                              right_on=partner_col, how="semi")
+                        .join(q_df, left_on=candidate_col, right_on="q",
+                              how="anti")
+                        .group_by([candidate_col, partner_col])
+                        .agg(pl.len().alias("_w"))
+                        .group_by(candidate_col)
+                        .agg(pl.len().alias("n_shared"))
+                        .collect())
 
-        up_shared = _shared("bodyId_pre", "bodyId_post", up["bodyId_pre"].unique())
-        down_shared = _shared("bodyId_post", "bodyId_pre", down["bodyId_post"].unique())
+            up_shared = _shared("bodyId_pre", "bodyId_post", up)
+            down_shared = _shared("bodyId_post", "bodyId_pre", down)
 
-        counts = None
-        for part in (up_shared, down_shared):
-            if part.height == 0:
-                continue
-            part = part.rename({part.columns[0]: "candidate"})
-            counts = part if counts is None else counts.vstack(part)
-        if counts is None:
+            counts = None
+            for part in (up_shared, down_shared):
+                if part.height == 0:
+                    continue
+                part = part.rename({part.columns[0]: "candidate"})
+                counts = part if counts is None else counts.vstack(part)
+            if counts is None:
+                return pd.DataFrame()
+            counts = (counts
+                      .group_by("candidate")
+                      .agg(pl.col("n_shared").sum())
+                      .filter(pl.col("n_shared") >= min_shared_partners)
+                      .sort("n_shared", descending=True))
+            if top_k:
+                counts = counts.head(top_k)
+        except Exception as exc:
+            self._log(f"Connection cache unreadable: {exc}")
             return pd.DataFrame()
-        counts = (counts
-                  .group_by("candidate")
-                  .agg(pl.col("n_shared").sum())
-                  .filter(pl.col("n_shared") >= min_shared_partners)
-                  .sort("n_shared", descending=True))
-        if top_k:
-            counts = counts.head(top_k)
 
         out = pd.DataFrame({
             "target_bodyId": counts["candidate"].to_list(),
@@ -4633,11 +6056,38 @@ class MorphologyComparer:
         self._progress(3, PROFILE_FIRST_TOTAL_STEPS,
                        f"Selecting top {len(pool_ids)} candidates for scoring")
 
+        # The exported profile_similarity column should carry connectivity
+        # evidence whatever screen discovered the pool: when the ROI screen
+        # ran alone, score the candidates' shared partners post-hoc (the
+        # 'profile'/'combined' screens already populate the column).
+        conn_map: Dict[int, float] = {}
+        if source == "roi":
+            try:
+                conn = self._connection_cache_candidates(query_df)
+            except Exception as exc:
+                self._log(f"Profile-evidence backfill skipped: {exc}")
+                conn = pd.DataFrame()
+            if not conn.empty:
+                conn_map = {
+                    self._body_id(b): float(v)
+                    for b, v in zip(conn["target_bodyId"],
+                                    conn["profile_similarity"])
+                    if pd.notna(v)
+                }
+                candidates = candidates.copy()
+                candidates["profile_similarity"] = [
+                    conn_map.get(self._body_id(b), np.nan)
+                    for b in candidates["target_bodyId"]
+                ]
+
         prof_by_id = {
             self._body_id(b): float(v)
             for b, v in zip(candidates["target_bodyId"], candidates["profile_similarity"])
             if np.isfinite(v)
         }
+        # Expansion members are not part of the screen's candidate list but
+        # share the same connectivity evidence: keep the full map for them.
+        prof_by_id.update(conn_map)
         roi_by_id = {
             self._body_id(b): float(v)
             for b, v in zip(candidates["target_bodyId"], candidates["roi_similarity"])
@@ -4653,8 +6103,8 @@ class MorphologyComparer:
                      if cache_data is not None else set())
         cache_rep = cache_data.get("dataset_rep", "") if cache_data is not None else ""
         cache_basis = (((cache_data.get("meta") or {}).get("vector_basis")
-                        or VECTOR_BASIS_RAW) if cache_data is not None
-                       else VECTOR_BASIS_RAW)
+                        or cache._default_basis()) if cache_data is not None
+                       else cache._default_basis())
 
         # Determine every online miss before fetching anything.  Query and
         # candidate IDs are intentionally combined: a query can also occur in
@@ -4682,18 +6132,49 @@ class MorphologyComparer:
                           or done % max(1, total // 10) == 0):
                 self._log(f"Step 4/6 — {message}")
 
-        fetched_all = fetch_skeletons_on_demand_batch(
-            self.dataset,
-            missing_ids,
-            project_root=str(self.project_root),
-            persist=self.cache_fetched_skeletons,
-            level=VECTOR_BASIS_RAW,
-            max_threads=min(NEUPRINT_FETCH_MAX_THREADS,
-                            max(1, int(self.n_workers))),
-            progress_callback=_report_fetch,
-            raw_cache=cache,
-            vector_cache=cache,
-        ) if missing_ids else {}
+        fetch_cache = self._fetch_vector_cache() if self._is_v2 else cache
+        fetched_all: Dict[int, object] = {}
+        if missing_ids:
+            if self._is_v2 and is_fafb_dataset(self.dataset):
+                # FAFB: the healed skeleton bundle is LOCAL — fetch through
+                # the fast bundle loader (extrusion gates included) instead
+                # of the generic batch fetcher's per-neuron CAVE path, which
+                # takes minutes per skeleton on this dataset. Persisted raw
+                # SWCs land in the shared skeleton store for reuse.
+                loaded = self._load_fafb_skeletons(missing_ids)
+                fetched = {int(b): n for b, n in (loaded or {}).items()
+                           if n is not None}
+                if fetched and self.cache_fetched_skeletons:
+                    # Persist only skeleton trees (CAVE replacements are
+                    # mesh-native and cache themselves in the prepared-mesh
+                    # namespace); each tree at its OWN recorded level.
+                    skeleton_only = {b: n for b, n in fetched.items()
+                                     if _neuron_rep(n) == "skeleton"}
+                    if skeleton_only:
+                        fetch_cache.persist_skeletons(
+                            skeleton_only, simplification=None)
+                fetched_all = {self._body_id(b): n for b, n in fetched.items()}
+                self._log(f"FAFB: fetched {len(fetched_all)} of "
+                          f"{len(missing_ids)} skeletons from the local "
+                          "healed bundle.")
+            else:
+                fetched_all = fetch_skeletons_on_demand_batch(
+                    self.dataset,
+                    missing_ids,
+                    project_root=str(self.project_root),
+                    persist=self.cache_fetched_skeletons,
+                    level=VECTOR_BASIS_RAW,
+                    max_threads=min(NEUPRINT_FETCH_MAX_THREADS,
+                                    max(1, int(self.n_workers))),
+                    progress_callback=_report_fetch,
+                    # V2 (non-FAFB): the fetcher warms the V1 vector cache
+                    # and persists raw SWCs into the SHARED skeleton dir;
+                    # the V2 schema is always computed locally afterwards
+                    # (a 124-dim fetcher row must never land in the V2
+                    # parquet).
+                    raw_cache=fetch_cache,
+                    vector_cache=fetch_cache,
+                )
 
         query_neurons = {
             self._body_id(bid): fetched_all[self._body_id(bid)]
@@ -4735,7 +6216,9 @@ class MorphologyComparer:
         fetched_vectors: List[Tuple[Union[int, str], np.ndarray, str]] = []
         for bid, neuron in fetched_all.items():
             try:
-                _, vec = vectorize_neuron(neuron)
+                # The cache's schema hook: V1's vectorize_neuron, or V2 with
+                # the population spatial bounds.
+                _, vec = cache._vectorize_neuron(neuron)
                 rep = _neuron_rep(neuron)
                 if not q_rep or rep == q_rep:
                     fetched_vectors.append((self._body_id(bid), vec, rep))
@@ -4760,8 +6243,9 @@ class MorphologyComparer:
         cache_rep = (cache_data.get("dataset_rep", "")
                      if cache_data is not None else "")
         cache_basis = (((cache_data.get("meta") or {}).get("vector_basis")
-                        or VECTOR_BASIS_RAW) if cache_data is not None
-                       else VECTOR_BASIS_RAW)
+                        or cache._default_basis()) if cache_data is not None
+                       else cache._default_basis())
+        vec_dim = self._vector_dim_for(cache_data)
 
         snapshot_rows = {}
         if cache_data is not None:
@@ -4771,7 +6255,7 @@ class MorphologyComparer:
         pre_rows = {self._body_id(bid): i for i, bid in enumerate(all_load_ids)}
 
         def _snapshot_vectors(ids):
-            vectors = np.full((len(ids), VECTOR_DIM), np.nan)
+            vectors = np.full((len(ids), vec_dim), np.nan)
             mask = np.zeros(len(ids), dtype=bool)
             reps = [""] * len(ids)
             for i, bid in enumerate(ids):
@@ -4832,7 +6316,7 @@ class MorphologyComparer:
             if m is not None and s is not None:
                 mm = np.asarray(m, dtype=float)
                 ss = np.asarray(s, dtype=float)
-                if mm.shape == (VECTOR_DIM,) and ss.shape == (VECTOR_DIM,):
+                if mm.shape == (vec_dim,) and ss.shape == (vec_dim,):
                     meta_mu, meta_sd = mm, ss
 
         using_cache_stats = False
@@ -4841,7 +6325,10 @@ class MorphologyComparer:
             if (meta_mu is not None
                     and len(cache_data["bodyIds"]) >= MIN_POPULATION_STATS_SKELETONS):
                 mu, sd, using_cache_stats = meta_mu, meta_sd, True
-            if mu is None:
+            if mu is None and not self._is_v2:
+                # V1 fallback: sample-based population statistics. The V2
+                # schema has its own whitening path instead (a V1-dim stats
+                # file would mis-slice the 256-dim vectors).
                 mu, sd = population_stats(
                     self.dataset, str(self.project_root), cache=cache
                 )
@@ -4870,6 +6357,12 @@ class MorphologyComparer:
                 X_q[mask_q] = (X_q[mask_q] - mu) / sd
                 X_c[mask_c] = (X_c[mask_c] - mu) / sd
 
+        if self._is_v2:
+            # Whiten the standardized snapshot and compose the optional
+            # ROI-expansion block BEFORE any scoring sees the vectors.
+            self._prepare_v2_scoring(cache_data, X_q, X_c, mask_q, mask_c,
+                                     query_ids, pool_ids)
+
         q_vec = X_q[mask_q].mean(axis=0)
         keep = mask_c
         scores = np.full(len(pool_ids), np.nan)
@@ -4877,8 +6370,9 @@ class MorphologyComparer:
             self._log(f"Step 5/6 — Scoring similarity ({self.method}) for "
                       f"{int(keep.sum())} usable candidates")
             self._progress(5, PROFILE_FIRST_TOTAL_STEPS,
-                           f"Scoring similarity ({self.method})")
-            scores[keep] = similarity_matrix(q_vec, X_c[keep], self.metric)
+                           self._scoring_step_label())
+            scores[keep] = self._similarity_matrix(
+                q_vec, X_c[keep], extra_subset=keep)
 
         query_type = ""
         if len(query_df):
@@ -4936,6 +6430,29 @@ class MorphologyComparer:
                 X_q[ok], self.metric,
             )
 
+        # NBLAST (method="nblast"): score every scored candidate against the
+        # query BEFORE aggregation, so the type-level table reflects NBLAST
+        # instead of the vector prefilter (which only ordered the pool).
+        nblast_scores: Dict[int, float] = {}
+        if self.method == "nblast":
+            nblast_scores = self._compute_nblast_scores(
+                query_df,
+                scored_pool_ids=[self._body_id(pool_ids[i])
+                                 for i in np.flatnonzero(keep)],
+                neurons={**query_neurons, **pool_neurons},
+            )
+
+        def _similarity_for(bid, vector_sim: float, is_same: bool) -> float:
+            """NBLAST override: scored candidates take their NBLAST score;
+            unscored same-type rows keep the vector reference, unscored
+            cross-type rows drop to NaN (rank last)."""
+            if not nblast_scores:
+                return vector_sim
+            n = nblast_scores.get(bid)
+            if n is not None:
+                return float(n)
+            return vector_sim if is_same else float("nan")
+
         rows: List[Dict[str, object]] = []
         if self.level == "type":
             # Compare every resolved query member to every pool candidate.
@@ -4944,21 +6461,28 @@ class MorphologyComparer:
             # last and are excluded from type aggregations and rendering).
             candidate_indices = [i for i, ok in enumerate(keep) if ok]
             query_indices = [i for i, ok in enumerate(mask_q) if ok]
+            cand_pos = {ci: k for k, ci in enumerate(candidate_indices)}
             for query_i in query_indices:
                 q_bid = self._body_id(query_ids[query_i])
                 raw_q_type = query_df["type"].iloc[query_i]
                 q_type = "" if pd.isna(raw_q_type) else str(raw_q_type).strip()
                 q_scores = np.full(len(pool_ids), np.nan)
+                q_blocks: Dict[str, np.ndarray] = {}
                 if candidate_indices:
-                    q_scores[candidate_indices] = similarity_matrix(
-                        X_q[query_i], X_c[candidate_indices], self.metric
-                    )
+                    q_scores[candidate_indices], q_blocks = \
+                        self._similarity_matrix_with_blocks(
+                            X_q[query_i], X_c[candidate_indices],
+                            extra_subset=candidate_indices,
+                            query_index=query_i
+                        )
                 for candidate_i in range(len(pool_ids)):
                     bid = self._body_id(pool_ids[candidate_i])
                     if bid in query_ids_set:
                         continue
                     target_type = str(id_to_type.get(bid, "") or "").strip()
-                    rows.append({
+                    is_same = target_type == q_type if target_type else False
+                    pos = cand_pos.get(candidate_i)
+                    row = {
                         "source_bodyId": q_bid,
                         "source_type": q_type,
                         "target_bodyId": bid,
@@ -4966,13 +6490,20 @@ class MorphologyComparer:
                         "target_instance": id_to_instance.get(bid, ""),
                         "profile_similarity": prof_by_id.get(bid, np.nan),
                         "roi_similarity": roi_by_id.get(bid, np.nan),
-                        "similarity": float(q_scores[candidate_i]),
-                        "is_same_type": target_type == q_type if target_type else False,
+                        "similarity": _similarity_for(
+                            bid, float(q_scores[candidate_i]), is_same),
+                        "is_same_type": is_same,
                         "intra_type_similarity": intra,
                         "method": self.method,
                         "metric": self.metric,
                         "candidate_source": source,
-                    })
+                    }
+                    for name in ("shape", "spatial", "topology"):
+                        if name in q_blocks and pos is not None:
+                            row[f"sim_{name}"] = float(q_blocks[name][pos])
+                    if "roi" in q_blocks and pos is not None:
+                        row["sim_roi"] = float(q_blocks["roi"][pos])
+                    rows.append(row)
             rows.extend(self._type_query_intra_rows(
                 query_df, X_q, mask_q, intra, candidate_source=source
             ))
@@ -4984,6 +6515,7 @@ class MorphologyComparer:
                 target_type = str(id_to_type.get(bid, "") or "").strip()
                 if bid in query_ids_set:
                     continue
+                is_same = target_type == query_type if target_type else False
                 rows.append({
                     "source_bodyId": query_ids[0],
                     "source_type": query_type,
@@ -4992,8 +6524,8 @@ class MorphologyComparer:
                     "target_instance": id_to_instance.get(bid, ""),
                     "profile_similarity": prof_by_id.get(bid, np.nan),
                     "roi_similarity": roi_by_id.get(bid, np.nan),
-                    "similarity": float(scores[i]),
-                    "is_same_type": target_type == query_type if target_type else False,
+                    "similarity": _similarity_for(bid, float(scores[i]), is_same),
+                    "is_same_type": is_same,
                     "intra_type_similarity": intra,
                     "method": self.method,
                     "metric": self.metric,
@@ -5002,26 +6534,422 @@ class MorphologyComparer:
         if not rows and not (self.level == "type" and np.isfinite(intra)):
             return pd.DataFrame(), pd.DataFrame()
 
+        # V2 two-pass type reevaluation: the first pass identified candidate
+        # types; their remaining (screen-ranked) members now join the pool
+        # and are scored, so the aggregation below re-ranks on real
+        # coverage instead of 1-2 lucky screen survivors.
+        if self._is_v2 and self.level == "type" \
+                and self.expand_top_types > 0 and np.isfinite(intra):
+            pre_type_df = self._aggregate_type_rows(
+                rows, query_type=query_type, intra=intra,
+                query_type_count=self._type_member_count(
+                    query_type, id_to_type, query_df=query_df),
+                candidate_source=source,
+            )
+            self._expand_top_type_rows(
+                rows, pre_type_df, query_df, query_ids, X_q, mask_q,
+                id_to_type, id_to_instance, intra, source,
+                cache=cache, cache_data=cache_data, mu=mu, sd=sd,
+                scored_ids=set(self._body_ids(pool_ids)) | set(query_ids_set),
+                pool_len=len(pool_ids), q_rep=q_rep, prof_by_id=prof_by_id,
+            )
+
+        # Connectivity-profile fallback: rows still without connectivity
+        # evidence (threshold-screen misses and intra-type query pairs) are
+        # scored with the Similarity>Connectivity machinery.
+        if self._is_v2:
+            self._fill_profile_similarity(rows, query_df)
+
         query_type_count = self._type_member_count(
             query_type, id_to_type, query_df=query_df
         )
+        population_counts = None
+        type_coverage = None
+        if self._is_v2:
+            from collections import Counter
+            population_counts = {
+                str(t or "").strip(): n
+                for t, n in Counter(
+                    str(v or "").strip() for v in id_to_type.values()
+                ).items() if str(t or "").strip()
+            }
+            scored: Dict[str, set] = {}
+            for r in rows:
+                t = str(r.get("target_type", "") or "").strip()
+                sim = r.get("similarity")
+                if t and pd.notna(sim) and np.isfinite(sim):
+                    scored.setdefault(t, set()).add(
+                        self._body_id(r["target_bodyId"]))
+            type_coverage = {
+                t: (len(ids) / population_counts[t]
+                    if population_counts.get(t) else np.nan)
+                for t, ids in scored.items()
+            }
         type_df = self._aggregate_type_rows(
             rows,
             query_type=query_type,
             intra=intra,
             query_type_count=query_type_count,
             candidate_source=source,
+            population_counts=population_counts,
         )
 
         # bodyId-level rows: top-N scored neurons.
-        bodyid_df = self._bodyid_dataframe(rows, query_type=query_type)
-
-        # NBLAST refinement over the fetched pool skeletons (transient).
-        if self.method == "nblast":
-            neurons = dict(query_neurons)
-            neurons.update(pool_neurons)
-            bodyid_df = self._nblast_refine(bodyid_df, query_df, cache, neurons)
+        bodyid_df = self._bodyid_dataframe(rows, query_type=query_type,
+                                           type_coverage=type_coverage)
         return bodyid_df, type_df
+
+    def _fill_profile_similarity(self, rows: List[Dict[str, object]],
+                                 query_df: pd.DataFrame) -> None:
+        """Connectivity-profile fallback for rows without profile evidence.
+
+        Rows whose profile_similarity is still NaN — threshold-screen misses
+        and intra-type query pairs — are scored with the
+        Similarity>Connectivity machinery: ``ConnectivityProfiler`` builds
+        each involved neuron's partner-type profile from the shared local
+        connection cache and ``ProfileComparator.weighted_cosine_similarity``
+        scores the pairs. Best-effort: any failure keeps the NaN in place.
+        """
+        pending = [r for r in rows if pd.isna(r.get("profile_similarity"))]
+        if not pending:
+            return
+        try:
+            from comparison.connectivity_profiler import ConnectivityProfiler
+            from comparison.profile_comparator import ProfileComparator
+        except Exception as exc:
+            self._log(f"Connectivity-profile fallback unavailable: {exc}")
+            return
+        neurons = sorted(
+            {self._body_id(r["source_bodyId"]) for r in pending}
+            | {self._body_id(r["target_bodyId"]) for r in pending},
+            key=str,
+        )
+        try:
+            profiler = ConnectivityProfiler(datasets=[self.dataset],
+                                            verbose=False)
+            profiles = profiler.get_profiles_batch(
+                neurons, self.dataset, show_progress=False)
+        except Exception as exc:
+            self._log(f"Connectivity-profile fallback skipped: {exc}")
+            return
+        if not profiles:
+            return
+        filled = 0
+        for r in pending:
+            pa = profiles.get(self._body_id(r["source_bodyId"]))
+            pb = profiles.get(self._body_id(r["target_bodyId"]))
+            if pa is None or pb is None:
+                continue
+            try:
+                sim = ProfileComparator.weighted_cosine_similarity(pa, pb)
+            except Exception:
+                continue
+            r["profile_similarity"] = float(sim)
+            filled += 1
+        if filled:
+            self._log(f"Profile evidence: filled {filled} rows from "
+                      "connectivity profiles.")
+
+    def _compute_nblast_scores(self, query_df: pd.DataFrame,
+                               scored_pool_ids: List,
+                               neurons: Dict[int, object]) -> Dict[int, float]:
+        """Score the vector-prefiltered pool against the query with NBLAST.
+
+        Runs BEFORE the type aggregation so the type-level table reflects
+        NBLAST (the former post-aggregation refinement left type_summary
+        showing the vector prefilter ranking). Returns {} when dotprops
+        cannot be built — the vector scores are then kept, and
+        ``nblast_applied`` is False so the fallback is observable.
+        """
+        self._progress(5, PROFILE_FIRST_TOTAL_STEPS, "Refining scores with NBLAST")
+        query_ids_set = set(self._body_ids(query_df["bodyId"].tolist()))
+        cand_ids = [b for b in scored_pool_ids if b not in query_ids_set]
+        query_dp = self._dotprops_for_ids(
+            self._body_ids(query_df["bodyId"].tolist()), neurons=neurons
+        )
+        if not query_dp:
+            self._log("NBLAST: query dotprops unavailable; KEEPING VECTOR "
+                      "SCORES (results are NOT NBLAST-refined).")
+            self.nblast_applied = False
+            return {}
+        cand_dp = self._dotprops_for_ids(cand_ids, neurons=neurons)
+        cand_dp = {b: dp for b, dp in cand_dp.items() if dp is not None}
+        if not cand_dp:
+            self._log("NBLAST: no candidate dotprops; KEEPING VECTOR SCORES "
+                      "(results are NOT NBLAST-refined).")
+            self.nblast_applied = False
+            return {}
+        self.nblast_applied = True
+        return self._nblast_pairwise(query_dp, cand_dp, desc="NBLAST scoring")
+
+    def _build_spatial_overlap(self, cache_data: Optional[dict],
+                               query_ids: List,
+                               pool_ids: List) -> Optional[Dict[str, np.ndarray]]:
+        """Raw Hellinger histograms for the spatial-overlap term.
+
+        Per query member, the pooled query centroid, and every pool
+        candidate — all lateral-normalized at extraction, so intersections
+        compare one hemisphere against one hemisphere. None when the raw
+        rows are unavailable.
+        """
+        hist_lo, hist_hi = V2_SPATIAL_SLICE[0] + len(SPATIAL_ELLIPSOID_FEATURES), \
+            V2_SPATIAL_SLICE[1]
+        if cache_data is None or cache_data.get("raw") is None:
+            return None
+        raw = np.asarray(cache_data["raw"], dtype=float)
+        if raw.shape[1] < hist_hi:
+            return None
+        pos = {self._body_id(b): i for i, b in enumerate(cache_data["bodyIds"])}
+
+        def _hists(ids: List) -> Optional[np.ndarray]:
+            rows = [pos.get(self._body_id(b)) for b in ids]
+            if any(r is None for r in rows):
+                return None
+            h = raw[np.asarray(rows, dtype=int), hist_lo:hist_hi]
+            totals = h.sum(axis=1, keepdims=True)
+            return h / np.maximum(totals, 1e-9)   # L1 proportions
+
+        members = _hists(query_ids)
+        pool = _hists(pool_ids)
+        if members is None or pool is None:
+            return None
+        centroid = members.mean(axis=0)
+        centroid = centroid / max(float(centroid.sum()), 1e-9)
+        return {"members": members, "centroid": centroid, "pool": pool}
+
+    def _slice_spatial_overlap(self, subset
+                               ) -> Optional[Dict[str, np.ndarray]]:
+        """Spatial-overlap pool matrix sliced to the rows a scoring call
+        selected (same alignment rule as ``_slice_extra_blocks``)."""
+        so = self._v2_spatial_overlap
+        if so is None:
+            return None
+        pool = so["pool"]
+        if subset is None:
+            return so
+        if isinstance(subset, np.ndarray) and subset.dtype == bool:
+            sliced = pool[subset]
+        else:
+            sliced = pool[np.asarray(subset, dtype=int)]
+        return {"members": so["members"], "centroid": so["centroid"],
+                "pool": sliced}
+
+
+    @staticmethod
+    def _select_expansion_ids(top_types: List[str],
+                              id_to_type: Dict[int, str],
+                              scored_ids: set,
+                              roi_rank: Dict[int, tuple],
+                              per_type_cap: int, total_cap: int) -> List[int]:
+        """Remaining members of the top-ranked types, in expansion order.
+
+        Members already scored are skipped; the rest are prioritized by the
+        ROI screen's full ranking (the strongest-overlap representatives of
+        the type first), capped per type and in total. Pure/static so the
+        selection policy is unit-testable in isolation.
+        """
+        members_by_type: Dict[str, List[int]] = {}
+        wanted = {str(t or "").strip() for t in top_types if str(t or "").strip()}
+        for bid, t in (id_to_type or {}).items():
+            tt = str(t or "").strip()
+            if tt in wanted:
+                members_by_type.setdefault(tt, []).append(bid)
+        out: List[int] = []
+        for t in top_types:
+            mems = [b for b in members_by_type.get(t, [])
+                    if b not in scored_ids]
+            mems.sort(key=lambda b: roi_rank.get(b, (1 << 30, b)))
+            out.extend(mems[:max(0, int(per_type_cap))])
+        return out[:max(0, int(total_cap))]
+
+    def _expand_top_type_rows(self, rows: List[Dict[str, object]],
+                              pre_type_df: pd.DataFrame,
+                              query_df: pd.DataFrame,
+                              query_ids: List,
+                              X_q: np.ndarray, mask_q: np.ndarray,
+                              id_to_type: Dict[int, str],
+                              id_to_instance: Dict[int, str],
+                              intra: float, source: str, *,
+                              cache: SkeletonVectorCache,
+                              cache_data: Optional[dict],
+                              mu: np.ndarray, sd: np.ndarray,
+                              scored_ids: set, pool_len: int,
+                              q_rep: str,
+                              prof_by_id: Optional[Dict[int, float]] = None) -> None:
+        """Two-pass type reevaluation: score the top types' remaining members.
+
+        Takes the first-pass top candidate types from ``pre_type_df``, pulls
+        their unscored members into the pool (ROI-screen-ranked, bounded by
+        ``expand_per_type``/``expand_top_types``), vectorizes them with the
+        SAME standardization/whitening as the first pass, scores them against
+        every query member, and appends their rows to ``rows`` (in place).
+        The caller re-runs the aggregation afterwards; V1 never calls this.
+        """
+        inter = pre_type_df[~pre_type_df["is_intra_type"]] \
+            if not pre_type_df.empty else pd.DataFrame()
+        if inter.empty:
+            return
+        top_types = inter["target_type"].astype(str).tolist()[:self.expand_top_types]
+
+        # Full screen ranking prioritizes each type's strongest-overlap
+        # representatives first.
+        roi_rank: Dict[int, tuple] = {}
+        store = self._maybe_roi_store()
+        if store is not None:
+            try:
+                full = store.screen([int(b) for b in query_ids], top_k=None)
+                roi_rank = {int(b): (-float(s), int(b))
+                            for b, s in zip(full["bodyId"],
+                                            full["roi_similarity"])}
+            except Exception:
+                pass
+        new_ids = self._select_expansion_ids(
+            top_types, id_to_type, scored_ids, roi_rank,
+            self.expand_per_type,
+            self.expand_top_types * self.expand_per_type)
+        if not new_ids:
+            return
+
+        cache_ids = set()
+        if cache_data is not None:
+            cache_ids = {self._body_id(b) for b in cache_data["bodyIds"]}
+        missing = []
+        for bid in new_ids:
+            if bid in cache_ids:
+                continue
+            if cache.find_skeleton_file(bid) is not None:
+                continue
+            missing.append(bid)
+        self._log(
+            f"Type reevaluation: expanding the pool with "
+            f"{len(new_ids)} members of the top {len(top_types)} candidate "
+            f"types ({len(missing)} to fetch)...")
+        self._progress(5, PROFILE_FIRST_TOTAL_STEPS,
+                       f"Reevaluating top types (+{len(new_ids)} members)")
+        fetch_cache = self._fetch_vector_cache()
+        fetched_all = fetch_skeletons_on_demand_batch(
+            self.dataset, missing,
+            project_root=str(self.project_root),
+            persist=True, level=VECTOR_BASIS_RAW,
+            max_threads=min(NEUPRINT_FETCH_MAX_THREADS,
+                            max(1, int(self.n_workers))),
+            raw_cache=fetch_cache, vector_cache=fetch_cache,
+        ) if missing else {}
+
+        order: List[int] = []
+        vec_by_id: Dict[int, np.ndarray] = {}
+        appends: List[Tuple[int, np.ndarray, str]] = []
+        for bid in new_ids:
+            bid = self._body_id(bid)
+            neuron = fetched_all.get(bid)
+            if neuron is None:
+                pkl = cache.find_skeleton_file(bid)
+                if pkl is None:
+                    continue
+                neuron = _load_cached_skeleton_file(str(pkl))
+            rep = _neuron_rep(neuron)
+            if q_rep and rep != q_rep:
+                continue   # one representation per comparison
+            try:
+                _, vec = cache._vectorize_neuron(neuron)
+            except Exception:
+                continue
+            if not np.isfinite(vec).all():
+                continue
+            order.append(bid)
+            vec_by_id[bid] = vec
+            appends.append((bid, vec, rep))
+        if appends:
+            cache.append_vectors(appends, vector_basis=cache._default_basis())
+        if not order:
+            return
+
+        # Same standardization + whitening as the first pass (mu/sd were
+        # fixed there; meta stats never move during appends).
+        dim = X_q.shape[1] if X_q.ndim == 2 else self._vector_dim_for(cache_data)
+        X_new = np.full((len(order), dim), np.nan)
+        for k, bid in enumerate(order):
+            vec = vec_by_id[bid]
+            if vec.shape[0] == dim:
+                X_new[k] = (vec - mu) / sd
+        W = (cache_data or {}).get("whiten")
+        if W is not None and getattr(W, "size", 0):
+            X_new = apply_whitening(W, X_new)
+
+        # Extend the ROI-expansion block and the spatial-overlap histograms
+        # to cover the new candidates.
+        new_idx = np.arange(pool_len, pool_len + len(order))
+        if self._v2_spatial_overlap is not None:
+            hist_lo = V2_SPATIAL_SLICE[0] + len(SPATIAL_ELLIPSOID_FEATURES)
+            hist_hi = V2_SPATIAL_SLICE[1]
+            new_h = np.zeros((len(order), hist_hi - hist_lo))
+            for k, bid in enumerate(order):
+                vec = vec_by_id.get(bid)
+                if vec is None:
+                    continue
+                h = np.asarray(vec[hist_lo:hist_hi], dtype=float)
+                new_h[k] = h / max(float(h.sum()), 1e-9)
+            so = self._v2_spatial_overlap
+            self._v2_spatial_overlap = {
+                "members": so["members"], "centroid": so["centroid"],
+                "pool": np.vstack([so["pool"], new_h])}
+        if self._v2_extra_blocks:
+            block_store = self._maybe_roi_store()
+            found = np.array([], dtype=np.int64)
+            blk = np.zeros((0, 0))
+            if block_store is not None:
+                try:
+                    found, blk = block_store.expansion_rows(order)
+                except Exception:
+                    found, blk = np.array([], dtype=np.int64), np.zeros((0, 0))
+            row_of = {int(b): i for i, b in enumerate(found.tolist())}
+            width = self._v2_extra_blocks[0][3].shape[1]
+            extended = np.zeros((len(order), width))
+            for k, bid in enumerate(order):
+                r = row_of.get(int(bid))
+                if r is not None:
+                    extended[k] = blk[r]
+            name, weight, q_block, c_block = self._v2_extra_blocks[0]
+            self._v2_extra_blocks = [
+                (name, weight, q_block, np.vstack([c_block, extended]))]
+
+        query_indices = [i for i, ok in enumerate(mask_q) if ok]
+        id_to_type = dict(id_to_type)
+        added_rows = 0
+        for query_i in query_indices:
+            q_bid = self._body_id(query_ids[query_i])
+            raw_q_type = query_df["type"].iloc[query_i]
+            q_type = "" if pd.isna(raw_q_type) else str(raw_q_type).strip()
+            totals, blocks = self._similarity_matrix_with_blocks(
+                X_q[query_i], X_new, extra_subset=new_idx, query_index=query_i)
+            for k, bid in enumerate(order):
+                if bid in scored_ids:
+                    continue
+                target_type = str(id_to_type.get(bid, "") or "").strip()
+                row = {
+                    "source_bodyId": q_bid,
+                    "source_type": q_type,
+                    "target_bodyId": bid,
+                    "target_type": target_type,
+                    "target_instance": id_to_instance.get(bid, ""),
+                    "profile_similarity": (prof_by_id or {}).get(bid, np.nan),
+                    "roi_similarity": (-roi_rank[bid][0]
+                                       if bid in roi_rank else np.nan),
+                    "similarity": float(totals[k]),
+                    "is_same_type": target_type == q_type if target_type else False,
+                    "intra_type_similarity": intra,
+                    "method": self.method,
+                    "metric": self.metric,
+                    "candidate_source": source,
+                    "pool_stage": "expansion",
+                }
+                for name in ("shape", "spatial", "topology", "roi"):
+                    if name in blocks:
+                        row[f"sim_{name}"] = float(blocks[name][k])
+                rows.append(row)
+                added_rows += 1
+        self._log(f"Type reevaluation: scored {added_rows} expanded-member "
+                  "rows; re-aggregating types.")
 
     def _nblast_pairwise(self, query_dps: Dict[int, object],
                          cand_dps: Dict[int, object],
@@ -5130,7 +7058,7 @@ class MorphologyComparer:
         # Compute the whole pairwise matrix once.  The previous row-by-row
         # implementation recalculated all row norms for every member and was
         # unnecessarily slow for large types.
-        pair = pairwise_similarity_matrix(sub, metric)
+        pair = self._pairwise_similarity(sub)
         total = float(pair.sum()) - n  # drop the diagonal (self = 1)
         return total / (n * (n - 1))
 
@@ -5209,9 +7137,8 @@ class MorphologyComparer:
             for j in range(i + 1, n_records):
                 pair_directions.setdefault((i, j), (i, j))
 
-        pair_matrix = pairwise_similarity_matrix(
+        pair_matrix = self._pairwise_similarity(
             np.asarray([X[i] for i, _, _, _ in records], dtype=float),
-            self.metric,
         )
         for source_i, target_i in pair_directions.values():
             _, source_bid, source_type, _ = records[source_i]
@@ -5243,6 +7170,7 @@ class MorphologyComparer:
         intra: float,
         query_type_count: int = 0,
         candidate_source: Optional[str] = None,
+        population_counts: Optional[Dict[str, int]] = None,
     ) -> pd.DataFrame:
         """Aggregate bodyId rows while preserving the queried type count.
 
@@ -5250,6 +7178,18 @@ class MorphologyComparer:
         when a type query contributes one row per query source.  The queried
         type is a reference row, so its count is the population member count,
         not the number of pairwise rows.
+
+        When ``population_counts`` is provided (V2), the type statistic
+        (mean, or max under ``type_agg="max"``) is scaled by the continuous
+        coverage factor ``sqrt(type_coverage)`` (:func:`_coverage_factor`)
+        and a ``type_coverage`` column (scored members / population
+        members) is added: a sparsely covered type's sample is a
+        screen-selected slice of it and is gently damped, a fully covered
+        type passes through untouched, and the weighting is continuous
+        everywhere. The unweighted statistic is kept in
+        ``similarity_raw``; ``similarity_max`` records the best member;
+        per-block means (``sim_shape`` etc.) are averaged through when the
+        rows carry them.
         """
         import collections
 
@@ -5258,6 +7198,14 @@ class MorphologyComparer:
             target_type = str(row.get("target_type", "") or "").strip()
             if target_type:
                 grouped[target_type].append(row)
+
+        block_keys = [k for k in ("sim_shape", "sim_spatial", "sim_topology",
+                                  "sim_roi")
+                      if any(k in r for r in rows)]
+
+        def _type_stat(values: List[float]) -> float:
+            return float(np.max(values)) if self.type_agg == "max" \
+                else float(np.mean(values))
 
         agg_rows: List[Dict[str, object]] = []
         for target_type, subrows in grouped.items():
@@ -5278,12 +7226,20 @@ class MorphologyComparer:
                           for row in subrows
                           if pd.notna(row.get("roi_similarity"))]
             is_intra = target_type == str(query_type or "").strip()
+            sim_raw = float(intra if is_intra and np.isfinite(intra)
+                            else _type_stat(values))
+            similarity = sim_raw
+            type_coverage = np.nan
+            if population_counts is not None and not is_intra:
+                pop = int(population_counts.get(target_type, 0))
+                type_coverage = (len(target_ids) / pop) if pop > 0 else np.nan
+                if np.isfinite(type_coverage):
+                    similarity = sim_raw * _coverage_factor(type_coverage)
             row = {
                 "target_type": target_type,
-                "similarity": float(intra if is_intra and np.isfinite(intra)
-                                     else np.mean(values)),
+                "similarity": float(similarity),
                 "n_bodyids": int(query_type_count if is_intra and query_type_count
-                                  else len(target_ids)),
+                                 else len(target_ids)),
                 "profile_similarity": (
                     np.nan if is_intra else
                     (float(np.mean(profile_values)) if profile_values else np.nan)
@@ -5297,6 +7253,15 @@ class MorphologyComparer:
                 "method": self.method,
                 "metric": self.metric,
             }
+            if population_counts is not None:
+                row["similarity_raw"] = sim_raw
+                row["similarity_max"] = (float(np.max(values))
+                                         if not is_intra else np.nan)
+                row["type_coverage"] = type_coverage
+            for key in block_keys:
+                vals = [float(r[key]) for r in subrows
+                        if key in r and pd.notna(r.get(key))]
+                row[key] = float(np.mean(vals)) if vals else np.nan
             if candidate_source is not None:
                 row["candidate_source"] = candidate_source
             agg_rows.append(row)
@@ -5313,6 +7278,12 @@ class MorphologyComparer:
                 "method": self.method,
                 "metric": self.metric,
             }
+            if population_counts is not None:
+                row["similarity_raw"] = float(intra)
+                row["similarity_max"] = np.nan
+                pop = int(population_counts.get(str(query_type).strip(), 0))
+                row["type_coverage"] = (int(query_type_count) / pop
+                                        if pop > 0 else np.nan)
             if candidate_source is not None:
                 row["candidate_source"] = candidate_source
             agg_rows.append(row)
@@ -5330,7 +7301,8 @@ class MorphologyComparer:
         return result
 
     def _bodyid_dataframe(
-        self, rows: List[Dict[str, object]], query_type: str = ""
+        self, rows: List[Dict[str, object]], query_type: str = "",
+        type_coverage: Optional[Dict[str, float]] = None,
     ) -> pd.DataFrame:
         """Rank bodyId rows, retaining every compared candidate.
 
@@ -5338,7 +7310,11 @@ class MorphologyComparer:
         already bounded the pool). Rows without a finite similarity
         (unscorable candidates) are kept but rank after every scored row. For
         type queries every resolved same-type pair is preserved so the query
-        does not collapse to one source."""
+        does not collapse to one source. ``type_coverage`` (V2) maps target
+        type -> pool coverage and is attached per row so the exported
+        bodyId-level table carries the same trust signal as the type-level
+        aggregation.
+        """
         if not rows:
             return pd.DataFrame()
 
@@ -5363,6 +7339,25 @@ class MorphologyComparer:
             )
         result = pd.DataFrame(ordered).reset_index(drop=True)
         result.insert(0, "rank", np.arange(1, len(result) + 1))
+        if type_coverage:
+            result["type_coverage"] = (
+                result["target_type"].map(type_coverage).astype(float))
+        # Canonical column order, mirroring type_summary.csv: target
+        # identity, score and trust, evidence columns, same-type flag and
+        # reference, method meta, per-block scores, then the query-side
+        # identity and run annotations. Optional columns appear only when
+        # present.
+        base = ["target_bodyId", "target_type", "target_instance",
+                "similarity", "type_coverage", "profile_similarity",
+                "roi_similarity",
+                "is_same_type", "intra_type_similarity", "method", "metric"]
+        tail = ["sim_shape", "sim_spatial", "sim_topology", "sim_roi",
+                "source_bodyId", "source_type", "candidate_source",
+                "pool_stage"]
+        ordered_cols = [c for c in base + tail if c in result.columns]
+        extra = [c for c in result.columns
+                 if c not in ordered_cols and c != "rank"]
+        result = result[["rank"] + ordered_cols + extra]
         return result
 
     def _vector_search(self, query_df: pd.DataFrame, data: dict
@@ -5379,6 +7374,17 @@ class MorphologyComparer:
         body_ids = data["bodyIds"]
         types = data["types"]
         X = data["X"]
+        if self._is_v2:
+            # Cache-direct V2 scores in the whitened space (the screen-first
+            # path whitens inside ``_prepare_v2_scoring`` instead). No
+            # ROI-expansion block here: cache-direct runs carry no screen
+            # alignment, and FAFB has no ROI table anyway.
+            W = data.get("whiten")
+            if W is not None and getattr(W, "size", 0):
+                data["X"] = apply_whitening(W, X)
+                X = data["X"]
+            self._v2_extra_blocks = None
+            self._v2_spatial_overlap = None
         query_ids = self._body_ids(query_df["bodyId"].tolist())
         query_ids_set = set(query_ids)
         q_type = ""
@@ -5415,7 +7421,7 @@ class MorphologyComparer:
                 q_vec = X[q_idx[0]]
                 query_pair_X[query_i] = q_vec
                 query_pair_mask[query_i] = True
-                scores = similarity_matrix(q_vec, X, self.metric)
+                scores = self._similarity_matrix(q_vec, X)
                 source_type = str(getattr(qrow, "type", q_type) or "").strip()
                 for i, bid in enumerate(body_ids):
                     bid = self._body_id(bid)
@@ -5447,7 +7453,7 @@ class MorphologyComparer:
                 )
                 if q_vec is None:
                     continue
-                scores = similarity_matrix(q_vec, X, self.metric)
+                scores = self._similarity_matrix(q_vec, X)
                 row_intra = self._intra_type_similarity(
                     qrow["type"], body_ids, types, X, self.metric
                 )
@@ -5483,7 +7489,7 @@ class MorphologyComparer:
                 query_type_count=(query_type_count or int(q_mask.sum())),
             )
             if q_vec is not None and q_type and not type_df.empty:
-                centroid_scores = similarity_matrix(q_vec, X, self.metric)
+                centroid_scores = self._similarity_matrix(q_vec, X)
                 query_type_mask = np.asarray(
                     [str(t or "").strip() == q_type for t in types],
                     dtype=bool,
@@ -5505,7 +7511,7 @@ class MorphologyComparer:
             q_vec = X[q_mask].mean(axis=0) if q_mask.any() else None
             type_df = pd.DataFrame()
             if q_vec is not None:
-                scores = similarity_matrix(q_vec, X, self.metric)
+                scores = self._similarity_matrix(q_vec, X)
                 type_df = self._aggregate_by_type(
                     body_ids, types, scores, query_type=q_type,
                     metric=self.metric, X=X,
@@ -6052,6 +8058,14 @@ class MorphologyComparer:
             "level": self.level,
             "method": self.method,
             "metric": self.metric,
+            **({"v2_block_weights": dict(self._v2_weights),
+                "expand_top_types": self.expand_top_types,
+                "expand_per_type": self.expand_per_type,
+                "coverage_weight": "sqrt",
+                "type_agg": self.type_agg}
+               if self._is_v2 else {}),
+            **({"nblast_applied": self.nblast_applied}
+               if self.method == "nblast" else {}),
             "candidate_source": getattr(self, "resolved_candidate_source",
                                         self.candidate_source),
             "candidate_cap": self.candidate_cap,

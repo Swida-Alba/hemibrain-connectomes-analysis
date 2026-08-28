@@ -836,7 +836,7 @@ class TestMorphologyComparer:
 
     def _make_comparer(self, root, **kwargs):
         params = dict(
-            dataset="test:v1", level="bodyid", method="vector", metric="cosine",
+            dataset="test:v1", level="bodyid", method="vector_v2", expand_top_types=0, metric="cosine",
             output_dir=str(root / "out"),
             project_root=str(root), verbose=False, candidate_source="cache",
         )
@@ -865,8 +865,9 @@ class TestMorphologyComparer:
         assert len(intra) == 1
         assert intra.iloc[0]["target_type"] == "LINE"
         assert intra.iloc[0]["rank"] == 1
-        # 2 identical-morphology LINE members -> intra-type similarity ~1.
-        assert intra.iloc[0]["intra_type_similarity"] == pytest.approx(1.0, abs=1e-6)
+        # 2 LINE members, one translated: V2 spatial block makes the intra
+        # reference position-sensitive (not exactly 1.0).
+        assert intra.iloc[0]["intra_type_similarity"] > 0.3
         # Inter-type rows exclude the query type and rank after it.
         inter = res[~res["is_intra_type"]]
         assert inter.iloc[0]["target_type"] == "Y"
@@ -883,8 +884,10 @@ class TestMorphologyComparer:
         # 102 is the same type (LINE) and morphologically identical -> top hit
         assert res.iloc[0]["target_bodyId"] == 102
         assert res.iloc[0]["is_same_type"] == True
-        # LINE has 2 identical members -> intra-type similarity ~1
-        assert res.iloc[0]["intra_type_similarity"] == pytest.approx(1.0, abs=1e-6)
+        # LINE has 2 members, one translated: under the V2 spatial block the
+        # intra reference is position-sensitive (lateral normalization and
+        # the overlap term both apply), never exactly 1.0.
+        assert res.iloc[0]["intra_type_similarity"] > 0.3
         # the Y neuron is a different type
         row_y = res[res["target_bodyId"] == 103]
         assert row_y.iloc[0]["is_same_type"] == False
@@ -1949,7 +1952,7 @@ class TestRoiProfileFirst:
         write_skeleton(tmp_path, "np:v1", 201, line_neuron(length=20))
         write_skeleton(tmp_path, "np:v1", 202, bushy_y_neuron())
         params = dict(
-            query=query, dataset="np:v1", level="bodyid", method="vector",
+            query=query, dataset="np:v1", level="bodyid", method="vector_v2", expand_top_types=0,
             candidate_source="roi",
             output_dir=str(tmp_path / "out"), project_root=str(tmp_path),
             verbose=False,
@@ -2042,7 +2045,7 @@ class TestRoiProfileFirst:
         write_skeleton(tmp_path, "np:v1", 101, line_neuron(length=20))
         write_skeleton(tmp_path, "np:v1", 201, line_neuron(length=20))
         params = dict(
-            query=101, dataset="np:v1", level="bodyid", method="vector",
+            query=101, dataset="np:v1", level="bodyid", method="vector_v2", expand_top_types=0,
             output_dir=str(tmp_path / "out"), project_root=str(tmp_path),
             verbose=False,
         )
@@ -2382,7 +2385,7 @@ class TestProfileFirst:
                                         bushy_y_neuron())
 
         params = dict(
-            query=query, dataset="np:v1", level="bodyid", method="vector",
+            query=query, dataset="np:v1", level="bodyid", method="vector_v2", expand_top_types=0,
             candidate_source="profile",
             output_dir=str(tmp_path / "out"), project_root=str(tmp_path),
             verbose=False,
@@ -2665,6 +2668,8 @@ class TestProfileFirst:
         """Without a vector cache the pool vectors are z-scored with
         pool-computed stats; scores match the manual z-scored cosine."""
         comparer = self._setup(tmp_path, monkeypatch)
+        # Isolate the standardization semantics: no ROI-expansion block.
+        comparer._v2_weights["roi"] = 0.0
         self._index(tmp_path, [
             (101, "T", "T_1"), (201, "T", "T_2"), (202, "Y", "Y_1"),
         ])
@@ -2678,22 +2683,31 @@ class TestProfileFirst:
         res = comparer.find_similar()
         assert not res.empty
 
-        # manual: raw vectors for query + pool, z-scored with pool stats
-        cache = morph.find_similar_raw_cache(
+        # manual: raw V2 vectors for query + pool, z-scored with pool stats,
+        # whitened with the cache's matrix, scored with the same
+        # block-weighted V2 similarity incl. the spatial-overlap blend.
+        cache = morph.find_similar_dataset_cache_v2(
             "np:v1", project_root=str(tmp_path), verbose=False
         )
+        data = cache.load()
+        rows_by_id = {int(b): i for i, b in enumerate(data["bodyIds"])}
         ids = [101, 201, 202]
-        Xr, mask, _ = cache.vectors_for(ids, compute_missing=True)
-        assert mask.all()
+        Xr = data["raw"][[rows_by_id[i] for i in ids]]
         mu = Xr.mean(axis=0)
         sd = Xr.std(axis=0)
         sd[sd <= 0] = 1.0
-        Xz = (Xr - mu) / sd
-        qz = Xz[0]
+        Xw = morph.apply_whitening(data["whiten"], (Xr - mu) / sd)
+        hist = Xr[:, 136:232]
+        hist = hist / np.maximum(hist.sum(axis=1, keepdims=True), 1e-9)
+        qz = Xw[0]
         for _, row in res.iterrows():
             idx = ids.index(int(row["target_bodyId"]))
-            expected = morph.cosine_similarity_matrix(qz, Xz[idx].reshape(1, -1))[0]
-            assert row["similarity"] == pytest.approx(expected, abs=1e-9),                 row["target_bodyId"]
+            so = {"members": hist[[0]], "centroid": hist[0],
+                  "pool": hist[[idx]]}
+            expected, _ = morph.v2_similarity_matrix(
+                qz, Xw[idx].reshape(1, -1), dict(morph.DEFAULT_V2_BLOCK_WEIGHTS),
+                spatial_overlap=so, query_index=0)
+            assert row["similarity"] == pytest.approx(expected[0], abs=1e-9),                 row["target_bodyId"]
 
     def test_profile_first_and_warm_cache_use_the_same_cosine_space(
             self, tmp_path, monkeypatch):
@@ -3077,7 +3091,7 @@ class TestStepProgress:
         ])
 
         comparer = morph.MorphologyComparer(
-            query=101, dataset="np:v1", level="bodyid", method="vector",
+            query=101, dataset="np:v1", level="bodyid", method="vector_v2", expand_top_types=0,
             candidate_source="profile",
             output_dir=str(tmp_path / "out"), project_root=str(tmp_path),
             verbose=True,
@@ -3110,7 +3124,7 @@ class TestStepProgress:
             "[DROCAT][progress] 2/6 Discovering candidates (connection cache)",
             "[DROCAT][progress] 3/6 Selecting top 2 candidates for scoring",
             "[DROCAT][progress] 4/6 Loading & vectorizing skeletons",
-            "[DROCAT][progress] 5/6 Scoring similarity (vector)",
+            "[DROCAT][progress] 5/6 Scoring similarity (vector: shape + spatial + topology)",
             "[DROCAT][progress] 6/6 Saving results",
         ]
 
@@ -3284,7 +3298,7 @@ class TestRepresentationConsistency:
             (101, "T", "T_1"), (201, "T", "T_2"), (301, "M", "M_1"),
         ])
         comparer = morph.MorphologyComparer(
-            query=101, dataset="np:v1", level="bodyid", method="vector",
+            query=101, dataset="np:v1", level="bodyid", method="vector_v2", expand_top_types=0,
             candidate_source="profile",
             output_dir=str(tmp_path / "out"), project_root=str(tmp_path),
             verbose=False,
@@ -3363,7 +3377,7 @@ class TestVectorPersistence:
 
         monkeypatch.setattr(morph, "fetch_skeleton_on_demand", fake_fetch)
         params = dict(
-            query=101, dataset="np:v1", level="bodyid", method="vector",
+            query=101, dataset="np:v1", level="bodyid", method="vector_v2", expand_top_types=0,
             candidate_source="profile",
             output_dir=str(tmp_path / "out"), project_root=str(tmp_path),
             verbose=False,

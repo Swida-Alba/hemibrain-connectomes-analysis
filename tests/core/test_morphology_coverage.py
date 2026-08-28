@@ -1581,8 +1581,16 @@ def _write_neuron_table(tmp_path, dataset, rows):
 
 def _seed_cache(tmp_path, ids, dataset="hemibrain:v1.2.1"):
     cache = _raw_cache(tmp_path, dataset=dataset)
-    records = [(b, M.vectorize_neuron(_tree_with_id(b))[1], "skeleton")
-               for b in ids]
+    cache_v2 = M.SkeletonVectorCacheV2(dataset, project_root=str(tmp_path),
+                                       verbose=False)
+    records = []
+    for b in ids:
+        vec = M.vectorize_neuron(_tree_with_id(b))[1]
+        records.append((b, vec, "skeleton"))
+        # The V2 cache (default method) shares the population but carries
+        # the extended schema; zero-fill the appended blocks.
+        v2 = np.concatenate([vec, np.zeros(M.VECTOR_V2_DIM - len(vec))])
+        cache_v2.append_vectors([(b, v2, "skeleton")])
     cache.append_vectors(records)
     return cache
 
@@ -1633,7 +1641,7 @@ def test_comparer_find_similar_cache_direct_vector(tmp_path, monkeypatch):
     _downloader_guard(monkeypatch)
     _seed_cache(tmp_path, [1, 2, 3])
     _patch_getneurons(monkeypatch, [1], types=["T1"])
-    comparer = _comparer(tmp_path, method="vector", level="bodyid",
+    comparer = _comparer(tmp_path, method="vector_v2", expand_top_types=0, level="bodyid",
                          metric="cosine", saveas="run_cov")
     results = comparer.find_similar()
     assert not results.empty
@@ -1643,7 +1651,7 @@ def test_comparer_find_similar_cache_direct_vector(tmp_path, monkeypatch):
     assert (run_dir / "type_summary.csv").exists()
     assert (run_dir / "README.txt").exists()
     # pearson metric variant
-    comparer = _comparer(tmp_path, method="vector", level="bodyid",
+    comparer = _comparer(tmp_path, method="vector_v2", expand_top_types=0, level="bodyid",
                          metric="pearson", saveas="run_cov_pearson")
     results = comparer.find_similar()
     assert not results.empty
@@ -1660,20 +1668,20 @@ def test_comparer_find_similar_type_level(tmp_path, monkeypatch):
     _seed_cache(tmp_path, [1, 2, 3, 4])
     _patch_getneurons(monkeypatch, [1], types=["T1"])
     # explicit type level
-    comparer = _comparer(tmp_path, method="vector", level="type",
+    comparer = _comparer(tmp_path, method="vector_v2", expand_top_types=0, level="type",
                          saveas="run_type")
     results = comparer.find_similar()
     assert not results.empty
     # auto level: non-numeric query resolving to a single type -> type
     _patch_getneurons(monkeypatch, [1], types=["T1"])
-    comparer = _comparer(tmp_path, method="vector", level="auto",
+    comparer = _comparer(tmp_path, method="vector_v2", expand_top_types=0, level="auto",
                          query="some pattern", saveas="run_auto_type")
     results = comparer.find_similar()
     assert comparer.level == "type"
     assert not results.empty
     # auto level with a numeric query -> bodyid
     _patch_getneurons(monkeypatch, [1], types=["T1"])
-    comparer = _comparer(tmp_path, method="vector", level="auto", query="42",
+    comparer = _comparer(tmp_path, method="vector_v2", expand_top_types=0, level="auto", query="42",
                          saveas="run_auto_bodyid")
     results = comparer.find_similar()
     assert comparer.level == "bodyid"
@@ -1694,8 +1702,9 @@ def test_comparer_cache_direct_missing_query_fetch(tmp_path, monkeypatch):
     results = comparer.find_similar()
     assert fetched["ids"] == [5]
     assert not results.empty
-    # the fetched query vector was appended to the raw cache
-    cache = _raw_cache(tmp_path)
+    # the fetched query vector was appended to the V2 vector cache
+    cache = M.find_similar_dataset_cache_v2(
+        "hemibrain:v1.2.1", project_root=str(tmp_path), verbose=False)
     data = cache.load()
     assert 5 in set(int(b) for b in data["bodyIds"])
 
@@ -2037,7 +2046,7 @@ def test_profile_first_search_end_to_end(tmp_path, monkeypatch):
     _write_connections(tmp_path, dataset)
     _patch_getneurons(monkeypatch, [1], types=["T1"])
     comparer = _comparer(tmp_path, candidate_source="profile",
-                         method="vector", saveas="run_profile_e2e",
+                         method="vector_v2", expand_top_types=0, saveas="run_profile_e2e",
                          min_shared_partners=1)
     results = comparer.find_similar()
     assert comparer.resolved_candidate_source == "profile"
@@ -2221,8 +2230,9 @@ def test_profile_first_fetch_missing(tmp_path, monkeypatch):
     assert not results.empty
     # candidate 2 scored from the cache; 3 was unvectorizable
     assert 2 in set(results["target_bodyId"])
-    # fetched query vector was persisted for reuse
-    cache = _raw_cache(tmp_path)
+    # fetched query vector was persisted for reuse (V2 schema)
+    cache = M.find_similar_dataset_cache_v2(
+        "hemibrain:v1.2.1", project_root=str(tmp_path), verbose=False)
     assert 1 in set(int(b) for b in cache.load()["bodyIds"])
     # fetch returning nothing -> the query cannot be vectorized (fresh root
     # so no earlier run has persisted the query vector)
@@ -2270,7 +2280,7 @@ def test_profile_first_type_level(tmp_path, monkeypatch):
     _write_connections(tmp_path, dataset)
     _patch_getneurons(monkeypatch, [1], types=["T1"])
     comparer = _comparer(tmp_path, candidate_source="profile",
-                         method="vector", level="type",
+                         method="vector_v2", expand_top_types=0, level="type",
                          saveas="run_profile_type", min_shared_partners=1)
     results = comparer.find_similar()
     assert not results.empty
@@ -2379,7 +2389,7 @@ def test_type_query_multi_member_intra_rows(tmp_path, monkeypatch):
     _seed_cache(tmp_path, [1, 2, 3, 4])
     # three same-type query members -> cyclic intra-type pair orientation
     _patch_getneurons(monkeypatch, [1, 2, 3], types=["T1", "T1", "T1"])
-    comparer = _comparer(tmp_path, method="vector", level="type",
+    comparer = _comparer(tmp_path, method="vector_v2", expand_top_types=0, level="type",
                          query=[1, 2, 3], saveas="run_intra")
     results = comparer.find_similar()
     assert not results.empty

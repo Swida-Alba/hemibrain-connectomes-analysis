@@ -402,7 +402,7 @@ DEFAULTS = {
     "nb_min_type_avg_score": 10000,
     # Find Similar Neurons (morphological mode)
     "morph_level": "auto",
-    "morph_method": "vector",
+    "morph_method": "vector_v2",
     "morph_metric": "cosine",
     "candidate_source": "auto",
     "candidate_cap": 500,
@@ -483,7 +483,7 @@ def is_valid_synapse_size(value) -> bool:
 
 # Morphology similarity options (Find Similar tab)
 MORPH_LEVEL_OPTIONS = ["auto", "bodyid", "type"]
-MORPH_METHOD_OPTIONS = ["vector", "nblast"]
+MORPH_METHOD_OPTIONS = ["vector_v2", "nblast"]
 MORPH_METRIC_OPTIONS = ["cosine", "pearson"]
 CANDIDATE_SOURCE_OPTIONS = ["auto", "roi", "combined", "profile", "cache"]
 

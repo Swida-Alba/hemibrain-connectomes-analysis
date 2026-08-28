@@ -707,14 +707,14 @@ class TestRunner:
         sr = ScriptRunner()
         morph_script = sr._generate_script(
             "find_similar_morphology",
-            {"query": "aMe12", "dataset": "male-cns:v1.0", "method": "vector",
+            {"query": "aMe12", "dataset": "male-cns:v1.0", "method": "vector_v2",
              "candidate_cap": 500, "visualize_top_n": 6, "visualize_by": "type"},
             "find_similar",
             None,
         )
         assert "from morphology import MorphologyComparer" in morph_script
         assert "comparer.find_similar()" in morph_script
-        assert "method='vector'" in morph_script
+        assert "method='vector_v2'" in morph_script
         assert "candidate_cap=500" in morph_script
         assert "visualize_top_n=6" in morph_script
         assert "visualize_by='type'" in morph_script

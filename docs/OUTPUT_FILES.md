@@ -271,8 +271,8 @@ Finds morphologically similar neurons (vectorized skeleton comparison).
 Example: `similar-morphology_flywire_FAFB_v783_aMe12_20260815_143601/`
 
 ### Key Output Files
-*   **`results.csv`**: BodyId-level similarity results — columns `rank`, `source_bodyId`, `source_type`, `target_bodyId`, `target_type`, `target_instance`, `profile_similarity`, `roi_similarity`, `similarity`, `is_same_type`, `intra_type_similarity`, `method`, `metric`
-*   **`type_summary.csv`**: Type-level summary — columns `rank`, `target_type`, `similarity`, `n_bodyids`, `profile_similarity`, `roi_similarity`, `is_intra_type`, `intra_type_similarity`, `method`, `metric`
+*   **`results.csv`**: BodyId-level similarity results — columns `rank`, `target_bodyId`, `target_type`, `target_instance`, `similarity`, `type_coverage`, `profile_similarity`, `roi_similarity`, `is_same_type`, `intra_type_similarity`, `method`, `metric` (column order mirrors `type_summary.csv`; `sim_shape`/`sim_spatial`/`sim_topology`/`sim_roi` per-block scores and `source_bodyId`/`source_type`/`pool_stage` appear when applicable)
+*   **`type_summary.csv`**: Type-level summary — columns `rank`, `target_type`, `similarity`, `n_bodyids`, `profile_similarity`, `roi_similarity`, `is_intra_type`, `intra_type_similarity`, `method`, `metric` (vector_v2 adds `similarity_raw`, `similarity_max`, `type_coverage`, and the `sim_*` per-block means; vector_v2 type scores are weighted continuously by `sqrt(type_coverage)`)
 *   **`README.txt`**: Run summary
 
 ### 6b. Connection Profile Similarity (HomologFinder)

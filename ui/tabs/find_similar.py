@@ -28,7 +28,10 @@ from ..dataset_service import is_banc_dataset
 
 # Option lists live centrally in ui/config; labels for the method select
 # stay local because the backend only knows the raw keys.
-_MORPH_METHOD_LABELS = {"vector": "Vector", "nblast": "NBLAST"}
+_MORPH_METHOD_LABELS = {
+    "vector_v2": "Vector (spatial)",
+    "nblast": "NBLAST",
+}
 MORPH_METHODS = {
     method: _MORPH_METHOD_LABELS.get(method, method)
     for method in MORPH_METHOD_OPTIONS
@@ -110,16 +113,22 @@ def create_find_similar_tab():
                              "individual neurons. 'type': aggregate candidates "
                              "by neuron type.",
                     )
+                    # Legacy saved default ("vector") maps to the current method.
+                    saved_method = get_user_default("morph_method")
+                    if saved_method not in MORPH_METHODS:
+                        saved_method = "vector_v2"
                     method = select_input(
-                        "Method", MORPH_METHODS, get_user_default("morph_method"),
-                        hint="'Vector': fast morphometrics + persistence vectors "
-                             "(recommended). 'NBLAST': canonical NBLAST (slower; "
-                             "runs on vector-prefiltered candidates).",
+                        "Method", MORPH_METHODS, saved_method,
+                        hint="'Vector (spatial)' (default): shape + brain-position/"
+                             "expansion + topology blocks with ZCA whitening — "
+                             "finer discrimination. 'NBLAST': canonical NBLAST "
+                             "(slower; runs on vector-prefiltered candidates).",
                     )
                     metric = select_input(
                         "Metric", MORPH_METRIC_OPTIONS, get_user_default("morph_metric"),
                         hint="Similarity on standardized vectors: cosine or "
-                             "Pearson. Applies to the 'Vector' method only.",
+                             "Pearson. Applies to the 'Vector (spatial)' method "
+                             "(per block) only.",
                     )
 
                     def sync_metric_state():
@@ -280,7 +289,8 @@ def create_find_similar_tab():
                         except Exception:
                             pass
                     n_vec = 0
-                    vec_file = vector_folder / "morphology" / "skeleton_vectors.parquet"
+                    vec_file = (vector_folder / "morphology"
+                                / "skeleton__vectors_v2.parquet")
                     if vec_file.exists():
                         import polars as pl
                         n_vec = pl.read_parquet(vec_file).height
@@ -307,10 +317,10 @@ def create_find_similar_tab():
                     import asyncio
                     import sys
                     sys.path.insert(0, str(SRC_DIR))
-                    from morphology import find_similar_raw_cache
+                    from morphology import find_similar_dataset_cache_v2
 
                     def _run():
-                        cache = find_similar_raw_cache(
+                        cache = find_similar_dataset_cache_v2(
                             dataset.value, n_workers=8, verbose=False
                         )
                         return cache.build(fetch_missing=0)

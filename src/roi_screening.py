@@ -531,3 +531,37 @@ class RoiProfileStore:
             "bodyId": kept_ids.astype(np.int64),
             "roi_similarity": scores[order].astype(float),
         })
+
+    def expansion_rows(self, body_ids: Sequence[int],
+                       ) -> Tuple[np.ndarray, np.ndarray]:
+        """Hellinger pre/post expansion rows for specific bodyIds.
+
+        Returns ``(found_ids, block)`` where ``block[i]`` is
+        ``sqrt([pre_fractions, post_fractions])`` (2R dims) of
+        ``found_ids[i]``. Composed from the cached npz on demand — the raw
+        count matrices are dropped from memory after normalization — so the
+        screen's own state is never disturbed. Used by the V2 morphology
+        comparison as its optional ROI-expansion block; datasets without a
+        store (FAFB/FlyWire) simply omit the block.
+        """
+        if self.bodyIds is None or self.cache_file is None \
+                or not Path(self.cache_file).exists():
+            return np.array([], dtype=np.int64), np.zeros((0, 0))
+        wanted = [int(b) for b in body_ids]
+        pos = {int(b): i for i, b in enumerate(self.bodyIds.tolist())}
+        rows = [pos[b] for b in wanted if b in pos]
+        found = [b for b in wanted if b in pos]
+        if not rows:
+            return np.array([], dtype=np.int64), np.zeros((0, 0))
+        try:
+            with np.load(self.cache_file, allow_pickle=False) as data:
+                pre = data["pre"][rows].astype(np.float64)
+                post = data["post"][rows].astype(np.float64)
+        except Exception:
+            return np.array([], dtype=np.int64), np.zeros((0, 0))
+        for mat in (pre, post):
+            totals = mat.sum(axis=1)
+            mat /= np.maximum(totals, 1.0)[:, None]
+            mat[totals <= 0, :] = 0.0
+        block = np.sqrt(np.hstack([pre, post]))
+        return np.asarray(found, dtype=np.int64), block

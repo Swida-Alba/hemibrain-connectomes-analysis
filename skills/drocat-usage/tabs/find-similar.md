@@ -20,7 +20,7 @@ from morphology import MorphologyComparer
 comparer = MorphologyComparer(
     dataset="male-cns:v0.9",
     level="type",                        # query level
-    method="vector",                     # or "nblast"
+    method="vector_v2",                  # "vector_v2" (default) | "nblast"
     metric="cosine",                     # vector similarity metric
     candidate_cap=500,
     candidate_source="auto",             # "auto" | "profile" | "combined" | "cache" | "roi"
