@@ -75,6 +75,7 @@ ui/line_history.json
 
 # Reorganization updates
 output/
+outputs/
 test_output/
 *.pyc
 __pycache__/
@@ -83,3 +84,6 @@ __pycache__/
 # Build artifacts
 *.egg-info/
 .coverage
+
+# Security-plugin local state (scan history, hook baselines; recreated on demand)
+.mimosa/
