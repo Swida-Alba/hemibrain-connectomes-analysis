@@ -293,6 +293,25 @@ _FINDALLPATH_GRAPH_CACHE = {}
 
 _FINDALLPATH_CACHE_MAX = 8
 
+# ============================================================================
+# Columns retained for path-discovery connection layers
+# Neuron-info enrichment adds ~a dozen columns per endpoint (hemisphere and
+# neurotransmitter labels, ...) that no path consumer reads.  Trimming every
+# fetched layer to this set before the pandas -> Polars conversion removes
+# the duplicate wide copy that drove `pyarrow.lib.ArrowMemoryError` on
+# 32 GB machines during multi-million-row layer discovery (2026-08 issue).
+# Each entry is applied only when present, so dataset-specific schemas and
+# optional filter outputs coexist with the canonical frame.
+# ============================================================================
+_PATH_CONN_KEEP_COLS = (
+    'bodyId_pre', 'bodyId_post', 'weight', 'roi',
+    'type_pre', 'type_post', 'instance_pre', 'instance_post',
+    'nt_type', 'nt_type_pre',
+    'custom_group_pre', 'custom_group_post',
+    'connection_ratio', 'traversal_probability',
+    'synapse',
+)
+
 
 def _id_set_digest(ids) -> str:
     """
@@ -1025,7 +1044,7 @@ class FindNeuronConnection:
         else:
             index_col = 'type_pre'
             columns_col = 'type_post'
-            
+
         # 1. Weight Matrix
         try:
             mat_weight = df.pivot(index=index_col, columns=columns_col, values='weight').fillna(0)
@@ -1457,7 +1476,7 @@ class FindNeuronConnection:
     def _save_matrices_to_csv(self, df, folder, level='bodyId'):
         """Generate and save connection matrices to CSV using Polars for speed"""
         import polars as pl
-        
+
         is_polars = isinstance(df, pl.DataFrame)
         if is_polars:
             if df.is_empty(): return
@@ -1471,7 +1490,7 @@ class FindNeuronConnection:
         else:
             index_col = 'type_pre'
             columns_col = 'type_post'
-            
+
         if is_polars:
             pl_df = df
         else:
@@ -1485,7 +1504,7 @@ class FindNeuronConnection:
         # This helper is also exercised as an unbound export utility by the
         # regression tests, so do not require an initialized instance here.
         pl_df = FindNeuronConnection._normalize_export_count_columns_polars(pl_df)
-            
+
         # 1. Weight Matrix
         if level != 'bodyId':
             try:
@@ -3615,13 +3634,13 @@ class FindNeuronConnection:
             # scramble result ordering between runs.
             pre_result = df_pl.group_by('bodyId_pre', maintain_order=True).agg(pl.col('idx'))
             self._conn_index = {row[0]: row[1] for row in pre_result.iter_rows()}
-            
+
             # Group by post and collect indices
             post_result = df_pl.group_by('bodyId_post', maintain_order=True).agg(pl.col('idx'))
             self._conn_index_post = {row[0]: row[1] for row in post_result.iter_rows()}
-            
+
             # del df_pl, pre_result, post_result
-            
+
         except Exception:
             # Fallback: build the index with pandas (previously this branch
             # created empty defaultdicts and never populated them, making
@@ -3647,7 +3666,7 @@ class FindNeuronConnection:
         if hasattr(self, '_dataset_safe'):
             if self._dataset_safe not in _FNC_CACHE:
                 _FNC_CACHE[self._dataset_safe] = {}
-            
+
             # Ensure conn_df stored in _FNC_CACHE is always pandas DataFrame
             # (other modules like connectivity_profiler expect pandas)
             conn_df_for_cache = self._conn_df_cache
@@ -3658,7 +3677,7 @@ class FindNeuronConnection:
                         conn_df_for_cache = conn_df_for_cache.to_pandas()
                 except ImportError:
                     pass
-            
+
             _FNC_CACHE[self._dataset_safe]['conn_df'] = conn_df_for_cache
             _FNC_CACHE[self._dataset_safe]['conn_index'] = self._conn_index
             _FNC_CACHE[self._dataset_safe]['conn_index_post'] = self._conn_index_post
@@ -4730,8 +4749,91 @@ class FindNeuronConnection:
             )
         )
         
-        # Load from complete dataset (includes type=None neurons)
-        is_flywire = is_flywire_dataset(self.dataset)
+        neuron_info = self._build_neuron_info_frame(
+            all_bodyids, is_flywire_dataset(self.dataset)
+        )
+        # Same primary-NT pick order as inside _build_neuron_info_frame
+        nt_col_to_use = next(
+            (col for col in ('nt_type', 'consensusNt', 'predictedNt')
+             if col in neuron_info.columns),
+            None,
+        )
+        
+        # Drop existing type/instance/custom_group/nt columns if they exist (to avoid _x, _y suffixes after merge)
+        columns_to_drop = []
+        for col in ['type_pre', 'instance_pre', 'type_post', 'instance_post', 
+                'custom_group_pre', 'custom_group_post', 'nt_type_pre', 'nt_type_post',
+                'hemisphere_pre', 'hemisphere_post', 'hemisphere_code_pre', 'hemisphere_code_post']:
+            if col in conn_df.columns:
+                columns_to_drop.append(col)
+        if columns_to_drop:
+            conn_df = conn_df.drop(columns=columns_to_drop)
+        
+        # Prepare columns to merge - add NT column if available
+        rename_dict_pre = {'type': 'type_pre', 'instance': 'instance_pre', 'hemisphere': 'hemisphere_pre', 'hemisphere_code': 'hemisphere_code_pre'}
+        rename_dict_post = {'type': 'type_post', 'instance': 'instance_post', 'hemisphere': 'hemisphere_post', 'hemisphere_code': 'hemisphere_code_post'}
+        
+        # Add NT column renaming if available
+        if nt_col_to_use and nt_col_to_use in neuron_info.columns:
+            rename_dict_pre[nt_col_to_use] = 'nt_type_pre'
+            rename_dict_post[nt_col_to_use] = 'nt_type_post'
+        
+        # Join type, instance, and NT for pre-synaptic neurons
+        merge_info_pre = neuron_info.rename(columns=rename_dict_pre)
+        
+        # Build list of columns to keep for pre
+        pre_cols = ['bodyId', 'type_pre', 'instance_pre', 'hemisphere_pre', 'hemisphere_code_pre']
+        if 'nt_type_pre' in merge_info_pre.columns:
+            pre_cols.append('nt_type_pre')
+        if 'custom_group_pre' in merge_info_pre.columns:
+            pre_cols.append('custom_group_pre')
+        merge_info_pre = merge_info_pre[[c for c in pre_cols if c in merge_info_pre.columns]]
+        
+        # Ensure bodyId columns are strings for merging to avoid warnings
+        conn_df['bodyId_pre'] = conn_df['bodyId_pre'].astype(str)
+        merge_info_pre['bodyId'] = merge_info_pre['bodyId'].astype(str)
+
+        conn_df = conn_df.merge(
+            merge_info_pre,
+            left_on='bodyId_pre',
+            right_on='bodyId',
+            how='left'
+        ).drop(columns=['bodyId'])
+        
+        # Join type, instance, and NT for post-synaptic neurons  
+        merge_info_post = neuron_info.rename(columns=rename_dict_post)
+        
+        # Build list of columns to keep for post
+        post_cols = ['bodyId', 'type_post', 'instance_post', 'hemisphere_post', 'hemisphere_code_post']
+        if 'nt_type_post' in merge_info_post.columns:
+            post_cols.append('nt_type_post')
+        if 'custom_group_post' in merge_info_post.columns:
+            post_cols.append('custom_group_post')
+        merge_info_post = merge_info_post[[c for c in post_cols if c in merge_info_post.columns]]
+        
+        # Ensure bodyId columns are strings for merging to avoid warnings
+        conn_df['bodyId_post'] = conn_df['bodyId_post'].astype(str)
+        merge_info_post['bodyId'] = merge_info_post['bodyId'].astype(str)
+
+        conn_df = conn_df.merge(
+            merge_info_post,
+            left_on='bodyId_post',
+            right_on='bodyId',
+            how='left'
+        ).drop(columns=['bodyId'])
+        
+        self._vprint(f'  ✓ Enrichment complete', level='full')
+        return conn_df
+
+    def _build_neuron_info_frame(self, all_bodyids, is_flywire):
+        """Build the per-neuron enrichment table for the given bodyIds.
+
+        Shared by the pandas and Polars enrichment paths: resolves the local
+        neuron table (with API fallback), keeps the base/hemisphere/NT
+        columns, and attaches custom_group_pre/post from source/target
+        frames when available.  Returns a small pandas frame keyed by the
+        string column 'bodyId'.
+        """
         dataset_safe = dataset_folder(self.dataset)
         if is_flywire:
             dataset_dir = resolve_flywire_dataset_dir(
@@ -4808,10 +4910,10 @@ class FindNeuronConnection:
 
                 # Ensure hemisphere columns exist
                 neuron_df = self._ensure_hemisphere_columns(neuron_df)
-        
+
         # Extract base columns: bodyId, type, instance, hemisphere
         base_cols = ['bodyId', 'type', 'instance', 'hemisphere', 'hemisphere_code']
-        
+
         # Check for neurotransmitter columns and include them
         # FAFB uses: nt_type
         # male-cns uses: predictedNt, consensusNt, celltypePredictedNt
@@ -4819,14 +4921,14 @@ class FindNeuronConnection:
         for nt_col in ['nt_type', 'predictedNt', 'consensusNt', 'celltypePredictedNt']:
             if nt_col in neuron_df.columns:
                 nt_columns.append(nt_col)
-        
+
         # Build neuron_info with available columns
         available_cols = [c for c in base_cols + nt_columns if c in neuron_df.columns]
         neuron_info = neuron_df[available_cols].copy()
-        
+
         # Ensure bodyId is string for merging
         neuron_info['bodyId'] = neuron_info['bodyId'].astype(str)
-        
+
         # Determine which NT column to use as primary (prefer nt_type, then consensusNt, then predictedNt)
         nt_col_to_use = None
         if 'nt_type' in nt_columns:
@@ -4835,10 +4937,10 @@ class FindNeuronConnection:
             nt_col_to_use = 'consensusNt'
         elif 'predictedNt' in nt_columns:
             nt_col_to_use = 'predictedNt'
-        
+
         if nt_col_to_use:
             self._vprint(f'  ℹ️  Including neurotransmitter info from column: {nt_col_to_use}', level='full')
-        
+
         # Add custom_group from source_df and target_df if available
         if hasattr(self, 'source_df') and 'custom_group' in self.source_df.columns:
             source_custom = self.source_df[['bodyId', 'custom_group']].rename(
@@ -4846,79 +4948,235 @@ class FindNeuronConnection:
             )
             source_custom['bodyId'] = source_custom['bodyId'].astype(str)
             neuron_info = neuron_info.merge(source_custom, on='bodyId', how='left')
-        
+
         if hasattr(self, 'target_df') and 'custom_group' in self.target_df.columns:
             target_custom = self.target_df[['bodyId', 'custom_group']].rename(
                 columns={'custom_group': 'custom_group_post'}
             )
             target_custom['bodyId'] = target_custom['bodyId'].astype(str)
             neuron_info = neuron_info.merge(target_custom, on='bodyId', how='left')
-        
-        # Drop existing type/instance/custom_group/nt columns if they exist (to avoid _x, _y suffixes after merge)
-        columns_to_drop = []
-        for col in ['type_pre', 'instance_pre', 'type_post', 'instance_post', 
-                'custom_group_pre', 'custom_group_post', 'nt_type_pre', 'nt_type_post',
-                'hemisphere_pre', 'hemisphere_post', 'hemisphere_code_pre', 'hemisphere_code_post']:
-            if col in conn_df.columns:
-                columns_to_drop.append(col)
+
+        return neuron_info
+
+    def _enrich_connections_with_neuron_info_polars(self, conn_pl):
+        """Polars twin of :meth:`_enrich_connections_with_neuron_info`.
+
+        The per-neuron enrichment table is built once (pandas, small) and
+        joined onto the connection frame in Polars, so the large frame never
+        crosses to pandas and back.
+        """
+        if conn_pl is None or conn_pl.is_empty():
+            return conn_pl
+
+        self._vprint(f'  ⏳ Enriching {len(conn_pl):,} connections with neuron info...', level='full')
+        # String keys before anything joins on them (pandas astype(str)
+        # semantics, including NaN -> 'nan')
+        conn_pl = conn_pl.with_columns([
+            pl.col('bodyId_pre').cast(pl.Utf8).fill_null('nan'),
+            pl.col('bodyId_post').cast(pl.Utf8).fill_null('nan'),
+        ])
+        all_bodyids = list(
+            set(
+                normalize_flywire_body_ids(
+                    conn_pl['bodyId_pre'].to_list()
+                    + conn_pl['bodyId_post'].to_list()
+                )
+                if is_flywire_dataset(self.dataset) else
+                [str(body_id) for body_id in
+                 conn_pl['bodyId_pre'].to_list()
+                 + conn_pl['bodyId_post'].to_list()]
+            )
+        )
+        neuron_info = self._build_neuron_info_frame(
+            all_bodyids, is_flywire_dataset(self.dataset)
+        )
+        nt_col_to_use = next(
+            (col for col in ('nt_type', 'consensusNt', 'predictedNt')
+             if col in neuron_info.columns),
+            None,
+        )
+
+        neuron_pl = pl.from_pandas(neuron_info).with_columns(
+            pl.col('bodyId').cast(pl.Utf8)
+        )
+
+        # Drop existing enrichment columns (mirror of the pandas path) to
+        # avoid suffix collisions on the joins
+        columns_to_drop = [
+            col for col in ('type_pre', 'instance_pre', 'type_post', 'instance_post',
+                            'custom_group_pre', 'custom_group_post', 'nt_type_pre', 'nt_type_post',
+                            'hemisphere_pre', 'hemisphere_post', 'hemisphere_code_pre', 'hemisphere_code_post')
+            if col in conn_pl.columns
+        ]
         if columns_to_drop:
-            conn_df = conn_df.drop(columns=columns_to_drop)
-        
-        # Prepare columns to merge - add NT column if available
+            conn_pl = conn_pl.drop(columns_to_drop)
+
         rename_dict_pre = {'type': 'type_pre', 'instance': 'instance_pre', 'hemisphere': 'hemisphere_pre', 'hemisphere_code': 'hemisphere_code_pre'}
         rename_dict_post = {'type': 'type_post', 'instance': 'instance_post', 'hemisphere': 'hemisphere_post', 'hemisphere_code': 'hemisphere_code_post'}
-        
-        # Add NT column renaming if available
-        if nt_col_to_use and nt_col_to_use in neuron_info.columns:
+        if nt_col_to_use and nt_col_to_use in neuron_pl.columns:
             rename_dict_pre[nt_col_to_use] = 'nt_type_pre'
             rename_dict_post[nt_col_to_use] = 'nt_type_post'
-        
-        # Join type, instance, and NT for pre-synaptic neurons
-        merge_info_pre = neuron_info.rename(columns=rename_dict_pre)
-        
-        # Build list of columns to keep for pre
-        pre_cols = ['bodyId', 'type_pre', 'instance_pre', 'hemisphere_pre', 'hemisphere_code_pre']
-        if 'nt_type_pre' in merge_info_pre.columns:
-            pre_cols.append('nt_type_pre')
-        if 'custom_group_pre' in merge_info_pre.columns:
-            pre_cols.append('custom_group_pre')
-        merge_info_pre = merge_info_pre[[c for c in pre_cols if c in merge_info_pre.columns]]
-        
-        # Ensure bodyId columns are strings for merging to avoid warnings
-        conn_df['bodyId_pre'] = conn_df['bodyId_pre'].astype(str)
-        merge_info_pre['bodyId'] = merge_info_pre['bodyId'].astype(str)
 
-        conn_df = conn_df.merge(
-            merge_info_pre,
-            left_on='bodyId_pre',
-            right_on='bodyId',
-            how='left'
-        ).drop(columns=['bodyId'])
-        
-        # Join type, instance, and NT for post-synaptic neurons  
-        merge_info_post = neuron_info.rename(columns=rename_dict_post)
-        
-        # Build list of columns to keep for post
-        post_cols = ['bodyId', 'type_post', 'instance_post', 'hemisphere_post', 'hemisphere_code_post']
-        if 'nt_type_post' in merge_info_post.columns:
-            post_cols.append('nt_type_post')
-        if 'custom_group_post' in merge_info_post.columns:
-            post_cols.append('custom_group_post')
-        merge_info_post = merge_info_post[[c for c in post_cols if c in merge_info_post.columns]]
-        
-        # Ensure bodyId columns are strings for merging to avoid warnings
-        conn_df['bodyId_post'] = conn_df['bodyId_post'].astype(str)
-        merge_info_post['bodyId'] = merge_info_post['bodyId'].astype(str)
+        def _join_side(rename_dict, side_cols, left_on):
+            merge_info = neuron_pl.rename(rename_dict)
+            merge_info = merge_info.select(
+                [c for c in side_cols if c in merge_info.columns]
+            )
+            return conn_pl.join(
+                merge_info, left_on=left_on, right_on='bodyId', how='left'
+            )
 
-        conn_df = conn_df.merge(
-            merge_info_post,
-            left_on='bodyId_post',
-            right_on='bodyId',
-            how='left'
-        ).drop(columns=['bodyId'])
-        
+        pre_cols = ['bodyId', 'type_pre', 'instance_pre', 'hemisphere_pre', 'hemisphere_code_pre', 'nt_type_pre', 'custom_group_pre']
+        conn_pl = _join_side(rename_dict_pre, pre_cols, 'bodyId_pre')
+
+        post_cols = ['bodyId', 'type_post', 'instance_post', 'hemisphere_post', 'hemisphere_code_post', 'nt_type_post', 'custom_group_post']
+        conn_pl = _join_side(rename_dict_post, post_cols, 'bodyId_post')
+
         self._vprint(f'  ✓ Enrichment complete', level='full')
-        return conn_df
+        return conn_pl
+
+    def _hemi_code_expr(self, conn_pl, side: str):
+        """Polars equivalent of :meth:`_hemi_code_series`.
+
+        hemisphere_code_ wins verbatim, then hemisphere_ (normalized), then
+        the instance_ _R/_L suffix, defaulting to 'U'.
+        """
+        code_col = f"hemisphere_code_{side}" if side else 'hemisphere_code'
+        hemi_col = f"hemisphere_{side}" if side else 'hemisphere'
+        inst_col = f"instance_{side}" if side else 'instance'
+
+        expr = pl.lit('U')
+        if inst_col in conn_pl.columns:
+            inst = pl.col(inst_col).cast(pl.Utf8)
+            expr = (
+                pl.when(inst.str.ends_with('_R')).then(pl.lit('R'))
+                .when(inst.str.ends_with('_L')).then(pl.lit('L'))
+                .otherwise(expr)
+            )
+        if hemi_col in conn_pl.columns:
+            normalized = (
+                pl.col(hemi_col).cast(pl.Utf8).str.strip_chars().str.to_lowercase()
+                .replace(self._HEMI_CODE_ALIASES, default='U')
+            )
+            expr = (
+                pl.when(pl.col(hemi_col).is_not_null())
+                .then(normalized)
+                .otherwise(expr)
+            )
+        if code_col in conn_pl.columns:
+            expr = (
+                pl.when(pl.col(code_col).is_not_null())
+                .then(pl.col(code_col).cast(pl.Utf8))
+                .otherwise(expr)
+            )
+        return expr
+
+    @staticmethod
+    def _append_hemi_suffix_expr(labels_expr, codes_expr):
+        """Polars equivalent of :meth:`_append_hemi_suffix_series`."""
+        labels = labels_expr.fill_null('Unknown').cast(pl.Utf8)
+        has_suffix = (
+            labels.str.ends_with('_L')
+            | labels.str.ends_with('_R')
+            | labels.str.ends_with('_U')
+        )
+        return pl.when(has_suffix).then(labels).otherwise(
+            labels + pl.lit('_') + codes_expr.cast(pl.Utf8)
+        )
+
+    def _apply_hemisphere_suffix_to_conn_df_polars(self, conn_pl):
+        """Polars twin of :meth:`_apply_hemisphere_suffix_to_conn_df`."""
+        if conn_pl is None or conn_pl.is_empty():
+            return conn_pl
+
+        conn_pl = conn_pl.with_columns([
+            self._hemi_code_expr(conn_pl, 'pre').alias('_hemi_code_pre'),
+            self._hemi_code_expr(conn_pl, 'post').alias('_hemi_code_post'),
+        ])
+        # Optional hemisphere filtering ('left' / 'right') at the EDGE level:
+        # an edge is kept only when BOTH endpoints belong to the selected
+        # hemisphere.  Endpoints without an explicit hemisphere ('U') are
+        # kept in every option.
+        if self.hemisphere_filter == 'left':
+            conn_pl = conn_pl.filter(
+                pl.col('_hemi_code_pre').is_in(['L', 'U'])
+                & pl.col('_hemi_code_post').is_in(['L', 'U'])
+            )
+        elif self.hemisphere_filter == 'right':
+            conn_pl = conn_pl.filter(
+                pl.col('_hemi_code_pre').is_in(['R', 'U'])
+                & pl.col('_hemi_code_post').is_in(['R', 'U'])
+            )
+
+        if not self.separate_hemispheres:
+            return conn_pl.drop(['_hemi_code_pre', '_hemi_code_post'])
+
+        for col, code_col in (
+            ('type_pre', '_hemi_code_pre'),
+            ('type_post', '_hemi_code_post'),
+            ('custom_group_pre', '_hemi_code_pre'),
+            ('custom_group_post', '_hemi_code_post'),
+        ):
+            if col in conn_pl.columns:
+                conn_pl = conn_pl.with_columns(
+                    self._append_hemi_suffix_expr(
+                        pl.col(col), pl.col(code_col)
+                    ).alias(col)
+                )
+        return conn_pl.drop(['_hemi_code_pre', '_hemi_code_post'])
+
+    def _apply_bodyid_level_filters_polars(self, combined, min_conn_ratio,
+                                           min_traversal_prob,
+                                           total_before_filter, min_weight):
+        """Polars twin of :meth:`_apply_bodyid_level_filters`.
+
+        The full-dataset incoming-weight denominator comes from the same
+        pandas helper; only the join and the ratio/prob arithmetic run on
+        the Polars frame.
+        """
+        post_bodyIds = combined['bodyId_post'].unique().to_list()
+        total_incoming = self._fetch_total_incoming_weight(
+            post_bodyIds, min_weight
+        )
+
+        combined = combined.with_columns(pl.col('bodyId_post').cast(pl.Utf8))
+        total_pl = pl.from_pandas(total_incoming).with_columns(
+            pl.col('bodyId_post').cast(pl.Utf8)
+        )
+        combined = combined.join(total_pl, on='bodyId_post', how='left')
+
+        total_col = pl.col('total_incoming_weight').cast(pl.Float64)
+        combined = combined.with_columns(
+            pl.when(total_col.is_not_null() & (total_col > 0))
+            .then(pl.col('weight').cast(pl.Float64) / total_col)
+            .otherwise(None)
+            .alias('connection_ratio')
+        )
+        combined = combined.with_columns(
+            (pl.col('connection_ratio') / 0.3)
+            .clip(upper_bound=1.0)
+            .alias('traversal_probability')
+        )
+
+        if min_conn_ratio > 0:
+            combined = combined.filter(pl.col('connection_ratio') >= min_conn_ratio)
+        if min_traversal_prob > 0:
+            combined = combined.filter(pl.col('traversal_probability') >= min_traversal_prob)
+
+        combined = combined.drop('total_incoming_weight')
+
+        filter_msg = []
+        if min_weight > 1:
+            filter_msg.append(f'weight ≥ {min_weight}')
+        if min_conn_ratio > 0:
+            filter_msg.append(f'ratio ≥ {min_conn_ratio}')
+        if min_traversal_prob > 0:
+            filter_msg.append(f'prob ≥ {min_traversal_prob}')
+
+        self._vprint(f'     Filtered (bodyId level): {total_before_filter} → {len(combined)} connections ({", ".join(filter_msg)})', level='full')
+        self._vprint(f'     Note: Ratio = weight / total_incoming_from_ALL_sources', level='full')
+
+        return combined
     
     def _fetch_neurons_batched(self, bodyIds, batch_size: int = 2000,
                                cancel_event: threading.Event = None,
@@ -5695,7 +5953,8 @@ class FindNeuronConnection:
     # Main Fetch Method (replaces old _fetch_connections_with_cache)
     # ============================================================================
 
-    def _fetch_path_connections(self, upstream_bodyIds, downstream_bodyIds=None):
+    def _fetch_path_connections(self, upstream_bodyIds, downstream_bodyIds=None,
+                                return_polars=False):
         """Fetch one path-discovery layer through the shared connection cache.
 
         FindPath (legacy complete-path mode), FindAllPath, and
@@ -5703,6 +5962,11 @@ class FindNeuronConnection:
         owns the persistent ``connections.parquet`` lookup/save behavior and
         the batched NeuPrint pull, so path modes cannot silently diverge in
         cache location or fetch strategy.
+
+        With ``return_polars=True`` the layer comes back as a Polars frame
+        (trimmed to ``_PATH_CONN_KEEP_COLS``, bodyIds as Utf8) so discovery
+        never holds pandas and Polars copies of the same multi-million-row
+        layer at the same time.
         """
         return self._fetch_connections_with_cache(
             upstream_bodyIds=upstream_bodyIds,
@@ -5710,6 +5974,7 @@ class FindNeuronConnection:
             min_weight=self.min_synapse_num,
             min_conn_ratio=self.min_ratio,
             min_traversal_prob=self.min_traversal_probability,
+            return_polars=return_polars,
         )
 
     @staticmethod
@@ -5719,6 +5984,64 @@ class FindNeuronConnection:
             'bodyId_pre', 'bodyId_post', 'weight', 'roi',
             'type_pre', 'type_post', 'instance_pre', 'instance_post',
         ])
+
+    @staticmethod
+    def _empty_path_connection_frame_polars():
+        """Polars twin of :meth:`_empty_path_connection_frame`."""
+        return pl.DataFrame(schema={
+            'bodyId_pre': pl.Utf8, 'bodyId_post': pl.Utf8,
+            'weight': pl.Float64, 'roi': pl.Utf8,
+            'type_pre': pl.Utf8, 'type_post': pl.Utf8,
+            'instance_pre': pl.Utf8, 'instance_post': pl.Utf8,
+        })
+
+    @staticmethod
+    def _trim_conn_df_for_path_discovery(conn_df):
+        """Project a connection layer to the columns path discovery consumes.
+
+        Layer frames leave the fetch enriched with neuron info the pipeline
+        never reads (hemisphere/NT labels, ...); converting that width to
+        Polars holds a duplicate multi-GB copy alive and can OOM the run.
+        See ``_PATH_CONN_KEEP_COLS``.
+        """
+        keep = [col for col in _PATH_CONN_KEEP_COLS if col in conn_df.columns]
+        return conn_df[keep]
+
+    def _warn_conversion_memory(self, action: str):
+        self._vprint(
+            f'\n⚠️  Not enough memory while {action}.\n'
+            f'   Reduce the search size and rerun: lower '
+            f'graph_edge_limit_bodyid, lower max_interlayer, or raise '
+            f'min_synapse_num so fewer connections are discovered.',
+            level='always',
+        )
+
+    def _as_polars_conn_frame(self, conn):
+        """Normalize a fetched connection layer to a trimmed Polars frame.
+
+        Accepts the pandas frame of the default fetch path and the Polars
+        frame of the ``return_polars`` path.  bodyIds end up Utf8 either way
+        (pandas ``astype(str)`` semantics, including NaN -> 'nan') and the
+        result is projected to ``_PATH_CONN_KEEP_COLS``.
+        """
+        if isinstance(conn, pl.DataFrame):
+            conn = conn.with_columns([
+                pl.col('bodyId_pre').cast(pl.Utf8).fill_null('nan'),
+                pl.col('bodyId_post').cast(pl.Utf8).fill_null('nan'),
+            ])
+            keep = [col for col in _PATH_CONN_KEEP_COLS if col in conn.columns]
+            return conn.select(keep)
+
+        if not conn.empty:
+            conn = conn.copy()
+            conn['bodyId_pre'] = conn['bodyId_pre'].astype(str)
+            conn['bodyId_post'] = conn['bodyId_post'].astype(str)
+        conn = self._trim_conn_df_for_path_discovery(conn)
+        try:
+            return pl.from_pandas(conn)
+        except MemoryError:
+            self._warn_conversion_memory('converting a connection layer to Polars')
+            raise
 
     def _finalize_path_connection_frame(self, combined):
         """Enrich and apply the path-edge filters to a raw connection frame.
@@ -5930,7 +6253,16 @@ class FindNeuronConnection:
                     post_index.get(post_id, [])
                 )
             if row_indices:
-                cached_raw = conn_db[row_indices].to_pandas()
+                # Project to the columns the finalize path needs while the
+                # rows are still Polars: the downstream finalize step
+                # re-adds the neuron-info columns, so converting the DB's
+                # extra bookkeeping columns to pandas is pure waste.
+                cached_pl = conn_db[row_indices]
+                keep = [
+                    col for col in ('bodyId_pre', 'bodyId_post', 'weight', 'roi')
+                    if col in cached_pl.columns
+                ]
+                cached_raw = cached_pl.select(keep).to_pandas()
                 cached_raw['bodyId_pre'] = cached_raw['bodyId_pre'].astype(str)
                 cached_raw['bodyId_post'] = cached_raw['bodyId_post'].astype(str)
                 cached_raw = cached_raw[
@@ -6025,8 +6357,254 @@ class FindNeuronConnection:
             )
         return self._finalize_path_connection_frame(combined)
     
-    def _fetch_connections_with_cache(self, upstream_bodyIds, downstream_bodyIds=None, 
-                                      min_weight=None, min_traversal_prob=None, min_conn_ratio=None):
+    def _fetch_api_connections(self, uncached_upstream, downstream_bodyIds):
+        """Fetch rows for uncached upstream neurons from the API.
+
+        Shared by the pandas and Polars fetch pipelines so both routes
+        pull through the same batched/retried NeuPrint and local-FAFB
+        logic.  Returns the fetched pandas frame, or None to signal the
+        'local FAFB data absent - abort with an empty result' case.
+        """
+        api_conn = pd.DataFrame()
+        self._vprint(f'  🌐 Fetching {len(uncached_upstream)} uncached neurons from API (weight ≥ 1)...', level='full')
+
+        fetched_locally = False
+        # Special handling for FAFB/FlyWire local data.  This branch
+        # is intentionally cache-enabled only: no-cache FlyWire runs
+        # are routed through CAVE above and must not inspect local
+        # merged-connection tables.
+        if self.use_cache and is_flywire_dataset(self.dataset):
+            try:
+                import fafb_utils
+                project_root = os.path.dirname(os.path.dirname(__file__))
+
+                # Try to find dataset directory by name
+                data_dir = resolve_flywire_dataset_dir(
+                    project_root, self.dataset
+                )
+
+                if data_dir is not None:
+                    # Only try local if the directory exists
+                    _, conn_file = fafb_utils.prepare_flywire_data(data_dir)
+
+                    # Load connections with an mtime-aware cache: the
+                    # FlyWire synapse table has millions of rows and
+                    # was re-parsed on EVERY layer fetch.
+                    try:
+                        conn_mtime = os.path.getmtime(conn_file)
+                    except OSError:
+                        conn_mtime = None
+                    if (self._fafb_local_conn_cache is not None
+                            and self._fafb_local_conn_cache[0] == conn_mtime):
+                        full_conn = self._fafb_local_conn_cache[1]
+                    else:
+                        full_conn = load_flywire_merged_connections(conn_file)
+                        self._fafb_local_conn_cache = (conn_mtime, full_conn)
+
+                    # Filter by upstream (copy: cached frame is shared)
+                    upstream_strs = normalize_flywire_body_ids(uncached_upstream)
+                    api_conn = full_conn[full_conn['bodyId_pre'].isin(upstream_strs)].copy()
+
+                    # Filter by downstream if provided
+                    if downstream_bodyIds is not None:
+                        downstream_strs = normalize_flywire_body_ids(downstream_bodyIds)
+                        api_conn = api_conn[api_conn['bodyId_post'].isin(downstream_strs)].copy()
+
+                    # Add dummy ROI column if missing
+                    if 'roi' not in api_conn.columns:
+                        api_conn['roi'] = 'WholeBrain'
+
+                    fetched_locally = True
+                    self._vprint(f"  ✓ Loaded {len(api_conn)} connections from local FAFB data", level='full')
+            except ImportError:
+                pass
+            except Exception as e:
+                self._vprint(f"  ⚠️ Error loading local FAFB data: {e}", level='full')
+
+        if not fetched_locally:
+            # Check if we should enforce local-only for FAFB/FlyWire
+            if 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower():
+                self._vprint(f"\n  ⚠️  Local connection data not found for dataset '{self.dataset}'.", level='full')
+                self._vprint("  Please download the synapse table from: https://codex.flywire.ai/api/download?dataset=fafb", level='full')
+                self._vprint(f"  Save the file to: datasets/{self.dataset.replace(':', '_')}", level='full') 
+                self._vprint("  Skipping API fetch to avoid timeouts/limits.", level='full')
+                return None
+
+            if self.client_type == 'flywire':
+                if self.client_flywire:
+                    # Use FlyWire adapter
+                    # Note: FlyWire adapter mimics fetch_adjacencies behavior
+                    neuron_df, api_conn = self.client_flywire.fetch_adjacencies(
+                        sources=uncached_upstream,
+                        targets=downstream_bodyIds
+                    )
+                    # api_conn should have bodyId_pre, bodyId_post, weight, roi
+                else:
+                    self._vprint("Error: FlyWire client not initialized", level='full')
+            else:
+                # Login to neuprint only if needed
+                from neuprint import Client, set_default_client, default_client, NeuronCriteria
+                try:
+                    from tqdm import tqdm
+                except ImportError:
+                    # Fallback if tqdm not installed
+                    def tqdm(iterable, **kwargs): return iterable
+
+                # Ensure bodyIds are integers for NeuPrint
+                # NeuPrint client requires bodyIds to be integers, not strings or floats
+                # This fixes AssertionError: bodyId should be an integer or list of integers
+                # Converted copies are used ONLY for the NeuPrint calls; the original
+                # string-form ids stay untouched for the cache-marking logic below.
+                neuprint_upstream = uncached_upstream
+                neuprint_downstream = downstream_bodyIds
+                if neuprint_upstream:
+                    try:
+                        neuprint_upstream = [int(x) for x in neuprint_upstream]
+                    except (ValueError, TypeError):
+                        # If conversion fails (e.g. non-numeric IDs), keep as is and let NeuPrint handle/fail
+                        pass
+
+                if neuprint_downstream:
+                    try:
+                        neuprint_downstream = [int(x) for x in neuprint_downstream]
+                    except (ValueError, TypeError):
+                        pass
+
+                # Ensure we have a valid client for THIS dataset (not a different one from global default)
+                self._ensure_neuprint_client()
+
+                # Batch processing with timeout and retry
+                batch_size = 1000
+                all_api_conn = []
+
+                # Import API utilities for timeout/retry
+                api_call_with_retry, APITimeoutError, APIRetryExhaustedError, APICancelError = _get_api_retry_utils()
+
+                # Create batches
+                batches = [neuprint_upstream[i:i + batch_size] for i in range(0, len(neuprint_upstream), batch_size)]
+
+                # Progress bar over the neurons being pulled: the first
+                # run of a fresh dataset downloads every neuron here, so
+                # the user always sees the downloading progress (also
+                # for a single large batch).
+                self._in_progress_bar = True
+                progress = None
+                try:
+                    progress = tqdm(total=len(neuprint_upstream),
+                                    desc='Pulling connections',
+                                    unit='neuron', leave=False)
+                    failed_batches = []
+                    # A single unbounded "all downstream" query for a
+                    # whole batch can run for minutes on dense datasets
+                    # (e.g. male-cns:v1.0) and exceed the per-attempt
+                    # timeout - the same failure the Settings pull
+                    # had. Split each batch into 10-neuron sub-batches
+                    # so every query completes within the timeout; a
+                    # failed sub-batch is recorded and the remaining
+                    # ones still proceed (path finding continues with
+                    # partial data, as it always did for failures).
+                    sub_batch_size = 10
+                    for batch_idx, batch in enumerate(batches):
+                        def fetch_sub_batch(sub):
+                            """Inner function for timeout wrapping."""
+                            if self.simple_fetch:
+                                from neuprint import fetch_simple_connections
+                                upstream_criteria = NeuronCriteria(bodyId=sub)
+                                downstream_criteria = NeuronCriteria(bodyId=neuprint_downstream) if neuprint_downstream is not None else None
+                                with _suppress_nested_fetch_progress():
+                                    return fetch_simple_connections(
+                                        upstream_criteria=upstream_criteria,
+                                        downstream_criteria=downstream_criteria,
+                                        min_weight=1,
+                                        **self.kwargs_fetch
+                                    )
+                            else:
+                                from neuprint import fetch_adjacencies
+                                # NeuPrint's own fetch_adjacencies()
+                                # wraps every call in a trange over its
+                                # default 200-ID chunks.  DROCAT
+                                # already owns the outer batch and
+                                # progress bar, so make this one API
+                                # call a single NeuPrint batch; this
+                                # removes the noisy nested 2/4/5/5
+                                # bars from the output stream.
+                                adjacency_kwargs = dict(self.kwargs_fetch)
+                                adjacency_kwargs.pop('batch_size', None)
+                                adjacency_kwargs['batch_size'] = max(1, len(sub))
+                                with _suppress_nested_fetch_progress():
+                                    neuron_df, roi_conn_df = fetch_adjacencies(
+                                        sources=sub,
+                                        targets=neuprint_downstream,
+                                        min_total_weight=1,
+                                        **adjacency_kwargs
+                                    )
+                                # roi_conn_df already has bodyId_pre, bodyId_post, roi, weight
+                                return roi_conn_df
+
+                        def _retry_notice(attempt, exc):
+                            self._vprint(
+                                f'     ⚠️ Server not responding (sub-batch of {len(current_sub)} '
+                                f'neurons, batch {batch_idx+1}/{len(batches)}) '
+                                f'— reconnecting, attempt {attempt}/5...',
+                                level='always',
+                            )
+
+                        sub_frames = []
+                        sub_failed = 0
+                        for sub_start in range(0, len(batch), sub_batch_size):
+                            current_sub = batch[sub_start:sub_start + sub_batch_size]
+                            try:
+                                # Use timeout and retry for each sub-batch
+                                sub_conn = api_call_with_retry(
+                                    lambda s=current_sub: fetch_sub_batch(s),
+                                    timeout=120.0,  # 2 minutes per sub-batch
+                                    max_retries=5,
+                                    retry_delay=5.0,
+                                    description=f"Batch {batch_idx+1}/{len(batches)} ({len(current_sub)} neurons)",
+                                    on_retry=_retry_notice,
+                                    verbose=True
+                                )
+                                if sub_conn is not None and not sub_conn.empty:
+                                    sub_frames.append(sub_conn)
+                            except (APITimeoutError, APIRetryExhaustedError) as e:
+                                self._vprint(f"     ⚠️ Sub-batch of {len(current_sub)} neurons failed after retries: {e}", level='always')
+                                sub_failed += 1
+                            except Exception as e:
+                                self._vprint(f"     ⚠️ Error fetching sub-batch: {e}", level='full')
+                                sub_failed += 1
+                        if sub_frames:
+                            batch_conn = pd.concat(sub_frames, ignore_index=True)
+                        else:
+                            batch_conn = pd.DataFrame()
+                        if sub_failed:
+                            failed_batches.append(batch_idx + 1)
+                            n_sub = (len(batch) + sub_batch_size - 1) // sub_batch_size
+                            self._vprint(f"     ⚠️ {sub_failed}/{n_sub} sub-batches failed in batch {batch_idx+1}", level='full')
+                        if batch_conn is not None and not batch_conn.empty:
+                            all_api_conn.append(batch_conn)
+                        progress.update(len(batch))
+                        if hasattr(progress, 'set_postfix_str'):
+                            progress.set_postfix_str(
+                                f'batch {batch_idx + 1}/{len(batches)}',
+                                refresh=True,
+                            )
+                finally:
+                    if progress is not None:
+                        progress.close()
+                    self._in_progress_bar = False
+
+                if failed_batches:
+                    self._vprint(f"     ⚠️ {len(failed_batches)} batches failed: {failed_batches}", level='full')
+
+                if all_api_conn:
+                    api_conn = pd.concat(all_api_conn, ignore_index=True)
+                else:
+                    api_conn = pd.DataFrame()
+        return api_conn
+
+    def _fetch_connections_with_cache(self, upstream_bodyIds, downstream_bodyIds=None,
+                                      min_weight=None, min_traversal_prob=None, min_conn_ratio=None,
+                                      return_polars=False):
         '''
         Fetch connections with v4.0 pair-level caching.
         Queries unified database first, only fetches missing neurons from API.
@@ -6051,7 +6629,8 @@ class FindNeuronConnection:
         
         Returns:
         --------
-        pd.DataFrame : Connection table filtered by min_weight, min_traversal_prob, and min_conn_ratio
+        pd.DataFrame : Connection table filtered by min_weight, min_traversal_prob, and min_conn_ratio.
+        With return_polars=True a trimmed pl.DataFrame is returned instead.
         '''
         if min_weight is None:
             min_weight = self.min_synapse_num
@@ -6064,18 +6643,27 @@ class FindNeuronConnection:
             upstream_bodyIds = normalize_flywire_body_ids(upstream_bodyIds)
             if downstream_bodyIds is not None:
                 downstream_bodyIds = normalize_flywire_body_ids(downstream_bodyIds)
-        
+
         # Check if we should use CAVE API (force_API_fetching for FAFB/FlyWire)
         use_cave_api = (
             (self.force_API_fetching or not self.use_cache)
             and is_flywire_dataset(self.dataset)
             and not is_banc_dataset(self.dataset)
         )
-        
+
         if use_cave_api:
             return self._fetch_connections_with_cave_api(upstream_bodyIds, downstream_bodyIds,
                                                         min_weight, min_traversal_prob, min_conn_ratio)
-        
+
+        # Path discovery can consume Polars directly; the Polars pipeline
+        # below keeps the cached rows in Polars so they never cross
+        # to_pandas() -> from_pandas() like the pandas pipeline does.
+        if return_polars:
+            return self._fetch_connections_with_cache_polars(
+                upstream_bodyIds, downstream_bodyIds,
+                min_weight, min_traversal_prob, min_conn_ratio,
+            )
+
         # Step 1: Query database for cached connections
         cached_conn, uncached_upstream, partially_cached = self._query_connection_db(upstream_bodyIds, downstream_bodyIds)
         
@@ -6103,240 +6691,14 @@ class FindNeuronConnection:
                     self._vprint(f'     No cached connections found for these neurons.', level='full')
                 # Continue without API fetch - api_conn stays empty
             else:
-                self._vprint(f'  🌐 Fetching {len(uncached_upstream)} uncached neurons from API (weight ≥ 1)...', level='full')
-                
-                fetched_locally = False
-                # Special handling for FAFB/FlyWire local data.  This branch
-                # is intentionally cache-enabled only: no-cache FlyWire runs
-                # are routed through CAVE above and must not inspect local
-                # merged-connection tables.
-                if self.use_cache and is_flywire_dataset(self.dataset):
-                    try:
-                        import fafb_utils
-                        project_root = os.path.dirname(os.path.dirname(__file__))
-                        
-                        # Try to find dataset directory by name
-                        data_dir = resolve_flywire_dataset_dir(
-                            project_root, self.dataset
-                        )
+                fetched = self._fetch_api_connections(
+                    uncached_upstream, downstream_bodyIds
+                )
+                if fetched is None:
+                    # Local connection data absent for a FAFB/FlyWire dataset
+                    return pd.DataFrame()
+                api_conn = fetched
 
-                        if data_dir is not None:
-                            # Only try local if the directory exists
-                            _, conn_file = fafb_utils.prepare_flywire_data(data_dir)
-                            
-                            # Load connections with an mtime-aware cache: the
-                            # FlyWire synapse table has millions of rows and
-                            # was re-parsed on EVERY layer fetch.
-                            try:
-                                conn_mtime = os.path.getmtime(conn_file)
-                            except OSError:
-                                conn_mtime = None
-                            if (self._fafb_local_conn_cache is not None
-                                    and self._fafb_local_conn_cache[0] == conn_mtime):
-                                full_conn = self._fafb_local_conn_cache[1]
-                            else:
-                                full_conn = load_flywire_merged_connections(conn_file)
-                                self._fafb_local_conn_cache = (conn_mtime, full_conn)
-                            
-                            # Filter by upstream (copy: cached frame is shared)
-                            upstream_strs = normalize_flywire_body_ids(uncached_upstream)
-                            api_conn = full_conn[full_conn['bodyId_pre'].isin(upstream_strs)].copy()
-                            
-                            # Filter by downstream if provided
-                            if downstream_bodyIds is not None:
-                                downstream_strs = normalize_flywire_body_ids(downstream_bodyIds)
-                                api_conn = api_conn[api_conn['bodyId_post'].isin(downstream_strs)].copy()
-                                
-                            # Add dummy ROI column if missing
-                            if 'roi' not in api_conn.columns:
-                                api_conn['roi'] = 'WholeBrain'
-                                
-                            fetched_locally = True
-                            self._vprint(f"  ✓ Loaded {len(api_conn)} connections from local FAFB data", level='full')
-                    except ImportError:
-                        pass
-                    except Exception as e:
-                        self._vprint(f"  ⚠️ Error loading local FAFB data: {e}", level='full')
-
-                if not fetched_locally:
-                    # Check if we should enforce local-only for FAFB/FlyWire
-                    if 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower():
-                        self._vprint(f"\n  ⚠️  Local connection data not found for dataset '{self.dataset}'.", level='full')
-                        self._vprint("  Please download the synapse table from: https://codex.flywire.ai/api/download?dataset=fafb", level='full')
-                        self._vprint(f"  Save the file to: datasets/{self.dataset.replace(':', '_')}", level='full') 
-                        self._vprint("  Skipping API fetch to avoid timeouts/limits.", level='full')
-                        return pd.DataFrame()
-
-                    if self.client_type == 'flywire':
-                        if self.client_flywire:
-                            # Use FlyWire adapter
-                            # Note: FlyWire adapter mimics fetch_adjacencies behavior
-                            neuron_df, api_conn = self.client_flywire.fetch_adjacencies(
-                                sources=uncached_upstream,
-                                targets=downstream_bodyIds
-                            )
-                            # api_conn should have bodyId_pre, bodyId_post, weight, roi
-                        else:
-                            self._vprint("Error: FlyWire client not initialized", level='full')
-                    else:
-                        # Login to neuprint only if needed
-                        from neuprint import Client, set_default_client, default_client, NeuronCriteria
-                        try:
-                            from tqdm import tqdm
-                        except ImportError:
-                            # Fallback if tqdm not installed
-                            def tqdm(iterable, **kwargs): return iterable
-                        
-                        # Ensure bodyIds are integers for NeuPrint
-                        # NeuPrint client requires bodyIds to be integers, not strings or floats
-                        # This fixes AssertionError: bodyId should be an integer or list of integers
-                        # Converted copies are used ONLY for the NeuPrint calls; the original
-                        # string-form ids stay untouched for the cache-marking logic below.
-                        neuprint_upstream = uncached_upstream
-                        neuprint_downstream = downstream_bodyIds
-                        if neuprint_upstream:
-                            try:
-                                neuprint_upstream = [int(x) for x in neuprint_upstream]
-                            except (ValueError, TypeError):
-                                # If conversion fails (e.g. non-numeric IDs), keep as is and let NeuPrint handle/fail
-                                pass
-                                
-                        if neuprint_downstream:
-                            try:
-                                neuprint_downstream = [int(x) for x in neuprint_downstream]
-                            except (ValueError, TypeError):
-                                pass
-
-                        # Ensure we have a valid client for THIS dataset (not a different one from global default)
-                        self._ensure_neuprint_client()
-                        
-                        # Batch processing with timeout and retry
-                        batch_size = 1000
-                        all_api_conn = []
-                        
-                        # Import API utilities for timeout/retry
-                        api_call_with_retry, APITimeoutError, APIRetryExhaustedError, APICancelError = _get_api_retry_utils()
-                        
-                        # Create batches
-                        batches = [neuprint_upstream[i:i + batch_size] for i in range(0, len(neuprint_upstream), batch_size)]
-                        
-                        # Progress bar over the neurons being pulled: the first
-                        # run of a fresh dataset downloads every neuron here, so
-                        # the user always sees the downloading progress (also
-                        # for a single large batch).
-                        self._in_progress_bar = True
-                        progress = None
-                        try:
-                            progress = tqdm(total=len(neuprint_upstream),
-                                            desc='Pulling connections',
-                                            unit='neuron', leave=False)
-                            failed_batches = []
-                            # A single unbounded "all downstream" query for a
-                            # whole batch can run for minutes on dense datasets
-                            # (e.g. male-cns:v1.0) and exceed the per-attempt
-                            # timeout - the same failure the Settings pull
-                            # had. Split each batch into 10-neuron sub-batches
-                            # so every query completes within the timeout; a
-                            # failed sub-batch is recorded and the remaining
-                            # ones still proceed (path finding continues with
-                            # partial data, as it always did for failures).
-                            sub_batch_size = 10
-                            for batch_idx, batch in enumerate(batches):
-                                def fetch_sub_batch(sub):
-                                    """Inner function for timeout wrapping."""
-                                    if self.simple_fetch:
-                                        from neuprint import fetch_simple_connections
-                                        upstream_criteria = NeuronCriteria(bodyId=sub)
-                                        downstream_criteria = NeuronCriteria(bodyId=neuprint_downstream) if neuprint_downstream is not None else None
-                                        with _suppress_nested_fetch_progress():
-                                            return fetch_simple_connections(
-                                                upstream_criteria=upstream_criteria,
-                                                downstream_criteria=downstream_criteria,
-                                                min_weight=1,
-                                                **self.kwargs_fetch
-                                            )
-                                    else:
-                                        from neuprint import fetch_adjacencies
-                                        # NeuPrint's own fetch_adjacencies()
-                                        # wraps every call in a trange over its
-                                        # default 200-ID chunks.  DROCAT
-                                        # already owns the outer batch and
-                                        # progress bar, so make this one API
-                                        # call a single NeuPrint batch; this
-                                        # removes the noisy nested 2/4/5/5
-                                        # bars from the output stream.
-                                        adjacency_kwargs = dict(self.kwargs_fetch)
-                                        adjacency_kwargs.pop('batch_size', None)
-                                        adjacency_kwargs['batch_size'] = max(1, len(sub))
-                                        with _suppress_nested_fetch_progress():
-                                            neuron_df, roi_conn_df = fetch_adjacencies(
-                                                sources=sub,
-                                                targets=neuprint_downstream,
-                                                min_total_weight=1,
-                                                **adjacency_kwargs
-                                            )
-                                        # roi_conn_df already has bodyId_pre, bodyId_post, roi, weight
-                                        return roi_conn_df
-
-                                def _retry_notice(attempt, exc):
-                                    self._vprint(
-                                        f'     ⚠️ Server not responding (sub-batch of {len(current_sub)} '
-                                        f'neurons, batch {batch_idx+1}/{len(batches)}) '
-                                        f'— reconnecting, attempt {attempt}/5...',
-                                        level='always',
-                                    )
-
-                                sub_frames = []
-                                sub_failed = 0
-                                for sub_start in range(0, len(batch), sub_batch_size):
-                                    current_sub = batch[sub_start:sub_start + sub_batch_size]
-                                    try:
-                                        # Use timeout and retry for each sub-batch
-                                        sub_conn = api_call_with_retry(
-                                            lambda s=current_sub: fetch_sub_batch(s),
-                                            timeout=120.0,  # 2 minutes per sub-batch
-                                            max_retries=5,
-                                            retry_delay=5.0,
-                                            description=f"Batch {batch_idx+1}/{len(batches)} ({len(current_sub)} neurons)",
-                                            on_retry=_retry_notice,
-                                            verbose=True
-                                        )
-                                        if sub_conn is not None and not sub_conn.empty:
-                                            sub_frames.append(sub_conn)
-                                    except (APITimeoutError, APIRetryExhaustedError) as e:
-                                        self._vprint(f"     ⚠️ Sub-batch of {len(current_sub)} neurons failed after retries: {e}", level='always')
-                                        sub_failed += 1
-                                    except Exception as e:
-                                        self._vprint(f"     ⚠️ Error fetching sub-batch: {e}", level='full')
-                                        sub_failed += 1
-                                if sub_frames:
-                                    batch_conn = pd.concat(sub_frames, ignore_index=True)
-                                else:
-                                    batch_conn = pd.DataFrame()
-                                if sub_failed:
-                                    failed_batches.append(batch_idx + 1)
-                                    n_sub = (len(batch) + sub_batch_size - 1) // sub_batch_size
-                                    self._vprint(f"     ⚠️ {sub_failed}/{n_sub} sub-batches failed in batch {batch_idx+1}", level='full')
-                                if batch_conn is not None and not batch_conn.empty:
-                                    all_api_conn.append(batch_conn)
-                                progress.update(len(batch))
-                                if hasattr(progress, 'set_postfix_str'):
-                                    progress.set_postfix_str(
-                                        f'batch {batch_idx + 1}/{len(batches)}',
-                                        refresh=True,
-                                    )
-                        finally:
-                            if progress is not None:
-                                progress.close()
-                            self._in_progress_bar = False
-                        
-                        if failed_batches:
-                            self._vprint(f"     ⚠️ {len(failed_batches)} batches failed: {failed_batches}", level='full')
-                                
-                        if all_api_conn:
-                            api_conn = pd.concat(all_api_conn, ignore_index=True)
-                        else:
-                            api_conn = pd.DataFrame()
             
             # Save connections to database (but don't mark neurons as cached
             # yet). In no-cache mode the API result is deliberately kept
@@ -6435,7 +6797,170 @@ class FindNeuronConnection:
                 self._vprint(f'     Enriched with neuron info from complete local dataset', level='full')
         
         return combined
-    
+
+    def _fetch_connections_with_cache_polars(self, upstream_bodyIds, downstream_bodyIds,
+                                             min_weight, min_traversal_prob, min_conn_ratio):
+        """Polars-native twin of ``_fetch_connections_with_cache`` for path discovery.
+
+        Cached rows stay in Polars end to end; only the (much smaller)
+        API-fetched portion and the per-neuron enrichment table cross to
+        pandas.  The label-mapper and type-level filter branches have no
+        Polars port and fall back to a guarded pandas round trip on those
+        (rare) configurations.  Returns a Polars frame projected to
+        ``_PATH_CONN_KEEP_COLS`` with bodyIds cast to Utf8.
+        """
+        # CAVE-driven runs return a processed pandas frame; trim + convert
+        # once at the boundary.
+        use_cave_api = (
+            (self.force_API_fetching or not self.use_cache)
+            and is_flywire_dataset(self.dataset)
+            and not is_banc_dataset(self.dataset)
+        )
+        if use_cave_api:
+            combined = self._fetch_connections_with_cave_api(
+                upstream_bodyIds, downstream_bodyIds,
+                min_weight, min_traversal_prob, min_conn_ratio,
+            )
+            return self._as_polars_conn_frame(combined)
+
+        # Step 1: Query database for cached connections (stays Polars)
+        cached_conn, uncached_upstream, partially_cached = self._query_connection_db(
+            upstream_bodyIds, downstream_bodyIds
+        )
+        if not isinstance(cached_conn, pl.DataFrame):
+            cached_conn = pl.from_pandas(cached_conn) if len(cached_conn) > 0 else pl.DataFrame()
+
+        if not cached_conn.is_empty():
+            self._vprint(f'  📂 Found {len(set(upstream_bodyIds) - set(uncached_upstream))}/{len(upstream_bodyIds)} neurons in cache', level='full')
+            self._vprint(f'     Retrieved {len(cached_conn):,} connections from database', level='full')
+
+        # Step 2: Fetch uncached neurons from the API (shared pandas helper)
+        api_conn = pd.DataFrame()
+        if len(uncached_upstream) > 0:
+            if self.cache_only:
+                self._vprint(f'  ⚠️  {len(uncached_upstream)} neurons not in cache (cache-only mode - skipping API fetch)', level='full')
+                self._vprint(f'     Using only cached data. Results may be incomplete.', level='full')
+                if cached_conn.is_empty():
+                    self._vprint(f'     No cached connections found for these neurons.', level='full')
+            else:
+                fetched = self._fetch_api_connections(
+                    uncached_upstream, downstream_bodyIds
+                )
+                if fetched is None:
+                    # Local connection data absent for a FAFB/FlyWire dataset
+                    return self._empty_path_connection_frame_polars()
+                api_conn = fetched
+                if self.use_cache:
+                    self._save_connections_only(api_conn, uncached_upstream)
+
+        # Step 3: Combine cached and API results in Polars
+        api_pl = None
+        if not self._is_empty_df(api_conn):
+            try:
+                api_pl = pl.from_pandas(api_conn)
+            except MemoryError:
+                self._warn_conversion_memory('converting fetched API connections to Polars')
+                raise
+        if cached_conn.is_empty() and (api_pl is None or api_pl.is_empty()):
+            return self._empty_path_connection_frame_polars()
+
+        frames = [frame for frame in (cached_conn, api_pl)
+                  if frame is not None and not frame.is_empty()]
+        combined = (
+            pl.concat(frames, how='diagonal_relaxed')
+            if len(frames) > 1 else frames[0]
+        )
+        if 'cached_date' in combined.columns:
+            combined = combined.drop('cached_date')
+
+        total_before_filter = len(combined)
+
+        # Step 4: Enrich + filter (Polars pipeline)
+        combined = self._enrich_connections_with_neuron_info_polars(combined)
+
+        # Mark neurons as cached (after successful enrichment, like the
+        # pandas path) using only the small per-neuron slice in pandas.
+        neurons_to_mark = list(set(uncached_upstream + partially_cached)) if self.use_cache else []
+        if len(neurons_to_mark) > 0:
+            self._vprint(f'  ⏳ Preparing to mark {len(neurons_to_mark):,} neurons as cached...', level='full')
+            neurons_conn = combined.filter(
+                pl.col('bodyId_pre').is_in([str(b) for b in neurons_to_mark])
+            ).to_pandas()
+            neurons_with_conns = set(neurons_conn['bodyId_pre'].unique())
+            neurons_without_conns = set(str(b) for b in neurons_to_mark) - neurons_with_conns
+            if neurons_without_conns:
+                self._vprint(f'  ℹ️  Note: {len(neurons_without_conns)} neurons have 0 connections (will still be marked as complete)', level='full')
+            self._mark_neurons_as_cached(neurons_to_mark, neurons_conn, downstream_bodyIds)
+            self._vprint(f'  ✓ Cache update complete - {len(neurons_to_mark)} neurons marked as fetched', level='full')
+
+        # Label mapping has no Polars port; fall back to a guarded pandas
+        # round trip on this optional configuration.
+        if self.label_mapper and len(combined) > 0:
+            self._vprint(f'  🏷️  Applying label mapping to {len(combined):,} connections...', level='full')
+            try:
+                combined_pd = combined.to_pandas()
+                combined_pd = self.label_mapper.apply_to_dataframe(combined_pd, self.dataset)
+                if 'std_label_pre' in combined_pd.columns:
+                    mask = combined_pd['std_label_pre'] != ''
+                    combined_pd.loc[mask, 'type_pre'] = combined_pd.loc[mask, 'std_label_pre']
+                    combined_pd = combined_pd.drop(columns=['std_label_pre'])
+                if 'std_label_post' in combined_pd.columns:
+                    mask = combined_pd['std_label_post'] != ''
+                    combined_pd.loc[mask, 'type_post'] = combined_pd.loc[mask, 'std_label_post']
+                    combined_pd = combined_pd.drop(columns=['std_label_post'])
+                combined = pl.from_pandas(combined_pd)
+            except MemoryError:
+                self._warn_conversion_memory('applying label mapping to a connection layer')
+                raise
+
+        combined = self._apply_hemisphere_suffix_to_conn_df_polars(combined)
+
+        if self.exclude_intra_type_connections and len(combined) > 0:
+            before_count = len(combined)
+            # Null-type rows are always kept, mirroring the pandas filter
+            # where NaN != <type> evaluates True
+            combined = combined.filter(
+                pl.col('type_pre').is_null()
+                | pl.col('type_post').is_null()
+                | (pl.col('type_pre') != pl.col('type_post'))
+            )
+            if before_count > len(combined):
+                self._vprint(f'  ⚠️  Excluded {before_count - len(combined):,} intra-type connections (type_pre == type_post)', level='full')
+
+        self._vprint(f'  ⏳ Applying filters to {len(combined):,} connections...', level='full')
+        if self.filter_by == 'type':
+            # The aggregate type-level pipeline has no Polars port; use the
+            # pandas implementation via a guarded round trip.
+            try:
+                combined_pd = combined.to_pandas()
+                combined_pd = self._apply_type_level_filters(
+                    combined_pd, min_weight, min_conn_ratio, min_traversal_prob,
+                    total_before_filter, aggregate_method=self.aggregate_method,
+                )
+                combined = pl.from_pandas(combined_pd)
+            except MemoryError:
+                self._warn_conversion_memory('applying type-level filters to a connection layer')
+                raise
+        else:
+            if min_weight > 1:
+                before_count = len(combined)
+                combined = combined.filter(pl.col('weight') >= min_weight)
+                if len(combined) < before_count:
+                    self._min_synapse_excluded = True
+
+            if (min_traversal_prob > 0 or min_conn_ratio > 0) and len(combined) > 0:
+                combined = self._apply_bodyid_level_filters_polars(
+                    combined, min_conn_ratio, min_traversal_prob,
+                    total_before_filter, min_weight,
+                )
+            else:
+                if min_weight > 1:
+                    self._vprint(f'     Filtered: {total_before_filter} → {len(combined)} connections (weight ≥ {min_weight})', level='full')
+                self._vprint(f'     Enriched with neuron info from complete local dataset', level='full')
+
+        keep = [col for col in _PATH_CONN_KEEP_COLS if col in combined.columns]
+        return combined.select(keep)
+
     def _connection_source_signature(self):
         """Identity of the current data source (in-memory frame or disk files).
 
@@ -10113,7 +10638,9 @@ class FindNeuronConnection:
                 reverse_layers.append(set())
                 break
 
-            conn_pl = pl.from_pandas(conn_df).with_columns(
+            # Trimmed, guarded pandas -> Polars conversion (see
+            # _as_polars_conn_frame / _PATH_CONN_KEEP_COLS)
+            conn_pl = self._as_polars_conn_frame(conn_df).with_columns(
                 pl.lit(f'{reverse_depth}->{reverse_depth + 1}').alias(
                     'conn_layer'
                 )
@@ -10163,6 +10690,10 @@ class FindNeuronConnection:
             frontier_by_target = next_frontier_by_target
             all_neurons_in_network.update(next_reverse_layer)
             reverse_layers.append(next_reverse_layer)
+
+            # Release the fetched layer before the next depth iteration
+            del conn_df
+            gc.collect()
 
             if not any(frontier_by_target.values()):
                 break
@@ -11938,42 +12469,49 @@ class FindNeuronConnection:
                 conn_df = self._fetch_path_connections(
                     upstream_bodyIds=neurons_to_fetch,
                     downstream_bodyIds=None,
+                    return_polars=True,
                 )
-                
-                # Convert to Polars for faster processing
-                if not conn_df.empty:
-                    # Ensure string types
-                    conn_df['bodyId_pre'] = conn_df['bodyId_pre'].astype(str)
-                    conn_df['bodyId_post'] = conn_df['bodyId_post'].astype(str)
-                    
-                    conn_pl = pl.from_pandas(conn_df)
-                    
+                n_conn = len(conn_df)
+
+                # Convert to Polars for faster processing.  The frame is
+                # trimmed to the columns the path pipeline consumes first
+                # (see _PATH_CONN_KEEP_COLS): converting the full
+                # neuron-info width held wide pandas and Polars copies
+                # alive at once and OOM'ed 32 GB machines on
+                # multi-million-row layers.
+                conn_pl = self._as_polars_conn_frame(conn_df)
+
+                if not conn_pl.is_empty():
                     # Add conn_layer column
                     conn_pl = conn_pl.with_columns(pl.lit(f'{layer_idx}->{layer_idx+1}').alias('conn_layer'))
-                    
+
                     all_connections.append(conn_pl)
-                    
+
                     # Collect all downstream neurons for next layer
                     post_neurons = set(conn_pl['bodyId_post'].unique().to_list())
                 else:
                     all_connections.append(pl.DataFrame())
                     post_neurons = set()
-                
+
+                # Release the fetched layer before the next iteration
+                del conn_df, conn_pl
+                gc.collect()
+
                 # Calculate newly discovered neurons
                 next_layer = post_neurons - all_neurons_in_network
                 all_neurons_in_network.update(next_layer)
-                
+
                 # Add this layer to layer_neurons for target identification
                 # (even if we won't fetch from it in the next iteration)
                 layer_neurons.append(next_layer)
-                
+
                 if self.verbose_mode == 'simple':
                     self._vprint('Done', level='simple')
                 elif self.verbose_mode == 'full':
                     if forward_only:
-                        self._vprint(f'Layer {layer_idx}->{layer_idx+1}: {len(post_neurons)} downstream neurons, {len(next_layer)} new, {len(conn_df)} connections', level='full')
+                        self._vprint(f'Layer {layer_idx}->{layer_idx+1}: {len(post_neurons)} downstream neurons, {len(next_layer)} new, {n_conn} connections', level='full')
                     else:
-                        self._vprint(f'Layer {layer_idx}->{layer_idx+1}: {len(post_neurons)} total downstream, {len(next_layer)} new neurons, {len(conn_df)} connections', level='full')
+                        self._vprint(f'Layer {layer_idx}->{layer_idx+1}: {len(post_neurons)} total downstream, {len(next_layer)} new neurons, {n_conn} connections', level='full')
                 
                 # Shortest-mode early stop: discovery is BFS, so a target's
                 # first-appearance layer is its exact shortest hop distance —
@@ -12179,7 +12717,7 @@ class FindNeuronConnection:
             path_mode=path_mode)
         G = FastGraph()
         G.build_from_dataframe(conn_trimmed, 'bodyId_pre', 'bodyId_post', 'weight')
-        
+
         self._vprint(f'Done! ({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)', level='full')
         
         # Pruning: Remove nodes that cannot reach any target
@@ -12215,7 +12753,7 @@ class FindNeuronConnection:
                             queue.append(neighbor)
                 
                 nodes_that_can_reach_targets = reachable
-                
+
                 # Intersect with nodes reachable from sources
                 # Since G is built layer-by-layer from sources, most nodes are reachable.
                 # But let's be safe and precise.
@@ -12400,7 +12938,7 @@ class FindNeuronConnection:
                 self._vprint('building paths...', level='simple', end='', flush=True)
             elif self.verbose_mode == 'full':
                 self._vprint(f'   Pathfinding completed in {elapsed:.1f}s', level='full')
-        
+
         self._vprint(f'\n✅ Pathfinding complete!', level='full')
         self._vprint(f'   Total paths found: {path_count:,}', level='full')
         if path_mode == 'shortest':
@@ -13898,7 +14436,7 @@ class FindNeuronConnection:
                     self._vprint(f'   ✓ Saved to: {output_path_csv}', level='full')
         elif self.skip_bodyId:
             self._vprint('Skipping bodyId-level path enrichment (skip_bodyId=True)', level='full')
-        
+
         # save interlayer info to excel
         if not self.skip_bodyId:
             self._vprint('💾 Saving interlayer neuron info to Excel...', level='full')
