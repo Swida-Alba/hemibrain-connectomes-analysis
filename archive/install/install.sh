@@ -130,13 +130,54 @@ install_miniconda() {
         *) printf "%bUnsupported operating system: %s%b\n" "$RED" "$os" "$NC" >&2; exit 1 ;;
     esac
 
-    installer="$(mktemp "${TMPDIR:-/tmp}/drocat-miniconda.XXXXXX.sh")"
-    trap 'rm -f "${installer:-}"' EXIT
-    printf '%s\n' "Downloading Miniconda..."
+    # Download into a project-local cache (gitignored) so an interrupted
+    # transfer resumes instead of restarting the ~150 MB file from byte 0 -
+    # on a throttled CDN a single-shot download can take an hour or die
+    # outright. BSD mktemp only replaces a trailing X run, so a
+    # 'drocat-miniconda.XXXXXX.sh' template would create a literal 'XXXXXX'
+    # filename; the deterministic cache path needs no template at all.
+    installer="$PROJECT_ROOT/cache/miniconda/$(basename "$url")"
+    mkdir -p "$(dirname "$installer")"
+    printf '%s\n' "Downloading Miniconda (resumable)..."
+    local progress attempt
+    progress=(-sS)
+    if [[ -t 1 ]]; then progress=(-#); fi
     if command_exists curl; then
-        curl -fsSL "$url" -o "$installer"
+        # The shell-level loop covers failures curl's own --retry will not
+        # touch, without depending on --retry-all-errors (curl >= 7.71).
+        # -C - resumes the partial file across attempts and installer
+        # re-runs.
+        for attempt in 1 2 3 4 5; do
+            if curl -fL --retry 5 --retry-delay 3 -C - "${progress[@]}" "$url" -o "$installer"; then
+                break
+            fi
+            if [[ "$attempt" -eq 5 ]]; then
+                # A complete-but-uninstalled cache makes every resume fail
+                # with HTTP 416; fall back to one fresh download.
+                printf "%bResuming failed; retrying the download from scratch...%b\n" "$YELLOW" "$NC"
+                if ! curl -fL --retry 5 --retry-delay 3 "${progress[@]}" "$url" -o "$installer"; then
+                    printf "%bERROR: Miniconda download failed (%s).%b\n" "$RED" "$url" "$NC" >&2
+                    exit 1
+                fi
+                break
+            fi
+            printf "%bDownload interrupted (attempt %s of 5); resuming in %s seconds...%b\n" \
+                "$YELLOW" "$attempt" "$((attempt * 5))" "$NC"
+            sleep "$((attempt * 5))"
+        done
     elif command_exists wget; then
-        wget -q "$url" -O "$installer"
+        for attempt in 1 2 3 4 5; do
+            if wget -c -q "$url" -O "$installer"; then
+                break
+            fi
+            if [[ "$attempt" -eq 5 ]]; then
+                printf "%bERROR: Miniconda download failed (%s).%b\n" "$RED" "$url" "$NC" >&2
+                exit 1
+            fi
+            printf "%bDownload interrupted (attempt %s of 5); resuming in %s seconds...%b\n" \
+                "$YELLOW" "$attempt" "$((attempt * 5))" "$NC"
+            sleep "$((attempt * 5))"
+        done
     else
         printf "%bERROR: curl or wget is required to download Miniconda.%b\n" "$RED" "$NC" >&2
         exit 1
@@ -149,7 +190,6 @@ install_miniconda() {
         exit 1
     }
     rm -f "$installer"
-    trap - EXIT
     CONDA_BIN="$HOME/miniconda3/bin/conda"
 }
 

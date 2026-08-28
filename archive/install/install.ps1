@@ -108,25 +108,78 @@ function Find-Conda {
 
 function Install-Miniconda {
     $Url = "https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe"
-    $Installer = Join-Path $env:TEMP "drocat-miniconda-$PID.exe"
+    # Download into the project-local cache (gitignored) so an interrupted
+    # transfer resumes instead of restarting the installer executable from
+    # byte 0. curl.exe (bundled since Windows 10 1803) supports resumable
+    # downloads; fall back to a plain retry around Invoke-WebRequest when it
+    # is absent.
+    $CacheDir = Join-Path $ProjectRoot "cache\miniconda"
+    $Installer = Join-Path $CacheDir (Split-Path -Leaf $Url)
     $InstallDir = "$env:USERPROFILE\miniconda3"
     if ((Test-Path $InstallDir) -and -not (Test-Path "$InstallDir\Scripts\conda.exe")) {
         $InstallDir = "$env:USERPROFILE\miniconda3-drocat"
     }
-    try {
-        Write-Host "Downloading Miniconda..."
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri $Url -OutFile $Installer -UseBasicParsing
-        Write-Host "Installing Miniconda..."
-        $Process = Start-Process -FilePath $Installer -ArgumentList "/InstallationType=JustMe", "/RegisterPython=0", "/S", "/D=$InstallDir" -Wait -PassThru
-        if ($Process.ExitCode -ne 0 -or -not (Test-Path "$InstallDir\Scripts\conda.exe")) {
-            throw "Miniconda installation failed (exit $($Process.ExitCode))."
+    $Downloaded = $false
+    New-Item -ItemType Directory -Force -Path $CacheDir -ErrorAction Stop | Out-Null
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+        Write-Host "Downloading Miniconda (resumable)..."
+        for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
+            # EAP Continue: PS 5.1 turns any native stderr line into a
+            # terminating error under EAP Stop (curl writes progress to
+            # stderr); rely on $LASTEXITCODE instead.
+            $PreviousErrorActionPreference = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            try {
+                & curl.exe -fL --retry 5 --retry-delay 3 -C - -o "$Installer" "$Url"
+                if ($LASTEXITCODE -eq 0) { $Downloaded = $true }
+            } finally {
+                $ErrorActionPreference = $PreviousErrorActionPreference
+            }
+            if ($Downloaded) { break }
+            if ($Attempt -eq 5) {
+                # A complete-but-uninstalled cache makes every resume fail
+                # with HTTP 416; fall back to one fresh download.
+                Write-Host "Resuming failed; retrying the download from scratch..." -ForegroundColor Yellow
+                $PreviousErrorActionPreference = $ErrorActionPreference
+                $ErrorActionPreference = "Continue"
+                try {
+                    & curl.exe -fL --retry 5 --retry-delay 3 -o "$Installer" "$Url"
+                    if ($LASTEXITCODE -eq 0) { $Downloaded = $true }
+                } finally {
+                    $ErrorActionPreference = $PreviousErrorActionPreference
+                }
+                break
+            }
+            Write-Host "Download interrupted (attempt $Attempt of 5); resuming in $($Attempt * 5) seconds..." -ForegroundColor Yellow
+            Start-Sleep -Seconds ($Attempt * 5)
         }
-        return "$InstallDir\Scripts\conda.exe"
     }
-    finally {
-        Remove-Item $Installer -Force -ErrorAction SilentlyContinue
+    if (-not $Downloaded) {
+        Write-Host "Downloading Miniconda..."
+        for ($Attempt = 1; $Attempt -le 3; $Attempt++) {
+            try {
+                Invoke-WebRequest -Uri $Url -OutFile $Installer -UseBasicParsing
+                $Downloaded = $true
+                break
+            } catch {
+                if ($Attempt -eq 3) {
+                    throw "Miniconda download failed: $($_.Exception.Message)"
+                }
+                Write-Host "Download failed (attempt $Attempt of 3); retrying in $($Attempt * 5) seconds..." -ForegroundColor Yellow
+                Start-Sleep -Seconds ($Attempt * 5)
+            }
+        }
     }
+    Write-Host "Installing Miniconda..."
+    $Process = Start-Process -FilePath $Installer -ArgumentList "/InstallationType=JustMe", "/RegisterPython=0", "/S", "/D=$InstallDir" -Wait -PassThru
+    if ($Process.ExitCode -ne 0 -or -not (Test-Path "$InstallDir\Scripts\conda.exe")) {
+        # Keep the cached installer so a repair run can resume instead of
+        # re-downloading.
+        throw "Miniconda installation failed (exit $($Process.ExitCode))."
+    }
+    Remove-Item $Installer -Force -ErrorAction SilentlyContinue
+    return "$InstallDir\Scripts\conda.exe"
 }
 
 function Get-EnvironmentNames {
