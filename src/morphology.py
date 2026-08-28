@@ -6791,6 +6791,9 @@ class MorphologyComparer:
         SAME standardization/whitening as the first pass, scores them against
         every query member, and appends their rows to ``rows`` (in place).
         The caller re-runs the aggregation afterwards; V1 never calls this.
+
+        Fetch routing: FAFB loads skeletons through the healed-bundle loader
+        (``_load_fafb_skeletons``); NeuPrint keeps the batched SWC fetch.
         """
         inter = pre_type_df[~pre_type_df["is_intra_type"]] \
             if not pre_type_df.empty else pd.DataFrame()
@@ -6834,14 +6837,43 @@ class MorphologyComparer:
         self._progress(5, PROFILE_FIRST_TOTAL_STEPS,
                        f"Reevaluating top types (+{len(new_ids)} members)")
         fetch_cache = self._fetch_vector_cache()
-        fetched_all = fetch_skeletons_on_demand_batch(
-            self.dataset, missing,
-            project_root=str(self.project_root),
-            persist=True, level=VECTOR_BASIS_RAW,
-            max_threads=min(NEUPRINT_FETCH_MAX_THREADS,
-                            max(1, int(self.n_workers))),
-            raw_cache=fetch_cache, vector_cache=fetch_cache,
-        ) if missing else {}
+        fetched_all: Dict[int, object] = {}
+        if missing:
+            if is_fafb_dataset(self.dataset):
+                # FAFB: the healed skeleton bundle is LOCAL — fetch through
+                # the FAFB loader instead of the generic batch fetcher,
+                # which is mesh-native on this dataset; its MeshNeurons are
+                # dropped by the representation guard below, so expansion
+                # members never scored. Extrusion checking stays off by
+                # default here (the render pipeline checks what it
+                # displays); skeleton trees persist like the profile-first
+                # fetch does.
+                loaded = self._load_fafb_skeletons(missing)
+                fetched = {
+                    int(b): n for b, n in (loaded or {}).items()
+                    if n is not None
+                }
+                if fetched and self.cache_fetched_skeletons:
+                    skeleton_only = {
+                        b: n for b, n in fetched.items()
+                        if _neuron_rep(n) == "skeleton"
+                    }
+                    if skeleton_only:
+                        fetch_cache.persist_skeletons(
+                            skeleton_only, simplification=None)
+                fetched_all = {
+                    self._body_id(b): n for b, n in fetched.items()
+                }
+            else:
+                # NeuPrint (and other datasets): batched SWC fetch.
+                fetched_all = fetch_skeletons_on_demand_batch(
+                    self.dataset, missing,
+                    project_root=str(self.project_root),
+                    persist=True, level=VECTOR_BASIS_RAW,
+                    max_threads=min(NEUPRINT_FETCH_MAX_THREADS,
+                                    max(1, int(self.n_workers))),
+                    raw_cache=fetch_cache, vector_cache=fetch_cache,
+                )
 
         order: List[int] = []
         vec_by_id: Dict[int, np.ndarray] = {}

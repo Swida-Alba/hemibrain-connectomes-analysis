@@ -2248,6 +2248,86 @@ class TestFlyWireNblast:
         assert fetched == []
 
 
+class TestTypeReevaluationFetch:
+    """The V2 expansion pass fetches per dataset family: FAFB loads through
+    the healed-bundle loader (the generic batch fetcher is mesh-native and
+    its meshes are dropped by the representation guard), NeuPrint keeps the
+    batched SWC fetch."""
+
+    @staticmethod
+    def _comparer(dataset, tmp_path):
+        query = "aMe4" if dataset.startswith("flywire") else 101
+        return morph.MorphologyComparer(
+            query=query, dataset=dataset, level="type", method="vector_v2",
+            expand_top_types=2, expand_per_type=5,
+            project_root=str(tmp_path), verbose=False)
+
+    @staticmethod
+    def _expansion_kwargs(cache):
+        return dict(
+            rows=[],
+            pre_type_df=pd.DataFrame(
+                [{"target_type": "T1", "is_intra_type": False,
+                  "similarity": 0.5}]),
+            query_df=pd.DataFrame([{"bodyId": 101, "type": "Q"}]),
+            query_ids=[101],
+            X_q=np.zeros((1, 4)), mask_q=np.array([True]),
+            id_to_type={101: "Q", 42: "T1", 43: "T1"},
+            id_to_instance={},
+            intra=0.5, source="profile",
+            cache=cache, cache_data=None,
+            mu=np.zeros(4), sd=np.ones(4),
+            scored_ids={101}, pool_len=1, q_rep="skeleton",
+        )
+
+    def test_expansion_fafb_uses_bundle_loader(self, tmp_path, monkeypatch):
+        import fafb_utils
+
+        c = self._comparer("flywire_FAFB_v783", tmp_path)
+        loader_calls = []
+
+        def fake_loader(body_ids, check_extrusions=None):
+            loader_calls.append((list(body_ids), check_extrusions))
+            return {}
+
+        monkeypatch.setattr(c, "_load_fafb_skeletons", fake_loader)
+
+        def no_generic_fetch(*a, **k):
+            raise AssertionError(
+                "generic batch fetcher must not serve the FAFB expansion")
+
+        monkeypatch.setattr(morph, "fetch_skeletons_on_demand_batch",
+                            no_generic_fetch)
+        cache = morph.SkeletonVectorCache(
+            "flywire_FAFB_v783", project_root=str(tmp_path), raw_only=True)
+        c._expand_top_type_rows(**self._expansion_kwargs(cache))
+        # both unscored members routed through the FAFB loader, with the
+        # comparer's default extrusion policy (check off)
+        assert loader_calls == [([42, 43], None)]
+
+    def test_expansion_neuprint_keeps_batch_fetcher(self, tmp_path,
+                                                    monkeypatch):
+        c = self._comparer("np:v1", tmp_path)
+        fetch_calls = []
+
+        def fake_fetch(dataset, body_ids, **kwargs):
+            fetch_calls.append((dataset, list(body_ids)))
+            return {}
+
+        monkeypatch.setattr(morph, "fetch_skeletons_on_demand_batch",
+                            fake_fetch)
+
+        def no_fafb_loader(body_ids, check_extrusions=None):
+            raise AssertionError(
+                "FAFB loader must not serve the NeuPrint expansion")
+
+        monkeypatch.setattr(c, "_load_fafb_skeletons", no_fafb_loader)
+        cache = morph.SkeletonVectorCache(
+            "np:v1", project_root=str(tmp_path), raw_only=True)
+        c._expand_top_type_rows(**self._expansion_kwargs(cache))
+        assert fetch_calls == [("np:v1", [42, 43])]
+
+
 class TestExtrusionCheck:
     """The shared FAFB extrusion check (fafb_utils): spike detection,
     cached batch results and the parallel/serial flag_extrusions path."""
