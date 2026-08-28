@@ -55,9 +55,9 @@ dependencies = [
     "flybrains==0.6.3",
     "zstandard==0.23.0",
     "boto3>=1.26.0,<2",
-    "reportlab>=4.0.0,<6",
-    "python-pptx>=0.6.21,<2",
-    "pymupdf>=1.23.0,<2",
+    "reportlab==5.0.1",
+    "python-pptx==1.0.2",
+    "pymupdf==1.28.2",
     "img2pdf==0.5.1",
     # NeuronBridge metadata access uses src/neuronbridge_client.py. Keeping it
     # native avoids neuronbridge-python's incompatible Pydantic/Ray/Memray tree.

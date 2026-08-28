@@ -260,21 +260,44 @@ run_in_env_pip_retry() {
     # index-metadata responses) makes pip report "from versions: none" and
     # fail an otherwise-correct install. pip's built-in --retries covers
     # connection resets but NOT a failed index-metadata response, so retry
-    # here as well. The installer is idempotent and uses a project-local pip
-    # cache, so re-runs reuse the env and already-downloaded wheels.
-    local attempt
+    # here as well. The installer is idempotent, so re-runs reuse the env and
+    # already-downloaded wheels.
+    #
+    # Resolver failures (resolution-too-deep / ResolutionImpossible) are a
+    # separate class: a truncated metadata response during resolution makes
+    # pip treat candidate versions as unusable and backtrack past its depth
+    # limit (observed with wide version ranges). A retry usually succeeds
+    # once pip's HTTP cache is warm, so retry - but report the actual failure
+    # class instead of blaming the network. Output is teed to a log so the
+    # failure can be classified; `set -o pipefail` keeps the pipeline status
+    # equal to pip's exit code.
+    local attempt log
+    log="$(mktemp "${TMPDIR:-/tmp}/drocat-pip.XXXXXX")"
     for attempt in 1 2 3; do
-        if run_in_env python -m pip install --retries 5 --timeout 60 "$@"; then
+        if run_in_env python -m pip install --retries 5 --timeout 60 "$@" 2>&1 | tee "$log"; then
+            rm -f "$log"
             return 0
         fi
         if [[ "$attempt" -eq 3 ]]; then
-            printf "%bDependency install failed after 3 attempts - likely a transient PyPI network/index error. Re-running the installer resumes safely (the environment and already-downloaded wheels are reused).%b\n" "$RED" "$NC" >&2
+            if grep -qE 'resolution-too-deep|ResolutionImpossible' "$log"; then
+                printf "%bDependency resolution failed after 3 attempts (pip could not solve the pinned set - this is not a network error). Re-running the installer may help once pip's HTTP cache is warm; if it persists, tighten the pins in requirements.txt.%b\n" "$RED" "$NC" >&2
+            else
+                printf "%bDependency install failed after 3 attempts - likely a transient PyPI network/index error. Re-running the installer resumes safely (the environment and already-downloaded wheels are reused).%b\n" "$RED" "$NC" >&2
+            fi
+            rm -f "$log"
             return 1
         fi
-        printf "%bDependency install failed (attempt %s of 3) - likely a transient PyPI network or index error. Retrying in %s seconds...%b\n" \
-            "$YELLOW" "$attempt" "$((attempt * 5))" "$NC"
+        if grep -qE 'resolution-too-deep|ResolutionImpossible' "$log"; then
+            printf "%bDependency resolution failed (attempt %s of 3) - not a network error; a re-run often succeeds once pip's HTTP cache is warm. Retrying in %s seconds...%b\n" \
+                "$YELLOW" "$attempt" "$((attempt * 5))" "$NC"
+        else
+            printf "%bDependency install failed (attempt %s of 3) - likely a transient PyPI network or index error. Retrying in %s seconds...%b\n" \
+                "$YELLOW" "$attempt" "$((attempt * 5))" "$NC"
+        fi
         sleep "$((attempt * 5))"
     done
+    rm -f "$log"
+    return 1
 }
 
 printf "\n%b[3/5] Installing pinned dependencies...%b\n" "$BLUE" "$NC"

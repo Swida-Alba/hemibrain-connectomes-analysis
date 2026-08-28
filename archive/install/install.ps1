@@ -183,17 +183,40 @@ function Invoke-PipWithRetry([string[]]$Command, [int]$MaxAttempts = 3) {
     # connection resets but NOT a failed index-metadata response, so retry
     # here as well. The installer is idempotent and uses a project-local pip
     # cache, so re-runs reuse the env and already-downloaded wheels.
+    #
+    # Resolver failures (resolution-too-deep / ResolutionImpossible) are a
+    # separate class: a truncated metadata response during resolution makes
+    # pip treat candidate versions as unusable and backtrack past its depth
+    # limit (observed with wide version ranges). A retry usually succeeds
+    # once pip's HTTP cache is warm, so retry - but report the actual failure
+    # class instead of blaming the network. Output is teed to a log for the
+    # classification; EAP Continue at the call site keeps PS 5.1 from turning
+    # pip's redirected stderr into a terminating error.
     for ($Attempt = 1; $Attempt -le $MaxAttempts; $Attempt++) {
+        $PipLog = [System.IO.Path]::GetTempFileName()
+        $PreviousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         try {
-            Invoke-InEnvironment $Command
+            Invoke-InEnvironment $Command 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $PipLog
             return
         } catch {
+            $ResolverFailure = (Select-String -Path $PipLog -Pattern "resolution-too-deep|ResolutionImpossible" -Quiet) -eq $true
             if ($Attempt -eq $MaxAttempts) {
+                if ($ResolverFailure) {
+                    throw "Dependency resolution failed after $MaxAttempts attempts (pip could not solve the pinned set - this is not a network error). Re-running the installer may help once pip's HTTP cache is warm; if it persists, tighten the pins in requirements.txt."
+                }
                 throw "Dependency install failed after $MaxAttempts attempts: $($_.Exception.Message) This may be a transient PyPI network/index error; re-running the installer resumes safely (the environment and already-downloaded wheels are reused)."
             }
             $WaitSeconds = 5 * $Attempt
-            Write-Host "Dependency install failed (attempt $Attempt of $MaxAttempts) - likely a transient PyPI network or index error. Retrying in $WaitSeconds seconds..." -ForegroundColor Yellow
+            if ($ResolverFailure) {
+                Write-Host "Dependency resolution failed (attempt $Attempt of $MaxAttempts) - not a network error; a re-run often succeeds once pip's HTTP cache is warm. Retrying in $WaitSeconds seconds..." -ForegroundColor Yellow
+            } else {
+                Write-Host "Dependency install failed (attempt $Attempt of $MaxAttempts) - likely a transient PyPI network or index error. Retrying in $WaitSeconds seconds..." -ForegroundColor Yellow
+            }
             Start-Sleep -Seconds $WaitSeconds
+        } finally {
+            $ErrorActionPreference = $PreviousErrorActionPreference
+            Remove-Item $PipLog -Force -ErrorAction SilentlyContinue
         }
     }
 }

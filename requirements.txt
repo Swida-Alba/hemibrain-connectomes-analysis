@@ -55,9 +55,9 @@ zstandard==0.23.0         # Compressed FlyWire MeshNeuron cache (.pkl.zst)
 # NeuronBridge & FlyLight Integration (v4.3.0)
 # -----------------------------------------------------------------------------
 boto3>=1.26.0,<2           # AWS S3 access for FlyLight imagery downloads
-reportlab>=4.0.0,<6        # PDF generation for image summaries
-python-pptx>=0.6.21,<2     # PowerPoint generation for image summaries
-pymupdf>=1.23.0,<2         # PDF to PPTX conversion
+reportlab==5.0.1           # PDF generation for image summaries
+python-pptx==1.0.2         # PowerPoint generation for image summaries
+pymupdf==1.28.2            # PDF to PPTX conversion (1.28.x needs no PyMuPDFb)
 
 # Document Processing
 # -----------------------------------------------------------------------------
