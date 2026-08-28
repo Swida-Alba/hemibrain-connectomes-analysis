@@ -310,6 +310,34 @@ class TestWarningBanners:
         assert page2.read_text() == '<html></html>'
         vis._inject_skeleton_simplification_warning(str(tmp_path / 'absent.html'))
 
+    def test_layer_sampling_warning_html(self):
+        assert make_vis()._layer_sampling_warning_html() == ''
+        vis = make_vis(layer_sample_notes=[
+            "r1_aMe10: showing 5 of 12 members of type 'aMe10' "
+            "(per-layer render cap 20)",
+        ])
+        html = vis._layer_sampling_warning_html()
+        assert 'drocat-layer-sampling-warning' in html
+        assert 'Truncated type layers.' in html
+        assert 'r1_aMe10: showing 5 of 12 members' in html
+        # note text is escaped before insertion into the page
+        vis2 = make_vis(layer_sample_notes=["r1_<script>x</script>"])
+        escaped = vis2._layer_sampling_warning_html()
+        assert '<script>' not in escaped
+        assert '&lt;script&gt;' in escaped
+
+    def test_inject_layer_sampling_warning_into_html(self, tmp_path):
+        vis = make_vis(
+            layer_sample_notes=["r1_T1: showing 20 of 25 members"])
+        page = tmp_path / 'page.html'
+        page.write_text('<html><body><div>plot</div></body></html>')
+        vis._inject_skeleton_simplification_warning(str(page))
+        content = page.read_text()
+        assert 'drocat-layer-sampling-warning' in content
+        # second injection must be a no-op
+        vis._inject_skeleton_simplification_warning(str(page))
+        assert content == page.read_text()
+
     def test_write_plotly_html(self, tmp_path):
         vis = make_vis(skeleton_mode='line', save_folder=str(tmp_path))
         fig = go.Figure(go.Scatter3d(x=[0, 1], y=[0, 1], z=[0, 1]))

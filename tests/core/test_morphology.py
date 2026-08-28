@@ -2328,6 +2328,51 @@ class TestTypeReevaluationFetch:
         assert fetch_calls == [("np:v1", [42, 43])]
 
 
+class TestTypeRenderMemberCap:
+    """Type-level render layers sample members per type up to
+    TYPE_RENDER_MEMBER_CAP; the resolver tops the vector cache up from the
+    full neuron-table type map (so a layer cannot show fewer members than
+    the results report) and returns the uncapped total so the renderer can
+    warn about truncated layers in-page."""
+
+    def _setup(self, tmp_path, cached_ids):
+        folder = morph._dataset_folder("test:v1")
+        table_dir = tmp_path / "datasets" / folder
+        table_dir.mkdir(parents=True)
+        ids = list(range(101, 131))  # 30 neurons
+        types = ["T1"] * 25 + ["T2"] * 5
+        pd.DataFrame({
+            "bodyId": ids,
+            "type": types,
+            "instance": [f"{t}_1" for t in types],
+        }).to_parquet(table_dir / f"{folder}_allneurons_neuron_df.parquet")
+
+        cache = morph.SkeletonVectorCache(
+            "test:v1", project_root=str(tmp_path))
+        vec = np.zeros(len(cache._feature_columns()), dtype=float)
+        # the vector cache only ever learned a sparse subset of the types
+        cache.append_vectors([(bid, vec, "skeleton") for bid in cached_ids])
+        return morph.MorphologyComparer(
+            query=101, dataset="test:v1", level="type",
+            method="vector_v2", project_root=str(tmp_path), verbose=False)
+
+    def test_sparse_cache_topped_up_from_type_map(self, tmp_path):
+        """Regression: aMe10 rendered 1 neuron while type_summary.csv said
+        n_bodyids=3 / coverage=1.0 — the vector cache held one row of the
+        type and the neuron-table top-up only fired on zero members."""
+        c = self._setup(tmp_path, cached_ids=[101, 126])
+        members, total = c._type_members_from_cache("T1")
+        # cache member first, then the type map completes the membership
+        assert members[0] == 101
+        assert total == 25
+        assert len(members) == morph.TYPE_RENDER_MEMBER_CAP == 20
+        assert set(members) <= set(range(101, 126))
+        # a type within the cap resolves completely
+        members_t2, total_t2 = c._type_members_from_cache("T2")
+        assert total_t2 == 5
+        assert members_t2 == [126] + list(range(127, 131))
+
+
 class TestExtrusionCheck:
     """The shared FAFB extrusion check (fafb_utils): spike detection,
     cached batch results and the parallel/serial flag_extrusions path."""

@@ -215,10 +215,16 @@ CACHE_DIRECT_TOTAL_STEPS = 4    # vector-cache-direct (FlyWire) pipeline
 # distribution cosine with bilateral mirroring) and 'combined' (both).
 CANDIDATE_SCREEN_SOURCES = ("profile", "roi", "combined")
 
-# Members per type sampled for NBLAST type-level means and type-level 3D
-# visualizations. A scoring/rendering detail, not a candidate-list knob:
-# pool size is controlled by ``candidate_cap`` alone.
+# Members per type sampled for NBLAST type-level means. A scoring detail,
+# not a candidate-list knob: pool size is controlled by ``candidate_cap``
+# alone. Type-level 3D visualization layers use their own, larger cap
+# (``TYPE_RENDER_MEMBER_CAP``).
 TYPE_MEMBER_SAMPLE_CAP = 5
+
+# Members per type sampled for type-level 3D visualization layers. Each
+# result layer renders at most this many neurons; when a type has more,
+# the render page carries an in-page truncation warning.
+TYPE_RENDER_MEMBER_CAP = 20
 
 # Maximum number of cached skeletons sampled for population standardization
 # statistics when a dataset has no vector cache (see ``population_stats``).
@@ -8256,6 +8262,7 @@ class MorphologyComparer:
             self._log("Visualization skipped: no renderable query or results.")
             return
 
+        capped_notes: List[str] = []
         if self.visualize_by == "type":
             seen: set = set()
             rank = 0
@@ -8265,12 +8272,13 @@ class MorphologyComparer:
                     continue
                 if self.level == "type" or "target_bodyId" not in work.columns:
                     # Type-level results carry no bodyIds: resolve the type's
-                    # members from the vector cache (bounded to n_per_type).
-                    members = self._type_members_from_cache(t)
+                    # members from the vector cache (bounded to the render cap).
+                    members, total_members = self._type_members_from_cache(t)
                 else:
                     members = _body_ids(work.loc[
                         work["target_type"] == t
                     ].rename(columns={"target_bodyId": "bodyId"}))
+                    total_members = len(members)
                 members = [bid for bid in members if bid not in query_body_ids]
                 if not members:
                     continue
@@ -8278,6 +8286,11 @@ class MorphologyComparer:
                 rank += 1
                 layers.append(members)
                 names.append(f"r{rank}_{t}_x{len(members)}")
+                if total_members > len(members):
+                    capped_notes.append(
+                        f"r{rank}_{t}: showing {len(members)} of "
+                        f"{total_members} members of type '{t}' "
+                        f"(per-layer render cap {TYPE_RENDER_MEMBER_CAP})")
                 if rank >= self.visualize_top_n:
                     break
         else:
@@ -8337,6 +8350,9 @@ class MorphologyComparer:
                     }
                 ),
                 "verbose": "simple",
+                # Per-layer truncation notes for the renderer's in-page
+                # banner (type layers showing a capped member sample).
+                "layer_sample_notes": capped_notes or None,
             }
             # The panel contains the same keyword names as VisualizeSkeleton.
             # Ranking controls belong to MorphologyComparer, not the renderer.
@@ -8372,10 +8388,21 @@ class MorphologyComparer:
         except Exception as ex:
             self._log(f"3D visualization failed (search results kept): {ex}")
 
-    def _type_members_from_cache(self, type_name: str) -> List[Union[int, str]]:
-        """Member bodyIds of a type from the vector cache (capped to the
-        per-type sample size so type-level renders stay bounded); falls back
-        to the neuron table / index when the dataset has no vector cache."""
+    def _type_members_from_cache(self, type_name: str
+                                 ) -> Tuple[List[Union[int, str]], int]:
+        """Member bodyIds of a type for a 3D visualization layer, plus the
+        total member count found before capping.
+
+        Members come from the vector cache, then are topped up from the
+        full neuron-table type map: the vector cache only holds ids that
+        were vectorized at some point, so a type whose results report full
+        coverage could still resolve to fewer members than it has (the
+        render must not disagree with ``type_summary.csv``). Cached ids
+        come first, neuron-table ids follow, and the list is capped to
+        ``TYPE_RENDER_MEMBER_CAP`` so type-level renders stay bounded.
+        Returning ``(members, total)`` lets the caller warn when the render
+        shows only a sample of the type.
+        """
         try:
             data = find_similar_dataset_cache(
                 self.dataset, project_root=str(self.project_root),
@@ -8386,15 +8413,26 @@ class MorphologyComparer:
                 members = [self._body_id(b)
                            for b, t in zip(data["bodyIds"], data["types"])
                            if t == type_name]
-            if not members:
-                type_map, _ = _load_neuron_type_map(
+            # Top up from the neuron table / index (memoized per run).
+            type_maps = getattr(self, "_type_members_maps", None)
+            if type_maps is None:
+                type_maps = _load_neuron_type_map(
                     self.dataset, str(self.project_root)
                 )
-                members = [self._body_id(b) for b, t in type_map.items()
-                           if t == type_name]
-            return members[: TYPE_MEMBER_SAMPLE_CAP]
+                self._type_members_maps = type_maps
+            type_map = type_maps[0]
+            seen = set(members)
+            for b, t in type_map.items():
+                if t != type_name:
+                    continue
+                bid = self._body_id(b)
+                if bid not in seen:
+                    seen.add(bid)
+                    members.append(bid)
+            total = len(members)
+            return members[: TYPE_RENDER_MEMBER_CAP], total
         except Exception:
-            return []
+            return [], 0
 
 
 # =============================================================================

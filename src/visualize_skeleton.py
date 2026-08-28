@@ -95,7 +95,7 @@ import signal
 import gc
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 import logging
 import warnings
 from contextlib import contextmanager
@@ -2404,8 +2404,19 @@ class VisualizeSkeleton:
     Only applies to FlyWire/FAFB datasets. Has no effect on NeuPrint datasets.\n
     '''
     
+    layer_sample_notes: Optional[List[str]] = None
+    '''
+    Layer member-sample truncation notes (type-level renders).
+
+    Set by type-level callers (e.g. the morphology comparer's top-results
+    render) when a result layer shows fewer neurons than its type has:
+    each note names the layer, the rendered count, and the type's member
+    count. When non-empty, the saved HTML page carries an in-page
+    truncation warning banner listing the notes. Has no effect on scoring.
+    '''
+
     brain_mesh: str = 'none'
-    ''' 
+    '''
     Brain/VNC mesh visualization options (dataset-specific):\n
     - 'none': Only plot meshes specified in mesh_roi parameter\n
     - 'template': Plot the dataset's native template mesh (EM resolution)\n
@@ -2947,6 +2958,42 @@ class VisualizeSkeleton:
             '</div>'
         )
 
+    def _layer_sampling_warning_html(self):
+        """In-page banner for type layers whose member sample was capped.
+
+        Type-level callers (e.g. the morphology comparer's top-results
+        render) resolve each result layer's members from the type's member
+        list bounded by a per-layer render cap. When a layer shows fewer
+        neurons than its type has, the caller passes human-readable notes
+        via ``layer_sample_notes`` and this banner lists them so exported
+        artifacts are not mistaken for the complete type.
+        """
+        notes = list(getattr(self, 'layer_sample_notes', None) or [])
+        if not notes:
+            return ''
+
+        # Escape note text before inserting it into generated HTML.  The
+        # notes are generated from user-provided type/layer names.
+        from html import escape
+
+        items = ''.join(
+            f'<li>{escape(str(note))}</li>' for note in notes
+        )
+        return (
+            '<div id="drocat-layer-sampling-warning" role="alert" '
+            'style="box-sizing:border-box;width:100%;padding:10px 14px;'
+            'margin:0 0 8px 0;border:1px solid #d99a2b;border-left:5px solid '
+            '#d97706;border-radius:6px;background:#fff8e6;color:#5b4300;'
+            'font:14px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">'
+            '<strong>Truncated type layers.</strong> '
+            'Type-level rendering shows a capped sample of each layer\'s '
+            'members, so the layers below contain fewer neurons than their '
+            f'type has: <ul style="margin:6px 0 0 0;padding-left:20px;">'
+            f'{items}</ul> This affects visualization only; analysis graphs '
+            'and query results are unchanged.'
+            '</div>'
+        )
+
     def _inject_skeleton_simplification_warning(self, html_path):
         """Insert the in-page warning banner(s) at the top of a full HTML page."""
         warning_html = '\n'.join(
@@ -2955,6 +3002,7 @@ class VisualizeSkeleton:
                 self._skeleton_simplification_warning_html(),
                 self._line_mode_export_warning_html(),
                 self._pre_post_mode_warning_html(),
+                self._layer_sampling_warning_html(),
             )
             if banner
         )
@@ -2969,7 +3017,8 @@ class VisualizeSkeleton:
             # retry/export path more than once.
             if ('drocat-skeleton-simplification-warning' in html
                     or 'drocat-line-mode-export-warning' in html
-                    or 'drocat-pre-post-sites-warning' in html):
+                    or 'drocat-pre-post-sites-warning' in html
+                    or 'drocat-layer-sampling-warning' in html):
                 return
 
             import re
