@@ -2174,8 +2174,9 @@ class TestFlyWireNblast:
             assert scores[bid] == pytest.approx(expected, abs=1e-9)
 
     def test_fafb_pipeline_checks_extrusions(self, tmp_path, monkeypatch):
-        """Bundle skeletons run through the cached extrusion check; flagged
-        neurons join the CAVE fallback batch."""
+        """With check_extrusions enabled, bundle skeletons run through the
+        cached extrusion check and flagged neurons join the CAVE fallback
+        batch."""
         import zipfile
         import fafb_utils
 
@@ -2196,7 +2197,7 @@ class TestFlyWireNblast:
                             lambda *a, **k: [42])
         c = morph.MorphologyComparer(query=42, dataset="flywire_FAFB_v783",
                                      method="nblast", project_root=str(tmp_path),
-                                     verbose=False)
+                                     verbose=False, check_extrusions=True)
         fetched = []
         monkeypatch.setattr(c, "_fafb_cave_fallback",
                             lambda ids, **kwargs: (
@@ -2205,6 +2206,46 @@ class TestFlyWireNblast:
         assert 42 in loaded and 43 in loaded
         # 42 flagged by the extrusion check -> CAVE fallback requested
         assert fetched == [([42], {"force_refresh": True})]
+
+    def test_fafb_pipeline_skips_extrusions_by_default(self, tmp_path,
+                                                       monkeypatch):
+        """Similarity runs load skeletons unchecked by default: the render
+        pipeline (top-N visualization, Skeleton tab) owns the extrusion
+        check, so the fetch must not pay the detector cost."""
+        import zipfile
+        import fafb_utils
+
+        def _swc():
+            lines = ["# SWC skeleton"]
+            for i in range(1, 31):
+                parent = -1 if i == 1 else i - 1
+                lines.append(f"{i} 1 {i} 0 0 1.0 {parent}")
+            return "\n".join(lines)
+
+        zip_path = tmp_path / "sk.zip"
+        with zipfile.ZipFile(zip_path, "w") as z:
+            z.writestr("42.swc", _swc())
+            z.writestr("43.swc", _swc())
+        monkeypatch.setattr(morph, "_fafb_skeleton_zip_path",
+                            lambda dataset, project_root=None: zip_path)
+
+        def no_check(*a, **k):
+            raise AssertionError(
+                "extrusion check must not run under the default policy")
+
+        monkeypatch.setattr(fafb_utils, "flag_extrusions", no_check)
+        c = morph.MorphologyComparer(query=42, dataset="flywire_FAFB_v783",
+                                     method="nblast", project_root=str(tmp_path),
+                                     verbose=False)
+        assert c.check_extrusions is False
+        fetched = []
+        monkeypatch.setattr(c, "_fafb_cave_fallback",
+                            lambda ids, **kwargs: (
+                                fetched.append((list(ids), kwargs)), {})[1])
+        loaded = c._load_fafb_skeletons([42, 43])
+        # both bundle skeletons served raw, no extrusion-driven CAVE refetch
+        assert 42 in loaded and 43 in loaded
+        assert fetched == []
 
 
 class TestExtrusionCheck:

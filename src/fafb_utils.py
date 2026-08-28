@@ -234,6 +234,12 @@ def get_fafb_skeleton_parquet(data_dir):
 #                     safely identified extrusion subtree in memory.
 # These helpers expose that pipeline so every consumer (e.g. NBLAST
 # dotprops building) follows the same behavior.
+#
+# Enforcement point: only VisualizeSkeleton's render pipeline (top-N result
+# visualization, Skeleton tab) runs the check by default. The similarity
+# loader (``MorphologyComparer._load_fafb_skeletons``) opts out unless
+# ``check_extrusions`` is enabled, so it does not pay the detector cost for
+# neurons it never displays.
 
 EXTRUSION_CHECK_FILENAME = "extrusion_check_results.parquet"
 EXTRUSION_CACHE_SCHEMA_VERSION = 2

@@ -5262,6 +5262,11 @@ class MorphologyComparer:
         # Retained as a compatibility keyword. Raw skeletons are now always
         # persisted as compressed SWC in the shared dataset skeleton cache.
         cache_fetched_skeletons: bool = True,
+        # FAFB mesh-based extrusion detection is enforced at render time
+        # (top-N results visualization, Skeleton tab). Similarity runs load
+        # skeletons unchecked by default because the detector dominates the
+        # FAFB fetch cost while extrusions are a small fraction of each tree.
+        check_extrusions: bool = False,
         project_root: Optional[str] = None,
     ):
         self.query = query
@@ -5289,6 +5294,7 @@ class MorphologyComparer:
         # Keep accepting the old keyword, but raw persistence is unconditional
         # so visualization, Find Similar, and Settings pulls share one source.
         self.cache_fetched_skeletons = True
+        self.check_extrusions = bool(check_extrusions)
         self.project_root = Path(project_root) if project_root else Path(__file__).parent.parent
 
         if self.level not in ("auto", "bodyid", "type"):
@@ -6137,7 +6143,8 @@ class MorphologyComparer:
         if missing_ids:
             if self._is_v2 and is_fafb_dataset(self.dataset):
                 # FAFB: the healed skeleton bundle is LOCAL — fetch through
-                # the fast bundle loader (extrusion gates included) instead
+                # the fast bundle loader (extrusion check off by default;
+                # rendering performs it for displayed neurons) instead
                 # of the generic batch fetcher's per-neuron CAVE path, which
                 # takes minutes per skeleton on this dataset. Persisted raw
                 # SWCs land in the shared skeleton store for reuse.
@@ -7725,28 +7732,33 @@ class MorphologyComparer:
         type_df.insert(0, "rank", np.arange(1, len(type_df) + 1))
         return bodyid_df, type_df
 
-    def _load_fafb_skeletons(self, body_ids: List[int]
+    def _load_fafb_skeletons(self, body_ids: List[int],
+                             check_extrusions: Optional[bool] = None
                              ) -> Dict[int, object]:
         """Load FAFB sources following the visualization pipeline:
 
         1. local first: extrusion-fixed skeletons cached under
            ``cache/{dataset}/API_cache/skeletons/``,
         2. the healed skeleton bundle (``{bodyId}.swc``),
-        3. extrusion test on the bundle skeletons (results cached),
+        3. extrusion test on the bundle skeletons (results cached) — only
+           when ``check_extrusions`` is enabled; the default similarity run
+           loads skeletons unchecked because the render pipeline (top-N
+           results visualization, Skeleton tab) performs the check and the
+           CAVE repair for the neurons it actually displays,
         4. online fallback via the CAVE API (token-gated) for ids missing
            locally or flagged by the extrusion test. CAVE replacements are
            prepared ``MeshNeuron`` objects cached as ``.pkl.zst`` files; when
            CAVE cannot repair a flagged tree, a safe local extrusion branch
            cut is attempted in memory and never written to the raw SWC cache.
         """
-        from fafb_utils import flag_extrusions, repair_extruded_skeleton
-
         ids = sorted({int(b) for b in body_ids})
         if not ids:
             return {}
         root = self.project_root
         folder = _dataset_folder(self.dataset)
         loaded: Dict[int, object] = {}
+        check = self.check_extrusions if check_extrusions is None \
+            else bool(check_extrusions)
 
         # 1. Local first: the API skeleton cache holds previously fetched
         #    (extrusion-fixed) skeletons and takes priority over the bundle,
@@ -7793,13 +7805,19 @@ class MorphologyComparer:
                                 loaded[bid] = nrn
 
         # 3. Extrusion test on the bundle-sourced skeletons (cached per
-        #    neuron; unchecked ids are analyzed in a parallel batch).
-        zip_loaded = {b: loaded[b] for b in zip_ids if b in loaded}
-        extrusion_ids = flag_extrusions(
-            str(root), folder, zip_loaded,
-            verbose=self.verbose, log=self._log,
-            n_workers=self.n_workers,
-        )
+        #    neuron; unchecked ids are analyzed in a parallel batch). Off by
+        #    default for similarity runs: the render pipeline owns the check
+        #    for the neurons it displays.
+        extrusion_ids: List[int] = []
+        if check:
+            from fafb_utils import flag_extrusions
+
+            zip_loaded = {b: loaded[b] for b in zip_ids if b in loaded}
+            extrusion_ids = flag_extrusions(
+                str(root), folder, zip_loaded,
+                verbose=self.verbose, log=self._log,
+                n_workers=self.n_workers,
+            )
 
         missing = [b for b in ids if b not in loaded]
         extrusion_ids = sorted(set(extrusion_ids))
@@ -7812,6 +7830,8 @@ class MorphologyComparer:
                       "trying the CAVE API fallback.")
             loaded.update(self._fafb_cave_fallback(missing))
         if extrusion_ids:
+            from fafb_utils import repair_extruded_skeleton
+
             self._log(
                 f"FAFB: refreshing {len(extrusion_ids)} extrusion-affected "
                 "mesh(es) from the CAVE API.")
