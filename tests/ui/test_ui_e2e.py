@@ -6035,6 +6035,35 @@ class TestComponents:
         panel.log("free scroll line", "stdout")
         assert panel.log_area.default_slot.children[0].text == "free scroll line"
 
+    def test_output_panel_log_has_copy_button(self):
+        """The execution log must offer a clipboard copy action.
+
+        The button sits in the log's heading row and dispatches a
+        client-side copy routine that locates the log through its DOM id,
+        so the copied text is exactly what the browser shows.
+        """
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.output_panel import _COPY_LOG_JS, OutputPanel
+
+        client = Client(page("/output-panel-log-copy-test"))
+        with client:
+            panel = OutputPanel("Test")
+            panel.create()
+
+        assert panel.copy_log_button is not None
+        assert panel._log_dom_id.startswith("drocat-exec-log-")
+        # The log element carries the DOM id the copy routine resolves.
+        assert panel.log_area.props.get("id") == panel._log_dom_id
+
+        # The routine is parameterized for this panel's log element.
+        js = _COPY_LOG_JS.replace("__LOG_ID__", panel._log_dom_id)
+        assert f"document.getElementById('{panel._log_dom_id}')" in js
+
+        # Copying without a rendered panel is a no-op, not a crash.
+        orphan = OutputPanel("Orphan")
+        orphan._copy_log_to_clipboard()
+
     def _collect_panel_texts(self, container):
         """Recursively collect all label texts inside a UI container."""
         texts = []

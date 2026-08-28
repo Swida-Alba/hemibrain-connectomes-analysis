@@ -109,14 +109,69 @@ def _count_tree_files(tree: dict) -> int:
     )
 
 
+# Client-side copy routine for the execution log. The __LOG_ID__ placeholder
+# is substituted with the panel's log element id at call time. Lines are read
+# from the log DOM (each pushed line is a child element) so the copied text
+# matches exactly what is on screen, including in-place tqdm refreshes and
+# the max_lines trim. The async Clipboard API needs a secure context, so
+# plain-HTTP LAN sessions fall back to the hidden-textarea execCommand trick.
+_COPY_LOG_JS = """
+(() => {
+  const notify = (message, type) => {
+    try { Quasar.Notify.create({ message, type }); } catch (err) {}
+  };
+  const log = document.getElementById('__LOG_ID__');
+  if (!log) {
+    notify('Execution log is not available.', 'negative');
+    return;
+  }
+  const text = Array.from(log.children)
+    .map((child) => child.textContent || '')
+    .join('\\n')
+    .replace(/\\n+$/, '');
+  if (!text) {
+    notify('Execution log is empty.', 'info');
+    return;
+  }
+  const fallbackCopy = () => {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
+    document.body.removeChild(textarea);
+    return ok;
+  };
+  const finish = (ok) => notify(
+    ok ? 'Execution log copied to clipboard.' : 'Copying the execution log failed.',
+    ok ? 'positive' : 'negative'
+  );
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(
+      () => finish(true),
+      () => finish(fallbackCopy())
+    );
+  } else {
+    finish(fallbackCopy());
+  }
+})();
+"""
+
+
 class OutputPanel:
     """Reusable panel for displaying logs and output files."""
 
     def __init__(self, title: str = "Output"):
         self.title = title
         self._dom_id = f"drocat-results-{id(self)}"
+        self._log_dom_id = f"drocat-exec-log-{id(self)}"
         self.log_wrapper: Optional[ui.element] = None
         self.log_area: Optional[FreeLog] = None
+        self.copy_log_button: Optional[ui.button] = None
         self.files_container = None
         self.status_label: Optional[ui.badge] = None
         self.progress_bar = None
@@ -175,8 +230,18 @@ class OutputPanel:
             self.progress_label = self.page_progress.progress_label
             self.progress_bar = self.page_progress.progress_bar
 
-            # Log console
-            ui.label("Execution Log").classes("drocat-mini-label")
+            # Log console. The heading row carries the copy button so every
+            # tab that embeds this panel gets log-to-clipboard support.
+            with ui.row().classes("w-full items-center justify-between gap-2"):
+                ui.label("Execution Log").classes("drocat-mini-label")
+                self.copy_log_button = (
+                    ui.button(
+                        icon="content_copy",
+                        on_click=self._copy_log_to_clipboard,
+                    )
+                    .props("flat dense round size=sm color=grey-6")
+                    .tooltip("Copy the execution log to the clipboard")
+                )
             # The log window is pointer-resizable (drag the bottom edge): the
             # wrapper owns the CSS resize handle and carries a definite
             # initial height, while the inner log fills it (h-full) so it
@@ -188,7 +253,11 @@ class OutputPanel:
                 "resize: vertical; overflow: hidden; height: 400px; min-height: 100px; max-height: 1800px;"
             )
             with self.log_wrapper:
-                self.log_area = FreeLog(max_lines=500).classes(
+                # The DOM id lets the copy button locate this log's lines in
+                # the browser (the copy handler runs fully client-side).
+                self.log_area = FreeLog(max_lines=500).props(
+                    f'id="{self._log_dom_id}"'
+                ).classes(
                     "w-full h-full font-mono text-xs"
                 ).style(
                     # Both axes scroll: long output stays on its own single
@@ -286,6 +355,17 @@ class OutputPanel:
             # was active; silently drop further log lines instead of crashing
             # the run handler.
             pass
+
+    def _copy_log_to_clipboard(self) -> None:
+        """Copy the log text currently shown in the browser to the clipboard.
+
+        The copy runs entirely client-side: the pushed lines live in the
+        browser DOM, so collecting them there reflects exactly what the user
+        sees (in-place tqdm refreshes and the max_lines trim included).
+        """
+        if self.log_area is None:
+            return
+        ui.run_javascript(_COPY_LOG_JS.replace("__LOG_ID__", self._log_dom_id))
 
     def set_status(self, status: str, color: str = "grey"):
         """Update the status pill."""
