@@ -41,6 +41,11 @@ git checkout v4.5.0
 
 - If the user already has the repository locally, reuse it (ask if the path is
   not obvious) and skip the clone.
+- A transient GitHub outage can fail the clone itself (`HTTP2 framing layer`,
+  connect timeouts while other hosts stay reachable): retry the clone a few
+  times spaced 30-60 s; if it persists, set
+  `git config --global http.version HTTP/1.1` or clone over SSH. The
+  repository is ~270 MB.
 - Confirm the required files exist: `mac_DROCAT.command` / `windows_DROCAT.bat`
   (launchers), `archive/install/install.sh` (macOS/Linux), `archive/install/install.ps1` /
   `archive/install/install.bat` (Windows), `ui/app.py`, `src/coana.py`,

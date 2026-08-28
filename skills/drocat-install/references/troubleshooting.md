@@ -16,6 +16,14 @@ symptoms.
 | Versions appear installed but imports fail | Metadata-only wheel from a failed PEP 517 sdist build (e.g. `img2pdf`/`asciitree`), cached as "success". | The installer detects this and retries once after clearing the pip wheel cache. If the retry also fails, it aborts — clear the wheel cache and re-run. |
 | `neuronbridge-python` conflict | The legacy distribution pins Pydantic 2.9, conflicting with NiceGUI. | Do **not** install `neuronbridge-python`. The installer removes it when repairing an older versioned env. |
 
+## Clone and download failures
+
+| Symptom | Root cause | Resolution |
+| --- | --- | --- |
+| `git clone` fails with `HTTP2 framing layer` or `Failed to connect to github.com port 443` while other sites load | Transient GitHub-side outage (observed while PyPI/Anaconda stayed reachable). `git` does not retry on its own. | Retry the clone a few times spaced 30-60 s; if it persists, `git config --global http.version HTTP/1.1` or clone over SSH. The repository is ~270 MB. |
+| Miniconda download is very slow or gets interrupted | CDN throttling; a single-shot download restarts from byte 0 on every failure. | The installers download into the gitignored `cache/miniconda/` with automatic retry and resume (`curl -C -` on macOS/Linux, `curl.exe -C -` on Windows). Re-running the installer resumes the partial file; a completed-but-uninstalled file is re-downloaded fresh automatically. |
+| `error: resolution-too-deep` during `[3/5]` | pip resolver backtracking amplified by a truncated metadata response — not a network error. | A warm-cache retry usually succeeds; the installer retries automatically and reports the actual failure class. The `pymupdf` / `python-pptx` / `reportlab` pins are exact, so a persistent failure means the pinned set itself is unsolvable — tighten `requirements.txt`. |
+
 ## Installation environment prerequisites
 
 - **Python 3.10-3.11, 3.11 recommended** (matplotlib 3.10.0 requires >= 3.10).

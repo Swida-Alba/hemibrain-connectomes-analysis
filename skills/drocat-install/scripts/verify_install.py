@@ -272,9 +272,13 @@ def main() -> int:
         if has_neuprint:
             break
     if token_source:
-        check(
+        token_label = (
             "tokens (NeuPrint token configured)"
-            + ("" if args.require_token else " (optional)"),
+            if has_neuprint
+            else "tokens (NeuPrint token not configured - advisory)"
+        )
+        check(
+            token_label + ("" if args.require_token else " (optional)"),
             has_neuprint or not args.require_token,
             token_source,
         )
