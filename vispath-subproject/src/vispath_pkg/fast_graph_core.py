@@ -163,6 +163,10 @@ class FastGraph:
         self.node_attrs = {}  # {node: {attr: value}}
         self.edge_attrs = {}  # {(u, v): {attr: value}}
         self._num_edges = 0
+        # When False, add_edge skips the per-edge edge_attrs dict (weight
+        # still lives in adj).  A pure-pathfinding graph never reads them,
+        # and the dicts cost ~350 bytes/edge on million-edge graphs.
+        self.store_edge_attrs = True
         # Lazy reverse adjacency: {v: set of predecessors u with u -> v}.
         # Built on first use (backward traversals) instead of materialising a
         # full reversed graph copy per algorithm call; invalidated on edits.
@@ -217,12 +221,13 @@ class FastGraph:
         # Topology may have changed; the lazy reverse index is rebuilt on demand.
         self._radj_dirty = True
         
-        # Store edge attributes
-        edge_key = (u, v)
-        if edge_key not in self.edge_attrs:
-            self.edge_attrs[edge_key] = {}
-        self.edge_attrs[edge_key]['weight'] = self.adj[u][v]
-        self.edge_attrs[edge_key].update(attrs)
+        # Store edge attributes (skippable for slim pathfinding graphs)
+        if self.store_edge_attrs:
+            edge_key = (u, v)
+            if edge_key not in self.edge_attrs:
+                self.edge_attrs[edge_key] = {}
+            self.edge_attrs[edge_key]['weight'] = self.adj[u][v]
+            self.edge_attrs[edge_key].update(attrs)
 
     def number_of_nodes(self):
         """Return the number of nodes in the graph."""
@@ -362,6 +367,10 @@ class FastGraph:
             New graph with reversed edges
         """
         new_G = FastGraph()
+        # A slim (attr-free) source graph must stay slim: rebuilding the
+        # per-edge attr dicts here would reintroduce the ~350 bytes/edge
+        # cost the flag exists to avoid.
+        new_G.store_edge_attrs = self.store_edge_attrs
         for u in self.adj:
             for v, w in self.adj[u].items():
                 new_G.add_edge(v, u, w)
@@ -389,6 +398,7 @@ class FastGraph:
         """
         nodes = set(nodes)
         new_G = FastGraph()
+        new_G.store_edge_attrs = self.store_edge_attrs
         for u in nodes:
             if u in self.adj:
                 for v, w in self.adj[u].items():
@@ -412,6 +422,7 @@ class FastGraph:
             New graph with copied data
         """
         new_G = FastGraph()
+        new_G.store_edge_attrs = self.store_edge_attrs
         for u in self.adj:
             for v, w in self.adj[u].items():
                 new_G.add_edge(u, v, w)
@@ -422,10 +433,10 @@ class FastGraph:
             new_G.edge_attrs[edge] = attrs.copy()
         return new_G
 
-    def build_from_dataframe(self, df, source_col, target_col, weight_col, **extra_cols):
+    def build_from_dataframe(self, df, source_col, target_col, weight_col, store_edge_attrs=True, **extra_cols):
         """
         Build graph from a DataFrame (modifies graph in place).
-        
+
         Parameters
         ----------
         df : pandas.DataFrame or polars.DataFrame
@@ -436,15 +447,21 @@ class FastGraph:
             Column name for target nodes
         weight_col : str
             Column name for edge weights
+        store_edge_attrs : bool, optional
+            When False, skip the per-edge edge_attrs dicts (weight remains
+            available via adj).  Pathfinding-only graphs should pass False:
+            the dicts cost ~350 bytes/edge.  Default True preserves the
+            attribute-writing behavior for attribute consumers.
         **extra_cols : str
             Additional column names to store as edge attributes
             e.g., ratio_col='ratio', prob_col='probability'
-            
+
         Returns
         -------
         self : FastGraph
             Returns self for method chaining
         """
+        self.store_edge_attrs = store_edge_attrs
         # Check if it's a Polars DataFrame
         is_polars = False
         try:

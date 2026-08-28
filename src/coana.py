@@ -293,6 +293,17 @@ _FINDALLPATH_GRAPH_CACHE = {}
 
 _FINDALLPATH_CACHE_MAX = 8
 
+# Resident-size budget for the FindAllPath graph cache.  Each entry holds a
+# full discovery graph (layer tables); without a byte budget a handful of
+# wide queries pinned multi-GB graphs for the whole process lifetime in
+# long-lived sessions.  Override with DROCAT_FINDALLPATH_CACHE_BUDGET_MB.
+try:
+    _FINDALLPATH_CACHE_BUDGET_BYTES = max(
+        64, int(os.environ.get('DROCAT_FINDALLPATH_CACHE_BUDGET_MB', '2048'))
+    ) * 1024 * 1024
+except (TypeError, ValueError):
+    _FINDALLPATH_CACHE_BUDGET_BYTES = 2048 * 1024 * 1024
+
 # ============================================================================
 # Columns retained for path-discovery connection layers
 # Neuron-info enrichment adds ~a dozen columns per endpoint (hemisphere and
@@ -311,6 +322,91 @@ _PATH_CONN_KEEP_COLS = (
     'connection_ratio', 'traversal_probability',
     'synapse',
 )
+
+# Matrix exports pivot into a dense index x columns grid.  Past this cell
+# count the pivot itself (not the disk write) exhausts memory, so the
+# exporters skip with a warning instead.  The long-format edge table always
+# carries the same information.
+_DENSE_PIVOT_CELL_LIMIT = 20_000_000
+
+
+class _ConnRowIndex:
+    """Compact bodyId -> row-index map for the in-memory connection DB.
+
+    Replaces the former dict-of-Python-lists indexes (measured ~97 MB per
+    million rows: every row index is an individual 28-byte int object
+    inside a list slot, plus dict-table slack).  One int32 array of row
+    indices plus a bodyId -> (start, end) offset dict is ~8x smaller at
+    10M rows and exposes the read-only dict API the consumers use
+    (``get`` / ``__contains__`` / ``__getitem__`` / ``keys`` / ``__iter__``
+    / ``__len__`` / ``__bool__``).
+    """
+
+    __slots__ = ('_data', '_offsets', '_keys')
+
+    def __init__(self):
+        self._data = np.empty(0, dtype=np.int32)
+        self._offsets = {}
+        self._keys = []
+
+    @classmethod
+    def from_groups(cls, groups):
+        """Build from ``(key, iterable_of_row_indices)`` pairs in key order."""
+        index = cls()
+        offsets = {}
+        keys = []
+        chunks = []
+        pos = 0
+        for key, idx_list in groups:
+            idx_arr = np.asarray(idx_list, dtype=np.int32)
+            offsets[key] = (pos, pos + idx_arr.size)
+            keys.append(key)
+            chunks.append(idx_arr)
+            pos += idx_arr.size
+        index._data = (
+            np.concatenate(chunks)
+            if chunks else np.empty(0, dtype=np.int32)
+        )
+        index._offsets = offsets
+        index._keys = keys
+        return index
+
+    @classmethod
+    def from_dict(cls, mapping):
+        return cls.from_groups(mapping.items())
+
+    def get(self, key, default=None):
+        span = self._offsets.get(key)
+        if span is None:
+            return default
+        start, end = span
+        return self._data[start:end].tolist()
+
+    def __getitem__(self, key):
+        span = self._offsets.get(key)
+        if span is None:
+            raise KeyError(key)
+        start, end = span
+        return self._data[start:end].tolist()
+
+    def __contains__(self, key):
+        return key in self._offsets
+
+    def keys(self):
+        return list(self._keys)
+
+    def __iter__(self):
+        return iter(self._keys)
+
+    def __len__(self):
+        return len(self._offsets)
+
+    def __bool__(self):
+        return bool(self._offsets)
+
+    def __repr__(self):
+        return (f'_ConnRowIndex(entries={len(self._offsets)}, '
+                f'rows={self._data.size})')
 
 
 def _id_set_digest(ids) -> str:
@@ -367,12 +463,56 @@ def _findallpath_cache_key(
     )
 
 
+def _findallpath_cache_entry_bytes(entry: dict) -> int:
+    """Best-effort resident-size estimate for one graph-cache entry.
+
+    Layer tables dominate; each Polars frame reports its exact footprint
+    via ``estimated_size()``.  Pandas frames and neuron-id sets are
+    approximated (str objects ~60 B, one set slot ~60 B per id).
+    """
+    total = 0
+    for table in entry.get('all_connections', []) or []:
+        if hasattr(table, 'estimated_size'):
+            try:
+                total += int(table.estimated_size())
+                continue
+            except Exception:
+                pass
+        if hasattr(table, 'memory_usage'):
+            try:
+                total += int(table.memory_usage(deep=True).sum())
+                continue
+            except Exception:
+                pass
+        total += len(table) * 64
+    id_sets = list(entry.get('layer_neurons', []) or [])
+    if entry.get('all_neurons_in_network') is not None:
+        id_sets.append(entry['all_neurons_in_network'])
+    for id_set in id_sets:
+        total += len(id_set) * 120
+    return total
+
+
 def _findallpath_cache_put(key: str, entry: dict) -> None:
-    """Insert into the FindAllPath graph cache, evicting the oldest entry."""
+    """Insert into the FindAllPath graph cache, evicting the oldest entry.
+
+    Eviction is FIFO by count AND by resident size: each entry holds the
+    full discovery graph (layer tables), so a handful of wide queries can
+    pin multiple GB for the rest of the process in long-lived sessions
+    (comparison runs, notebooks).  The budget keeps that bounded.
+    """
     global _FINDALLPATH_GRAPH_CACHE
     _FINDALLPATH_GRAPH_CACHE[key] = entry
     while len(_FINDALLPATH_GRAPH_CACHE) > _FINDALLPATH_CACHE_MAX:
         _FINDALLPATH_GRAPH_CACHE.pop(next(iter(_FINDALLPATH_GRAPH_CACHE)))
+    budget = _FINDALLPATH_CACHE_BUDGET_BYTES
+    total = sum(
+        _findallpath_cache_entry_bytes(cached)
+        for cached in _FINDALLPATH_GRAPH_CACHE.values()
+    )
+    while total > budget and len(_FINDALLPATH_GRAPH_CACHE) > 1:
+        oldest = next(iter(_FINDALLPATH_GRAPH_CACHE))
+        total -= _findallpath_cache_entry_bytes(_FINDALLPATH_GRAPH_CACHE.pop(oldest))
 
 
 def _layer_table_edge_pairs(conn_df):
@@ -412,6 +552,11 @@ def _match_path_edges_to_layers(edges_in_paths, conn_layers):
     Matching against the real table rows instead of the path position keeps
     every occurrence of a path edge and never drops real connections.
 
+    The layer side is matched through a Polars join: materializing a full
+    layer table as Python (pre, post) string tuples costs ~1 GB per
+    million-row layer, while the join only touches the columns involved
+    and converts back just the (small) matched subset.
+
     Parameters
     ----------
     edges_in_paths : set of (pre, post) tuples
@@ -426,11 +571,53 @@ def _match_path_edges_to_layers(edges_in_paths, conn_layers):
         edges present in each layer's table.
         matched_edges: union of all valid pairs found in any layer table.
     """
+    edges_in_paths = set(edges_in_paths or ())
     valid_pairs_by_layer = []
     matched_edges = set()
+    if not edges_in_paths:
+        return [set() for _ in conn_layers], matched_edges
+
+    # The path-edge side is small (bounded by edges on found paths);
+    # materialize it once as a frame and join each layer against it.
+    pairs_df = pl.DataFrame(
+        list(edges_in_paths),
+        schema=[('bodyId_pre', pl.Utf8), ('bodyId_post', pl.Utf8)],
+        orient='row',
+    )
+
     for conn_df in conn_layers:
-        layer_edges = _layer_table_edge_pairs(conn_df)
-        valid = set(edges_in_paths) & layer_edges
+        if conn_df is None:
+            valid_pairs_by_layer.append(set())
+            continue
+        try:
+            is_empty = conn_df.is_empty()
+        except AttributeError:
+            is_empty = conn_df.empty
+        if is_empty:
+            valid_pairs_by_layer.append(set())
+            continue
+        try:
+            layer_df = (
+                conn_df
+                if isinstance(conn_df, pl.DataFrame)
+                else pl.from_pandas(conn_df)
+            )
+            layer_pairs = layer_df.select(
+                pl.col('bodyId_pre').cast(pl.Utf8),
+                pl.col('bodyId_post').cast(pl.Utf8),
+            ).unique()
+            matched = pairs_df.join(
+                layer_pairs, on=['bodyId_pre', 'bodyId_post'], how='inner'
+            )
+            valid = set(
+                zip(matched['bodyId_pre'].to_list(),
+                    matched['bodyId_post'].to_list())
+            )
+        except Exception:
+            # Odd schemas (missing/renamed id columns): keep the historical
+            # row-materializing path as the fallback.
+            layer_edges = _layer_table_edge_pairs(conn_df)
+            valid = edges_in_paths & layer_edges
         valid_pairs_by_layer.append(valid)
         matched_edges |= valid
     return valid_pairs_by_layer, matched_edges
@@ -1045,6 +1232,20 @@ class FindNeuronConnection:
             index_col = 'type_pre'
             columns_col = 'type_post'
 
+        # Same dense-pivot guard as the CSV exporter: a pivot materializes
+        # the full index x columns grid in memory before it reaches Excel.
+        n_cells = df[index_col].nunique() * df[columns_col].nunique()
+        if n_cells > _DENSE_PIVOT_CELL_LIMIT:
+            print(
+                f"Warning: skipped dense {level}-level matrix sheets "
+                f"({df[index_col].nunique():,} x {df[columns_col].nunique():,} "
+                f"cells exceeds the {_DENSE_PIVOT_CELL_LIMIT:,}-cell guard); "
+                f"the CSV matrix exporter covers them within budget or the "
+                f"edge table CSV carries the data in long format.",
+                flush=True,
+            )
+            return
+
         # 1. Weight Matrix
         try:
             mat_weight = df.pivot(index=index_col, columns=columns_col, values='weight').fillna(0)
@@ -1505,9 +1706,32 @@ class FindNeuronConnection:
         # regression tests, so do not require an initialized instance here.
         pl_df = FindNeuronConnection._normalize_export_count_columns_polars(pl_df)
 
+        # A pivot materializes a dense index x columns cell grid.  At
+        # bodyId level on large datasets that cross product alone (e.g.
+        # 60k x 120k = 7.2e9 string cells) exceeds any machine, so refuse
+        # pivots past a cell budget instead of dying with MemoryError.
+        def _pivot_too_dense() -> bool:
+            try:
+                n_index = pl_df[index_col].n_unique()
+                n_columns = pl_df[columns_col].n_unique()
+            except Exception:
+                return False
+            if n_index * n_columns > _DENSE_PIVOT_CELL_LIMIT:
+                print(
+                    f"  ⚠️ Skipped dense {level}-level matrix export: "
+                    f"{n_index:,} x {n_columns:,} cells exceeds the "
+                    f"{_DENSE_PIVOT_CELL_LIMIT:,}-cell guard. The edge table "
+                    f"CSV already contains the same data in long format.",
+                    flush=True,
+                )
+                return True
+            return False
+
         # 1. Weight Matrix
         if level != 'bodyId':
             try:
+                if _pivot_too_dense():
+                    return
                 # Use sum aggregation for weights to handle duplicates (e.g. same connection in multiple layers)
                 mat_weight = pl_df.pivot(values='weight', index=index_col, on=columns_col, aggregate_function='sum').fill_null(0)
                 mat_weight.write_csv(os.path.join(folder, f'conn_mat_{level}_weight.csv'))
@@ -1517,6 +1741,8 @@ class FindNeuronConnection:
         # 2. Ratio Matrix
         if level != 'bodyId' and 'connection_ratio' in df.columns:
             try:
+                if _pivot_too_dense():
+                    return
                 # Use max for ratios to show the strongest connection ratio found
                 mat_ratio = pl_df.pivot(values='connection_ratio', index=index_col, on=columns_col, aggregate_function='max').fill_null(0)
                 mat_ratio.write_csv(os.path.join(folder, f'conn_mat_{level}_ratio.csv'))
@@ -1526,15 +1752,19 @@ class FindNeuronConnection:
         # 3. Probability Matrix
         if level != 'bodyId' and 'traversal_probability' in df.columns:
             try:
+                if _pivot_too_dense():
+                    return
                 # Use max for probabilities
                 mat_prob = pl_df.pivot(values='traversal_probability', index=index_col, on=columns_col, aggregate_function='max').fill_null(0)
                 mat_prob.write_csv(os.path.join(folder, f'conn_mat_{level}_prob.csv'))
             except Exception as e:
                 print(f" Failed: {e}", flush=True)
 
-        # 4. NT Type Matrix
+        # 4. NT Type Matrix (the only pivot that also runs at bodyId level)
         if 'nt_type' in df.columns:
             try:
+                if _pivot_too_dense():
+                    return
                 # Use first for strings
                 mat_nt = pl_df.pivot(values='nt_type', index=index_col, on=columns_col, aggregate_function='first')
                 mat_nt.write_csv(os.path.join(folder, f'conn_mat_{level}_nt.csv'))
@@ -1870,6 +2100,20 @@ class FindNeuronConnection:
     inflate reported distances). 0/None = complete graph (no limit); when
     edges are trimmed a warning is printed telling the user how to restore
     the full network.
+    '''
+
+    max_paths_bodyid: Optional[int] = None
+    '''
+    Opt-in safety cap on how many bodyId-level paths FindAllPath /
+    FindShortestPath may materialize.  Enumeration is unbounded by default
+    and the number of simple paths grows combinatorially; each collected
+    path costs ~100+ bytes, so pathological queries can exhaust memory
+    before any output is produced.
+
+    None (default) = exactly the historical unbounded behavior.  When set,
+    enumeration stops at the cap, a loud warning plus a note in the run
+    summary explain that the path set is truncated, and the pipeline
+    continues with the paths collected so far.
     '''
 
     graph_edge_limit_groups: int = 5000
@@ -2780,7 +3024,15 @@ class FindNeuronConnection:
 
         if os.path.exists(index_path):
             try:
-                index_df = pd.read_parquet(index_path)
+                # Project to the consumed columns: the materialized index
+                # carries ~50 metadata columns but only these 7 are used,
+                # and the unprojected read cost ~215 MB resident per
+                # dataset on large catalogs.  Fall back to the full read
+                # for index files predating some of the columns.
+                try:
+                    index_df = pd.read_parquet(index_path, columns=index_columns)
+                except Exception:
+                    index_df = pd.read_parquet(index_path)
             except Exception:
                 index_df = pd.DataFrame()
         else:
@@ -3268,7 +3520,11 @@ class FindNeuronConnection:
             expressions.append(pl.lit('', dtype=pl.Utf8).alias('roi'))
         if 'cached_date' in names:
             expressions.append(
-                pl.col('cached_date').cast(pl.Utf8, strict=False).alias('cached_date')
+                # Date part only: nothing reads the time of day from the
+                # resident frame (disk writes stamp fresh full timestamps),
+                # and the 19-char strings cost ~18 MB per million rows.
+                pl.col('cached_date').cast(pl.Utf8, strict=False)
+                .str.slice(0, 10).alias('cached_date')
             )
         else:
             expressions.append(pl.lit('', dtype=pl.Utf8).alias('cached_date'))
@@ -3325,10 +3581,11 @@ class FindNeuronConnection:
                 self._conn_cache_signature = None
 
         if self._conn_df_cache is not None and not force_reload:
-            # Boundary normalization: the shared _FNC_CACHE stores pandas (for
-            # the comparison modules), so a frame picked up from there must be
-            # converted before callers use polars-only APIs (.is_empty(),
-            # pl.concat, .filter ...). Otherwise they crash with AttributeError.
+            # Boundary normalization: a frame picked up from the shared
+            # _FNC_CACHE could be pandas (older writer versions) while all
+            # callers here use polars-only APIs (.is_empty(), pl.concat,
+            # .filter ...). Convert defensively; for the Polars frames the
+            # cache now stores this is a no-op.
             # NOTE: no local `import polars as pl` here - it would shadow the
             # module-level binding for the rest of this function.
             if hasattr(self._conn_df_cache, 'empty') and not hasattr(self._conn_df_cache, 'is_empty'):
@@ -3628,16 +3885,18 @@ class FindNeuronConnection:
                     'idx': range(n_rows)
                 })
             
-            # Group by pre and collect indices using iter_rows for efficiency.
+            # Group by pre and collect indices; the compact _ConnRowIndex
+            # keeps the same key -> row-index-list contract at ~1/8 the
+            # memory of dict-of-Python-lists.
             # maintain_order=True: consumers slice the connection table with
             # these row-index lists; a nondeterministic aggregation order would
             # scramble result ordering between runs.
             pre_result = df_pl.group_by('bodyId_pre', maintain_order=True).agg(pl.col('idx'))
-            self._conn_index = {row[0]: row[1] for row in pre_result.iter_rows()}
+            self._conn_index = _ConnRowIndex.from_groups(pre_result.iter_rows())
 
             # Group by post and collect indices
             post_result = df_pl.group_by('bodyId_post', maintain_order=True).agg(pl.col('idx'))
-            self._conn_index_post = {row[0]: row[1] for row in post_result.iter_rows()}
+            self._conn_index_post = _ConnRowIndex.from_groups(post_result.iter_rows())
 
             # del df_pl, pre_result, post_result
 
@@ -3646,8 +3905,8 @@ class FindNeuronConnection:
             # created empty defaultdicts and never populated them, making
             # every cached neuron appear uncached -> refetch storms).
             from collections import defaultdict
-            self._conn_index = defaultdict(list)
-            self._conn_index_post = defaultdict(list)
+            fallback_pre = defaultdict(list)
+            fallback_post = defaultdict(list)
             try:
                 fallback_df = self._conn_df_cache
                 if hasattr(fallback_df, 'to_pandas'):
@@ -3655,10 +3914,12 @@ class FindNeuronConnection:
                 for idx, (pre, post) in enumerate(
                     zip(fallback_df['bodyId_pre'], fallback_df['bodyId_post'])
                 ):
-                    self._conn_index[pre].append(idx)
-                    self._conn_index_post[post].append(idx)
+                    fallback_pre[pre].append(idx)
+                    fallback_post[post].append(idx)
             except Exception:
                 pass
+            self._conn_index = _ConnRowIndex.from_dict(fallback_pre)
+            self._conn_index_post = _ConnRowIndex.from_dict(fallback_post)
 
         self._vprint(f'  ✓ Index built: {len(self._conn_index):,} upstream, {len(self._conn_index_post):,} downstream neurons', level='always')
         
@@ -3667,18 +3928,11 @@ class FindNeuronConnection:
             if self._dataset_safe not in _FNC_CACHE:
                 _FNC_CACHE[self._dataset_safe] = {}
 
-            # Ensure conn_df stored in _FNC_CACHE is always pandas DataFrame
-            # (other modules like connectivity_profiler expect pandas)
-            conn_df_for_cache = self._conn_df_cache
-            if conn_df_for_cache is not None:
-                try:
-                    import polars as pl
-                    if isinstance(conn_df_for_cache, pl.DataFrame):
-                        conn_df_for_cache = conn_df_for_cache.to_pandas()
-                except ImportError:
-                    pass
-
-            _FNC_CACHE[self._dataset_safe]['conn_df'] = conn_df_for_cache
+            # Store the POLARS frame only.  A pandas twin of a 10M-row table
+            # costs ~2 GB of process-lifetime memory; the comparison modules
+            # (connectivity_profiler, profile_comparator) already normalize
+            # either engine to pandas at their point of use.
+            _FNC_CACHE[self._dataset_safe]['conn_df'] = self._conn_df_cache
             _FNC_CACHE[self._dataset_safe]['conn_index'] = self._conn_index
             _FNC_CACHE[self._dataset_safe]['conn_index_post'] = self._conn_index_post
             self._record_connection_cache_signature()
@@ -10415,22 +10669,52 @@ class FindNeuronConnection:
                 conn = pd.concat(conn, ignore_index=True)
 
         is_polars = hasattr(conn, 'iter_rows')
-        pre_list = [str(x) for x in (conn[pre_col].to_list() if is_polars else conn[pre_col].tolist())]
-        post_list = [str(x) for x in (conn[post_col].to_list() if is_polars else conn[post_col].tolist())]
-        w_list = conn['weight'].to_list() if is_polars else conn['weight'].tolist()
-        n = len(pre_list)
+        n = len(conn)
         if not n or not limit or limit <= 0:
             return conn, 0, None
 
         src_set = set(str(x) for x in sources)
         tgt_set = set(str(x) for x in targets)
 
-        # adjacency + reverse adjacency (for the two BFS passes)
+        # Node-string interning: row endpoints become int32 codes so the
+        # per-row Python lists of the previous implementation (two fresh
+        # string objects per row ≈ 1.2 GB at 4M rows) and the weight-scaled
+        # adjacency dicts (~2 GB) collapse into compact arrays and sets of
+        # shared int objects.  Semantics are unchanged: the BFS passes only
+        # need membership, and every sort below is a stable order on weight.
+        node_codes = {}
+        pre_codes = np.empty(n, dtype=np.int32)
+        post_codes = np.empty(n, dtype=np.int32)
+
+        def _code(value):
+            existing = node_codes.get(value)
+            if existing is None:
+                existing = len(node_codes)
+                node_codes[value] = existing
+            return existing
+
+        if is_polars:
+            pre_iter = conn[pre_col].to_list()
+            post_iter = conn[post_col].to_list()
+        else:
+            pre_iter = conn[pre_col].tolist()
+            post_iter = conn[post_col].tolist()
+        for i in range(n):
+            pre_codes[i] = _code(str(pre_iter[i]))
+            post_codes[i] = _code(str(post_iter[i]))
+        del pre_iter, post_iter
+
+        w_arr = np.asarray(conn['weight'].to_numpy(), dtype=np.float64)
+
+        # adjacency + reverse adjacency as code sets (the BFS passes never
+        # read the weights)
         adj = {}
         radj = {}
-        for u, v, wt in zip(pre_list, post_list, w_list):
-            adj.setdefault(u, {})[v] = wt
-            radj.setdefault(v, {})[u] = wt
+        for i in range(n):
+            u = int(pre_codes[i])
+            v = int(post_codes[i])
+            adj.setdefault(u, set()).add(v)
+            radj.setdefault(v, set()).add(u)
 
         def bfs(starts, edges):
             seen = set(starts)
@@ -10443,20 +10727,33 @@ class FindNeuronConnection:
                         dq.append(v)
             return seen
 
-        s_reach = bfs(src_set & set(adj), adj)
-        t_reach = bfs(tgt_set & set(radj), radj)
+        s_reach = bfs({node_codes[s] for s in src_set if s in node_codes} & set(adj), adj)
+        t_reach = bfs({node_codes[s] for s in tgt_set if s in node_codes} & set(radj), radj)
 
         # viability filter: only rows that can lie on a source->target path
-        viable = [pre_list[i] in s_reach and post_list[i] in t_reach for i in range(n)]
+        s_codes = np.fromiter(s_reach, dtype=np.int64)
+        t_codes = np.fromiter(t_reach, dtype=np.int64)
+        viable = np.isin(pre_codes, s_codes) & np.isin(post_codes, t_codes)
+
         # reservation: source-outgoing / target-incoming viable rows, capped
-        # at the limit (strongest first)
-        reserved_idx = [i for i in range(n) if viable[i]
-                        and (pre_list[i] in src_set or post_list[i] in tgt_set)]
-        reserved_idx.sort(key=lambda i: w_list[i], reverse=True)
-        reserved_idx = reserved_idx[:limit]
-        reserved_set = set(reserved_idx)
-        non_reserved_viable = [i for i in range(n) if viable[i] and i not in reserved_set]
-        non_reserved_viable.sort(key=lambda i: w_list[i], reverse=True)
+        # at the limit (strongest first).  Stable order on descending weight
+        # matches the previous stable list.sort.  Reservation candidates
+        # that lose the cap fall back into the non-reserved pool, exactly
+        # like the original list-based implementation.
+        src_code_set = {node_codes[s] for s in src_set if s in node_codes}
+        tgt_code_set = {node_codes[s] for s in tgt_set if s in node_codes}
+        reserved_candidates = np.flatnonzero(
+            viable
+            & (np.isin(pre_codes, np.fromiter(src_code_set, dtype=np.int64))
+               | np.isin(post_codes, np.fromiter(tgt_code_set, dtype=np.int64)))
+        )
+        reserved_idx = reserved_candidates[
+            np.argsort(-w_arr[reserved_candidates], kind='stable')][:limit]
+        reserved_set = set(int(i) for i in reserved_idx)
+        non_reserved_viable = np.flatnonzero(
+            viable & ~np.isin(np.arange(n), reserved_idx))
+        non_reserved_viable = non_reserved_viable[
+            np.argsort(-w_arr[non_reserved_viable], kind='stable')]
 
         # Adaptive fill loop: inflate the budget exactly by the deficit that
         # dead-end pruning creates, until the usable edge count reaches the
@@ -10466,21 +10763,26 @@ class FindNeuronConnection:
         budget = limit
         usable = 0
         for _ in range(max_iterations):
-            kept_idx = reserved_set | set(non_reserved_viable[:budget])
+            kept_idx = reserved_set | {
+                int(i) for i in non_reserved_viable[:budget]}
             kept_radj = {}
             for i in kept_idx:
-                kept_radj.setdefault(post_list[i], {})[pre_list[i]] = w_list[i]
-            kept_t_reach = bfs(tgt_set & set(kept_radj), kept_radj)
-            usable = sum(1 for i in kept_idx
-                         if pre_list[i] in kept_t_reach and post_list[i] in kept_t_reach)
+                kept_radj.setdefault(int(post_codes[i]), set()).add(
+                    int(pre_codes[i]))
+            kept_t_reach = bfs(tgt_code_set & set(kept_radj), kept_radj)
+            kept_arr = np.fromiter(kept_idx, dtype=np.int64)
+            usable = int(np.count_nonzero(
+                np.isin(pre_codes[kept_arr], np.fromiter(kept_t_reach, dtype=np.int64))
+                & np.isin(post_codes[kept_arr], np.fromiter(kept_t_reach, dtype=np.int64))
+            ))
             if usable >= limit or budget >= len(non_reserved_viable):
                 break
             budget = min(len(non_reserved_viable),
                          max(limit + (limit - usable), budget * 2))
 
-        kept_idx = reserved_set | set(non_reserved_viable[:budget])
-        kept_non_reserved = non_reserved_viable[:budget]
-        threshold = min(w_list[i] for i in kept_non_reserved) if kept_non_reserved else None
+        kept_idx = reserved_set | {int(i) for i in non_reserved_viable[:budget]}
+        kept_non_reserved = [int(i) for i in non_reserved_viable[:budget]]
+        threshold = float(w_arr[kept_non_reserved].min()) if kept_non_reserved else None
         removed = n - len(kept_idx)
         trimmed = conn[list(kept_idx)] if is_polars else conn.iloc[list(kept_idx)]
 
@@ -10519,6 +10821,31 @@ class FindNeuronConnection:
         if not keywords or [str(k) for k in keywords] == ['None']:
             return None
         return keywords
+
+    def _graph_edge_frames(self, conn_layers, sources, targets, path_mode='all'):
+        """Return the frame(s) to feed ``FastGraph.build_from_dataframe``.
+
+        When the pan-graph edge limit does not apply, the raw non-empty
+        layer tables are returned so the caller can build the graph layer
+        by layer — identical result (add_edge sums duplicate pairs across
+        layers) without materializing a full ``pl.concat`` copy of every
+        layer (~1 GB at a few million rows).  With the limit active, a
+        single trimmed frame (the ``_trim_bodyid_edges`` result) is
+        returned instead.
+        """
+        limit = self.graph_edge_limit_bodyid
+        if limit is None:
+            limit = 1000000 if path_mode == 'all' else 0
+        apply_trim = (self.max_interlayer >= 3) if path_mode == 'all' \
+            else (limit > 0)
+        if apply_trim:
+            return [self._trim_bodyid_edges(
+                conn_layers, sources, targets, path_mode=path_mode,
+            )]
+        return [
+            c for c in conn_layers
+            if not (c.is_empty() if hasattr(c, 'is_empty') else c.empty)
+        ]
 
     def _trim_bodyid_edges(self, conn_layers, sources, targets, path_mode='all'):
         """Return the bodyId-level edge table for the discovery graph.
@@ -12712,11 +13039,21 @@ class FindNeuronConnection:
         # applied ONLY for deep searches (max_interlayer >= 3); shallow
         # searches keep the complete graph. In 'shortest' mode applied only
         # when explicitly enabled (graph_edge_limit_bodyid > 0).
-        conn_trimmed = self._trim_bodyid_edges(
-            all_connections_filtered, list(source_ID), list(targets_found),
-            path_mode=path_mode)
+        # Slim build: pathfinding reads weights via adj only, and the
+        # per-edge attr dicts cost ~350 bytes/edge on million-edge graphs.
+        # When no pan-graph edge limit applies, the layers are fed straight
+        # into the graph — a full pl.concat of all layer tables first would
+        # materialize a ~1 GB duplicate of the discovery data.
         G = FastGraph()
-        G.build_from_dataframe(conn_trimmed, 'bodyId_pre', 'bodyId_post', 'weight')
+        graph_frames = self._graph_edge_frames(
+            all_connections_filtered, list(source_ID), list(targets_found),
+            path_mode=path_mode,
+        )
+        for _frame in graph_frames:
+            G.build_from_dataframe(_frame, 'bodyId_pre', 'bodyId_post', 'weight',
+                                   store_edge_attrs=False)
+        del graph_frames
+        gc.collect()
 
         self._vprint(f'Done! ({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)', level='full')
         
@@ -12754,6 +13091,12 @@ class FindNeuronConnection:
                 
                 nodes_that_can_reach_targets = reachable
 
+                # The reversed graph is a full second copy of the graph and
+                # is not used past this BFS — release it before the
+                # enumeration/enrichment phases.
+                del R
+                gc.collect()
+
                 # Intersect with nodes reachable from sources
                 # Since G is built layer-by-layer from sources, most nodes are reachable.
                 # But let's be safe and precise.
@@ -12761,7 +13104,9 @@ class FindNeuronConnection:
                 # because any node NOT in this set is a dead end w.r.t targets.
                 
                 original_node_count = G.number_of_nodes()
-                G = G.subgraph(nodes_that_can_reach_targets).copy()
+                # subgraph() already returns a standalone new graph; the
+                # extra .copy() duplicated every edge a second time.
+                G = G.subgraph(nodes_that_can_reach_targets)
                 self._vprint(f'Done! ({original_node_count} -> {G.number_of_nodes()} nodes)', level='full')
             else:
                 self._vprint('Warning: No targets found in graph (should have been caught earlier).', level='full')
@@ -12884,7 +13229,36 @@ class FindNeuronConnection:
             # the semantic contract at the shared pipeline boundary as well.
             # This protects type aggregation and bodyId exports from any
             # generator/cache path that might contain a longer alternative.
-            all_paths = list(path_iter)
+            # With max_paths_bodyid set, collect at most that many paths:
+            # each collected path costs ~100+ bytes and enumeration is
+            # combinatorial, so an uncapped pathological query exhausts
+            # memory before any output is produced.
+            cap = getattr(self, 'max_paths_bodyid', None)
+            if cap is not None:
+                all_paths = []
+                path_cap_reached = False
+                for path in path_iter:
+                    all_paths.append(path)
+                    if len(all_paths) >= cap:
+                        path_cap_reached = True
+                        break
+                if path_cap_reached:
+                    warning = (
+                        '- [path enumeration] stopped at max_paths_bodyid='
+                        f'{cap:,}: the path set is TRUNCATED and results '
+                        'undercount alternatives. Raise min_synapse_num or '
+                        'lower max_interlayer to shrink the search, or raise '
+                        'max_paths_bodyid (currently unbounded when unset).'
+                    )
+                    self._warn_notes.append(warning)
+                    self._vprint(
+                        f'\n⚠️  Path cap reached: stopped enumerating at '
+                        f'{len(all_paths):,} paths (max_paths_bodyid={cap:,}). '
+                        f'Results cover a subset of all existing paths.',
+                        level='always',
+                    )
+            else:
+                all_paths = list(path_iter)
             raw_path_count = len(all_paths)
             if path_mode == 'shortest':
                 all_paths = self._keep_shortest_bodyid_paths(all_paths)
@@ -12938,6 +13312,18 @@ class FindNeuronConnection:
                 self._vprint('building paths...', level='simple', end='', flush=True)
             elif self.verbose_mode == 'full':
                 self._vprint(f'   Pathfinding completed in {elapsed:.1f}s', level='full')
+
+        # The graph and its generator are dead once the paths are collected
+        # (a completed generator still pins its graph via the parent frame).
+        # Release them before the memory-heavy reconstruction/enrichment
+        # phases; at a few million edges the graph costs multiple GB.
+        if 'path_iter' in locals():
+            del path_iter
+        if 'path_gen' in locals():
+            del path_gen
+        if 'G' in locals():
+            del G
+        gc.collect()
 
         self._vprint(f'\n✅ Pathfinding complete!', level='full')
         self._vprint(f'   Total paths found: {path_count:,}', level='full')
@@ -14436,6 +14822,25 @@ class FindNeuronConnection:
                     self._vprint(f'   ✓ Saved to: {output_path_csv}', level='full')
         elif self.skip_bodyId:
             self._vprint('Skipping bodyId-level path enrichment (skip_bodyId=True)', level='full')
+
+        # BodyId-level structures are dead past the bodyId path export.
+        # The earlier release block only runs for skip_bodyId runs, so a
+        # default run carried ~2-3 GB of dead frames (layer-enriched table,
+        # dedup copy, edge sets, raw path list) through type/group
+        # derivation and all visualization phases. Release unconditionally.
+        if 'conn_inpath_global' in locals():
+            del conn_inpath_global
+        if 'conn_inpath' in locals():
+            del conn_inpath
+        if 'edges_in_paths' in locals():
+            del edges_in_paths
+        if 'edges_in_paths_with_layer' in locals():
+            del edges_in_paths_with_layer
+        if 'neurons_in_paths' in locals():
+            del neurons_in_paths
+        if 'all_paths' in locals():
+            del all_paths
+        gc.collect()
 
         # save interlayer info to excel
         if not self.skip_bodyId:
