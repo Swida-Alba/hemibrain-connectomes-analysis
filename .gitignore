@@ -87,3 +87,9 @@ __pycache__/
 
 # Security-plugin local state (scan history, hook baselines; recreated on demand)
 .mimosa/
+
+# Homolog parameter benchmark (local only)
+homolog_param_benchmark/
+
+# Morphology NBLAST vs vector benchmark (local only)
+morphology_benchmark_NBLAST_vector/

@@ -1,4 +1,4 @@
-"""Tests for the V2 spatial/topological vectorization and comparison
+"""Tests for the V2 spatial vectorization and comparison
 (method="vector_v2") in src/morphology.py, plus the RoiProfileStore
 expansion-block composer in src/roi_screening.py.
 
@@ -106,22 +106,76 @@ class TestSpatialHistogram:
         assert np.allclose(h_l, h_l2)
 
 
-class TestLaplacianSpectrum:
-    def test_spectrum_shape_and_connectivity(self):
-        spec = morph.compute_laplacian_spectrum(blob_neuron(seed=7))
-        assert spec.shape == (morph.LAPLACIAN_DIM,)
-        assert np.isfinite(spec).all()
-        # A connected arbor has algebraic connectivity ~0 and the spectrum
-        # ascends within [0, 2].
-        assert abs(spec[0]) < 1e-6
-        assert np.all(np.diff(spec) >= -1e-8)
-        assert spec[-1] <= 2.0 + 1e-8
+class TestShapeExtras:
+    def test_shape_and_non_skeleton_fallback(self):
+        out = morph.compute_shape_extras(blob_neuron(seed=7))
+        assert out.shape == (morph.SHAPE_EXTRA_DIM,) == (8,)
+        assert np.isfinite(out).all()
+        assert out[0] > 0     # make_neuron gives every node radius 1.0
+        # non-skeleton inputs (e.g. mesh representations) carry no
+        # radius/branch structure -> all zeros
+        import types
+        out2 = morph.compute_shape_extras(
+            types.SimpleNamespace(vertices=np.zeros((10, 3))))
+        assert np.allclose(out2, 0.0)
 
-    def test_tiny_neuron_pads(self):
-        spec = morph.compute_laplacian_spectrum(
-            make_neuron([(0, 0, 0), (1, 0, 0)], [-1, 0]))
-        assert spec.shape == (morph.LAPLACIAN_DIM,)
-        assert np.allclose(spec, 2.0)
+    def test_radius_stats(self):
+        # make_neuron gives every node radius=1.0
+        out = morph.compute_shape_extras(blob_neuron(seed=7))
+        assert np.isclose(out[0], 1.0)            # sx_radius_mean
+        assert np.isclose(out[1], 0.0)            # sx_radius_std
+        assert np.isclose(out[2], 1.0)            # sx_radius_max
+        assert np.isclose(out[3], 1.0)            # sx_radius_leaf_mean
+        # no-radius source: all four are zero
+        nrn = blob_neuron(seed=7)
+        nrn.nodes = nrn.nodes.drop(columns=["radius"])
+        out2 = morph.compute_shape_extras(nrn)
+        assert np.allclose(out2[:4], 0.0)
+
+    def test_branch_angle_straight_line(self):
+        # A straight chain has no branch points -> zero angles.
+        pts = [(float(i), 0.0, 0.0) for i in range(6)]
+        parents = [-1, 0, 1, 2, 3, 4]
+        out = morph.compute_shape_extras(make_neuron(pts, parents))
+        assert np.isclose(out[4], 0.0) and np.isclose(out[5], 0.0)
+
+    def test_branch_angle_right_angle(self):
+        # One branch point whose two children leave at 90 degrees.
+        pts = [(0, 0, 0), (1, 0, 0), (2, 0, 0), (2, 1, 0), (3, 0, 0)]
+        parents = [-1, 0, 1, 2, 2]
+        out = morph.compute_shape_extras(make_neuron(pts, parents))
+        assert np.isclose(out[4], 90.0, atol=1e-6)
+        assert np.isclose(out[5], 0.0, atol=1e-6)
+
+    def test_strahler_fractions_sum_within_bounds(self):
+        out = morph.compute_shape_extras(blob_neuron(seed=9))
+        assert 0.0 <= out[6] <= 1.0 and 0.0 <= out[7] <= 1.0
+        assert out[6] + out[7] <= 1.0 + 1e-9
+
+
+class TestSpatialProfileExtras:
+    def test_bounds_required(self):
+        assert np.allclose(
+            morph.compute_spatial_profile_extras(blob_neuron(seed=1)), 0.0)
+
+    def test_profiles_unit_norm(self):
+        bounds = np.array([[0.0, 0.0, 0.0], [200.0, 100.0, 80.0]])
+        out = morph.compute_spatial_profile_extras(
+            blob_neuron(center=(40, 50, 40), seed=5), bounds)
+        assert out.shape == (morph.SPATIAL_PROFILE_DIM,) == (16,)
+        # each Hellinger profile is a unit vector
+        assert np.isclose(np.linalg.norm(out[:8]), 1.0)
+        assert np.isclose(np.linalg.norm(out[8:]), 1.0)
+
+    def test_mirror_symmetric_arbors_same_profiles(self):
+        # Radial and midline-distance profiles are |distance|-based, so
+        # mirrored arbors (same |x - mid|) produce identical profiles.
+        bounds = np.array([[-100.0, 0.0, 0.0], [100.0, 100.0, 80.0]])
+        left = blob_neuron(center=(-40, 50, 40), seed=5)
+        right = blob_neuron(center=(40, 50, 40), seed=5)
+        a = morph.compute_spatial_profile_extras(left, bounds)
+        b = morph.compute_spatial_profile_extras(right, bounds)
+        assert np.allclose(a, b, atol=1e-9)
 
 
 class TestVectorizeNeuronV2:
@@ -140,8 +194,8 @@ class TestVectorizeNeuronV2:
         # Ellipsoid half populated, histogram half zeros.
         assert np.any(spatial[:len(morph.SPATIAL_ELLIPSOID_FEATURES)] != 0)
         assert np.allclose(
-            spatial[len(morph.SPATIAL_ELLIPSOID_FEATURES):], 0.0)
-        assert np.any(v2[slice(*morph.V2_TOPOLOGY_SLICE)] != 2.0)
+            spatial[len(morph.SPATIAL_ELLIPSOID_FEATURES)
+                    + morph.SPATIAL_HIST_DIM:], 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +256,52 @@ class TestV2Similarity:
         total, blocks = morph.v2_similarity_matrix(
             q, q[None, :], dict(morph.DEFAULT_V2_BLOCK_WEIGHTS))
         assert np.isclose(total[0], 1.0, atol=1e-9)
-        assert set(blocks) == {"shape", "spatial", "topology"}
+        # merged default: topology rides inside the spatial block
+        assert set(blocks) == {"shape", "spatial"}
+
+    def test_two_block_matches_direct_cosine(self):
+        rng = np.random.default_rng(11)
+        q = rng.normal(size=morph.VECTOR_V2_DIM)
+        row = rng.normal(size=morph.VECTOR_V2_DIM)
+        total, blocks = morph.v2_similarity_matrix(
+            q, row[None, :], dict(morph.DEFAULT_V2_BLOCK_WEIGHTS))
+        s_shape = float(morph.cosine_similarity_matrix(
+            q[morph.V2_SHAPE_SLICE[0]:morph.V2_SHAPE_SLICE[1]],
+            row[morph.V2_SHAPE_SLICE[0]:morph.V2_SHAPE_SLICE[1]][None, :])[0])
+        a, b = morph.V2_SPATIAL_SLICE
+        s_spatial = float(morph.cosine_similarity_matrix(
+            q[a:b], row[a:b][None, :])[0])
+        w = morph.DEFAULT_V2_BLOCK_WEIGHTS
+        expected = (w["shape"] * s_shape + w["spatial"] * s_spatial) \
+            / (w["shape"] + w["spatial"])
+        assert np.isclose(total[0], expected, atol=1e-9)
+        assert np.isclose(blocks["spatial"][0], s_spatial, atol=1e-9)
+        assert set(blocks) == {"shape", "spatial"}
+
+    def test_shape_extras_carry_shape_block(self):
+        rng = np.random.default_rng(3)
+        q = rng.normal(size=morph.VECTOR_V2_DIM)
+        row = rng.normal(size=morph.VECTOR_V2_DIM)
+        # Perturb ONLY the shape-extra dims (124:132): the shape block
+        # moves, the spatial block (132:256) does not.
+        a, b = morph.VECTOR_DIM, morph.SHAPE_BLOCK_DIM
+        row_pert = row.copy()
+        row_pert[a:b] += rng.normal(size=b - a)
+        _, blocks = morph.v2_similarity_matrix(
+            q, row_pert[None, :], dict(morph.DEFAULT_V2_BLOCK_WEIGHTS))
+        total_plain, _ = morph.v2_similarity_matrix(
+            q, row[None, :], dict(morph.DEFAULT_V2_BLOCK_WEIGHTS))
+        total_pert, _ = morph.v2_similarity_matrix(
+            q, row_pert[None, :], dict(morph.DEFAULT_V2_BLOCK_WEIGHTS))
+        assert not np.isclose(total_plain[0], total_pert[0])
+        assert not np.isclose(blocks["shape"][0],
+                              morph.cosine_similarity_matrix(
+            q[morph.V2_SHAPE_SLICE[0]:morph.V2_SHAPE_SLICE[1]],
+            row[morph.V2_SHAPE_SLICE[0]:morph.V2_SHAPE_SLICE[1]][None, :])[0])
+        s_spatial = float(morph.cosine_similarity_matrix(
+            q[morph.V2_SPATIAL_SLICE[0]:morph.V2_SPATIAL_SLICE[1]],
+            row[morph.V2_SPATIAL_SLICE[0]:morph.V2_SPATIAL_SLICE[1]][None, :])[0])
+        assert np.isclose(blocks["spatial"][0], s_spatial, atol=1e-9)
 
     def test_position_mismatch_lowers_v2_not_v1(self):
         bounds = np.array([[0.0, 0.0, 0.0], [200.0, 100.0, 80.0]])
@@ -219,7 +318,6 @@ class TestV2Similarity:
         # V1 sees two identical neurons; V2's spatial block separates them
         # (raw-vector level; production z-scoring widens the gap further).
         assert blocks["shape"][0] > 0.99
-        assert blocks["topology"][0] > 0.99
         assert blocks["spatial"][0] < 0.9
         assert total[0] < v1_cos - 0.05
 
@@ -228,21 +326,17 @@ class TestV2Similarity:
         q = rng.normal(size=morph.VECTOR_V2_DIM)
         row = rng.normal(size=morph.VECTOR_V2_DIM)
         a, b = morph.V2_SPATIAL_SLICE
-        row[a:b] = 0.0    # candidate has no spatial evidence at all
-        total, _ = morph.v2_similarity_matrix(
-            q, row[None, :], dict(morph.DEFAULT_V2_BLOCK_WEIGHTS))
-        # Only shape+topology participate: the total is their weighted mean,
-        # not a value dragged toward 0 by the empty block.
+        row_zero = row.copy()
+        row_zero[a:b] = 0.0    # candidate has no spatial evidence at all
+        # only shape participates: the total is the shape cosine, not a
+        # value dragged toward 0 by the empty block
+        total, blocks = morph.v2_similarity_matrix(
+            q, row_zero[None, :], dict(morph.DEFAULT_V2_BLOCK_WEIGHTS))
         s_shape = float(morph.cosine_similarity_matrix(
             q[morph.V2_SHAPE_SLICE[0]:morph.V2_SHAPE_SLICE[1]],
-            row[morph.V2_SHAPE_SLICE[0]:morph.V2_SHAPE_SLICE[1]][None, :])[0])
-        t_a, t_b = morph.V2_TOPOLOGY_SLICE
-        s_top = float(morph.cosine_similarity_matrix(
-            q[t_a:t_b], row[t_a:t_b][None, :])[0])
-        w = morph.DEFAULT_V2_BLOCK_WEIGHTS
-        expected = (w["shape"] * s_shape + w["topology"] * s_top) \
-            / (w["shape"] + w["topology"])
-        assert np.isclose(total[0], expected, atol=1e-9)
+            row_zero[morph.V2_SHAPE_SLICE[0]:morph.V2_SHAPE_SLICE[1]][None, :])[0])
+        assert np.isclose(total[0], s_shape, atol=1e-9)
+        assert np.isclose(blocks["spatial"][0], 0.0, atol=1e-12)
 
     def test_pairwise_agrees_with_one_to_one(self):
         rng = np.random.default_rng(4)
@@ -287,8 +381,10 @@ class TestV2Similarity:
             query_index=None)
         # With zero blocks all cosines are 0 -> overlap drives the score.
         assert total[0] > total[1] > 0
-        # identical -> spatial score 0.5, weighted by 0.4 over all blocks
-        assert np.isclose(total[0], 0.4 * 0.5, atol=1e-9)
+        # identical -> spatial score 0.5, weighted by 0.4; the all-zero rows
+        # count as valid (production _block_cosine_one semantics), so the
+        # renormalizer is shape 0.5 + spatial 0.4 (merged: no topology).
+        assert np.isclose(total[0], 0.4 * 0.5 / (0.5 + 0.4), atol=1e-9)
 
 # ---------------------------------------------------------------------------
 # V2 cache
@@ -372,8 +468,18 @@ class TestComparerV2Wiring:
         c = morph.MorphologyComparer(query="aMe4", dataset="male-cns:v1.0",
                                      method="vector_v2")
         assert c._is_v2
-        assert c._v2_weights == {"shape": 0.5, "spatial": 0.4,
-                                 "topology": 0.1, "roi": 0.2}
+        # topology block removed in schema v4: two-block weights
+        assert c._v2_weights == {"shape": 0.5, "spatial": 0.4, "roi": 0.2}
+
+    def test_unknown_weight_key_ignored(self):
+        c = morph.MorphologyComparer(
+            query=1, dataset="hemibrain:v1.2.1", method="vector_v2",
+            v2_block_weights={"shape": 0.8, "topology": 0.5, "bogus": 9.0},
+            v2_roi_weight=0.0)
+        # "topology" is no longer a known block key and is dropped
+        assert c._v2_weights["shape"] == 0.8
+        assert "topology" not in c._v2_weights
+        assert "bogus" not in c._v2_weights
 
     def test_weight_override(self):
         c = morph.MorphologyComparer(

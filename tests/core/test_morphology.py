@@ -2863,7 +2863,7 @@ class TestProfileFirst:
         sd = Xr.std(axis=0)
         sd[sd <= 0] = 1.0
         Xw = morph.apply_whitening(data["whiten"], (Xr - mu) / sd)
-        hist = Xr[:, 136:232]
+        hist = Xr[:, morph.SPATIAL_HIST_SLICE[0]:morph.SPATIAL_HIST_SLICE[1]]
         hist = hist / np.maximum(hist.sum(axis=1, keepdims=True), 1e-9)
         qz = Xw[0]
         for _, row in res.iterrows():
@@ -3290,7 +3290,7 @@ class TestStepProgress:
             "[DROCAT][progress] 2/6 Discovering candidates (connection cache)",
             "[DROCAT][progress] 3/6 Selecting top 2 candidates for scoring",
             "[DROCAT][progress] 4/6 Loading & vectorizing skeletons",
-            "[DROCAT][progress] 5/6 Scoring similarity (vector: shape + spatial + topology)",
+            "[DROCAT][progress] 5/6 Scoring similarity (vector: shape + spatial)",
             "[DROCAT][progress] 6/6 Saving results",
         ]
 

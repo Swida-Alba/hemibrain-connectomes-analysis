@@ -840,7 +840,7 @@ DEFAULT_SETTING_SPECS = {
         "group": "similarity",
         "kind": "select",
         "options": MORPH_METRIC_OPTIONS,
-        "hint": "Similarity on standardized vectors (Vector method only).",
+        "hint": "Similarity on standardized vectors: cosine or Pearson.",
     },
     "match_algorithm": {
         "label": "NeuronBridge Algorithm",

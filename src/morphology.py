@@ -130,22 +130,28 @@ VECTOR_CACHE_VERSION = 1
 RAW_SKELETON_CACHE_VERSION = 2
 
 # =============================================================================
-# V2 spatial/topological vectorization (opt-in method="vector_v2")
+# V2 spatial vectorization (opt-in method="vector_v2")
 # =============================================================================
 # The V1 124-dim vector is purely shape-statistical: two neurons with the
 # same global size/branching but arborized in different brain regions score
-# identically.  The V2 schema appends three blocks to the SAME V1 features
+# identically.  The V2 schema appends two blocks to the SAME V1 features
 # (nothing is removed, so "vector" results remain reproducible):
-#   spatial  — an arbor ellipsoid (PCA of node coordinates: centroid,
-#              spread, principal axis, anisotropy) plus a cable-mass
-#              histogram over a POPULATION-FIXED bounding box, so absolute
-#              position in the shared template space is preserved;
-#   topology — the leading eigenvalues of the normalized graph Laplacian
-#              (an LLE-family spectral descriptor of branching structure,
-#              scale-normalized and rotation/translation invariant).
-# A fourth, ROI-expansion block (Hellinger pre/post synapse fractions over
+#   shape extras — cheap arbor-geometry scalars the V1 features omit
+#                  (node-radius stats, branch angles, Strahler cable
+#                  fractions);
+#   spatial      — an arbor ellipsoid (PCA of node coordinates: centroid,
+#                  spread, principal axis, anisotropy), a cable-mass
+#                  histogram over a POPULATION-FIXED bounding box, and two
+#                  1-D cable-mass profiles (radial from the centroid and
+#                  midline-distance), so absolute position in the shared
+#                  template space is preserved.
+# A third, ROI-expansion block (Hellinger pre/post synapse fractions over
 # the primary ROIs) is composed at runtime from ``RoiProfileStore`` when the
-# dataset provides one — FAFB/FlyWire runs simply omit it.
+# dataset provides one — FAFB/FlyWire runs simply omit it. The former
+# 24-dim Laplacian topology block was removed in cache schema v4: its
+# eigensolver dominated vectorization time with an intermittent stall
+# (seconds-to-minutes per neuron) while its 10% weight measurably changed
+# nothing in the user-facing ranking (see the morphology benchmark).
 SPATIAL_ELLIPSOID_FEATURES: List[str] = [
     "sp_com_x", "sp_com_y", "sp_com_z",
     "sp_ax1_len", "sp_ax2_len", "sp_ax3_len",
@@ -154,12 +160,29 @@ SPATIAL_ELLIPSOID_FEATURES: List[str] = [
 ]
 SPATIAL_HIST_BINS = (6, 4, 4)          # x/y/z over the population bbox
 SPATIAL_HIST_DIM = SPATIAL_HIST_BINS[0] * SPATIAL_HIST_BINS[1] * SPATIAL_HIST_BINS[2]
-LAPLACIAN_DIM = 24
-# Full-resolution skeletons (FAFB healed bundle) can exceed 100k nodes;
-# eigsh on graphs that large dominates vectorization time. Beyond the cap
-# the graph is stride-subsampled deterministically, keeping the spectrum
-# stable across runs at a bounded cost.
-LAPLACIAN_NODE_CAP = 5000
+# Cheap shape extras (skeletons only; zeros for mesh-representation caches,
+# which carry no radius/branch structure). Computed from the node table in
+# O(k) — radius stats, sibling-edge branch angles at branch points, and
+# cable-length fractions by the Strahler order already computed for
+# strahler_max/strahler_mean.
+SHAPE_EXTRA_FEATURES: List[str] = [
+    "sx_radius_mean", "sx_radius_std", "sx_radius_max", "sx_radius_leaf_mean",
+    "sx_branch_angle_mean", "sx_branch_angle_std",
+    "sx_strahler_frac_1", "sx_strahler_frac_ge4",
+]
+SHAPE_EXTRA_DIM = len(SHAPE_EXTRA_FEATURES)
+# 1-D cable-mass profiles over the population bbox: radial distance from
+# the arbor centroid (rp, scale-free shape of the distribution) and
+# absolute distance from the brain midline (md, region identity along the
+# lateral axis). Both L1-normalized then Hellinger-transformed like the
+# 96-bin histogram.
+SPATIAL_PROFILE_RADIAL_BINS = 8
+SPATIAL_PROFILE_MIDLINE_BINS = 8
+SPATIAL_PROFILE_DIM = SPATIAL_PROFILE_RADIAL_BINS + SPATIAL_PROFILE_MIDLINE_BINS
+SPATIAL_EXTRA_FEATURES: List[str] = (
+    [f"rp_{i}" for i in range(SPATIAL_PROFILE_RADIAL_BINS)]
+    + [f"md_{i}" for i in range(SPATIAL_PROFILE_MIDLINE_BINS)]
+)
 # FAFB bundle population seeding: cache-direct FlyWire searches only see
 # locally vectorized neurons, so a representative random sample of the
 # whole-brain skeleton bundle is vectorized once (and cached) whenever the
@@ -169,22 +192,27 @@ LAPLACIAN_NODE_CAP = 5000
 # cache no longer defines the search population. Set a positive target to
 # opt back into a pre-seeded exploratory pool for cache-direct browsing.
 FAFB_BUNDLE_SAMPLE_TARGET = 0
-SPATIAL_BLOCK_DIM = len(SPATIAL_ELLIPSOID_FEATURES) + SPATIAL_HIST_DIM
-VECTOR_V2_DIM = VECTOR_DIM + SPATIAL_BLOCK_DIM + LAPLACIAN_DIM   # 124+108+24
+SPATIAL_BLOCK_DIM = len(SPATIAL_ELLIPSOID_FEATURES) + SPATIAL_HIST_DIM \
+    + SPATIAL_PROFILE_DIM
+SHAPE_BLOCK_DIM = VECTOR_DIM + SHAPE_EXTRA_DIM
+VECTOR_V2_DIM = SHAPE_BLOCK_DIM + SPATIAL_BLOCK_DIM   # 132+124 = 256
 
 # Column slices of the fixed V2 schema (the optional ROI block is appended
 # beyond the fixed width and carried separately at scoring time).
-V2_SHAPE_SLICE = (0, VECTOR_DIM)
-V2_SPATIAL_SLICE = (VECTOR_DIM, VECTOR_DIM + SPATIAL_BLOCK_DIM)
-V2_TOPOLOGY_SLICE = (VECTOR_V2_DIM - LAPLACIAN_DIM, VECTOR_V2_DIM)
+V2_SHAPE_SLICE = (0, SHAPE_BLOCK_DIM)
+V2_SPATIAL_SLICE = (SHAPE_BLOCK_DIM, VECTOR_V2_DIM)
+# The 96-bin histogram's position inside the spatial block (after the 12
+# ellipsoid features; the radial/midline profiles follow it).
+SPATIAL_HIST_SLICE = (V2_SPATIAL_SLICE[0] + len(SPATIAL_ELLIPSOID_FEATURES),
+                      V2_SPATIAL_SLICE[0] + len(SPATIAL_ELLIPSOID_FEATURES)
+                      + SPATIAL_HIST_DIM)
 
 # Per-block weights of the V2 score: sum(weight * cosine_block). When the
 # ROI block is available its weight is added and ALL weights are renor-
 # malized, so the defaults below describe the ROI-less (FAFB) case.
-# Topology stays deliberately light: its spectrum is a COARSE summary and
-# is satisfied by many unrelated arbors (measured cross-p90 ~0.7 on
-# male-cns), so it must not drive the ranking.
-DEFAULT_V2_BLOCK_WEIGHTS = {"shape": 0.50, "spatial": 0.40, "topology": 0.10}
+# The topology block was removed entirely in schema v4 (cost without
+# ranking effect); ``v2_block_weights`` accepts only shape/spatial keys.
+DEFAULT_V2_BLOCK_WEIGHTS = {"shape": 0.50, "spatial": 0.40}
 DEFAULT_V2_ROI_WEIGHT = 0.2
 
 # Two-pass type reevaluation (vector_v2): after the first scoring pass, the
@@ -200,10 +228,10 @@ DEFAULT_EXPAND_PER_TYPE = 10
 # this the V2 comparison falls back to z-scored per-block cosine.
 MIN_ROWS_FOR_WHITENING = 64
 
-VECTOR_CACHE_V2_VERSION = 3   # 3 = lateral norm + fast (no shift-invert) topology spectra
+VECTOR_CACHE_V2_VERSION = 4   # 4 = Laplacian topology block removed; +8 shape extras (sx_) +16 spatial profile dims (rp_/md_)
 
 # Bump when the whitening fit changes so persisted matrices are refit.
-WHITEN_FIT_VERSION = 2
+WHITEN_FIT_VERSION = 3
 
 # Step-progress totals reported to the web UI during a similarity run
 # (see the [DROCAT][progress] event protocol in ui/components/output_panel.py).
@@ -667,120 +695,152 @@ def compute_spatial_histogram_abs(neuron,
     return np.sqrt(np.maximum(hist, 0.0))
 
 
-def _skeleton_laplacian_spectrum(neuron, k: int = LAPLACIAN_DIM) -> np.ndarray:
-    """Leading eigenvalues of the normalized graph Laplacian (skeletons).
+def compute_shape_extras(neuron) -> np.ndarray:
+    """8 cheap arbor-geometry extras (skeletons; zeros for meshes).
 
-    The skeleton graph (nodes joined by parent edges) is scale-normalized by
-    dividing edge weights by the median edge length, so the spectrum isolates
-    BRANCHING TOPOLOGY from overall size (already covered by the shape
-    block). The first ``k`` eigenvalues ascend from the algebraic
-    connectivity; they are the LLE-family spectral summary of the arbor.
+    Complements the curated V1 morphometrics with node-radius statistics
+    (the V1 feature set only touches radius via ``soma_radius``),
+    sibling-edge branch angles at branch points, and cable-length
+    fractions by the Strahler order computed here with the same
+    reverse-depth idiom as ``compute_morphometrics``. All O(k) from the
+    node table; meshes carry no radius/branch structure and return zeros
+    (same convention as ``soma_radius``).
     """
-    import scipy.sparse as sp
-    from scipy.sparse.linalg import eigsh
-
-    out = np.full(k, 2.0)   # eigenvalues of a normalized Laplacian are <= 2
+    out = np.zeros(SHAPE_EXTRA_DIM)
+    if not (hasattr(neuron, "nodes") and neuron.nodes is not None
+            and len(neuron.nodes)
+            and "parent_id" in neuron.nodes.columns):
+        return out
     df = neuron.nodes
-    if df is None or not len(df) or "parent_id" not in df.columns:
-        return out
+    coords = df[["x", "y", "z"]].to_numpy(dtype=float)
+    parent = df["parent_id"].to_numpy(dtype=np.int64)
+    node_ids = df["node_id"].to_numpy(dtype=np.int64)
     n = len(df)
-    if n < 3:
-        return out
-    coords, edges = _neuron_edges(neuron)
-    if not edges:
-        return out
-    if n > LAPLACIAN_NODE_CAP:
-        # Deterministic stride subsample: bounds eigsh cost on
-        # full-resolution skeletons while staying reproducible.
-        stride = int(np.ceil(n / LAPLACIAN_NODE_CAP))
-        sel = np.arange(0, n, stride)
-        sel_set = {int(x) for x in sel}
-        remap = {int(x): new for new, x in enumerate(sel)}
-        edges = [(remap[int(a)], remap[int(b)]) for a, b in edges
-                 if int(a) in sel_set and int(b) in sel_set]
-        coords = coords[sel]
-        n = len(sel)
-        if not edges:
-            return out
-    rows = [a for a, _ in edges] + [b for _, b in edges]
-    cols = [b for _, b in edges] + [a for a, _ in edges]
-    edge_lens = [float(np.linalg.norm(coords[a] - coords[b])) for a, b in edges]
-    med = float(np.median(edge_lens)) or 1.0
-    vals = [l / med for l in edge_lens] * 2
-    adj = sp.coo_matrix((vals, (rows, cols)), shape=(n, n)).tocsr()
-    deg = np.asarray(adj.sum(axis=1)).ravel()
-    deg[deg <= 0] = 1.0
-    d_inv_sqrt = sp.diags(1.0 / np.sqrt(deg))
-    lap = sp.identity(n, format="csr") - d_inv_sqrt @ adj @ d_inv_sqrt
-    k_eff = min(k, n - 2)
-    if k_eff < 1:
-        return out
-    try:
-        # Smallest eigenvalues of the normalized Laplacian without the
-        # costly shift-invert factorization: they equal
-        # 2 - (largest eigenvalues of 2I - L), which plain Lanczos
-        # ('LA') computes directly on the sparse graph.
-        eigvals = 2.0 - eigsh(2.0 * sp.identity(n, format="csr") - lap,
-                              k=k_eff, which="LA",
-                              return_eigenvectors=False)
-    except Exception:
-        return out
-    eigvals = np.sort(np.real(eigvals))
-    out[:len(eigvals)] = eigvals
-    return np.nan_to_num(out, nan=2.0, posinf=2.0, neginf=2.0)
+    radius = (df["radius"].to_numpy(dtype=float)
+              if "radius" in df.columns else np.zeros(n))
+    radius = np.where(np.isfinite(radius) & (radius > 0), radius, 0.0)
+
+    is_root = ~np.isin(parent, node_ids)
+    id_to_idx = {int(i): k for k, i in enumerate(node_ids)}
+    pidx = np.array([id_to_idx.get(int(p), -1) for p in parent],
+                    dtype=np.int64)
+    has_parent = ~is_root
+
+    # radius statistics (0 when the source carries no radii)
+    pos = radius > 0
+    if pos.any():
+        r = radius[pos]
+        out[0] = float(r.mean())
+        out[1] = float(r.std())
+        out[2] = float(r.max())
+
+    child_count = np.bincount(pidx[has_parent], minlength=n) \
+        if has_parent.any() else np.zeros(n, dtype=np.int64)
+    children: List[List[int]] = [[] for _ in range(n)]
+    for i in range(n):
+        if has_parent[i]:
+            children[pidx[i]].append(i)
+
+    # mean radius at leaf nodes (tips are often behaviorally distinct)
+    leaves = np.where(child_count == 0)[0]
+    leaf_r = radius[leaves]
+    leaf_r = leaf_r[leaf_r > 0]
+    if leaf_r.size:
+        out[3] = float(leaf_r.mean())
+
+    # branch angles: at each branch node, the angle between the unit
+    # vectors to each pair of children
+    angles: List[float] = []
+    for i in np.where(child_count >= 2)[0]:
+        vecs = coords[children[i]] - coords[i]
+        norms = np.linalg.norm(vecs, axis=1)
+        keep = norms > 1e-9
+        if keep.sum() < 2:
+            continue
+        units = vecs[keep] / norms[keep][:, None]
+        for a in range(len(units)):
+            for b in range(a + 1, len(units)):
+                cos = float(np.clip(units[a] @ units[b], -1.0, 1.0))
+                angles.append(np.degrees(np.arccos(cos)))
+    if angles:
+        out[4] = float(np.mean(angles))
+        out[5] = float(np.std(angles))
+
+    # cable-length fractions by Strahler order (edge Strahler = child's)
+    depth = np.zeros(n)
+    stack = [i for i in range(n) if is_root[i]]
+    while stack:
+        i = stack.pop()
+        for c in children[i]:
+            depth[c] = depth[i] + 1
+            stack.append(c)
+    strahler = np.ones(n)
+    for i in sorted(range(n), key=lambda k: -depth[k]):
+        vals = [strahler[c] for c in children[i]]
+        if not vals:
+            strahler[i] = 1
+        elif len(vals) == 1:
+            strahler[i] = vals[0]
+        else:
+            top2 = sorted(vals, reverse=True)[:2]
+            strahler[i] = top2[0] + 1 if top2[0] == top2[1] else top2[0]
+    seg = coords[has_parent] - coords[pidx[has_parent]]
+    edge_len = np.linalg.norm(seg, axis=1)
+    child_str = strahler[np.where(has_parent)[0]]
+    total = float(edge_len.sum())
+    if total > 0:
+        out[6] = float(edge_len[child_str == 1].sum() / total)
+        out[7] = float(edge_len[child_str >= 4].sum() / total)
+    return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def _mesh_laplacian_spectrum(neuron, k: int = LAPLACIAN_DIM,
-                             n_sample: int = 2000, knn: int = 8) -> np.ndarray:
-    """kNN-graph Laplacian spectrum for meshes (vertices subsampled)."""
-    import scipy.sparse as sp
-    from scipy.sparse.linalg import eigsh
+def compute_spatial_profile_extras(neuron,
+                                   bounds: Optional[np.ndarray] = None
+                                   ) -> np.ndarray:
+    """16-dim 1-D cable-mass profiles (see ``SPATIAL_EXTRA_FEATURES``).
 
-    out = np.full(k, 2.0)
-    pts = _neuron_points(neuron)
-    n = len(pts)
-    if n < 3:
+    ``rp_0..7``: radial distance from the arbor centroid in 8 equal bins
+    over [0, max distance] — a scale-free shape-of-distribution summary
+    complementing the absolute-position histogram. ``md_0..7``: absolute
+    distance from the brain midline (x mid of the population bbox) in 8
+    equal bins over [0, x span] — region identity along the lateral axis.
+    Weights are cable length (skeletons) or unit vertex mass (meshes),
+    L1-normalized then Hellinger-transformed like the 96-bin histogram.
+    Zeros when bounds are unknown.
+    """
+    out = np.zeros(SPATIAL_PROFILE_DIM)
+    if bounds is None:
         return out
-    if n > n_sample:
-        rng = np.random.default_rng(0)
-        sel = np.sort(rng.choice(n, n_sample, replace=False))
-        pts = pts[sel]
-        n = n_sample
-    dist = np.linalg.norm(pts[:, None, :] - pts[None, :, :], axis=2)
-    np.fill_diagonal(dist, np.inf)
-    rows = np.repeat(np.arange(n), knn)
-    cols = np.argpartition(dist, knn, axis=1)[:, :knn].ravel()
-    med = float(np.median(dist[rows, cols])) or 1.0
-    vals = np.ones(len(rows))          # unit weights: shape-only topology
-    adj = sp.coo_matrix((vals, (rows, cols)), shape=(n, n)).tocsr()
-    adj = adj.maximum(adj.T)
-    deg = np.asarray(adj.sum(axis=1)).ravel()
-    deg[deg <= 0] = 1.0
-    d_inv_sqrt = sp.diags(1.0 / np.sqrt(deg))
-    lap = sp.identity(n, format="csr") - d_inv_sqrt @ adj @ d_inv_sqrt
-    k_eff = min(k, n - 2)
-    if k_eff < 1:
+    bounds = np.asarray(bounds, dtype=float)
+    if bounds.shape != (2, 3):
         return out
-    try:
-        # Smallest eigenvalues of the normalized Laplacian without the
-        # costly shift-invert factorization: they equal
-        # 2 - (largest eigenvalues of 2I - L), which plain Lanczos
-        # ('LA') computes directly on the sparse graph.
-        eigvals = 2.0 - eigsh(2.0 * sp.identity(n, format="csr") - lap,
-                              k=k_eff, which="LA",
-                              return_eigenvectors=False)
-    except Exception:
+    mids, weights = _cable_mass_points(neuron)
+    if not len(mids):
         return out
-    eigvals = np.sort(np.real(eigvals))
-    out[:len(eigvals)] = eigvals
-    return np.nan_to_num(out, nan=2.0, posinf=2.0, neginf=2.0)
-
-
-def compute_laplacian_spectrum(neuron, k: int = LAPLACIAN_DIM) -> np.ndarray:
-    """Laplacian-spectrum topology block; dispatches skeleton vs mesh."""
-    if hasattr(neuron, "nodes") and neuron.nodes is not None and len(neuron.nodes):
-        return _skeleton_laplacian_spectrum(neuron, k)
-    return _mesh_laplacian_spectrum(neuron, k)
+    total = float(weights.sum())
+    if total <= 0:
+        return out
+    centroid = mids.mean(axis=0)
+    dist = np.linalg.norm(mids - centroid, axis=1)
+    r_max = float(dist.max())
+    if r_max > 0:
+        frac = np.clip(dist / r_max, 0.0, 1.0 - 1e-9)
+        idx = np.floor(frac * SPATIAL_PROFILE_RADIAL_BINS).astype(np.int64)
+        prof = np.bincount(idx, weights=weights / total,
+                           minlength=SPATIAL_PROFILE_RADIAL_BINS)
+        out[:SPATIAL_PROFILE_RADIAL_BINS] = np.sqrt(
+            np.maximum(prof, 0.0))
+    mid_x = 0.5 * (float(bounds[0][0]) + float(bounds[1][0]))
+    span_x = float(bounds[1][0] - bounds[0][0])
+    if span_x > 0:
+        dmid = np.abs(mids[:, 0] - mid_x)
+        frac = np.clip(dmid / span_x, 0.0, 1.0 - 1e-9)
+        idx = np.floor(frac * SPATIAL_PROFILE_MIDLINE_BINS).astype(np.int64)
+        prof = np.bincount(idx, weights=weights / total,
+                           minlength=SPATIAL_PROFILE_MIDLINE_BINS)
+        out[SPATIAL_PROFILE_RADIAL_BINS:] = np.sqrt(
+            np.maximum(prof, 0.0))
+    return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def _lateral_reflected(neuron, mid_x: float):
@@ -810,18 +870,20 @@ def vectorize_neuron_v2(neuron,
     """Return (24-feature dict, 256-dim V2 vector).
 
     The first 124 dims are the V1 vector (identical schema and values); the
-    appended blocks carry spatial expansion (ellipsoid + population-bbox
-    histogram) and topology (Laplacian spectrum). ``spatial_bounds`` comes
-    from the cache's population estimate; without it the histogram block is
-    zeros (ellipsoid/topology still apply).
+    appended 8 shape-extra dims carry arbor geometry the V1 features omit
+    (radius stats, branch angles, Strahler cable fractions); the appended
+    124 spatial dims carry position (ellipsoid + population-bbox
+    histogram + radial/midline cable-mass profiles). ``spatial_bounds``
+    comes from the cache's population estimate; without it the histogram
+    and midline-profile blocks are zeros (ellipsoid/radial still apply).
 
     ``lateral_normalize`` reflects right-hemisphere arbors (centroid x past
     the bounds midline) onto the left BEFORE the spatial features are
     computed. Stored this way, every neuron of a dataset is represented on
     one hemisphere, so type-level aggregation can no longer average L and R
     positions into a midline blur; L/R homologs compare directly. The V1
-    prefix is reflection-invariant and unaffected, and the topology block
-    (a Laplacian spectrum) is reflection-invariant too.
+    prefix and shape extras are reflection-invariant and unaffected, and
+    the radial/midline profiles are mirror-invariant too.
     """
     morph, v1 = vectorize_neuron(neuron)
     spatial_view = neuron
@@ -832,9 +894,10 @@ def vectorize_neuron_v2(neuron,
             spatial_view = _lateral_reflected(neuron, mid_x)
     vector = np.concatenate([
         v1,
+        compute_shape_extras(neuron),
         compute_spatial_ellipsoid(spatial_view),
         compute_spatial_histogram_abs(spatial_view, spatial_bounds),
-        compute_laplacian_spectrum(neuron),
+        compute_spatial_profile_extras(spatial_view, spatial_bounds),
     ])
     if vector.shape[0] != VECTOR_V2_DIM:   # defensive: never mis-slice blocks
         raise ValueError(
@@ -1718,11 +1781,12 @@ def _mirror_spatial_block(block: np.ndarray) -> np.ndarray:
     """Mirror a spatial block across the brain midline (x-axis flip).
 
     The ellipsoid's x-signed features (centroid x, principal-axis x) flip
-    sign; the histogram's x-bin order reverses. Applied to standardized/
-    whitened vectors this is an approximation of scoring in the mirrored
-    space — exact when the population statistics are LR-symmetric, which a
-    full-brain population approximately is (the ROI screen makes the same
-    assumption).
+    sign; the histogram's x-bin order reverses. The radial and midline-
+    distance profiles are mirror-invariant (distances don't change sign)
+    and pass through untouched. Applied to standardized/whitened vectors
+    this is an approximation of scoring in the mirrored space — exact when
+    the population statistics are LR-symmetric, which a full-brain
+    population approximately is (the ROI screen makes the same assumption).
     """
     values = np.asarray(block, dtype=float)
     single = values.ndim == 1
@@ -1730,9 +1794,11 @@ def _mirror_spatial_block(block: np.ndarray) -> np.ndarray:
     n_ell = len(SPATIAL_ELLIPSOID_FEATURES)
     m[:, 0] = -m[:, 0]    # sp_com_x
     m[:, 6] = -m[:, 6]    # sp_ax1_x
-    hist = m[:, n_ell:].reshape(-1, SPATIAL_HIST_BINS[0],
-                                SPATIAL_HIST_BINS[1], SPATIAL_HIST_BINS[2])
-    m[:, n_ell:] = np.flip(hist, axis=1).reshape(len(m), -1)
+    hist_end = n_ell + SPATIAL_HIST_DIM
+    hist = m[:, n_ell:hist_end].reshape(-1, SPATIAL_HIST_BINS[0],
+                                        SPATIAL_HIST_BINS[1],
+                                        SPATIAL_HIST_BINS[2])
+    m[:, n_ell:hist_end] = np.flip(hist, axis=1).reshape(len(m), -1)
     return m[0] if single else m
 
 
@@ -1744,8 +1810,8 @@ def v2_similarity_matrix(query: np.ndarray, matrix: np.ndarray,
                          ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """Block-weighted V2 similarity of one query against matrix rows.
 
-    Fixed blocks (shape / spatial / topology) are column slices of the full
-    V2 schema; ``extra_blocks`` carries run-composed blocks as
+    Fixed blocks (shape / spatial) are column slices of the full V2 schema;
+    ``extra_blocks`` carries run-composed blocks as
     ``(name, weight, query_block, candidate_matrix)`` — the ROI-expansion
     block, whose width depends on the dataset's ROI count. Each block
     contributes ``weight * cosine_block`` over the rows where the block is
@@ -1786,13 +1852,15 @@ def v2_similarity_matrix(query: np.ndarray, matrix: np.ndarray,
         total += weight * np.where(valid, scores, 0.0)
         total_w += np.where(valid, weight, 0.0)
 
+    # Block slices are clamped to the input width: a V1-width snapshot
+    # (e.g. the warmed V1 counterpart cache) is scored by its shape prefix.
     for name, (a, b) in (("shape", V2_SHAPE_SLICE),
-                         ("spatial", V2_SPATIAL_SLICE),
-                         ("topology", V2_TOPOLOGY_SLICE)):
+                         ("spatial", V2_SPATIAL_SLICE)):
+        b_eff = min(b, q.shape[0])
         weight = float(block_weights.get(name, 0.0))
-        if weight <= 0 or b > q.shape[0]:
+        if weight <= 0 or a >= b_eff:
             continue
-        _accumulate(name, weight, q[a:b], m[:, a:b])
+        _accumulate(name, weight, q[a:b_eff], m[:, a:b_eff])
     for name, weight, q_block, m_block in (extra_blocks or []):
         weight = float(weight)
         if weight <= 0 or not len(m_block):
@@ -1815,13 +1883,15 @@ def v2_pairwise_matrix(matrix: np.ndarray,
     n = len(values)
     total_w = np.zeros((n, n))
     total = np.zeros((n, n))
+    # Slice clamp, as in v2_similarity_matrix (V1-width snapshots are
+    # scored by their shape prefix).
     for name, (a, b) in (("shape", V2_SHAPE_SLICE),
-                         ("spatial", V2_SPATIAL_SLICE),
-                         ("topology", V2_TOPOLOGY_SLICE)):
+                         ("spatial", V2_SPATIAL_SLICE)):
+        b_eff = min(b, values.shape[1])
         weight = float(block_weights.get(name, 0.0))
-        if weight <= 0 or b > values.shape[1]:
+        if weight <= 0 or a >= b_eff:
             continue
-        block = values[:, a:b]
+        block = values[:, a:b_eff]
         norms = np.linalg.norm(block, axis=1)
         valid = norms > 1e-12
         normalized = block / np.maximum(norms[:, None], 1e-12)
@@ -3211,9 +3281,10 @@ class SkeletonVectorCacheV2(SkeletonVectorCache):
     @staticmethod
     def _raw_matrix(df: pd.DataFrame) -> np.ndarray:
         cols = (MORPHOMETRIC_FEATURES + [f"pv_{i}" for i in range(PERSISTENCE_DIM)]
+                + SHAPE_EXTRA_FEATURES
                 + SPATIAL_ELLIPSOID_FEATURES
                 + [f"sh_{i}" for i in range(SPATIAL_HIST_DIM)]
-                + [f"lp_{i}" for i in range(LAPLACIAN_DIM)])
+                + SPATIAL_EXTRA_FEATURES)
         return df[cols].to_numpy(dtype=float)
 
     def _vector_dim(self) -> int:
@@ -3231,9 +3302,10 @@ class SkeletonVectorCacheV2(SkeletonVectorCache):
 
     def _feature_columns(self) -> List[str]:
         return (MORPHOMETRIC_FEATURES + [f"pv_{i}" for i in range(PERSISTENCE_DIM)]
+                + SHAPE_EXTRA_FEATURES
                 + SPATIAL_ELLIPSOID_FEATURES
                 + [f"sh_{i}" for i in range(SPATIAL_HIST_DIM)]
-                + [f"lp_{i}" for i in range(LAPLACIAN_DIM)])
+                + SPATIAL_EXTRA_FEATURES)
 
     def _cache_version(self) -> int:
         return VECTOR_CACHE_V2_VERSION
@@ -5782,10 +5854,10 @@ class MorphologyComparer:
         return results
 
     def _scoring_step_label(self) -> str:
-        """Label for the scoring step (vector vs NBLAST refinement)."""
+        return "Scoring similarity (vector: shape + spatial)"
         if self.method == "nblast":
             return "Building dotprops & NBLAST scoring"
-        return "Scoring similarity (vector: shape + spatial + topology)"
+        return "Scoring similarity (vector: shape + spatial)"
 
     # ---------------------------------------------------- profile-first
     def _connection_cache_candidates(self, query_df: pd.DataFrame,
@@ -6511,7 +6583,7 @@ class MorphologyComparer:
                         "metric": self.metric,
                         "candidate_source": source,
                     }
-                    for name in ("shape", "spatial", "topology"):
+                    for name in ("shape", "spatial"):
                         if name in q_blocks and pos is not None:
                             row[f"sim_{name}"] = float(q_blocks[name][pos])
                     if "roi" in q_blocks and pos is not None:
@@ -6705,8 +6777,7 @@ class MorphologyComparer:
         compare one hemisphere against one hemisphere. None when the raw
         rows are unavailable.
         """
-        hist_lo, hist_hi = V2_SPATIAL_SLICE[0] + len(SPATIAL_ELLIPSOID_FEATURES), \
-            V2_SPATIAL_SLICE[1]
+        hist_lo, hist_hi = SPATIAL_HIST_SLICE
         if cache_data is None or cache_data.get("raw") is None:
             return None
         raw = np.asarray(cache_data["raw"], dtype=float)
@@ -6925,8 +6996,7 @@ class MorphologyComparer:
         # to cover the new candidates.
         new_idx = np.arange(pool_len, pool_len + len(order))
         if self._v2_spatial_overlap is not None:
-            hist_lo = V2_SPATIAL_SLICE[0] + len(SPATIAL_ELLIPSOID_FEATURES)
-            hist_hi = V2_SPATIAL_SLICE[1]
+            hist_lo, hist_hi = SPATIAL_HIST_SLICE
             new_h = np.zeros((len(order), hist_hi - hist_lo))
             for k, bid in enumerate(order):
                 vec = vec_by_id.get(bid)
@@ -6988,7 +7058,7 @@ class MorphologyComparer:
                     "candidate_source": source,
                     "pool_stage": "expansion",
                 }
-                for name in ("shape", "spatial", "topology", "roi"):
+                for name in ("shape", "spatial", "roi"):
                     if name in blocks:
                         row[f"sim_{name}"] = float(blocks[name][k])
                 rows.append(row)
@@ -7244,7 +7314,7 @@ class MorphologyComparer:
             if target_type:
                 grouped[target_type].append(row)
 
-        block_keys = [k for k in ("sim_shape", "sim_spatial", "sim_topology",
+        block_keys = [k for k in ("sim_shape", "sim_spatial",
                                   "sim_roi")
                       if any(k in r for r in rows)]
 
@@ -7396,7 +7466,7 @@ class MorphologyComparer:
                 "similarity", "type_coverage", "profile_similarity",
                 "roi_similarity",
                 "is_same_type", "intra_type_similarity", "method", "metric"]
-        tail = ["sim_shape", "sim_spatial", "sim_topology", "sim_roi",
+        tail = ["sim_shape", "sim_spatial", "sim_roi",
                 "source_bodyId", "source_type", "candidate_source",
                 "pool_stage"]
         ordered_cols = [c for c in base + tail if c in result.columns]

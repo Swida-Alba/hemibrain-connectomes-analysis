@@ -44,24 +44,31 @@ returned and written.
 `vector_v2` is the DEFAULT and only vector method (the legacy global-shape
 `"vector"` method was removed). It keeps the search pipeline (screening,
 pooling, output) and pairs the vector schema with a block-weighted scorer.
-The 256-dim V2 vector = the V1 124 dims
-plus a **spatial block** (12-dim arbor ellipsoid from node-coordinate PCA +
-96-dim cable-mass histogram over a population-fixed bounding box) and a
-**topology block** (24 leading eigenvalues of the normalized graph Laplacian,
-scale-normalized). On NeuPrint datasets a 288-dim ROI-expansion block
-(Hellinger pre/post fractions over the primary ROIs) is composed at runtime and
-scored with weight `v2_roi_weight=0.2`; FAFB/FlyWire runs omit it.
+The 256-dim V2 vector (cache schema v4) = the V1 124 dims + 8 **shape
+extras** (`sx_*`: node-radius stats, sibling-edge branch angles at branch
+points, cable-length fractions by Strahler order) + a **spatial block**
+(12-dim arbor ellipsoid from node-coordinate PCA + 96-dim cable-mass
+histogram over a population-fixed bounding box + 16-dim 1-D cable-mass
+profiles: 8 radial bins from the arbor centroid and 8 midline-distance
+bins). The former 24-dim Laplacian topology block was REMOVED in v4: its
+eigensolver caused an intermittent vectorization cost lottery (median
+0.3 s, tail to ~400 s/neuron) while its 10% weight measurably changed
+nothing in the user-facing ranking (production-run analysis, l-LNv +
+aMe12 2026-08-29: dropping it leaves top-10 type overlap 9-10/10,
+Spearman >= 0.96). On NeuPrint datasets a 288-dim ROI-expansion block
+(Hellinger pre/post fractions over the primary ROIs) is composed at runtime
+and scored with weight `v2_roi_weight=0.2`; FAFB/FlyWire runs omit it.
 
-Scoring is per-block cosine with weights
-`v2_block_weights` (default shape 0.50 / spatial 0.40 / topology 0.10 —
-topology is a coarse, weakly-specific signal and stays light; weights are
-renormalized over the blocks defined per row — a zero block carries no
-evidence instead of a zero score) after **truncated ZCA whitening** of the
-standardized population: whitening directions whose covariance eigenvalue
-is below 1% of the largest is skipped (they carry only population noise —
-amplifying them once collapsed every cosine toward 1), and the gain of
-kept directions is capped (max 10x). The whitener is persisted beside the
-cache with a fit version; identity below 64 rows.
+Scoring is per-block cosine with weights `v2_block_weights` (default
+shape 0.50 / spatial 0.40; effective .556/.444 after renormalization)
+after **truncated ZCA whitening** of the standardized population:
+whitening directions whose covariance eigenvalue is below 1% of the
+largest is skipped (they carry only population noise — amplifying them
+once collapsed every cosine toward 1), and the gain of kept directions is
+capped (max 10x). The whitener is persisted beside the cache with a fit
+version; identity below 64 rows. Block slices are clamped to the input
+width, so V1-width snapshots (the warmed V1 counterpart cache) are scored
+by their shape prefix.
 
 **Spatial block**: right-hemisphere arbors are reflected onto the left at
 vectorization time (lateral normalization, cache schema v2), so type-level
@@ -91,7 +98,7 @@ exclusion; sparse types are damped, fully covered types pass through
 untouched. Columns `type_coverage`, `similarity_raw`, and `similarity_max`
 document the treatment in type_summary.csv; the bodyId-level results.csv
 carries `type_coverage` per row. Per-block score columns (`sim_shape`,
-`sim_spatial`, `sim_topology`, `sim_roi`) are written to results.csv and
+`sim_spatial`, `sim_roi`) are written to results.csv and
 averaged into type_summary.csv.
 
 **Connectivity-profile evidence backfill**: the `profile_similarity` column
@@ -112,7 +119,7 @@ Block weights and basis are recorded in the run README.
 ```python
 comparer = MorphologyComparer(
     query="aMe4", dataset="male-cns:v1.0", method="vector_v2",
-    v2_block_weights={"shape": 0.45, "spatial": 0.35, "topology": 0.20},
+    v2_block_weights={"shape": 0.5, "spatial": 0.4},
     v2_roi_weight=0.2,                  # 0 disables the ROI block
 )
 ```

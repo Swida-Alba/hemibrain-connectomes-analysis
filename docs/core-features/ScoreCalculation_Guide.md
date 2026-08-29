@@ -465,9 +465,17 @@ weight vectors.
 | `profile_similarity`  | shared-count / max-shared-count (normalized shared-partner count) | 0–1 |
 | `intra_type_similarity` | mean pairwise similarity of the type's members (the intra-type reference) | 0–1 |
 
-For the vector method each neuron is reduced to ~24 morphometrics plus a
-100-dim persistence block; the candidate pool is z-scored with pool-computed
-statistics so cosine scores stay scale-fair regardless of the local
+For the vector method (vector_v2) each neuron is reduced to a 256-dim
+vector: a 132-dim shape block (24 morphometrics + 100-dim persistence + 8
+arbor-geometry extras such as node-radius stats and branch angles) and a
+124-dim spatial block (arbor ellipsoid + cable-mass histogram over the
+population bounding box + radial and midline-distance cable-mass
+profiles). The former 24-dim Laplacian topology block was removed in cache
+schema v4 — its eigensolver dominated vectorization time while its 10%
+weight changed nothing in the user-facing ranking. Scoring is per-block
+cosine on z-scored (and ZCA-whitened) vectors with block weights — default
+shape 0.50 / spatial 0.40, effective .556/.444 after renormalization — so
+cosine scores stay scale-fair and region-fair regardless of the local
 population.
 
 ---
