@@ -6338,7 +6338,10 @@ class HomologFinder:
             combined_path=combined_path,
             source_dataset=source_dataset,
             target_dataset=target_dataset,
-            queries=[str(u['query']) for u in units],
+            # A coarse label expands into one unit per real type, all sharing
+            # the same 'query' label; dedupe so README/type_summary list each
+            # query once.
+            queries=list(dict.fromkeys(str(u['query']) for u in units)),
             similarity_metric=similarity_metric,
         )
 

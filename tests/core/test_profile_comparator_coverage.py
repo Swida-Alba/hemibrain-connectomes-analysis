@@ -1015,6 +1015,12 @@ def test_find_homologs_multi_writes_combined_grouped_output(finder, tmp_path, mo
     assert 'source_type' in summary_df.columns
     assert 'target_type' in summary_df.columns
 
+    # A coarse label expands into several real-type units sharing the same
+    # 'query' label; the combined outputs must list each query only once.
+    readme = (combined_path / 'README.txt').read_text(encoding='utf-8')
+    assert 'Query Types: cellclass, T2\n' in readme
+    assert summary_df['query'].eq('cellclass,T2').all()
+
     # Per-type subfolders for every resolved type, each with per-type visualization.
     for sub in ['R1', 'R2', 'T2']:
         assert (combined_path / 'by_type' / sub / 'results').is_dir()
