@@ -2411,8 +2411,10 @@ class VisualizeSkeleton:
     Set by type-level callers (e.g. the morphology comparer's top-results
     render) when a result layer shows fewer neurons than its type has:
     each note names the layer, the rendered count, and the type's member
-    count. When non-empty, the saved HTML page carries an in-page
-    truncation warning banner listing the notes. Has no effect on scoring.
+    count. When non-empty, the saved HTML page carries a single-row
+    truncation warning inside the combined in-page banner, and the
+    per-layer details are written to user_warning_notes.txt. Has no
+    effect on scoring.
     '''
 
     brain_mesh: str = 'none'
@@ -2874,11 +2876,6 @@ class VisualizeSkeleton:
                 'skeleton-node reduction.'
             )
         return (
-            '<div id="drocat-skeleton-simplification-warning" role="alert" '
-            'style="box-sizing:border-box;width:100%;padding:10px 14px;'
-            'margin:0 0 8px 0;border:1px solid #d99a2b;border-left:5px solid '
-            '#d97706;border-radius:6px;background:#fff8e6;color:#5b4300;'
-            'font:14px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">'
             '<strong>Skeleton simplification warning.</strong> '
             f'{family} dataset <code>{dataset}</code> is rendered with '
             f'<code>skeleton_mesh_simplification={value:.3f}</code>, above '
@@ -2887,18 +2884,18 @@ class VisualizeSkeleton:
             'simplification value in the visualization settings for more '
             f'detail.{pipeline_note} This affects visualization only; analysis graphs and '
             'query results are unchanged.'
-            '</div>'
         )
 
     def _line_mode_export_warning_html(self):
-        """Build the in-page warning raised for line-mode skeleton renders.
+        """Build the in-page warning text raised for line-mode renders.
 
         Line plots bypass the tube-mesh pipeline entirely, so the
         high-quality export pipeline (exported PNG views, rotating videos,
         and individual PDF/PPTX profiles) captures the same lightweight
         line rendering instead of detailed tube meshes.  Every line-mode
         page carries this warning so exported artifacts are not mistaken
-        for high-quality tube renders.
+        for high-quality tube renders.  Returns the banner paragraph only;
+        ``_in_page_warning_html`` supplies the shared single-banner styling.
         """
         if str(getattr(self, 'skeleton_mode', 'tube') or 'tube').lower() != 'line':
             return ''
@@ -2909,11 +2906,6 @@ class VisualizeSkeleton:
 
         dataset = escape(str(getattr(self, 'dataset', '') or ''))
         return (
-            '<div id="drocat-line-mode-export-warning" role="alert" '
-            'style="box-sizing:border-box;width:100%;padding:10px 14px;'
-            'margin:0 0 8px 0;border:1px solid #d99a2b;border-left:5px solid '
-            '#d97706;border-radius:6px;background:#fff8e6;color:#5b4300;'
-            'font:14px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">'
             '<strong>Line-mode skeleton rendering.</strong> '
             f'<code>{dataset}</code> is plotted with line-mode skeletons: '
             'thin, radius-less lines that bypass the tube-mesh pipeline. '
@@ -2924,27 +2916,22 @@ class VisualizeSkeleton:
             "Skeleton Mode to 'tube' for high-quality exports. This affects "
             'visualization only; analysis graphs and query results are '
             'unchanged.'
-            '</div>'
         )
 
     def _pre_post_mode_warning_html(self):
-        """Build the in-page warning banner for pre/post-site synapse mode.
+        """Build the in-page warning text for pre/post-site synapse mode.
 
         Pre/post-site mode shows the input/output SITES of the queried neurons
-        rather than the paired inter-layer synapses; the banner makes that
+        rather than the paired inter-layer synapses; the warning makes that
         distinction explicit so exported artifacts are not mis-read as paired
-        connector view.
+        connector view.  Returns the banner paragraph only;
+        ``_in_page_warning_html`` supplies the shared single-banner styling.
         """
         if str(getattr(self, 'synapse_mode', '') or '').lower() != 'pre_post':
             return ''
         from html import escape
         dataset = escape(str(getattr(self, 'dataset', '') or ''))
         return (
-            '<div id="drocat-pre-post-sites-warning" role="alert" '
-            'style="box-sizing:border-box;width:100%;padding:10px 14px;'
-            'margin:0 0 8px 0;border:1px solid #d99a2b;border-left:5px solid '
-            '#d97706;border-radius:6px;background:#fff8e6;color:#5b4300;'
-            'font:14px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">'
             '<strong>Pre/post-synaptic site mode.</strong> '
             f'<code>{dataset}</code> is plotted with <code>synapse_mode=pre_post</code>: '
             'this shows the pre- and post-synaptic SITES of the queried neurons '
@@ -2955,57 +2942,73 @@ class VisualizeSkeleton:
             'regardless of which other neuron they connect to, with a separate '
             'legend for pre and post sites per layer. This affects visualization '
             'only; analysis graphs and query results are unchanged.'
-            '</div>'
         )
 
     def _layer_sampling_warning_html(self):
-        """In-page banner for type layers whose member sample was capped.
+        """One-row in-page note for type layers whose sample was capped.
 
         Type-level callers (e.g. the morphology comparer's top-results
         render) resolve each result layer's members from the type's member
         list bounded by a per-layer render cap. When a layer shows fewer
         neurons than its type has, the caller passes human-readable notes
-        via ``layer_sample_notes`` and this banner lists them so exported
-        artifacts are not mistaken for the complete type.
+        via ``layer_sample_notes``; the banner stays a single row that
+        points to ``user_warning_notes.txt``, which carries the per-layer
+        details.  Returns the banner paragraph only;
+        ``_in_page_warning_html`` supplies the shared single-banner styling.
         """
         notes = list(getattr(self, 'layer_sample_notes', None) or [])
         if not notes:
             return ''
 
-        # Escape note text before inserting it into generated HTML.  The
-        # notes are generated from user-provided type/layer names.
-        from html import escape
-
-        items = ''.join(
-            f'<li>{escape(str(note))}</li>' for note in notes
-        )
+        count = len(notes)
+        layer_word = 'layer' if count == 1 else 'layers'
+        verb = 'shows' if count == 1 else 'show'
         return (
-            '<div id="drocat-layer-sampling-warning" role="alert" '
-            'style="box-sizing:border-box;width:100%;padding:10px 14px;'
-            'margin:0 0 8px 0;border:1px solid #d99a2b;border-left:5px solid '
-            '#d97706;border-radius:6px;background:#fff8e6;color:#5b4300;'
-            'font:14px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">'
             '<strong>Truncated type layers.</strong> '
-            'Type-level rendering shows a capped sample of each layer\'s '
-            'members, so the layers below contain fewer neurons than their '
-            f'type has: <ul style="margin:6px 0 0 0;padding-left:20px;">'
-            f'{items}</ul> This affects visualization only; analysis graphs '
-            'and query results are unchanged.'
-            '</div>'
+            f'{count} type {layer_word} {verb} a capped sample of their '
+            'type\'s members, so they render fewer neurons than their type '
+            'has; per-layer details are in <code>user_warning_notes.txt'
+            '</code>. This affects visualization only; analysis graphs and '
+            'query results are unchanged.'
         )
 
-    def _inject_skeleton_simplification_warning(self, html_path):
-        """Insert the in-page warning banner(s) at the top of a full HTML page."""
-        warning_html = '\n'.join(
-            banner
-            for banner in (
+    def _in_page_warning_html(self):
+        """Fold every applicable rendering caveat into ONE warning banner.
+
+        Mesh simplification, line-mode exports, pre/post-site mode, and
+        capped type-layer samples each contribute a paragraph; a page
+        never carries more than a single styled warning box.
+        """
+        sections = [
+            section
+            for section in (
                 self._skeleton_simplification_warning_html(),
                 self._line_mode_export_warning_html(),
                 self._pre_post_mode_warning_html(),
                 self._layer_sampling_warning_html(),
             )
-            if banner
+            if section
+        ]
+        if not sections:
+            return ''
+
+        paragraphs = ''.join(
+            f'<p style="{"margin:0;" if i == 0 else "margin:6px 0 0 0;"}">'
+            f'{section}</p>'
+            for i, section in enumerate(sections)
         )
+        return (
+            '<div id="drocat-in-page-warning" role="alert" '
+            'style="box-sizing:border-box;width:100%;padding:10px 14px;'
+            'margin:0 0 8px 0;border:1px solid #d99a2b;border-left:5px solid '
+            '#d97706;border-radius:6px;background:#fff8e6;color:#5b4300;'
+            'font:14px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">'
+            f'{paragraphs}</div>'
+        )
+
+    def _inject_in_page_warning(self, html_path):
+        """Insert the single combined warning banner at the top of a page."""
+        warning_html = self._in_page_warning_html()
         if not warning_html or not os.path.exists(html_path):
             return
 
@@ -3014,8 +3017,10 @@ class VisualizeSkeleton:
                 html = handle.read()
 
             # Avoid duplicate banners when an existing file is decorated by a
-            # retry/export path more than once.
-            if ('drocat-skeleton-simplification-warning' in html
+            # retry/export path more than once.  The legacy ids keep pages
+            # written by older versions from being decorated a second time.
+            if ('drocat-in-page-warning' in html
+                    or 'drocat-skeleton-simplification-warning' in html
                     or 'drocat-line-mode-export-warning' in html
                     or 'drocat-pre-post-sites-warning' in html
                     or 'drocat-layer-sampling-warning' in html):
@@ -3048,7 +3053,7 @@ class VisualizeSkeleton:
                 handle.write(html)
         except Exception as exc:
             self._vprint(
-                f'  Warning: could not add HTML simplification warning: {exc}',
+                f'  Warning: could not add HTML in-page warning: {exc}',
                 level='full',
             )
 
@@ -3064,7 +3069,7 @@ class VisualizeSkeleton:
         kwargs.setdefault('full_html', True)
         kwargs.setdefault('include_plotlyjs', True)
         figure.write_html(html_path, **kwargs)
-        self._inject_skeleton_simplification_warning(html_path)
+        self._inject_in_page_warning(html_path)
         self._record_large_html_warning(html_path)
 
     def _simplify_mesh_open3d(self, trimesh_obj, target_faces):
@@ -5879,6 +5884,21 @@ class VisualizeSkeleton:
                 "paired inter-layer synapses; there is a separate legend for pre and "
                 "post sites per layer.\n"
             )
+        # Per-layer truncation details for capped type layers.  The in-page
+        # banner carries only a one-row summary pointing here, so this file
+        # must list every affected layer.
+        sample_notes = list(getattr(self, "layer_sample_notes", None) or [])
+        truncation_note = ""
+        if sample_notes:
+            count = len(sample_notes)
+            layer_word = "layer" if count == 1 else "layers"
+            verb = "shows" if count == 1 else "show"
+            details = "".join(f"  - {note}\n" for note in sample_notes)
+            truncation_note = (
+                f"- [truncated type layers] {count} type {layer_word} {verb} a "
+                "capped sample of their type's members (fewer neurons than the "
+                f"type has); per-layer details:\n{details}"
+            )
         note_path = os.path.join(self.save_folder, "user_warning_notes.txt")
         text = (
             "DROCAT user warning notes\n"
@@ -5891,6 +5911,7 @@ class VisualizeSkeleton:
               f"skeleton_mesh_simplification={value_text} ({scope}; "
               f"{warning_note}).\n"
             + pre_post_note
+            + truncation_note
         )
         try:
             with open(note_path, "w", encoding="utf-8") as f:

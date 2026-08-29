@@ -276,39 +276,60 @@ class TestWarningBanners:
         vis = make_vis(skeleton_mode='tube', skeleton_mesh_simplification=0.99,
                        neuprint_skeleton_pipeline='fast')
         html = vis._skeleton_simplification_warning_html()
-        assert 'drocat-skeleton-simplification-warning' in html
-        assert 'simp90' in html or 'simp 90' in html or 'simp90' in html or '0.90' in html
+        assert 'Skeleton simplification warning.' in html
+        assert '0.90' in html
         vis.neuprint_skeleton_pipeline = 'fine'
         assert 'raw .swc.gz source' in vis._skeleton_simplification_warning_html()
         vis.dataset = 'flywire_FAFB_v783'
         assert 'soma-aware mesh cache' in vis._skeleton_simplification_warning_html()
         vis.skeleton_mesh_simplification = 0.90
         assert vis._skeleton_simplification_warning_html() == ''
+        assert vis._in_page_warning_html() == ''
 
     def test_line_mode_warning_html(self):
         vis = make_vis(skeleton_mode='tube')
         assert vis._line_mode_export_warning_html() == ''
         vis.skeleton_mode = 'line'
         html = vis._line_mode_export_warning_html()
-        assert 'drocat-line-mode-export-warning' in html
+        assert 'Line-mode skeleton rendering.' in html
         assert 'hemibrain' in html
+
+    def test_combined_in_page_warning_is_single_banner(self):
+        vis = make_vis(
+            skeleton_mode='line',
+            skeleton_mesh_simplification=0.99,
+            synapse_mode='pre_post',
+            layer_sample_notes=["r1_T1: showing 20 of 25 members"])
+        html = vis._in_page_warning_html()
+        # exactly one styled banner wrapping every applicable section
+        assert html.count('drocat-in-page-warning') == 1
+        assert html.startswith('<div id="drocat-in-page-warning"')
+        assert html.endswith('</div>')
+        assert 'Line-mode skeleton rendering.' in html
+        assert 'Pre/post-synaptic site mode.' in html
+        assert 'Truncated type layers.' in html
+        # line mode suppresses the tube-mesh simplification section
+        assert 'Skeleton simplification warning.' not in html
+        assert html.count('<strong>') == 3
+        # sections render as plain paragraphs inside the one banner
+        assert '<li>' not in html
 
     def test_inject_warning_into_html(self, tmp_path):
         vis = make_vis(skeleton_mode='line', save_folder=str(tmp_path))
         page = tmp_path / 'page.html'
         page.write_text('<html><body><div>plot</div></body></html>')
-        vis._inject_skeleton_simplification_warning(str(page))
+        vis._inject_in_page_warning(str(page))
         content = page.read_text()
-        assert 'drocat-line-mode-export-warning' in content
+        assert 'drocat-in-page-warning' in content
         # second injection must be a no-op
-        vis._inject_skeleton_simplification_warning(str(page))
+        vis._inject_in_page_warning(str(page))
         assert content == page.read_text()
         # no body tag -> untouched; missing file -> untouched
         page2 = tmp_path / 'nobody.html'
         page2.write_text('<html></html>')
-        vis._inject_skeleton_simplification_warning(str(page2))
+        vis._inject_in_page_warning(str(page2))
         assert page2.read_text() == '<html></html>'
-        vis._inject_skeleton_simplification_warning(str(tmp_path / 'absent.html'))
+        vis._inject_in_page_warning(str(tmp_path / 'absent.html'))
 
     def test_layer_sampling_warning_html(self):
         assert make_vis()._layer_sampling_warning_html() == ''
@@ -317,25 +338,28 @@ class TestWarningBanners:
             "(per-layer render cap 20)",
         ])
         html = vis._layer_sampling_warning_html()
-        assert 'drocat-layer-sampling-warning' in html
+        # one-row summary: counts the capped layers, points at the notes file
         assert 'Truncated type layers.' in html
-        assert 'r1_aMe10: showing 5 of 12 members' in html
-        # note text is escaped before insertion into the page
-        vis2 = make_vis(layer_sample_notes=["r1_<script>x</script>"])
-        escaped = vis2._layer_sampling_warning_html()
-        assert '<script>' not in escaped
-        assert '&lt;script&gt;' in escaped
+        assert '1 type layer shows' in html
+        assert 'user_warning_notes.txt' in html
+        # per-layer details stay out of the page
+        assert 'r1_aMe10' not in html
+        assert 'showing 5 of 12' not in html
+        vis2 = make_vis(layer_sample_notes=[
+            "r1_a: showing 1 of 2", "r2_b: showing 2 of 3"])
+        assert '2 type layers show' in vis2._layer_sampling_warning_html()
 
     def test_inject_layer_sampling_warning_into_html(self, tmp_path):
         vis = make_vis(
             layer_sample_notes=["r1_T1: showing 20 of 25 members"])
         page = tmp_path / 'page.html'
         page.write_text('<html><body><div>plot</div></body></html>')
-        vis._inject_skeleton_simplification_warning(str(page))
+        vis._inject_in_page_warning(str(page))
         content = page.read_text()
-        assert 'drocat-layer-sampling-warning' in content
+        assert 'drocat-in-page-warning' in content
+        assert 'Truncated type layers.' in content
         # second injection must be a no-op
-        vis._inject_skeleton_simplification_warning(str(page))
+        vis._inject_in_page_warning(str(page))
         assert content == page.read_text()
 
     def test_write_plotly_html(self, tmp_path):
@@ -345,7 +369,7 @@ class TestWarningBanners:
         vis._write_plotly_html(fig, str(out))
         content = out.read_text(encoding="utf-8")
         assert 'plotly' in content.lower()
-        assert 'drocat-line-mode-export-warning' in content
+        assert 'drocat-in-page-warning' in content
 
     def test_record_large_html_warning(self, tmp_path):
         vis = make_vis(save_folder=str(tmp_path))
@@ -381,6 +405,24 @@ class TestWarningBanners:
         vis._write_user_warning_notes()
         text = (tmp_path / 'user_warning_notes.txt').read_text()
         assert "not set" in text and 'not applied' in text
+
+    def test_write_user_warning_notes_truncation_details(self, tmp_path):
+        # capped layers are listed per-layer in the notes file
+        vis = make_vis(save_folder=str(tmp_path), layer_sample_notes=[
+            "r1_T1: showing 20 of 25 members of type 'T1'",
+            "r2_T2: showing 20 of 80 members of type 'T2'",
+        ])
+        vis._write_user_warning_notes()
+        text = (tmp_path / 'user_warning_notes.txt').read_text()
+        assert '[truncated type layers]' in text
+        assert '2 type layers show' in text
+        assert "r1_T1: showing 20 of 25 members of type 'T1'" in text
+        assert "r2_T2: showing 20 of 80 members of type 'T2'" in text
+        # no capped layers -> no truncation block
+        vis2 = make_vis(save_folder=str(tmp_path))
+        vis2._write_user_warning_notes()
+        assert '[truncated type layers]' not in (
+            tmp_path / 'user_warning_notes.txt').read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -1528,7 +1570,7 @@ class TestPrePostWarningHtml:
     def test_banner_only_in_pre_post_mode(self):
         vis = make_vis(synapse_mode='pre_post', dataset='flywire_FAFB_v783')
         html = vis._pre_post_mode_warning_html()
-        assert 'drocat-pre-post-sites-warning' in html
+        assert 'Pre/post-synaptic site mode.' in html
         assert 'flywire_FAFB_v783' in html
         assert 'synapse_mode=pre_post' in html
 

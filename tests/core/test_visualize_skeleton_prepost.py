@@ -400,7 +400,7 @@ def test_plotly_scatter_size_slider_targets_only_synapse_traces(tmp_path):
 
 def test_pre_post_warning_banner(tmp_path):
     vs = build_vs(tmp_path, synapse_mode="pre_post")
-    assert "drocat-pre-post-sites-warning" in vs._pre_post_mode_warning_html()
+    assert "Pre/post-synaptic site mode." in vs._pre_post_mode_warning_html()
     other = build_vs(tmp_path, synapse_mode="cone")
     assert other._pre_post_mode_warning_html() == ""
 

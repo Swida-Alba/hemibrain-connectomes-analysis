@@ -190,11 +190,11 @@ def test_html_writer_embeds_plotly_runtime_and_injects_warning(tmp_path):
 
     assert figure.kwargs["include_plotlyjs"] is True
     html = path.read_text(encoding="utf-8")
-    assert "drocat-skeleton-simplification-warning" in html
+    assert "drocat-in-page-warning" in html
     assert "skeleton_mesh_simplification=0.950" in html
     assert "shared raw level-0" in html
     assert "fixed simp90 skeleton cache" not in html
-    assert html.index("drocat-skeleton-simplification-warning") > html.index("<body>")
+    assert html.index("drocat-in-page-warning") > html.index("<body>")
 
 
 def test_line_mode_html_raises_export_pipeline_warning(tmp_path):
@@ -219,12 +219,12 @@ def test_line_mode_html_raises_export_pipeline_warning(tmp_path):
     visualizer._write_plotly_html(FakeFigure(), str(path))
 
     html = path.read_text(encoding="utf-8")
-    assert "drocat-line-mode-export-warning" in html
+    assert "drocat-in-page-warning" in html
     assert "Line-mode skeleton rendering" in html
     assert "high-quality export pipeline" in html
-    assert html.index("drocat-line-mode-export-warning") > html.index("<body>")
+    assert html.index("drocat-in-page-warning") > html.index("<body>")
     # The tube-surface simplification warning does not apply to lines.
-    assert "drocat-skeleton-simplification-warning" not in html
+    assert "Skeleton simplification warning" not in html
 
 
 def test_tube_mode_html_omits_line_mode_export_warning(tmp_path):
@@ -247,7 +247,8 @@ def test_tube_mode_html_omits_line_mode_export_warning(tmp_path):
     visualizer._write_plotly_html(FakeFigure(), str(path))
 
     html = path.read_text(encoding="utf-8")
-    assert "drocat-line-mode-export-warning" not in html
+    assert "Line-mode skeleton rendering" not in html
+    assert "drocat-in-page-warning" not in html
 
 
 def test_user_warning_notes_record_line_mode_export_warning(tmp_path):
@@ -282,7 +283,7 @@ def test_fine_html_warning_starts_above_simp95(tmp_path):
 
     exact_path = tmp_path / "fine_simp95.html"
     visualizer._write_plotly_html(FakeFigure(), str(exact_path))
-    assert "drocat-skeleton-simplification-warning" not in exact_path.read_text(
+    assert "Skeleton simplification warning" not in exact_path.read_text(
         encoding="utf-8"
     )
 
@@ -290,7 +291,7 @@ def test_fine_html_warning_starts_above_simp95(tmp_path):
     high_path = tmp_path / "fine_simp951.html"
     visualizer._write_plotly_html(FakeFigure(), str(high_path))
     html = high_path.read_text(encoding="utf-8")
-    assert "drocat-skeleton-simplification-warning" in html
+    assert "Skeleton simplification warning" in html
     assert "rebuild the FAFB-style tube mesh" in html
     assert "raw .swc.gz source" in html
 
@@ -376,7 +377,7 @@ def test_real_skeleton_html_is_portable_without_plotly_sidecar(tmp_path):
     html = path.read_text(encoding="utf-8")
     assert 'src="plotly.min.js"' not in html
     assert "Plotly.newPlot" in html
-    assert "drocat-skeleton-simplification-warning" in html
+    assert "drocat-in-page-warning" in html
 
 
 def test_all_skeleton_result_paths_accept_visualization_settings():
