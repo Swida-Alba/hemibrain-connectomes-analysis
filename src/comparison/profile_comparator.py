@@ -27,7 +27,7 @@ Example:
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union, Any, TYPE_CHECKING
+from typing import Callable, Dict, List, Optional, Tuple, Union, Any, TYPE_CHECKING
 from datetime import datetime
 import os
 import time
@@ -1356,9 +1356,158 @@ class ProfileComparator:
                 'union_type_count': len(all_types),
                 'target_type_count': target_type_count
             })
-        
+
         return results
-    
+
+    @staticmethod
+    def build_pooled_type_profiles(
+        conn_df: pd.DataFrame,
+        bid_to_labels: Dict[Any, Any],
+        dataset: str = '',
+        min_weight: Optional[int] = None,
+        normalize_types: Optional[Callable[[pd.Series], pd.Series]] = None,
+    ) -> Dict[str, ConnectivityProfile]:
+        """
+        Pool ALL adjacencies of each label's member neurons into type-level
+        profiles (no per-bodyId top-k truncation).
+
+        For every label L in ``bid_to_labels`` the upstream profile sums the
+        weights of all connections whose postsynaptic neuron is a member of L
+        (grouped by presynaptic partner type), and symmetrically for the
+        downstream profile. This is the type-level analogue of a bodyId
+        profile: one row per connection, aggregated by partner type, with the
+        'untyped' bucket kept (the cross-dataset scorer drops it).
+
+        Args:
+            conn_df: Connection frame with bodyId_pre, bodyId_post, weight and
+                type_pre, type_post columns (raw type names; fuzzy-normalized
+                here when ``normalize_types`` is given).
+            bid_to_labels: bodyId -> label (str) or list of labels. A bodyId
+                may belong to several labels (e.g. overlapping custom groups);
+                its connections then contribute to every one of them.
+            dataset: Dataset identifier stored on the profiles.
+            min_weight: Minimum synapse weight to include (the profiler's
+                min_synapse_threshold; None keeps everything).
+            normalize_types: Optional vectorized normalizer applied to the
+                partner-type columns (the profiler's
+                ``_normalize_types_vectorized``).
+
+        Returns:
+            Dict mapping label -> pooled ConnectivityProfile (neuron_id is the
+            label string, so these are never written to the bodyId profile
+            disk cache).
+        """
+        from .connectivity_profiler import ConnectivityProfile, compute_ranks
+
+        if conn_df is None or conn_df.empty or not bid_to_labels:
+            return {}
+
+        df = conn_df
+        if min_weight is not None:
+            df = df[df['weight'] >= min_weight]
+        if df.empty:
+            return {}
+
+        # Normalize the lookup keys so int64 and string bodyId columns both
+        # resolve (FlyWire frames carry string bodyIds, NeuPrint frames ints).
+        lut: Dict[Any, Any] = {}
+        overlaps = False
+        for key, value in bid_to_labels.items():
+            labels = value if isinstance(value, (list, tuple, set)) else [value]
+            labels = [lbl for lbl in labels if lbl is not None and lbl == lbl
+                      and str(lbl).strip() != '']
+            if not labels:
+                continue
+            if len(labels) > 1:
+                overlaps = True
+            lut[key] = labels[0] if len(labels) == 1 else list(labels)
+            try:
+                int_key = int(key)
+                if int_key != key:
+                    lut[int_key] = lut[key]
+            except (TypeError, ValueError):
+                pass
+            str_key = str(key)
+            if str_key not in lut:
+                lut[str_key] = lut[key]
+
+        def partner_types(col: pd.Series) -> pd.Series:
+            types = col.where(col.notna(), '').astype(str).str.strip()
+            types = types.where(types != '', 'untyped')
+            if normalize_types is not None:
+                types = normalize_types(types)
+            return types
+
+        # Positional frame (numpy columns -> no index-alignment pitfalls),
+        # then explode label lists once each: a row whose pre AND post neurons
+        # are both multi-label contributes to every label combination.
+        work = pd.DataFrame({
+            'lbl_post': df['bodyId_post'].map(lut).to_numpy(),
+            'lbl_pre': df['bodyId_pre'].map(lut).to_numpy(),
+            'pt_pre': partner_types(df['type_pre']).to_numpy(),
+            'pt_post': partner_types(df['type_post']).to_numpy(),
+            'weight': df['weight'].to_numpy(dtype=np.float64),
+        })
+        work = work[work['lbl_post'].notna() | work['lbl_pre'].notna()]
+        if work.empty:
+            return {}
+        if overlaps:
+            work = work.explode('lbl_post').explode('lbl_pre')
+            work = work[work['lbl_post'].notna() | work['lbl_pre'].notna()]
+        if work.empty:
+            return {}
+
+        def finish(label: str, up: Dict[str, float], down: Dict[str, float]) -> ConnectivityProfile:
+            up = {t: float(w) for t, w in up.items() if w > 0}
+            down = {t: float(w) for t, w in down.items() if w > 0}
+            total_up = float(sum(up.values()))
+            total_down = float(sum(down.values()))
+            untyped_up = up.get('untyped', 0.0)
+            untyped_down = down.get('untyped', 0.0)
+            return ConnectivityProfile(
+                neuron_id=label,
+                dataset=dataset,
+                upstream_partners=up,
+                downstream_partners=down,
+                upstream_ranks=compute_ranks(up),
+                downstream_ranks=compute_ranks(down),
+                upstream_top_k=len(up),
+                downstream_top_k=len(down),
+                total_upstream_weight=total_up,
+                total_downstream_weight=total_down,
+                num_neurons_aggregated=1,
+                untyped_upstream_count=1 if untyped_up > 0 else 0,
+                untyped_downstream_count=1 if untyped_down > 0 else 0,
+                untyped_upstream_weight_fraction=(
+                    untyped_up / total_up if total_up > 0 else 0.0),
+                untyped_downstream_weight_fraction=(
+                    untyped_down / total_down if total_down > 0 else 0.0),
+                actual_upstream_count=len(up),
+                actual_downstream_count=len(down),
+                is_weak_connectivity=(len(up) + len(down) - ('untyped' in up)
+                                      - ('untyped' in down)) < 5,
+                unique_types_upstream=len(up),
+                unique_types_downstream=len(down),
+                top_k_bodyid_used=0,   # sentinel: pooled profiles are untruncated
+                top_m_type_target=0,
+            )
+
+        profiles: Dict[str, ConnectivityProfile] = {}
+        up_agg = (work[work['lbl_post'].notna()]
+                  .groupby(['lbl_post', 'pt_pre'])['weight'].sum())
+        down_agg = (work[work['lbl_pre'].notna()]
+                    .groupby(['lbl_pre', 'pt_post'])['weight'].sum())
+        labels = set(work['lbl_post'].dropna()) | set(work['lbl_pre'].dropna())
+        for label in labels:
+            up = up_agg.get(label)
+            down = down_agg.get(label)
+            profiles[str(label)] = finish(
+                str(label),
+                {} if up is None else up.to_dict(),
+                {} if down is None else down.to_dict(),
+            )
+        return profiles
+
     @staticmethod
     def compare_profiles(
         profile_a: ConnectivityProfile,
@@ -2673,6 +2822,148 @@ class HomologFinder:
             int(bid) for bid, t in target_type_lookup.items() if t in matched_types
         }
 
+    def _compute_type_level_results(
+        self,
+        source_types: List[str],
+        target_dataset: str,
+        similarity_metric: str = 'rank_union',
+        type_mapper: Optional['CrossDatasetTypeMapper'] = None,
+        source_pooled: Optional[Dict[str, 'ConnectivityProfile']] = None,
+        target_pooled: Optional[Dict[str, 'ConnectivityProfile']] = None,
+        show_progress: bool = True,
+    ) -> pd.DataFrame:
+        """
+        True type-level homolog ranking: pooled all-adjacency type profiles.
+
+        Every source type's profile pools ALL adjacencies of its member
+        neurons (no top-k truncation); target type profiles are pooled the
+        same way and ranked per source type with the same scorer the bodyId
+        level uses (``batch_compare_cross_dataset``), partner types
+        standardized through the cross-dataset type mapper.
+
+        Args:
+            source_types: Resolved source type names.
+            target_dataset: Dataset whose types are ranked.
+            similarity_metric: Metric used for the ``rank`` column (all five
+                metrics are always computed).
+            type_mapper: CrossDatasetTypeMapper for partner-type
+                standardization and same-type detection.
+            source_pooled: Pre-built pooled source profiles (label ->
+                ConnectivityProfile). Built on demand when omitted.
+            target_pooled: Pre-built pooled target profiles for ALL typed
+                targets of ``target_dataset``. Built on demand when omitted.
+
+        Returns:
+            DataFrame: source_type, target_type, is_same_type, target_dataset,
+            jaccard, weighted_jaccard, cosine, rank_corr, rank_union, rank
+            (1-based rank of the target type under ``similarity_metric``,
+            NaN last).
+        """
+        normalize = lambda s: self.profiler._normalize_types_vectorized(
+            s, self.profiler.config.fuzzy_match)  # noqa: E731
+        # NOTE: called unbound with the finder's own profiler config; the
+        # normalizer is stateless beyond that config.
+
+        if source_pooled is None:
+            conn_s = self._load_connection_cache(self.source_dataset)
+            if conn_s is None:
+                return pd.DataFrame()
+            bid_to_label: Dict[Any, Any] = {}
+            for st in source_types:
+                for bid in self.get_bodyids_for_type(st, self.source_dataset):
+                    bid_to_label[int(bid)] = st
+            source_pooled = ProfileComparator.build_pooled_type_profiles(
+                conn_s, bid_to_label, dataset=self.source_dataset,
+                min_weight=self.min_synapse_threshold,
+                normalize_types=normalize)
+        if target_pooled is None:
+            conn_t = self._load_connection_cache(target_dataset)
+            if conn_t is None:
+                return pd.DataFrame()
+            target_type_lookup = self._build_bodyid_type_lookup(conn_t)
+            target_pooled = ProfileComparator.build_pooled_type_profiles(
+                conn_t, dict(target_type_lookup), dataset=target_dataset,
+                min_weight=self.min_synapse_threshold,
+                normalize_types=normalize)
+
+        # Pre-standardize each profile ONCE (partner types -> canonical names).
+        # Passing type_mapper=None to the scorer after this is equivalent to
+        # standardizing per pair, but avoids re-standardizing every target
+        # profile for every source (O(sources x targets) Python-loop calls).
+        if type_mapper is not None:
+            def _std(profile, ds):
+                up = type_mapper.standardize_partner_types(
+                    dict(profile.upstream_partners), ds)
+                down = type_mapper.standardize_partner_types(
+                    dict(profile.downstream_partners), ds)
+                from .connectivity_profiler import ConnectivityProfile, compute_ranks
+                return ConnectivityProfile(
+                    neuron_id=profile.neuron_id, dataset=profile.dataset,
+                    upstream_partners=up, downstream_partners=down,
+                    upstream_ranks=compute_ranks(up),
+                    downstream_ranks=compute_ranks(down),
+                    upstream_top_k=len(up), downstream_top_k=len(down),
+                    total_upstream_weight=profile.total_upstream_weight,
+                    total_downstream_weight=profile.total_downstream_weight,
+                    untyped_upstream_weight_fraction=(
+                        profile.untyped_upstream_weight_fraction),
+                    untyped_downstream_weight_fraction=(
+                        profile.untyped_downstream_weight_fraction),
+                    actual_upstream_count=len(up),
+                    actual_downstream_count=len(down),
+                    unique_types_upstream=len(up),
+                    unique_types_downstream=len(down),
+                )
+            source_pooled = {k: _std(v, self.source_dataset)
+                             for k, v in source_pooled.items()}
+            target_pooled = {k: _std(v, target_dataset)
+                             for k, v in target_pooled.items()}
+            type_mapper = None
+
+        target_names = sorted(target_pooled.keys())
+        target_profiles = {i: target_pooled[name] for i, name in enumerate(target_names)}
+        candidate_map = {i: 0 for i in range(len(target_names))}
+
+        def canonical(name: str, ds: str) -> str:
+            if type_mapper is None:
+                return name
+            try:
+                return type_mapper.get_canonical_type(name, ds) or name
+            except Exception:
+                return name
+
+        rows = []
+        for source_type in sorted(source_types):
+            src_profile = source_pooled.get(source_type)
+            if src_profile is None:
+                continue
+            src_canon = canonical(source_type, self.source_dataset or '')
+            scores = ProfileComparator.batch_compare_cross_dataset(
+                src_profile, target_profiles, candidate_map, 'both',
+                type_mapper=type_mapper)
+            for score in scores:
+                t_name = target_names[score['target_bid']]
+                rows.append({
+                    'source_type': source_type,
+                    'target_type': t_name,
+                    'is_same_type': canonical(t_name, target_dataset) == src_canon,
+                    'target_dataset': target_dataset,
+                    'jaccard': score['jaccard'],
+                    'weighted_jaccard': score.get('weighted_jaccard', np.nan),
+                    'cosine': score['cosine'],
+                    'rank_corr': score['rank'],
+                    'rank_union': score['rank_union'],
+                })
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df
+        sort_col = (similarity_metric if similarity_metric in df.columns
+                    else 'rank_union')
+        df = df.sort_values(['source_type', sort_col], ascending=[True, False],
+                            na_position='last').reset_index(drop=True)
+        df['rank'] = df.groupby('source_type').cumcount() + 1
+        return df
+
     # ------------------------------------------------------------------
     # Shared bodyId-level type comparison core (for ComparisonAnalyzer)
     # ------------------------------------------------------------------
@@ -3924,6 +4215,24 @@ class HomologFinder:
         # Attach vector-based morphological similarity (post-search only).
         results_df = self._enrich_with_morphology(results_df, source_dataset, target_dataset)
 
+        # True type-level results (pooled all-adjacency type profiles). The
+        # comprehensive path does not keep the connection frames in memory, so
+        # the helper reloads them from the connection cache.
+        type_level_df = None
+        try:
+            source_types_resolved = sorted(
+                {str(t) for t in results_df['source_type'].dropna().unique()}
+            ) if not results_df.empty else []
+            if source_types_resolved:
+                type_level_df = self._compute_type_level_results(
+                    source_types_resolved, target_dataset,
+                    similarity_metric=self.similarity_metric,
+                    type_mapper=self._get_type_mapper_for_comparison(
+                        source_dataset != target_dataset),
+                    show_progress=show_progress)
+        except Exception as e:
+            self._log(f"Type-level results skipped: {e}")
+
         # Save results if output_dir is provided
         self._progress(4, 4, "Saving results")
         if output_dir is not None:
@@ -3981,7 +4290,8 @@ class HomologFinder:
                 shuffle_stats=shuffle_stats,
                 visualize_skeleton=visualize_skeleton,
                 visualize_top_n=visualize_top_n,
-                similarity_metric=self.similarity_metric
+                similarity_metric=self.similarity_metric,
+                type_level_df=type_level_df
             )
         
         return results_df
@@ -5230,6 +5540,11 @@ class HomologFinder:
         if is_cross_dataset:
             self._prewarm_profile_cache(target_dataset)
         
+        # Pooled all-adjacency type profiles for the true type-level view
+        # (built during the loading block, before the frames are released).
+        source_pooled_profiles: Dict[str, 'ConnectivityProfile'] = {}
+        target_pooled_profiles: Dict[str, 'ConnectivityProfile'] = {}
+
         # Step 1: Load connection caches
         self._progress(1, 6, "Loading connection data")
         self._log("Loading and processing connection data...")
@@ -5253,6 +5568,30 @@ class HomologFinder:
                     source_conn, min_weight, show_progress=False
                 )
                 source_type_lookup = self._build_bodyid_type_lookup(source_conn)
+
+                # Pooled all-adjacency type profiles for the query's source
+                # type(s) (true type-level view; built before source_conn is
+                # released, costs one groupby over the connection frame).
+                source_pooled_profiles: Dict[str, 'ConnectivityProfile'] = {}
+                try:
+                    if is_bodyid:
+                        _src_bids = [int(query)]
+                    else:
+                        _src_bids = self.get_bodyids_for_type(str(query), source_dataset)
+                    _bid_to_label = {}
+                    for _b in _src_bids:
+                        _t = source_type_lookup.get(int(_b))
+                        if _t:
+                            _bid_to_label[int(_b)] = _t
+                    source_pooled_profiles = ProfileComparator.build_pooled_type_profiles(
+                        source_conn, _bid_to_label, dataset=source_dataset,
+                        min_weight=self.min_synapse_threshold,
+                        normalize_types=lambda s: self.profiler._normalize_types_vectorized(
+                            s, self.profiler.config.fuzzy_match))
+                    self._log(f"Pooled type profiles built for "
+                              f"{len(source_pooled_profiles)} source type(s)")
+                except Exception as e:
+                    self._log(f"Type-level source pooling skipped: {e}")
 
                 # WORKFLOW OPTIMIZATION: Build source profiles NOW while source connections are in memory
                 # This avoids reloading source connections later when building profiles
@@ -5340,6 +5679,21 @@ class HomologFinder:
                         target_conn, min_weight, show_progress=False
                     )
                     target_type_lookup = self._build_bodyid_type_lookup(target_conn)
+
+                    # Pooled all-adjacency type profiles for ALL typed target
+                    # types (one groupby over the connection frame).
+                    try:
+                        target_pooled_profiles = ProfileComparator.build_pooled_type_profiles(
+                            target_conn, dict(target_type_lookup),
+                            dataset=target_dataset,
+                            min_weight=self.min_synapse_threshold,
+                            normalize_types=lambda s: self.profiler._normalize_types_vectorized(
+                                s, self.profiler.config.fuzzy_match))
+                        self._log(f"Pooled type profiles built for "
+                                  f"{len(target_pooled_profiles)} target types")
+                    except Exception as e:
+                        target_pooled_profiles = {}
+                        self._log(f"Type-level target pooling skipped: {e}")
                     
                     # Release target after building aggregates
                     del target_conn
@@ -5352,6 +5706,19 @@ class HomologFinder:
                     target_bodyid_up, target_bodyid_down = source_bodyid_up, source_bodyid_down
                     target_type_lookup = source_type_lookup
                     pbar.update(2)
+
+                    try:
+                        target_pooled_profiles = ProfileComparator.build_pooled_type_profiles(
+                            source_conn, dict(target_type_lookup),
+                            dataset=target_dataset,
+                            min_weight=self.min_synapse_threshold,
+                            normalize_types=lambda s: self.profiler._normalize_types_vectorized(
+                                s, self.profiler.config.fuzzy_match))
+                        self._log(f"Pooled type profiles built for "
+                                  f"{len(target_pooled_profiles)} target types")
+                    except Exception as e:
+                        target_pooled_profiles = {}
+                        self._log(f"Type-level target pooling skipped: {e}")
         finally:
             self._in_progress_bar = False
         
@@ -5748,6 +6115,23 @@ class HomologFinder:
             save_output_dir = output_dir if output_dir is not None else self.output_dir
             # Attach vector-based morphological similarity (post-search only).
             results_df = self._enrich_with_morphology(results_df, source_dataset, target_dataset)
+            # True type-level results: pooled all-adjacency type profiles
+            # scored against every typed target type (cheap; ~1-2 s/source).
+            type_level_df = None
+            try:
+                if source_pooled_profiles and target_pooled_profiles:
+                    type_level_df = self._compute_type_level_results(
+                        sorted(source_pooled_profiles.keys()), target_dataset,
+                        similarity_metric=similarity_metric,
+                        type_mapper=type_mapper,
+                        source_pooled=source_pooled_profiles,
+                        target_pooled=target_pooled_profiles,
+                        show_progress=show_progress)
+                    self._log(f"Type-level results computed for "
+                              f"{type_level_df['source_type'].nunique() if not type_level_df.empty else 0} source type(s)")
+            except Exception as e:
+                self._log(f"Type-level results skipped: {e}")
+
             self._progress(6, 6, "Saving results")
             self._save_homolog_results_internal(
                 results_df=results_df,
@@ -5768,10 +6152,12 @@ class HomologFinder:
                     'min_weight': min_weight,
                     'method': 'find_homologs_fast',
                     'source_bodyids_count': len(source_bodyids),
-                    'profile_method': '1-hop/2-hop hybrid via ConnectivityProfiler'
+                    'profile_method': '1-hop/2-hop hybrid via ConnectivityProfiler',
+                    'type_level': 'pooled all-adjacency type profiles'
                 },
                 visualize_skeleton=visualize_skeleton,
                 visualize_top_n=visualize_top_n,
+                type_level_df=type_level_df,
                 intra_type_df=intra_type_df,  # Pass intra-type results for saving
                 similarity_metric=self.similarity_metric,
                 source_status_summary=source_status_summary
@@ -6082,6 +6468,23 @@ class HomologFinder:
             }
         }
 
+        # True type-level results: pooled all-adjacency type profiles scored
+        # against every typed target type (cheap; ~1-2 s/source).
+        type_level_df = None
+        try:
+            if source_pooled_profiles and target_pooled_profiles:
+                type_level_df = self._compute_type_level_results(
+                    sorted(source_pooled_profiles.keys()), target_dataset,
+                    similarity_metric=similarity_metric,
+                    type_mapper=type_mapper,
+                    source_pooled=source_pooled_profiles,
+                    target_pooled=target_pooled_profiles,
+                    show_progress=show_progress)
+                self._log(f"Type-level results computed for "
+                          f"{type_level_df['source_type'].nunique() if not type_level_df.empty else 0} source type(s)")
+        except Exception as e:
+            self._log(f"Type-level results skipped: {e}")
+
         self._progress(6, 6, "Saving results")
         self._save_homolog_results_internal(
             results_df=results_df,
@@ -6108,6 +6511,7 @@ class HomologFinder:
             visualize_skeleton=visualize_skeleton,
             visualize_top_n=visualize_top_n,
             similarity_metric=self.similarity_metric,
+            type_level_df=type_level_df,
             intra_type_df=intra_type_df,
             source_status_summary=source_status_summary
         )
@@ -6429,6 +6833,25 @@ class HomologFinder:
             type_summary.insert(0, 'query', ','.join(queries))
         type_summary.to_csv(results_dir / 'type_summary.csv', index=False)
 
+        # 3b) type_level_results.csv — pooled all-adjacency type-level
+        # ranking, collected from the per-type output folders.
+        tl_frames = []
+        for per_dir in sorted(combined_path.glob('by_type/*')):
+            tl_path = per_dir / 'results' / 'type_level_results.csv'
+            if tl_path.exists():
+                try:
+                    tl_df = pd.read_csv(tl_path)
+                    tl_df.insert(0, 'query_type', per_dir.name)
+                    tl_frames.append(tl_df)
+                except Exception as e:
+                    self._log(f"Warning: could not read {tl_path}: {e}")
+        if tl_frames:
+            tl_combined = pd.concat(tl_frames, ignore_index=True)
+            tl_combined.insert(0, 'source_dataset', source_dataset)
+            tl_combined.to_csv(results_dir / 'type_level_results.csv', index=False)
+        self._log("Saved: results/type_level_results.csv (pooled type-level ranking)"
+                  if tl_frames else "No type-level results collected from per-type folders")
+
         # 4) README.txt summarizing all query types.
         readme = combined_path / 'README.txt'
         with open(readme, 'w') as f:
@@ -6444,6 +6867,7 @@ class HomologFinder:
             f.write("  results/\n")
             f.write("    ├── bodyid_results.csv  Combined results grouped per query_type\n")
             f.write("    ├── type_summary.csv    Aggregated per (query_type, source_type, target_type)\n")
+            f.write("    ├── type_level_results.csv  Pooled all-adjacency type-level ranking\n")
             f.write("    └── homolog_results.csv Legacy format sorted by metric\n")
             f.write("  by_type/<query_type>/     Full per-type output (results, visualization)\n")
         self._log(f"Saved combined multi-query results to {combined_path}")
@@ -6527,6 +6951,7 @@ class HomologFinder:
         visualize_skeleton: bool = False,
         visualize_top_n: int = 5,
         intra_type_df: Optional[pd.DataFrame] = None,
+        type_level_df: Optional[pd.DataFrame] = None,
         similarity_metric: str = 'rank_union',
         source_status_summary: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
@@ -7032,7 +7457,21 @@ class HomologFinder:
             
             type_summary.to_csv(results_dir / 'type_summary.csv', index=False)
             files_saved.append('results/type_summary.csv')
-            self._log("Saved: results/type_summary.csv (aggregated type-level summary)")
+            self._log("Saved: results/type_summary.csv (type-mean aggregated FROM bodyId-level results)")
+
+        # 6b. True type-level results: pooled all-adjacency type profiles
+        # (source type vs every typed target type; NOT derived from the
+        # bodyId-level scores).
+        if type_level_df is not None and not type_level_df.empty:
+            tl_cols = ['source_type', 'target_type', 'is_same_type',
+                       'target_dataset', 'jaccard', 'weighted_jaccard',
+                       'cosine', 'rank_corr', 'rank_union', 'rank']
+            tl_out = type_level_df[[c for c in tl_cols if c in type_level_df.columns]]
+            tl_out = tl_out.round(6)
+            tl_out.to_csv(results_dir / 'type_level_results.csv', index=False)
+            files_saved.append('results/type_level_results.csv')
+            self._log(f"Saved: results/type_level_results.csv "
+                      f"({len(tl_out)} type-level rows)")
         
         # 7. Generate 3D skeleton visualizations if enabled
         if visualize_skeleton and not results_df.empty:
@@ -9492,9 +9931,42 @@ class ConnectivityProfileComparer:
             for (label, bid), profile in bodyid_profiles.items():
                 type_profiles[label] = profile
         else:
-            self._log("Aggregating type-level profiles...")
-            for label, neuron_ids in tqdm(neurons.items(), desc="Aggregating types", 
+            # Preferred: pool ALL adjacencies of each label's members straight
+            # from the connection cache (no per-bodyId top-k truncation, so a
+            # type profile represents the full connectivity of the type).
+            conn_df = None
+            try:
+                conn_df = self.profiler._get_cached_conn_df(dataset)
+            except Exception:
+                conn_df = None
+            pooled_done = False
+            if (conn_df is not None and not conn_df.empty
+                    and {'bodyId_pre', 'bodyId_post', 'type_pre', 'type_post',
+                         'weight'} <= set(conn_df.columns)):
+                bid_to_labels: Dict[Any, Any] = {}
+                for label, neuron_ids in neurons.items():
+                    for nid in neuron_ids:
+                        key = int(nid) if isinstance(nid, str) and nid.isdigit() else nid
+                        bid_to_labels.setdefault(key, []).append(label)
+                try:
+                    pooled = ProfileComparator.build_pooled_type_profiles(
+                        conn_df, bid_to_labels, dataset=dataset,
+                        min_weight=self.min_synapse_threshold,
+                        normalize_types=lambda s: self.profiler._normalize_types_vectorized(
+                            s, self.profiler.config.fuzzy_match))
+                    type_profiles.update(pooled)
+                    pooled_done = True
+                    self._log(f"Aggregated type-level profiles by pooling ALL "
+                              f"adjacencies ({len(pooled)} labels)")
+                except Exception as e:
+                    self._log(f"Pooled type profiling failed ({e}); falling back "
+                              f"to bodyId profile aggregation")
+            if not pooled_done:
+                self._log("Aggregating type-level profiles...")
+            for label, neuron_ids in tqdm(neurons.items(), desc="Aggregating types",
                                            disable=progress_bars_disabled(True, self.verbose), unit="type"):
+                if label in type_profiles:
+                    continue
                 individual_profiles = []
                 
                 for nid in neuron_ids:

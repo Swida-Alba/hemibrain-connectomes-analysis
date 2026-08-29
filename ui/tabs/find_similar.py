@@ -21,6 +21,7 @@ from ..components.common import (
     apply_filter_mode,
 )
 from ..components.output_panel import OutputPanel
+from ..components.result_previews import add_result_previews
 from ..components.skeleton_visualization_settings import skeleton_visualization_settings
 from ..runner import ScriptRunner
 from ..type_suggestions import dataset_suggestions
@@ -41,6 +42,7 @@ MORPH_METHODS = {
 def create_find_similar_tab():
     runner = ScriptRunner()
     output_panel = OutputPanel("Similarity Output")
+    profile_previews_container = None
     dataset = None
     source_dataset = None
 
@@ -125,8 +127,8 @@ def create_find_similar_tab():
                     method = select_input(
                         "Method", MORPH_METHODS, saved_method,
                         hint="'Vector (spatial)' (default): shape + brain-position/"
-                             "expansion + topology blocks with ZCA whitening — "
-                             "finer discrimination. 'NBLAST': canonical NBLAST "
+                             "expansion blocks with ZCA whitening — finer "
+                             "discrimination. 'NBLAST': canonical NBLAST "
                              "(slower; runs on vector-prefiltered candidates).",
                     )
                     metric = select_input(
@@ -476,6 +478,7 @@ def create_find_similar_tab():
 
     with results_col:
         output_panel.create(run_label="Run Similarity Search", run_icon="play_arrow")
+        profile_previews_container = ui.column().classes("w-full")
 
     def _unique_queries(values):
         """Return the entered queries in order, without duplicate chips."""
@@ -692,6 +695,11 @@ def create_find_similar_tab():
                     files,
                     profile_output_dir.value if len(sources) > 1
                     else last_output_folder or profile_output_dir.value,
+                )
+            if profile_previews_container is not None:
+                add_result_previews(
+                    last_output_folder or profile_output_dir.value,
+                    profile_previews_container,
                 )
         finally:
             output_panel.set_running(False)
