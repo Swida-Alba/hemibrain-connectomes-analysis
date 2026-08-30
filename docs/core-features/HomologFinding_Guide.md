@@ -321,7 +321,8 @@ Sorted by `source_bodyId`, then `rank_corr` (descending):
 
 ### type_summary.csv (Always Saved)
 
-Aggregated type-level summary:
+Type-mean aggregated FROM the bodyId-level results (a bodyId-level
+aggregation view, not a type-level profile comparison):
 
 ```
 | query | source_dataset | target_dataset | source_type | target_type | avg_rank_corr | best_rank_corr | std_rank_corr | n_bodyid_comparisons |
@@ -329,6 +330,15 @@ Aggregated type-level summary:
 | Mi1   | hemibrain      | flywire_FAFB   | Mi1         | Mi1         | 0.89          | 0.92           | 0.03          | 12                   |
 | Mi1   | hemibrain      | flywire_FAFB   | Mi1         | Mi4         | 0.65          | 0.71           | 0.08          | 12                   |
 ```
+
+### type_level_results.csv (Always Saved)
+
+True type-level homolog ranking: pooled all-adjacency type profiles (every
+connection of each type's neurons, no top-k truncation) scored against every
+typed target type. One row per source×target type with `jaccard`,
+`weighted_jaccard`, `cosine`, `rank_corr`, `rank_union` and a 1-based `rank`
+per source type (1 = best under the run's metric). This is a separate
+computation from `type_summary.csv`, not a re-aggregation of bodyId scores.
 
 ### homolog_results.csv (Legacy Format)
 

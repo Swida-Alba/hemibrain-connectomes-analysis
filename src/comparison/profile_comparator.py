@@ -2403,7 +2403,8 @@ class HomologFinder:
     
     Output (always both levels):
         - bodyid_results.csv: BodyId-level comparisons (sorted by source_bodyId, rank_corr)
-        - type_summary.csv: Type-level aggregated summary (avg/best/std metrics)
+        - type_summary.csv: Type-mean aggregated FROM bodyId-level results
+        - type_level_results.csv: True type-level ranking (pooled type profiles)
         - homolog_results.csv: Legacy format (sorted by rank_corr only)
     
     Visualization:
@@ -2861,6 +2862,9 @@ class HomologFinder:
         """
         normalize = lambda s: self.profiler._normalize_types_vectorized(
             s, self.profiler.config.fuzzy_match)  # noqa: E731
+        # Captured before the pre-standardization block nulls type_mapper
+        # (the canonical() closure below must keep seeing the real mapper).
+        mapper_for_same = type_mapper
         # NOTE: called unbound with the finder's own profiler config; the
         # normalizer is stateless beyond that config.
 
@@ -2925,10 +2929,10 @@ class HomologFinder:
         candidate_map = {i: 0 for i in range(len(target_names))}
 
         def canonical(name: str, ds: str) -> str:
-            if type_mapper is None:
+            if mapper_for_same is None:
                 return name
             try:
-                return type_mapper.get_canonical_type(name, ds) or name
+                return mapper_for_same.get_canonical_type(name, ds) or name
             except Exception:
                 return name
 
@@ -5480,7 +5484,8 @@ class HomologFinder:
         Output Files (always saved when output_dir is set):
             - bodyid_results.csv: BodyId-level comparisons (sorted by source_bodyId, metric)
             - intra_type_results.csv: Intra-type self-comparisons (when source is a type)
-            - type_summary.csv: Type-level aggregated summary (avg/best/std metrics)
+            - type_summary.csv: Type-mean aggregated FROM bodyId-level results
+        - type_level_results.csv: True type-level ranking (pooled type profiles)
             - homolog_results.csv: Legacy format (sorted by metric only)
             - visualization/: 3D skeleton plots (if visualize_skeleton=True)
         
@@ -6965,7 +6970,8 @@ class HomologFinder:
             ├── README.txt                    # Parameters, summary, and column descriptions
             ├── results/                      # Main results
             │   ├── homolog_results.csv       # Full results with all columns (sorted by metric)
-            │   ├── type_summary.csv          # Type-level aggregated summary
+            │   ├── type_summary.csv          # Type-mean from bodyId level
+            │   ├── type_level_results.csv   # Pooled type-level ranking
             │   ├── bodyid_results.csv        # BodyId-level results (sorted by source, metric)
             │   ├── intra_type_results.csv    # Intra-type comparisons (if type query)
             │   ├── shuffle_test.json         # Shuffle test statistics (if run)
