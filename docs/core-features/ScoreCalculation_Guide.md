@@ -474,7 +474,8 @@ profiles). The former 24-dim Laplacian topology block was removed in cache
 schema v4 — its eigensolver dominated vectorization time while its 10%
 weight changed nothing in the user-facing ranking. Scoring is per-block
 cosine on z-scored (and ZCA-whitened) vectors with block weights — default
-shape 0.50 / spatial 0.40, effective .556/.444 after renormalization — so
+shape 0.30 / spatial 0.70, effective .300/.700 after
+renormalization — so
 cosine scores stay scale-fair and region-fair regardless of the local
 population.
 

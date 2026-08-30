@@ -60,7 +60,9 @@ Spearman >= 0.96). On NeuPrint datasets a 288-dim ROI-expansion block
 and scored with weight `v2_roi_weight=0.2`; FAFB/FlyWire runs omit it.
 
 Scoring is per-block cosine with weights `v2_block_weights` (default
-shape 0.50 / spatial 0.40; effective .556/.444 after renormalization)
+shape 0.30 / spatial 0.70; effective .300/.700 after renormalization —
+unbiased-sample sweep: spatial-heavy ratios beat balanced and
+shape-heavy ones)
 after **truncated ZCA whitening** of the standardized population:
 whitening directions whose covariance eigenvalue is below 1% of the
 largest is skipped (they carry only population noise — amplifying them
@@ -119,7 +121,7 @@ Block weights and basis are recorded in the run README.
 ```python
 comparer = MorphologyComparer(
     query="aMe4", dataset="male-cns:v1.0", method="vector_v2",
-    v2_block_weights={"shape": 0.5, "spatial": 0.4},
+    v2_block_weights={"shape": 0.3, "spatial": 0.7},
     v2_roi_weight=0.2,                  # 0 disables the ROI block
 )
 ```

@@ -212,7 +212,9 @@ SPATIAL_HIST_SLICE = (V2_SPATIAL_SLICE[0] + len(SPATIAL_ELLIPSOID_FEATURES),
 # malized, so the defaults below describe the ROI-less (FAFB) case.
 # The topology block was removed entirely in schema v4 (cost without
 # ranking effect); ``v2_block_weights`` accepts only shape/spatial keys.
-DEFAULT_V2_BLOCK_WEIGHTS = {"shape": 0.50, "spatial": 0.40}
+# Spatial-heavy 3:7 (unbiased-sample weight sweep 2026-08-30: +0.016 MRR
+# over 5:5, Wilcoxon p = 0.039, AP@50 peak).
+DEFAULT_V2_BLOCK_WEIGHTS = {"shape": 0.30, "spatial": 0.70}
 DEFAULT_V2_ROI_WEIGHT = 0.2
 
 # Two-pass type reevaluation (vector_v2): after the first scoring pass, the
@@ -3459,6 +3461,23 @@ class SkeletonVectorCacheV2(SkeletonVectorCache):
             return self.build(fetch_missing=fetch_missing)
         return super().ensure(fetch_missing=fetch_missing)
 
+    def append_vectors(self, records: List[Tuple[int, np.ndarray, str]],
+                       vector_basis: Optional[str] = None) -> int:
+        """Append with a staleness guard.
+
+        Rows of the CURRENT schema must never land in a cache whose meta
+        predates it: load() refuses stale caches outright, so such rows
+        would be invisible to every reader (the vectors silently recompute
+        on every run) while still shaping the staging file. Rebuild first —
+        offline, no fetches — so the append lands under current meta.
+        """
+        if records and self._is_stale():
+            self._log("[SkeletonVectorCacheV2] Cache predates the current "
+                      f"vector semantics; rebuilding before appending "
+                      f"{len(records)} row(s).")
+            self.build(fetch_missing=0)
+        return super().append_vectors(records, vector_basis=vector_basis)
+
     # --------------------------------------------------------------- build
     def _vectorize_parallel_swc_v2(self, source_path: str,
                                    zip_path: Optional[str], bids: List[int],
@@ -3615,10 +3634,15 @@ class SkeletonVectorCacheV2(SkeletonVectorCache):
                    if self._canonical_body_id(_skeleton_body_id(f))
                    not in existing]
 
-        if not pending:
+        if not pending and not self.pending_path.exists():
             self._log("[SkeletonVectorCacheV2] No skeletons available to "
                       "vectorize.")
             return {"rows": len(existing), "new": 0, "fetched": 0}
+        # When pending staging rows exist, fall through even with no files
+        # to vectorize: the write path below folds them into the main
+        # parquet and recomputes the population statistics (the amortized
+        # merge checkpoint); an early return here would leave the parquet
+        # and its stats frozen at the first build's population.
         # Population bounds must exist BEFORE vectorization so every row of
         # the build shares one histogram binning.
         bounds = self.spatial_bounds()
@@ -6233,10 +6257,14 @@ class MorphologyComparer:
                     # Persist only skeleton trees (CAVE replacements are
                     # mesh-native and cache themselves in the prepared-mesh
                     # namespace); each tree at its OWN recorded level.
+                    # The V2 cache owns the shared raw-skeleton store
+                    # (raw_only); _fetch_vector_cache() is the mesh-native
+                    # V1 counterpart on FlyWire and silently drops
+                    # skeleton-rep neurons.
                     skeleton_only = {b: n for b, n in fetched.items()
                                      if _neuron_rep(n) == "skeleton"}
                     if skeleton_only:
-                        fetch_cache.persist_skeletons(
+                        cache.persist_skeletons(
                             skeleton_only, simplification=None)
                 fetched_all = {self._body_id(b): n for b, n in fetched.items()}
                 self._log(f"FAFB: fetched {len(fetched_all)} of "
@@ -6936,7 +6964,11 @@ class MorphologyComparer:
                         if _neuron_rep(n) == "skeleton"
                     }
                     if skeleton_only:
-                        fetch_cache.persist_skeletons(
+                        # The V2 cache owns the shared raw-skeleton store;
+                        # _fetch_vector_cache() is the mesh-native V1
+                        # counterpart on FlyWire and silently drops
+                        # skeleton-rep neurons.
+                        cache.persist_skeletons(
                             skeleton_only, simplification=None)
                 fetched_all = {
                     self._body_id(b): n for b, n in fetched.items()
@@ -6955,13 +6987,36 @@ class MorphologyComparer:
         order: List[int] = []
         vec_by_id: Dict[int, np.ndarray] = {}
         appends: List[Tuple[int, np.ndarray, str]] = []
+        cache_row: Dict[int, int] = {}
+        if cache_data is not None:
+            cache_row = {self._body_id(b): i
+                         for i, b in enumerate(cache_data["bodyIds"])}
         for bid in new_ids:
             bid = self._body_id(bid)
             neuron = fetched_all.get(bid)
             if neuron is None:
                 pkl = cache.find_skeleton_file(bid)
                 if pkl is None:
-                    continue
+                    # No in-memory neuron and no local file, but the id may
+                    # still carry a cached vector row — the `missing` check
+                    # above skips fetching exactly those ids. Reuse the raw
+                    # row instead of silently dropping the member (without
+                    # this, a member scores on the run that fetched it and
+                    # vanishes from every later run until its skeleton file
+                    # materializes).
+                    row = cache_row.get(bid)
+                    if row is None:
+                        continue
+                    vec = np.asarray(cache_data["raw"][row], dtype=float)
+                    rep = (cache_data["rep"][row]
+                           or cache_data.get("dataset_rep", ""))
+                    if not np.isfinite(vec).all():
+                        continue
+                    if q_rep and rep != q_rep:
+                        continue   # one representation per comparison
+                    order.append(bid)
+                    vec_by_id[bid] = vec
+                    continue   # already cached: nothing to append
                 neuron = _load_cached_skeleton_file(str(pkl))
             rep = _neuron_rep(neuron)
             if q_rep and rep != q_rep:

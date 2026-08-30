@@ -381,10 +381,13 @@ class TestV2Similarity:
             query_index=None)
         # With zero blocks all cosines are 0 -> overlap drives the score.
         assert total[0] > total[1] > 0
-        # identical -> spatial score 0.5, weighted by 0.4; the all-zero rows
-        # count as valid (production _block_cosine_one semantics), so the
-        # renormalizer is shape 0.5 + spatial 0.4 (merged: no topology).
-        assert np.isclose(total[0], 0.4 * 0.5 / (0.5 + 0.4), atol=1e-9)
+        # identical -> spatial score 0.5; the all-zero rows count as valid
+        # (production _block_cosine_one semantics), so with equal default
+        # weights the renormalizer is shape 0.5 + spatial 0.5.
+        w = morph.DEFAULT_V2_BLOCK_WEIGHTS
+        assert np.isclose(total[0],
+                          w["spatial"] * 0.5 / (w["shape"] + w["spatial"]),
+                          atol=1e-9)
 
 # ---------------------------------------------------------------------------
 # V2 cache
@@ -469,7 +472,7 @@ class TestComparerV2Wiring:
                                      method="vector_v2")
         assert c._is_v2
         # topology block removed in schema v4: two-block weights
-        assert c._v2_weights == {"shape": 0.5, "spatial": 0.4, "roi": 0.2}
+        assert c._v2_weights == {"shape": 0.3, "spatial": 0.7, "roi": 0.2}
 
     def test_unknown_weight_key_ignored(self):
         c = morph.MorphologyComparer(
@@ -486,7 +489,7 @@ class TestComparerV2Wiring:
             query=1, dataset="hemibrain:v1.2.1", method="vector_v2",
             v2_block_weights={"shape": 0.8, "bogus": 9.0}, v2_roi_weight=0.0)
         assert c._v2_weights["shape"] == 0.8
-        assert c._v2_weights["spatial"] == 0.4
+        assert c._v2_weights["spatial"] == 0.7
         assert "bogus" not in c._v2_weights
 
     def test_expand_params(self):
