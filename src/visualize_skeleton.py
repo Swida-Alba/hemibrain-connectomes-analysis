@@ -1425,6 +1425,149 @@ except ImportError:
     from . import FAFB_file_converter
     from . import BANC_file_converter
 
+
+# Legend color shared by every query_transformed_* overlay layer so the
+# transformed source neurons read as one group across their per-neuron
+# legend entries. Light blue: bokeh.palettes Category10, first item
+# (#1f77b4), with alpha=0.2.
+QUERY_OVERLAY_COLOR = 'rgba(31, 119, 180, 0.2)'
+
+
+def dataset_native_space(dataset: str) -> str:
+    """Native coordinate space of a connectome dataset.
+
+    Mirrors the source-space mapping used by VisualizeSkeleton's
+    ``_get_template_info`` so cross-dataset overlays resolve the same
+    bridging transforms the ROI mesh pipeline uses
+    (male-cns ROIs are transformed JRCFIB2022Mraw -> FLYWIRE).
+
+    Raises ValueError for datasets without a known native space.
+    """
+    d = str(dataset or '').lower()
+    if 'fafb' in d or ('flywire' in d and 'banc' not in d):
+        return 'FLYWIRE'
+    if 'banc' in d:
+        return 'BANC'
+    if 'male-cns' in d or 'malecns' in d or 'optic' in d:
+        return 'JRCFIB2022Mraw'
+    if 'hemibrain' in d:
+        return 'JRCFIB2018Fraw'
+    if 'manc' in d:
+        return 'MANCraw'
+    raise ValueError(
+        f"No known native coordinate space for dataset '{dataset}'; "
+        "pass explicit spaces to transform_neurons_to_space instead."
+    )
+
+
+def dataset_render_space(dataset: str) -> str:
+    """Template-mode render space of a dataset's visualization scene.
+
+    This is where skeletons are actually DRAWN: VisualizeSkeleton transforms
+    a dataset's native-space skeletons to this space before rendering
+    (``_get_template_info`` target, template mode). For overlays, transform
+    the foreign neurons into this space — NOT the native space, which for
+    NeuPrint datasets is a raw-voxel frame with different units.
+
+    Raises ValueError for datasets without a known render space.
+    """
+    d = str(dataset or '').lower()
+    if 'fafb' in d or ('flywire' in d and 'banc' not in d):
+        return 'FLYWIRE'
+    if 'banc' in d:
+        return 'FLYWIRE'  # BANC scenes render in the FLYWIRE template today
+    if ('male-cns' in d or 'malecns' in d or 'optic' in d):
+        return 'JRCFIB2022M'
+    if 'hemibrain' in d:
+        return 'JRCFIB2018F'
+    if 'manc' in d:
+        return 'MANC'
+    raise ValueError(
+        f"No known render space for dataset '{dataset}'; "
+        "pass explicit spaces to transform_neurons_to_space instead."
+    )
+
+
+def transform_neurons_to_space(
+        neurons, source_space: str, target_space: str,
+        validate_bounds: bool = True, verbose: bool = False) -> list:
+    """Transform navis neurons between template spaces via the flybrains
+    bridge registry (navis.xform per neuron, failure-isolated).
+
+    For male-cns -> FAFB this resolves to the production ROI-mesh bridging
+    (JRCFIB2022Mraw -affine-> JRCFIB2022M -landmark TPS-> FLYWIRE), which is
+    fully offline: both transforms ship inside the flybrains package.
+
+    When ``validate_bounds`` and the final hop is a landmark TPS, neurons
+    whose soma lands outside the TPS target-landmark envelope (plus 20%
+    margin) are dropped with a warning — a cheap guard against silent
+    mis-registration. Neurons without a soma are kept.
+
+    Returns a list of transformed navis neurons (failures excluded).
+    """
+    import navis
+    import flybrains
+    flybrains.register_transforms()
+    from navis.transforms import registry as _registry
+
+    if source_space == target_space:
+        return list(navis.NeuronList(neurons))
+
+    path, seq = _registry.shortest_bridging_seq(source_space, target_space)
+
+    # TPS target landmarks bound the template space the bridge maps into.
+    bounds_lo = bounds_hi = None
+    if validate_bounds and seq.transforms:
+        last = seq.transforms[-1]
+        tgt = getattr(last, 'target', None)
+        tgt = np.asarray(tgt) if tgt is not None else None
+        if tgt is not None and tgt.ndim == 2 and len(tgt):
+            span = tgt.max(axis=0) - tgt.min(axis=0)
+            bounds_lo = tgt.min(axis=0) - 0.2 * span
+            bounds_hi = tgt.max(axis=0) + 0.2 * span
+
+    out = []
+    dropped = []
+    for n in navis.NeuronList(neurons):
+        try:
+            xf = navis.xform(n, transform=seq)
+        except Exception as e:
+            _vprint_safe(f'  ⚠️ Could not transform {getattr(n, "name", n)} '
+                         f'({source_space} -> {target_space}): {e}')
+            continue
+        kept = True
+        if bounds_lo is not None:
+            try:
+                soma = getattr(xf, 'soma', None)
+                if soma is not None:
+                    pos = np.array([float(soma.x), float(soma.y), float(soma.z)])
+                    if np.any(pos < bounds_lo) or np.any(pos > bounds_hi):
+                        kept = False
+                        dropped.append(getattr(n, 'name', n))
+            except Exception:
+                pass  # advisory check only
+        if kept:
+            out.append(xf)
+        else:
+            _vprint_safe(f'  ⚠️ {getattr(n, "name", n)} transformed soma '
+                         f'outside {target_space} bounds; excluded from overlay')
+    if verbose:
+        _vprint_safe(f'  Bridged {source_space} -> {target_space} via '
+                     f'{" -> ".join(path)}: {len(out)} neuron(s)')
+    if dropped:
+        _vprint_safe(f'  {len(dropped)} transformed neuron(s) outside '
+                     f'{target_space} landmark envelope: {dropped[:5]}')
+    return out
+
+
+def _vprint_safe(msg: str) -> None:
+    """Module-level printer for helper warnings (no VisualizeSkeleton bound)."""
+    try:
+        tqdm.write(msg)
+    except Exception:
+        print(msg)
+
+
 @dataclass
 class VisualizeSkeleton:
     """
@@ -1682,6 +1825,17 @@ class VisualizeSkeleton:
         e.g. 'L1->L2->L3'. All type, instance (in regular expression), and bodyId are compatible.\n
     when use list, each layer can be neuron bodyIds, types, instances in regular expressions, or a list of them\n
     e.g. [['L1_0','L1_1'], ['L2_0','L2_1'], ['L3_0','L3_1']]
+    '''
+
+    custom_neurons: list = None
+    '''
+    Pre-built neurons rendered as extra layers, already in this dataset's
+    coordinate space. List of (layer_name, neurons) tuples where neurons is a
+    navis TreeNeuron / NeuronList / list of TreeNeurons. These layers bypass
+    dataset-bound fetching and coordinate transforms entirely (rendered
+    as-is), so callers must transform them into the scene space first —
+    see ``transform_neurons_to_space``. Used for cross-dataset overlays such
+    as the homolog visualizer's ``query_transformed_{neuron name}`` layer.
     '''
 
     search_columns: str = 'auto'
@@ -4886,6 +5040,107 @@ class VisualizeSkeleton:
             warn('background_color', f"value {self.background_color!r} is not a valid color", "'white'")
             self.background_color = standardize_color('white')
 
+    def _inject_custom_neurons(self):
+        """Prepend custom_neurons overlay layers as the scene's first layer.
+
+        Runs in ``__post_init__`` so every downstream consumer — the render
+        loop, ``_save_neuron_info_csv``, and ``_save_viz_layer_info_csv`` —
+        sees the overlay as a real layer (not only in the rendered traces).
+        The overlay is inserted at index 0 so ``query_transformed_{name}``
+        sits as layer 1, before the rank-1 homolog. Called once per instance;
+        a second call is a no-op.
+        """
+        self._custom_neurons_by_layer = {}
+        if getattr(self, '_custom_neurons_injected', False):
+            return
+        self._custom_neurons_injected = True
+        if not getattr(self, 'custom_neurons', None):
+            return
+        # Hermetic test objects may be built without __post_init__ field
+        # defaults; ensure the arrays we append to exist.
+        if not hasattr(self, 'neuron_dfs') or self.neuron_dfs is None:
+            self.neuron_dfs = []
+        if not hasattr(self, 'neuron_layers') or self.neuron_layers is None:
+            self.neuron_layers = []
+        if not hasattr(self, 'layer_criteria') or self.layer_criteria is None:
+            self.layer_criteria = []
+        if not hasattr(self, 'roi_dfs') or self.roi_dfs is None:
+            self.roi_dfs = []
+        if not hasattr(self, 'layer_names') or self.layer_names is None:
+            self.layer_names = []
+        if not hasattr(self, '_viz_input_neuron_layers') or \
+                self._viz_input_neuron_layers is None:
+            self._viz_input_neuron_layers = []
+        if not hasattr(self, '_viz_input_custom_layer_names') or \
+                self._viz_input_custom_layer_names is None:
+            self._viz_input_custom_layer_names = []
+        if self._viz_input_custom_layer_names == '':
+            self._viz_input_custom_layer_names = []
+
+        import navis
+        insert_pos = 0
+        for entry in self.custom_neurons:
+            try:
+                layer_nm, neurons = entry
+            except (TypeError, ValueError):
+                self._vprint('  ⚠️ custom_neurons entries must be '
+                             '(layer_name, neurons); entry skipped',
+                             level='simple')
+                continue
+            try:
+                neurons = navis.NeuronList(
+                    neurons if isinstance(neurons, (list, navis.NeuronList))
+                    else [neurons])
+            except Exception as e:
+                self._vprint(f'  ⚠️ custom_neurons layer "{layer_nm}" '
+                             f'could not be wrapped: {e}', level='simple')
+                continue
+            if neurons.empty:
+                continue
+            bids = []
+            for n in neurons:
+                try:
+                    bids.append(int(getattr(n, 'id', None)
+                                     or getattr(n, 'bodyId', None) or 0))
+                except (TypeError, ValueError):
+                    bids.append(0)
+            layer_nm = str(layer_nm)
+            # Insert at the front so the overlay is layer 1 (before the
+            # rank-1 homolog). Multiple overlays keep their order at the
+            # front.
+            self.neuron_layers.insert(insert_pos, bids)
+            self.neuron_dfs.insert(insert_pos, pd.DataFrame({'bodyId': bids}))
+            self.layer_criteria.insert(insert_pos, None)
+            self.roi_dfs.insert(insert_pos, None)
+            self.layer_names.insert(insert_pos, layer_nm)
+            # Track in the input arrays the export writers read so the
+            # overlay appears as an entry in viz_layer_info.csv /
+            # neuron_info.csv.
+            self._viz_input_neuron_layers.insert(insert_pos, bids)
+            if isinstance(self._viz_input_custom_layer_names, list):
+                self._viz_input_custom_layer_names.insert(insert_pos, layer_nm)
+            elif self._viz_input_custom_layer_names is None:
+                self._viz_input_custom_layer_names = [layer_nm]
+            self._custom_neurons_by_layer[layer_nm] = neurons
+            insert_pos += 1
+        if self._custom_neurons_by_layer:
+            n_layers = len(self.neuron_layers)
+            self.neuron_colors = self._expand_color_sequence(
+                self._base_neuron_colors, n_layers,
+                target_label='layers', tip_parameter='neuron_colors',
+                warn=False,
+                continuous=self._neuron_colors_continuous)
+            # One shared color for every overlay layer: the per-neuron
+            # legend entries read as one group (query_transformed_*).
+            self.neuron_colors = list(self.neuron_colors)
+            for _i in range(len(self._custom_neurons_by_layer)):
+                self.neuron_colors[_i] = QUERY_OVERLAY_COLOR
+            self._vprint(
+                '  ➕ Overlay layer(s) injected (pre-transformed, no '
+                f'fetch/coordinate transform): '
+                f'{", ".join(self._custom_neurons_by_layer)}',
+                level='simple')
+
     def __post_init__(self):
         # Keep the local binding available before auto-generated output names
         # are sanitized below (a later compatibility branch also imports re).
@@ -5583,6 +5838,7 @@ class VisualizeSkeleton:
         
         # Save one compact neuron-info table.  ROI counts are fetched for
         # internal query/filtering needs, but are not part of this export.
+        self._inject_custom_neurons()
         self._save_neuron_info_csv()
         # Always leave a small, directly reusable layer-map beside the
         # visualization. It preserves the readable source layer/neuron/color
@@ -9220,6 +9476,7 @@ class VisualizeSkeleton:
             # the prepared mesh a second time or decimate it twice.
             use_neuprint_mesh_cache = False
             neuprint_mesh_cache = {}
+
         
         
         # Note: For legend_mode='type', neurons keep their layer colors but get separate legend entries
@@ -9272,7 +9529,17 @@ class VisualizeSkeleton:
             template_info = None
             if self.brain_mesh in ['whole', 'template']:
                 template_info = self._get_template_info()
-            
+
+            # Overlay layers (custom_neurons) are already in this scene's
+            # coordinate space: render as-is, skip every cache/fetch branch.
+            # Guard with getattr so hermetic test objects built without
+            # __post_init__ (no overlay map) fall through to the normal path.
+            custom_layer_neurons = getattr(
+                self, '_custom_neurons_by_layer', {}).get(layer_name)
+            is_custom_layer = custom_layer_neurons is not None
+            if is_custom_layer:
+                needs_transform = False
+
             neuron_vols = None
             
             # For FAFB: split the layer into MeshNeuron sources (prepared
@@ -9286,13 +9553,14 @@ class VisualizeSkeleton:
             )
             neuprint_layer_prepared = (
                 neuprint_preprocessing_active
+                and not is_custom_layer
                 and all(body_id in neuprint_prepared_skeletons
                         for body_id in layer_body_ids)
             )
             cached_mesh_neurons = []  # MeshNeurons loaded from cache
             mesh_missing_ids = layer_body_ids  # IDs that need processing
             
-            if is_fafb and fafb_mesh_cache:
+            if is_fafb and fafb_mesh_cache and not is_custom_layer:
                 # Separate mesh sources vs TreeNeuron sources with
                 # type-robust matching
                 cached_mesh_neurons = []
@@ -9312,7 +9580,7 @@ class VisualizeSkeleton:
                     self._vprint(f'    ✓ {len(cached_mesh_neurons)}/{len(layer_body_ids)} from mesh cache', level='full', use_tqdm=True)
             
             # NeuPrint tube mode: split cached transformed meshes vs missing
-            if use_neuprint_mesh_cache and neuprint_mesh_cache:
+            if use_neuprint_mesh_cache and neuprint_mesh_cache and not is_custom_layer:
                 cached_mesh_neurons = []
                 mesh_missing_ids = []
                 for bid in layer_body_ids:
@@ -9331,9 +9599,10 @@ class VisualizeSkeleton:
             # selected pipeline and mesh simplification are render-time
             # choices, never cache-level selectors.
             ignore_skeleton_cache = False
-            if neuprint_preprocessing_active:
+            if neuprint_preprocessing_active or is_custom_layer:
                 # The aggregate preprocessing phase owns all NeuPrint cache
                 # resolution. Do not re-open the fixed skeleton cache here.
+                # Overlay layers bring their own neurons; nothing to resolve.
                 cached_neurons, missing_ids = None, []
             else:
                 cached_neurons, missing_ids = self._load_cached_neurons(
@@ -9358,9 +9627,13 @@ class VisualizeSkeleton:
                     [neuprint_prepared_skeletons[body_id]
                      for body_id in layer_body_ids])
 
+            # Overlay layer: inject the caller-provided neurons directly.
+            if is_custom_layer:
+                raw_neuron_vols = navis.NeuronList(custom_layer_neurons)
+
             # Fetch missing neurons (only those not in the mesh cache when
             # the FAFB or NeuPrint mesh cache is in use)
-            fetch_ids = [] if neuprint_preprocessing_active else (
+            fetch_ids = [] if (neuprint_preprocessing_active or is_custom_layer) else (
                 mesh_missing_ids if (is_fafb or use_neuprint_mesh_cache)
                 else missing_ids)
             remaining_fetch_ids = list(fetch_ids)
