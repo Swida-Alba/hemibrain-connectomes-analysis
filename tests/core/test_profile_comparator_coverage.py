@@ -1950,7 +1950,7 @@ def test_save_homolog_results_internal_full(finder, monkeypatch, tmp_path):
     assert saved['arr'] == pytest.approx(0.5)
 
     ts = pd.read_csv(base / 'results' / 'type_summary.csv')
-    assert 'avg_rank_corr' in ts.columns
+    assert 'avg_rank_corr' not in ts.columns
     assert 'visualized' in ts.columns
     assert out['query_profile'] is not None
     assert 'Cand' in out['match_profiles']
@@ -1970,7 +1970,7 @@ def test_save_homolog_results_internal_nan_and_sort_fallback(finder, monkeypatch
     ts = pd.read_csv(tmp_path / 'nan_folder' / 'results' / 'type_summary.csv')
     # all rows had NaN rank_corr -> empty aggregated summary (header only)
     assert ts.empty
-    assert 'avg_rank_corr' in ts.columns
+    assert 'avg_rank_corr' not in ts.columns
 
 
 def test_save_homolog_results_internal_type_level_and_fallback(finder, monkeypatch, tmp_path):

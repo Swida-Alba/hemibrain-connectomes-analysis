@@ -526,10 +526,12 @@ class TestRunner:
         assert "Min Shared Partners" not in labels
         assert "Candidate Prune %" not in labels
 
-    def test_homologs_sort_by_defaults_to_cosine(self):
+    def test_homologs_sort_by_defaults_to_jaccard(self):
         """The candidate-ranking control is labeled 'Sort By' and defaults to
-        cosine: all metrics are always computed by the shared backend, so the
-        selection only affects the candidate ordering (top-N cut)."""
+        jaccard (the benchmark's best bodyId-level metric — conservative,
+        bounded [0,1], never degenerate): all metrics are always computed by
+        the shared backend, so the selection only affects the candidate
+        ordering (top-N cut)."""
         from nicegui import Client
         from nicegui.page import page
         from ui.config import DEFAULTS
@@ -545,7 +547,7 @@ class TestRunner:
                 by_label[label] = el
         assert "Sort By" in by_label, by_label
         assert by_label["Sort By"].value == DEFAULTS["similarity_metric"]
-        assert DEFAULTS["similarity_metric"] == "cosine"
+        assert DEFAULTS["similarity_metric"] == "jaccard"
         assert "Similarity Metric" not in by_label
 
     def test_similar_tab_has_both_modes_and_loose_knobs(self):

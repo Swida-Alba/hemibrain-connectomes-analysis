@@ -331,6 +331,21 @@ aggregation view, not a type-level profile comparison):
 | Mi1   | hemibrain      | flywire_FAFB   | Mi1         | Mi4         | 0.65          | 0.71           | 0.08          | 12                   |
 ```
 
+### Output layout notes
+
+- Multi-type runs group per-type output under `by_type/<query_type>/`; a run
+  that resolves to a single query type writes `results/`, `profiles/`,
+  `overlaps/` and `visualization/` directly into the run folder (no
+  `by_type/` nesting).
+- Cross-dataset runs plot the query source inside the target brain:
+  `visualization/source_neurons/` renders the transformed query in the
+  target template (layer label `query_transformed_{neuron name}`), and the
+  `bodyId_level/` / `type_level/` scenes include the same overlay layer.
+- The `type_level/` scene is driven by the pooled all-adjacency
+  `type_level_results.csv` (real type-level ranking, `rank` order), not the
+  bodyId-mean `type_summary.csv`. Each listed type renders with its FULL
+  membership in the target dataset.
+
 ### type_level_results.csv (Always Saved)
 
 True type-level homolog ranking: pooled all-adjacency type profiles (every
@@ -359,7 +374,7 @@ When `output_dir` is set, results are automatically saved with **both bodyId-lev
 │   │                              #          rank_corr, jaccard, cosine,
 │   │                              #          source_status, target_status,
 │   │                              #          adjacency_score, ...
-│   ├── type_summary.csv          # Type-level aggregated summary
+│   ├── type_summary.csv          # Type-mean from bodyId level
 │   │                              # Columns: source_type, target_type,
 │   │                              #          avg_rank_corr, best_rank_corr,
 │   │                              #          std_rank_corr, n_bodyid_comparisons

@@ -391,10 +391,10 @@ DEFAULTS = {
     "fast_search": True,
     "vector_prefilter": True,
     "expand_2hop": True,
-    "top_k": 15,
+    "top_k": 25,
     "top_m": 5,
-    "similarity_metric": "cosine",  # Sort By (homolog candidates): sorting only — all metrics are always computed
-    "top_n": 30,
+    "similarity_metric": "jaccard",  # Sort By (homolog candidates): sorting only — all metrics are always computed. Jaccard is the conservative bodyId-level default (benchmark-best, bounded [0,1], never degenerate); see BENCHMARK_RESULTS.md §7.
+    "top_n": 100,
     "match_algorithm": "cds",
     # NeuronBridge Find Neurons / Co-Labeling shared controls
     "nb_top_n": 50,
@@ -431,7 +431,11 @@ RUN_GUIDE_FORMATS = ["html", "txt", "markdown", "disabled"]
 NETWORK_LAYOUTS = ["distributed", "circular", "shell", "spring"]
 
 # Similarity metrics
-SIMILARITY_METRICS = ["rank_union", "jaccard", "cosine", "rank_corr"]
+# rank_corr (shared-only Spearman) is intentionally excluded: it is fragile at
+# bodyId level (<3 shared types or low variance -> NaN, MRR 0.34 at (15,5) per
+# the homolog-parameter benchmark), and the UI default is rank_union, which
+# dominates at both bodyId and pooled type level. See BENCHMARK_RESULTS.md §6c.
+SIMILARITY_METRICS = ["rank_union", "jaccard", "cosine"]
 
 # Match algorithms for NeuronBridge
 MATCH_ALGORITHMS = ["cds", "pppm", "both"]

@@ -106,6 +106,21 @@ DEFAULT_SCORE_WEIGHTS = {
 # Comparison Result Dataclass
 # ============================================================================
 
+_OUTPUT_DROP_COLS = ('rank_corr', 'rank_union_raw', 'avg_rank_corr')
+
+
+def _drop_rank_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """Strip the poorly-ranking metric columns from user-facing output CSVs.
+
+    rank_corr (shared-partner Spearman) is retained internally for the sort
+    fallback and the type-mean derivation, but it is a poor ranker (see the
+    benchmark) and is not shown in the exported result tables. rank_union_raw
+    is an internal alias for the same signal and is likewise dropped.
+    """
+    drop = [c for c in _OUTPUT_DROP_COLS if c in df.columns]
+    return df.drop(columns=drop) if drop else df
+
+
 @dataclass
 class ComparisonResult:
     """
@@ -1718,7 +1733,7 @@ class ProfileComparator:
         comparison_mode: str = 'loose',
         label_mapper: Optional[Any] = None,
         score_weights: Optional[Dict[str, float]] = None,
-        top_k: int = 15,
+        top_k: int = 25,
         top_m: int = 5,
         min_synapse_threshold: int = 3,
         include_untyped_partners: bool = True,
@@ -1956,7 +1971,7 @@ class ProfileComparator:
                 }
 
                 return {
-                    'results': results_df.sort_values('rank_corr', ascending=False) if not results_df.empty else results_df,
+                    'results': results_df.sort_values('rank_union', ascending=False) if not results_df.empty else results_df,
                     'profiles_a': {},
                     'profiles_b': {},
                     'type_summary': type_summary,
@@ -2086,7 +2101,7 @@ class ProfileComparator:
 
         results_df = pd.DataFrame(rows)
         if not results_df.empty:
-            results_df = results_df.sort_values('rank_corr', ascending=False)
+            results_df = results_df.sort_values('rank_union', ascending=False)
 
         # Build summary
         summary = {}
@@ -2446,8 +2461,8 @@ class HomologFinder:
         target_dataset: Optional[str] = None,
         output_dir: Optional[str] = None,
         saveas: Optional[str] = None,
-        top_n: int = 20,
-        top_k: int = 15,
+        top_n: int = 100,
+        top_k: int = 25,
         top_m: int = 5,
         min_synapse_threshold: int = 3,
         include_untyped_partners: bool = True,
@@ -2455,7 +2470,7 @@ class HomologFinder:
         visualize_skeleton: bool = False,
         visualize_top_n: int = 5,
         visualization_settings: Optional[Dict[str, Any]] = None,
-        similarity_metric: Union[str, Dict[str, float]] = 'rank_union',
+        similarity_metric: Union[str, Dict[str, float]] = 'jaccard',
         score_weights: Optional[Dict[str, float]] = None,
         verbose: bool = True,
         token: str = '',
@@ -2827,7 +2842,7 @@ class HomologFinder:
         self,
         source_types: List[str],
         target_dataset: str,
-        similarity_metric: str = 'rank_union',
+        similarity_metric: str = 'jaccard',
         type_mapper: Optional['CrossDatasetTypeMapper'] = None,
         source_pooled: Optional[Dict[str, 'ConnectivityProfile']] = None,
         target_pooled: Optional[Dict[str, 'ConnectivityProfile']] = None,
@@ -2962,7 +2977,7 @@ class HomologFinder:
         if df.empty:
             return df
         sort_col = (similarity_metric if similarity_metric in df.columns
-                    else 'rank_union')
+                    else 'jaccard')
         df = df.sort_values(['source_type', sort_col], ascending=[True, False],
                             na_position='last').reset_index(drop=True)
         df['rank'] = df.groupby('source_type').cumcount() + 1
@@ -4295,7 +4310,8 @@ class HomologFinder:
                 visualize_skeleton=visualize_skeleton,
                 visualize_top_n=visualize_top_n,
                 similarity_metric=self.similarity_metric,
-                type_level_df=type_level_df
+                type_level_df=type_level_df,
+                top_n=top_n
             )
         
         return results_df
@@ -5204,7 +5220,7 @@ class HomologFinder:
 
         # Sorting and top-N trimming
         if not results_df.empty:
-            sort_col = similarity_metric if similarity_metric in results_df.columns else 'rank_corr'
+            sort_col = similarity_metric if similarity_metric in results_df.columns else 'jaccard'
             results_df = results_df.sort_values(['source_bodyId', sort_col], ascending=[True, False], na_position='last')
             if top_n > 0:
                 results_df = results_df.groupby('source_bodyId').head(top_n).reset_index(drop=True)
@@ -6163,6 +6179,7 @@ class HomologFinder:
                 visualize_skeleton=visualize_skeleton,
                 visualize_top_n=visualize_top_n,
                 type_level_df=type_level_df,
+                top_n=top_n,
                 intra_type_df=intra_type_df,  # Pass intra-type results for saving
                 similarity_metric=self.similarity_metric,
                 source_status_summary=source_status_summary
@@ -6517,6 +6534,7 @@ class HomologFinder:
             visualize_top_n=visualize_top_n,
             similarity_metric=self.similarity_metric,
             type_level_df=type_level_df,
+            top_n=top_n,
             intra_type_df=intra_type_df,
             source_status_summary=source_status_summary
         )
@@ -6563,6 +6581,10 @@ class HomologFinder:
                     type_summary.csv     # per (query_type, source_type, target_type)
                     homolog_results.csv  # legacy, sorted by metric
                 by_type/<query_type>/    # full per-type output incl. visualization/
+
+        A single resolved query type skips the by_type/ nesting: the full
+        per-type output (results/, profiles/, overlaps/, visualization/) is
+        written directly into <combined_name>/.
 
         Args: same as ``find_homologs_fast`` except ``source`` may be a list.
 
@@ -6618,6 +6640,12 @@ class HomologFinder:
         combined_path = Path(output_dir) / combined_name
         self._log(f"📁 Output folder: {combined_path}")
 
+        # A single resolved query type writes its full per-type output
+        # (results/, profiles/, overlaps/, visualization/) directly into the
+        # run folder — the by_type/<type>/ nesting only pays off when two or
+        # more types share one run.
+        single_type_output = len(units) == 1
+
         all_dfs: List[pd.DataFrame] = []
         # (idx, query_type, real_type, per_source, per_type_output_path, unit_df)
         fetched: List[Tuple[int, str, Optional[str], Union[str, int], Path, pd.DataFrame]] = []
@@ -6642,7 +6670,10 @@ class HomologFinder:
                 str(real_type if real_type is not None else query_type),
             ).strip("_")
             safe_sub = safe_sub[:60] or f"type_{idx + 1}"
-            per_type_saveas = f"{combined_name}/by_type/{safe_sub}"
+            per_type_saveas = (
+                combined_name if single_type_output
+                else f"{combined_name}/by_type/{safe_sub}"
+            )
             per_type_output_path = Path(output_dir) / per_type_saveas
             per_source = real_type if real_type is not None else query_type
 
@@ -6718,6 +6749,13 @@ class HomologFinder:
                         type_summary = pd.read_csv(summary_path)
                     except Exception:
                         type_summary = None
+                type_level_df = None
+                tl_path = per_type_output_path / 'results' / 'type_level_results.csv'
+                if tl_path.exists():
+                    try:
+                        type_level_df = pd.read_csv(tl_path)
+                    except Exception:
+                        type_level_df = None
                 self._visualize_homolog_candidates(
                     results_df=unit_df,
                     query=per_source,
@@ -6727,14 +6765,15 @@ class HomologFinder:
                     top_n=visualize_top_n,
                     files_saved=[],
                     type_summary=type_summary,
+                    type_level_df=type_level_df,
                 )
 
         combined_df = pd.concat(all_dfs, ignore_index=True)
 
         # Sort grouped by query_type, then the selected similarity metric.
-        sort_metric = similarity_metric if similarity_metric in combined_df.columns else 'rank_union'
+        sort_metric = similarity_metric if similarity_metric in combined_df.columns else 'jaccard'
         if sort_metric not in combined_df.columns:
-            for fallback in ['rank_corr', 'rank_union', 'jaccard', 'cosine']:
+            for fallback in ['jaccard', 'rank_union', 'cosine', 'rank_corr']:
                 if fallback in combined_df.columns:
                     sort_metric = fallback
                     break
@@ -6742,17 +6781,26 @@ class HomologFinder:
             ['query_type', sort_metric], ascending=[True, False], na_position='last'
         )
 
-        self._save_multi_results(
-            combined_df=combined_df,
-            combined_path=combined_path,
-            source_dataset=source_dataset,
-            target_dataset=target_dataset,
-            # A coarse label expands into one unit per real type, all sharing
-            # the same 'query' label; dedupe so README/type_summary list each
-            # query once.
-            queries=list(dict.fromkeys(str(u['query']) for u in units)),
-            similarity_metric=similarity_metric,
-        )
+        if single_type_output:
+            # The per-type save already wrote everything to the run folder
+            # root; writing the combined duplicates on top would only
+            # overwrite identical data with an extra query_type column.
+            self._log(
+                "Single query type: results written directly to the run "
+                "folder (no by_type/ nesting)"
+            )
+        else:
+            self._save_multi_results(
+                combined_df=combined_df,
+                combined_path=combined_path,
+                source_dataset=source_dataset,
+                target_dataset=target_dataset,
+                # A coarse label expands into one unit per real type, all
+                # sharing the same 'query' label; dedupe so README/
+                # type_summary list each query once.
+                queries=list(dict.fromkeys(str(u['query']) for u in units)),
+                similarity_metric=similarity_metric,
+            )
 
         return combined_df
 
@@ -6779,19 +6827,22 @@ class HomologFinder:
                 rounded[col] = rounded[col].round(4)
 
         # 1) homolog_results.csv (legacy, sorted by the selected metric).
-        sort_metric = similarity_metric if similarity_metric in rounded.columns else 'rank_union'
+        sort_metric = similarity_metric if similarity_metric in rounded.columns else 'jaccard'
         if sort_metric not in rounded.columns:
-            for fallback in ['rank_corr', 'rank_union', 'jaccard', 'cosine']:
+            for fallback in ['jaccard', 'rank_union', 'cosine', 'rank_corr']:
                 if fallback in rounded.columns:
                     sort_metric = fallback
                     break
-        results_by_score = rounded.sort_values(sort_metric, ascending=False, na_position='last')
-        results_by_score.to_csv(results_dir / 'homolog_results.csv', index=False)
+        if sort_metric in rounded.columns:
+            results_by_score = rounded.sort_values(sort_metric, ascending=False, na_position='last')
+        else:
+            results_by_score = rounded  # no metric column available; keep frame order
+        _drop_rank_cols(results_by_score).to_csv(results_dir / 'homolog_results.csv', index=False)
 
         # 2) bodyid_results.csv (grouped per query_type).
         bodyid_cols = [
             'query_type', 'source_bodyId', 'source_type', 'target_bodyId',
-            'target_type', 'rank_corr', 'rank_union', 'rank_union_raw',
+            'target_type', 'rank_union',
             'jaccard', 'cosine', 'adjacency_score', 'shared_type_count',
             'union_type_count', 'is_same_type', 'is_same_dataset',
             'source_status', 'target_status', 'weak_source', 'weak_target',
@@ -6799,7 +6850,7 @@ class HomologFinder:
         ]
         available = [c for c in bodyid_cols if c in rounded.columns]
         bodyid_df = rounded[available].copy()
-        bodyid_df.to_csv(results_dir / 'bodyid_results.csv', index=False)
+        _drop_rank_cols(bodyid_df).to_csv(results_dir / 'bodyid_results.csv', index=False)
 
         # 3) type_summary.csv aggregated per (query_type, source_type, target_type).
         valid = (
@@ -6809,8 +6860,10 @@ class HomologFinder:
         type_summary = pd.DataFrame()
         if not valid.empty and {'query_type', 'source_type'} <= set(valid.columns):
             target_col = 'target_type' if 'target_type' in valid.columns else 'target'
-            agg_dict = {'rank_corr': ['mean', 'count']}
-            for m in ['jaccard', 'rank_union', 'cosine', 'adjacency_score',
+            agg_dict = {}
+            if 'rank_corr' in valid.columns:
+                agg_dict['rank_corr'] = ['mean', 'count']
+            for m in ['rank_union', 'jaccard', 'cosine', 'adjacency_score',
                       'shared_type_count', 'union_type_count']:
                 if m in valid.columns:
                     agg_dict[m] = 'mean'
@@ -6836,7 +6889,7 @@ class HomologFinder:
             type_summary = type_summary.sort_values(sort_by, ascending=False, na_position='last')
             type_summary.insert(0, 'source_dataset', source_dataset)
             type_summary.insert(0, 'query', ','.join(queries))
-        type_summary.to_csv(results_dir / 'type_summary.csv', index=False)
+        _drop_rank_cols(type_summary).to_csv(results_dir / 'type_summary.csv', index=False)
 
         # 3b) type_level_results.csv — pooled all-adjacency type-level
         # ranking, collected from the per-type output folders.
@@ -6853,7 +6906,7 @@ class HomologFinder:
         if tl_frames:
             tl_combined = pd.concat(tl_frames, ignore_index=True)
             tl_combined.insert(0, 'source_dataset', source_dataset)
-            tl_combined.to_csv(results_dir / 'type_level_results.csv', index=False)
+            _drop_rank_cols(tl_combined).to_csv(results_dir / 'type_level_results.csv', index=False)
         self._log("Saved: results/type_level_results.csv (pooled type-level ranking)"
                   if tl_frames else "No type-level results collected from per-type folders")
 
@@ -6957,7 +7010,8 @@ class HomologFinder:
         visualize_top_n: int = 5,
         intra_type_df: Optional[pd.DataFrame] = None,
         type_level_df: Optional[pd.DataFrame] = None,
-        similarity_metric: str = 'rank_union',
+        top_n: int = 100,
+        similarity_metric: str = 'jaccard',
         source_status_summary: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
@@ -7160,20 +7214,23 @@ class HomologFinder:
             
             # Determine sorting columns based on available data
             # Use the user-selected similarity_metric for sorting
-            sort_metric = similarity_metric if similarity_metric in results_rounded.columns else 'rank_union'
+            sort_metric = similarity_metric if similarity_metric in results_rounded.columns else 'jaccard'
             if sort_metric not in results_rounded.columns:
                 # Fallback to any available metric
-                for fallback in ['rank_corr', 'rank_union', 'jaccard', 'cosine']:
+                for fallback in ['jaccard', 'rank_union', 'cosine', 'rank_corr']:
                     if fallback in results_rounded.columns:
                         sort_metric = fallback
                         break
+            if sort_metric not in results_rounded.columns:
+                sort_metric = None  # fixture has no metric column; skip metric sorting
             
             if 'source_bodyId' in results_rounded.columns:
                 # BodyId-level data: sort by source_bodyId, then similarity_metric
-                bodyid_sort_cols = ['source_bodyId', sort_metric]
+                bodyid_sort_cols = (['source_bodyId', sort_metric] if sort_metric
+                                    else ['source_bodyId'])
                 bodyid_sorted = results_rounded.sort_values(
-                    bodyid_sort_cols, 
-                    ascending=[True, False],
+                    bodyid_sort_cols,
+                    ascending=([True, False] if sort_metric else [True]),
                     na_position='last'
                 )
                 
@@ -7184,25 +7241,31 @@ class HomologFinder:
                 # shared_type_count shows how many shared types were used for rank correlation
                 # union_type_count shows total unique types in union (for rank_union)
                 bodyid_cols = ['source_bodyId', 'source_type', 'target_bodyId', 'target_type',
-                              'rank_corr', 'rank_union', 'rank_union_raw',
-                              'jaccard', 'cosine', 
+                              'rank_union',
+                              'jaccard', 'cosine',
                               'adjacency_score', 'shared_type_count', 'union_type_count',
-                              'is_same_type', 'is_same_dataset', 
+                              'is_same_type', 'is_same_dataset',
                               'source_status', 'target_status',  # Hierarchical status
                               'weak_source', 'weak_target',  # Legacy flags
                               'source_partner_count', 'target_partner_count']
                 available_bodyid_cols = [c for c in bodyid_cols if c in bodyid_sorted.columns]
                 bodyid_df = bodyid_sorted[available_bodyid_cols].copy()
-                bodyid_df.to_csv(results_dir / 'bodyid_results.csv', index=False)
+                _drop_rank_cols(bodyid_df).to_csv(results_dir / 'bodyid_results.csv', index=False)
                 files_saved.append('results/bodyid_results.csv')
                 self._log(f"Saved: results/bodyid_results.csv (sorted by source_bodyId, {sort_metric})")
             else:
                 # Type-level only data (source_neuron instead of source_bodyId)
-                bodyid_sorted = results_rounded.sort_values(sort_metric, ascending=False, na_position='last')
+                if sort_metric:
+                    bodyid_sorted = results_rounded.sort_values(sort_metric, ascending=False, na_position='last')
+                else:
+                    bodyid_sorted = results_rounded
             
             # Also save as homolog_results.csv (legacy format, sorted by similarity_metric)
-            results_by_score = results_rounded.sort_values(sort_metric, ascending=False, na_position='last')
-            results_by_score.to_csv(results_dir / 'homolog_results.csv', index=False)
+            if sort_metric:
+                results_by_score = results_rounded.sort_values(sort_metric, ascending=False, na_position='last')
+            else:
+                results_by_score = results_rounded
+            _drop_rank_cols(results_by_score).to_csv(results_dir / 'homolog_results.csv', index=False)
             files_saved.append('results/homolog_results.csv')
             self._log(f"Saved: results/homolog_results.csv (sorted by {sort_metric})")
         
@@ -7214,10 +7277,12 @@ class HomologFinder:
                 if col in intra_type_rounded.columns:
                     intra_type_rounded[col] = intra_type_rounded[col].round(4)
             
-            # Sort by rank_corr (descending) to show most similar pairs first
-            sort_col = 'rank_corr' if 'rank_corr' in intra_type_rounded.columns else 'jaccard'
-            intra_type_sorted = intra_type_rounded.sort_values(sort_col, ascending=False)
-            intra_type_sorted.to_csv(results_dir / 'intra_type_results.csv', index=False)
+            # Sort by rank_union (descending) to show most similar pairs first
+            sort_col = next((c for c in ['jaccard', 'rank_union', 'rank_corr', 'cosine']
+                             if c in intra_type_rounded.columns), None)
+            intra_type_sorted = (intra_type_rounded.sort_values(sort_col, ascending=False)
+                                 if sort_col else intra_type_rounded)
+            _drop_rank_cols(intra_type_sorted).to_csv(results_dir / 'intra_type_results.csv', index=False)
             files_saved.append('results/intra_type_results.csv')
             self._log(f"Saved: results/intra_type_results.csv ({len(intra_type_sorted)} pairs)")
         
@@ -7302,10 +7367,11 @@ class HomologFinder:
             # For bodyId-level comparisons, save target bodyId summary for top matches
             if has_bodyid_cols:
                 target_cols = ['target_bodyId', 'target_type', 'target_status', 
-                              'target_partner_count', 'rank_corr', 'jaccard']
+                              'target_partner_count', 'rank_union', 'jaccard']
                 available_target_cols = [c for c in target_cols if c in top_matches.columns]
                 target_summary = top_matches[available_target_cols].drop_duplicates(subset=['target_bodyId'])
-                target_summary = target_summary.sort_values('rank_corr', ascending=False, na_position='last')
+                if 'jaccard' in target_summary.columns:
+                    target_summary = target_summary.sort_values('jaccard', ascending=False, na_position='last')
                 target_summary.to_csv(match_profiles_dir / 'top_target_bodyids.csv', index=False)
                 files_saved.append('profiles/matches/top_target_bodyids.csv')
                 self._log(f"Saved: profiles/matches/top_target_bodyids.csv ({len(target_summary)} top targets)")
@@ -7426,7 +7492,7 @@ class HomologFinder:
                         type_summary['n_incomplete_sources'] = type_summary['n_bodyid_comparisons'] - type_summary['n_complete_sources']
                     
                     # Sort by the average of the selected similarity_metric
-                    sort_by_col = f'avg_{sort_metric}' if f'avg_{sort_metric}' in type_summary.columns else 'avg_rank_corr'
+                    sort_by_col = f'avg_{sort_metric}' if f'avg_{sort_metric}' in type_summary.columns else 'avg_jaccard'
                     type_summary = type_summary.sort_values(sort_by_col, ascending=False, na_position='last')
 
                     # Mark which rows correspond to the types we will visualize (top visualize_top_n)
@@ -7446,7 +7512,7 @@ class HomologFinder:
                                 'adjacency_score', 'is_same_type']
                 available_cols = [c for c in pairwise_cols if c in valid_results.columns]
                 type_summary = valid_results[available_cols].drop_duplicates().copy()
-                type_summary = type_summary.sort_values('rank_corr', ascending=False, na_position='last')
+                type_summary = type_summary.sort_values('jaccard', ascending=False, na_position='last')
                 if visualize_top_n and visualize_top_n > 0:
                     type_summary['visualized'] = False
                     type_summary.loc[type_summary.index[:visualize_top_n], 'visualized'] = True
@@ -7461,7 +7527,7 @@ class HomologFinder:
                 type_summary.insert(1, 'source_dataset', source_dataset)
                 type_summary.insert(2, 'target_dataset', target_dataset)
             
-            type_summary.to_csv(results_dir / 'type_summary.csv', index=False)
+            _drop_rank_cols(type_summary).to_csv(results_dir / 'type_summary.csv', index=False)
             files_saved.append('results/type_summary.csv')
             self._log("Saved: results/type_summary.csv (type-mean aggregated FROM bodyId-level results)")
 
@@ -7471,13 +7537,20 @@ class HomologFinder:
         if type_level_df is not None and not type_level_df.empty:
             tl_cols = ['source_type', 'target_type', 'is_same_type',
                        'target_dataset', 'jaccard', 'weighted_jaccard',
-                       'cosine', 'rank_corr', 'rank_union', 'rank']
+                       'cosine', 'rank_union', 'rank']
             tl_out = type_level_df[[c for c in tl_cols if c in type_level_df.columns]]
             tl_out = tl_out.round(6)
-            tl_out.to_csv(results_dir / 'type_level_results.csv', index=False)
+            # Apply the run's top-N cap per source type (by type-level rank).
+            if top_n and top_n > 0 and 'rank' in tl_out.columns:
+                tl_out = (tl_out.sort_values(['source_type', 'rank'],
+                                             na_position='last')
+                          .groupby('source_type', as_index=False)
+                          .head(int(top_n)))
+            _drop_rank_cols(tl_out).to_csv(results_dir / 'type_level_results.csv', index=False)
             files_saved.append('results/type_level_results.csv')
             self._log(f"Saved: results/type_level_results.csv "
-                      f"({len(tl_out)} type-level rows)")
+                      f"({len(tl_out)} type-level rows, top {top_n} per "
+                      f"source type)")
         
         # 7. Generate 3D skeleton visualizations if enabled
         if visualize_skeleton and not results_df.empty:
@@ -7489,7 +7562,8 @@ class HomologFinder:
                 visualization_dir=visualization_dir,
                 top_n=visualize_top_n,
                 files_saved=files_saved,
-                type_summary=type_summary
+                type_summary=type_summary,
+                type_level_df=type_level_df
             )
         
         self._log(f"Saved {len(files_saved)} files to {output_path}")
@@ -7510,7 +7584,8 @@ class HomologFinder:
         visualization_dir: 'Path',
         top_n: int = 5,
         files_saved: List[str] = None,
-        type_summary: Optional[pd.DataFrame] = None
+        type_summary: Optional[pd.DataFrame] = None,
+        type_level_df: Optional[pd.DataFrame] = None
     ):
         """
         Generate 3D skeleton visualizations for top homolog candidates.
@@ -7616,6 +7691,21 @@ class HomologFinder:
             ).strip('_') or 'neuron'
             query_layer_name = f'query_{safe_query}_x{len(query_bodyids)}'
 
+            # Cross-dataset: the query source is also rendered INSIDE the
+            # target brain as a transformed overlay layer, labeled
+            # query_transformed_{neuron name} (naming spec).
+            query_overlay = None          # per-neuron entries (bodyId level)
+            query_overlay_grouped = None  # single grouped layer (type level)
+            if not same_dataset and query_bodyids:
+                try:
+                    query_overlay, query_overlay_grouped = (
+                        self._build_query_overlay_layer(
+                            vis_source_dataset, vis_target_dataset,
+                            query_bodyids, safe_query,
+                        ))
+                except Exception as e:
+                    self._log(f'Query overlay skipped: {e}')
+
             def _is_query_bodyid(value):
                 try:
                     return not pd.isna(value) and int(value) in query_bodyid_set
@@ -7640,8 +7730,8 @@ class HomologFinder:
                     if 'source_bodyId' in candidate_results.columns:
                         per_source_matches = []
                         for _, group in candidate_results.groupby('source_bodyId'):
-                            if 'rank_corr' in group.columns:
-                                sorted_group = group.sort_values('rank_corr', ascending=False, na_position='last')
+                            if 'rank_union' in group.columns:
+                                sorted_group = group.sort_values('rank_union', ascending=False, na_position='last')
                             else:
                                 sorted_group = group
                             per_source_matches.append(sorted_group.head(top_n))
@@ -7716,6 +7806,7 @@ class HomologFinder:
                             dataset=vis_target_dataset,
                             neuron_layers=bodyid_layers,
                             custom_layer_names=bodyid_layer_names,
+                            custom_neurons=query_overlay,
                             output_dir=str(bodyid_dir),
                             client=target_client,
                         ))
@@ -7762,6 +7853,7 @@ class HomologFinder:
                             vis_target_dataset, bodyid_dir, files_saved,
                             reference_bodyids=query_bodyids if same_dataset else None,
                             reference_name=query_layer_name,
+                            custom_overlay=query_overlay,
                         )
             
             # =====================================================================
@@ -7782,7 +7874,22 @@ class HomologFinder:
             if not query_types and not str(query).strip().isdigit():
                 query_types.add(str(query))
 
-            if type_summary is not None and not type_summary.empty:
+            # Prefer the pooled all-adjacency type-level results (true
+            # type-level ranking) over the bodyId-mean aggregation view; fall
+            # back to type_summary (bodyId-mean) and then to the bodyId-level
+            # top matches.
+            type_values = []
+            if type_level_df is not None and not type_level_df.empty and 'target_type' in type_level_df.columns:
+                tl = type_level_df
+                if 'rank' in tl.columns:
+                    tl = tl.sort_values(['source_type', 'rank'],
+                                        ascending=[True, True], na_position='last')
+                # Filter to the source type(s) actually queried.
+                qsrc = query_types or {str(query)}
+                if 'source_type' in tl.columns:
+                    tl = tl[tl['source_type'].isin(qsrc)]
+                type_values = tl['target_type'].dropna().unique().tolist()
+            elif type_summary is not None and not type_summary.empty:
                 ts = type_summary
                 type_col_name = 'target_type' if 'target_type' in ts.columns else ('target' if 'target' in ts.columns else None)
                 if type_col_name:
@@ -7836,24 +7943,48 @@ class HomologFinder:
                         candidate_results[target_col] == target_type
                     ]
                     
-                    if target_bodyid_col:
+                    # Resolve the type's FULL membership from the target
+                    # dataset (pooled type-level results are type-level, so
+                    # every member neuron belongs in the layer, not only the
+                    # candidates that happened to appear in results_df).
+                    # Cap the rendered members per type (mirrors the
+                    # find-similar visualization's TYPE_RENDER_MEMBER_CAP).
+                    try:
+                        from morphology import TYPE_RENDER_MEMBER_CAP
+                    except Exception:
+                        TYPE_RENDER_MEMBER_CAP = 20
+                    try:
+                        members_for_type = self.get_bodyids_for_type(
+                            str(target_type), vis_target_dataset)
+                    except Exception:
+                        members_for_type = []
+                    if len(members_for_type) > TYPE_RENDER_MEMBER_CAP:
+                        self._log(
+                            f"    Warning: type '{target_type}' has "
+                            f"{len(members_for_type)} members; rendering the "
+                            f"first {TYPE_RENDER_MEMBER_CAP} "
+                            f"(per-type render cap)")
+                        members_for_type = members_for_type[:TYPE_RENDER_MEMBER_CAP]
+                    if members_for_type:
+                        bodyids_for_type = members_for_type
+                    elif target_bodyid_col:
                         bodyids_for_type = _body_ids(
                             type_rows[target_bodyid_col].dropna().unique().tolist()
                         )
-                        if bodyids_for_type:
-                            # Multiple bodyIds for a type share one layer.
-                            type_layers.append(
-                                bodyids_for_type
-                                if len(bodyids_for_type) > 1
-                                else bodyids_for_type[0]
-                            )
-                        else:
-                            continue
                     else:
-                        type_layers.append(str(target_type))
-                    
-                    safe_name = str(target_type).replace('/', '_').replace(':', '_').replace('*', '_')
-                    type_layer_names.append(safe_name)
+                        bodyids_for_type = []
+
+                    if bodyids_for_type:
+                        # Multiple bodyIds for a type share one layer.
+                        type_layers.append(
+                            bodyids_for_type
+                            if len(bodyids_for_type) > 1
+                            else bodyids_for_type[0]
+                        )
+                        safe_name = str(target_type).replace('/', '_').replace(':', '_').replace('*', '_')
+                        type_layer_names.append(safe_name)
+                    else:
+                        continue
                 
             if type_layers:
                 try:
@@ -7876,6 +8007,7 @@ class HomologFinder:
                         dataset=vis_target_dataset,
                         neuron_layers=type_layers,
                         custom_layer_names=type_layer_names,
+                        custom_neurons=query_overlay_grouped,
                         output_dir=str(type_dir),
                         client=target_client,
                     ))
@@ -7921,6 +8053,7 @@ class HomologFinder:
                         vis_target_dataset, type_dir, files_saved,
                         reference_bodyids=query_bodyids if same_dataset else None,
                         reference_name=query_layer_name,
+                        custom_overlay=query_overlay_grouped,
                     )
             
             # =====================================================================
@@ -7939,98 +8072,102 @@ class HomologFinder:
                 source_bodyids = [query]
             
             if source_bodyids:
-                try:
-                    source_layers = [int(bid) for bid in source_bodyids]
-                except (ValueError, TypeError):
-                    source_layers = [str(bid) for bid in source_bodyids]
-
                 safe_name = f"source_{query}".replace('/', '_').replace(':', '_').replace('*', '_')
-                
-                try:
-                    source_client = self.clients.get(vis_source_dataset)
-                    if source_client:
-                        set_default_client(source_client)
-                    
-                    # For source neurons, use separate layers to enable plot_individuals if multiple
-                    if len(source_layers) > 1:
-                        # Each source neuron as separate layer for individual exports
-                        source_layer_names = [f"source_{bid}" for bid in source_bodyids]
-                        vs_source = VisualizeSkeleton(**_visualizer_kwargs(
-                            {
-                                'show_fig': False,
-                                'export_views': True,
-                                'brain_mesh': 'template',
-                                'legend_mode': 'layer',
-                                'neuron_alpha': 0.2,
-                                'verbose': 'simple',
-                                'skip_synapse': True,
-                            },
-                            dataset=vis_source_dataset,
-                            neuron_layers=source_layers,
-                            custom_layer_names=source_layer_names,
-                            saveas=safe_name,
-                            output_dir=str(source_dir),
-                            client=source_client,
-                        ))
-                        vs_source.plot_neurons()
-                        
-                        # Also generate individual source neuron plots
-                        profiles_out = vs_source.plot_individuals(
-                            output_format=['png', 'html'],
-                            views=['front'],
-                            summary_format=['pdf'],
-                            neuron_alpha=0.2,
-                        )
 
-                        if files_saved is not None:
-                            files_saved.append(f'visualization/source_neurons/{safe_name}.html')
-                            files_saved.append(f'visualization/source_neurons/{safe_name}.png')
-                            # Record what was actually produced instead of
-                            # assuming exactly one file per requested layer name.
-                            if profiles_out and Path(profiles_out).is_dir():
-                                for profile_path in sorted(
-                                        Path(profiles_out).iterdir()):
-                                    if profile_path.is_file():
-                                        files_saved.append(
-                                            'visualization/source_neurons/'
-                                            f'individual_profiles/{profile_path.name}'
-                                        )
-                            for summary_path in sorted(
-                                    source_dir.glob('individual_profiles*.pdf')):
-                                files_saved.append(
-                                    f'visualization/source_neurons/{summary_path.name}'
-                                )
-                        
-                        self._log(f"    Saved: source_neurons/{safe_name}.html ({len(source_layers)} neurons with individual profiles)")
-                    else:
-                        # Single source neuron - simple plot
-                        vs_source = VisualizeSkeleton(**_visualizer_kwargs(
-                            {
-                                'show_fig': False,
-                                'export_views': True,
-                                'brain_mesh': 'template',
-                                'legend_mode': 'single',
-                                'neuron_alpha': 0.2,
-                                'verbose': 'simple',
-                                'skip_synapse': True,
-                            },
-                            dataset=vis_source_dataset,
-                            neuron_layers=source_layers,
-                            saveas=safe_name,
-                            output_dir=str(source_dir),
-                            client=source_client,
-                        ))
-                        vs_source.plot_neurons()
-                        
-                        if files_saved is not None:
-                            files_saved.append(f'visualization/source_neurons/{safe_name}.html')
-                            files_saved.append(f'visualization/source_neurons/{safe_name}.png')
-                        
-                        self._log(f"    Saved: source_neurons/{safe_name}.html (1 neuron)")
-                    
-                except Exception as e:
-                    self._log(f"    Warning: Could not visualize source neurons: {e}")
-            
+                # The transformed query is already layer 1 of the
+                # bodyId-level and type-level scenes (query_transformed_*).
+                # The standalone source scene is a FALLBACK only: rendered in
+                # the ORIGINAL source dataset (untransformed), and skipped
+                # when the overlay is available.
+                if query_overlay:
+                    self._log(
+                        "    Skipping standalone source_neurons scene: the "
+                        "query is rendered in the target scenes as "
+                        "query_transformed overlay"
+                    )
+                else:
+                    # Fallback (no overlay available): render in the source
+                    # dataset's own template.
+                        try:
+                            source_layers = [int(bid) for bid in source_bodyids]
+                        except (ValueError, TypeError):
+                            source_layers = [str(bid) for bid in source_bodyids]
+
+                        source_client = self.clients.get(vis_source_dataset)
+                        if source_client:
+                            set_default_client(source_client)
+
+                        # Separate layers enable plot_individuals when multiple
+                        if len(source_layers) > 1:
+                            source_layer_names = [f"source_{bid}" for bid in source_bodyids]
+                            vs_source = VisualizeSkeleton(**_visualizer_kwargs(
+                                {
+                                    'show_fig': False,
+                                    'export_views': True,
+                                    'brain_mesh': 'template',
+                                    'legend_mode': 'layer',
+                                    'neuron_alpha': 0.2,
+                                    'verbose': 'simple',
+                                    'skip_synapse': True,
+                                },
+                                dataset=vis_source_dataset,
+                                neuron_layers=source_layers,
+                                custom_layer_names=source_layer_names,
+                                saveas=safe_name,
+                                output_dir=str(source_dir),
+                                client=source_client,
+                            ))
+                            vs_source.plot_neurons()
+
+                            profiles_out = vs_source.plot_individuals(
+                                output_format=['png', 'html'],
+                                views=['front'],
+                                summary_format=['pdf'],
+                                neuron_alpha=0.2,
+                            )
+
+                            if files_saved is not None:
+                                files_saved.append(f'visualization/source_neurons/{safe_name}.html')
+                                files_saved.append(f'visualization/source_neurons/{safe_name}.png')
+                                if profiles_out and Path(profiles_out).is_dir():
+                                    for profile_path in sorted(
+                                            Path(profiles_out).iterdir()):
+                                        if profile_path.is_file():
+                                            files_saved.append(
+                                                'visualization/source_neurons/'
+                                                f'individual_profiles/{profile_path.name}'
+                                            )
+                                for summary_path in sorted(
+                                        source_dir.glob('individual_profiles*.pdf')):
+                                    files_saved.append(
+                                        f'visualization/source_neurons/{summary_path.name}'
+                                    )
+
+                            self._log(f"    Saved: source_neurons/{safe_name}.html ({len(source_layers)} neurons with individual profiles)")
+                        else:
+                            vs_source = VisualizeSkeleton(**_visualizer_kwargs(
+                                {
+                                    'show_fig': False,
+                                    'export_views': True,
+                                    'brain_mesh': 'template',
+                                    'legend_mode': 'single',
+                                    'neuron_alpha': 0.2,
+                                    'verbose': 'simple',
+                                    'skip_synapse': True,
+                                },
+                                dataset=vis_source_dataset,
+                                neuron_layers=source_layers,
+                                saveas=safe_name,
+                                output_dir=str(source_dir),
+                                client=source_client,
+                            ))
+                            vs_source.plot_neurons()
+
+                            if files_saved is not None:
+                                files_saved.append(f'visualization/source_neurons/{safe_name}.html')
+                                files_saved.append(f'visualization/source_neurons/{safe_name}.png')
+
+                            self._log(f"    Saved: source_neurons/{safe_name}.html (1 neuron)")            
         except ImportError as e:
             self._log(f"Warning: Could not import VisualizeSkeleton for visualization: {e}")
         except Exception as e:
@@ -8082,6 +8219,146 @@ class HomologFinder:
             options.pop('mesh_color', None)
         return options
     
+    def _build_query_overlay_layer(
+        self,
+        source_dataset: str,
+        target_dataset: str,
+        query_bodyids: List[int],
+        query_label: str,
+    ) -> Optional[List[Any]]:
+        """Cross-dataset overlay layer: the query source rendered in the
+        target brain.
+
+        Fetches the source skeletons (source dataset's NeuPrint client),
+        transforms them into the target dataset's native coordinate space via
+        the flybrains bridge registry (male-cns -> FAFB resolves to the same
+        offline affine + landmark-TPS bridge the ROI mesh pipeline uses), and
+        returns two lists ready for VisualizeSkeleton's ``custom_neurons``:
+        a per-neuron variant (each transformed source neuron its own layer,
+        ``query_transformed_{label}_{bodyId}`` — for bodyId-level scenes)
+        and a grouped variant (one ``query_transformed_{label}`` layer with
+        every neuron — for type-level scenes). Returns (None, None) when
+        there is nothing to overlay (same space, no bodyIds, or
+        fetch/transform unavailable).
+        """
+        if not query_bodyids:
+            return None
+        try:
+            import navis
+            import navis.interfaces.neuprint as neu
+            from visualize_skeleton import (
+                dataset_native_space, dataset_render_space,
+                transform_neurons_to_space,
+            )
+
+            # Source skeletons live in the dataset's NATIVE space; the
+            # overlay must land in the target scene's RENDER space (the
+            # template-mode _get_template_info target). For male-cns the
+            # native space is raw voxels (JRCFIB2022Mraw) while the scene
+            # renders in JRCFIB2022M nanometers — transforming into the
+            # native space would shrink the neuron ~8-45x (units mismatch).
+            source_space = dataset_native_space(source_dataset)
+            target_space = dataset_render_space(target_dataset)
+            if source_space == target_space:
+                return None
+
+            # Source skeletons: NeuPrint client for NeuPrint datasets, local
+            # raw skeleton cache for FlyWire/FAFB/BANC sources (which have no
+            # NeuPrint client).
+            client = self.clients.get(source_dataset)
+            # Fetch source skeletons WITHOUT depending on self.clients:
+            # FlyWire datasets (FAFB/BANC) never get a NeuPrint client, and
+            # UI subprocess runs may have no token-bound client at all. The
+            # local raw-skeleton cache covers every dataset offline; a
+            # token-manager-backed NeuPrint client is only the fallback.
+            project_root = str(Path(__file__).resolve().parents[2])
+            try:
+                from morphology import find_similar_raw_cache
+                raw_cache = find_similar_raw_cache(
+                    source_dataset, project_root=project_root, verbose=False)
+            except Exception:
+                raw_cache = None
+
+            fetched = []
+            missing = []
+            for bid in query_bodyids:
+                try:
+                    n = raw_cache.load_skeleton(int(bid)) if raw_cache else None
+                except Exception:
+                    n = None
+                if n is not None:
+                    fetched.append(n)
+                else:
+                    missing.append(int(bid))
+
+            if missing:
+                client = self.clients.get(source_dataset)
+                if client is None:
+                    try:
+                        from utils.token_manager import token_manager
+                        from neuprint import Client as _Client
+                        _tk = token_manager.get_neuprint_token() or self.token
+                        if _tk:
+                            client = _Client('https://neuprint.janelia.org',
+                                             dataset=source_dataset, token=_tk)
+                    except Exception:
+                        client = None
+                if client is not None:
+                    try:
+                        neurons = neu.fetch_skeletons(
+                            missing, client=client, with_synapses=False)
+                        fetched.extend(
+                            n for n in (neurons or []) if n is not None)
+                    except Exception as e:
+                        self._log(f'Query overlay: NeuPrint fallback fetch '
+                                  f'failed for {len(missing)} skeleton(s): {e}')
+                else:
+                    self._log(f'Query overlay: {len(missing)} source '
+                              f'skeleton(s) not in the local raw cache and no '
+                              f'NeuPrint client available')
+
+            neurons = navis.NeuronList([n for n in fetched if n is not None])
+            if neurons is None or len(neurons) == 0:
+                self._log('Query overlay skipped: source skeletons '
+                          'unavailable')
+                return None
+
+            transformed = transform_neurons_to_space(
+                neurons, source_space, target_space, validate_bounds=True,
+                verbose=True)
+            if not transformed:
+                self._log('Query overlay skipped: no neuron survived the '
+                          f'{source_space} -> {target_space} transform')
+                return None
+            safe = ''.join(
+                ch if ch.isalnum() or ch in '._-' else '_'
+                for ch in str(query_label)
+            ).strip('_') or 'neuron'
+
+            # Per-neuron entries (single-neuron legend per transformed
+            # source, mirroring the found-results layers) plus one grouped
+            # entry for type-level scenes.
+            per_neuron = []
+            for n in transformed:
+                try:
+                    bid = int(getattr(n, 'id', None)
+                              or getattr(n, 'bodyId', None) or 0)
+                except (TypeError, ValueError):
+                    bid = 0
+                nm = (f'query_transformed_{safe}_{bid}'
+                      if str(bid) != str(query_label).strip()
+                      else f'query_transformed_{bid}')
+                per_neuron.append((nm, [n]))
+            grouped = [n for _, ns in per_neuron for n in ns]
+            self._log(
+                f'Query overlay ready: query_transformed_{safe} '
+                f'({len(transformed)} neuron(s), '
+                f'{source_space} -> {target_space})')
+            return per_neuron, [(f'query_transformed_{safe}', grouped)]
+        except Exception as e:
+            self._log(f'Query overlay skipped: {e}')
+            return None
+
     def _visualize_bodyids_individual(
         self,
         top_matches: pd.DataFrame,
@@ -8092,6 +8369,7 @@ class HomologFinder:
         files_saved: List[str],
         reference_bodyids: Optional[List[int]] = None,
         reference_name: str = 'query',
+        custom_overlay: Optional[List[Any]] = None,
     ):
         """Fallback method: visualize bodyIds individually (original approach)."""
         from visualize_skeleton import VisualizeSkeleton
@@ -8152,6 +8430,7 @@ class HomologFinder:
                     dataset=vis_target_dataset,
                     neuron_layers=layers,
                     custom_layer_names=[safe_name],
+                    custom_neurons=custom_overlay,
                     saveas=safe_name,
                     output_dir=str(bodyid_dir),
                     client=target_client,
@@ -8178,6 +8457,7 @@ class HomologFinder:
         files_saved: List[str],
         reference_bodyids: Optional[List[int]] = None,
         reference_name: str = 'query',
+        custom_overlay: Optional[List[Any]] = None,
     ):
         """Fallback method: visualize types individually (original approach)."""
         from visualize_skeleton import VisualizeSkeleton
@@ -8806,8 +9086,11 @@ class HomologFinder:
         if 'rank_corr' in results_df.columns:
             results_df['rank_corr'] = (results_df['rank_corr'] + 1) / 2
         
-        # Sort by rank_corr and return top_n
-        results_df = results_df.sort_values('rank_corr', ascending=False).head(top_n)
+        # Sort by rank_union and return top_n
+        if 'jaccard' in results_df.columns:
+            results_df = results_df.sort_values('jaccard', ascending=False).head(top_n)
+        else:
+            results_df = results_df.head(top_n)
         
         return results_df
 
@@ -8975,7 +9258,7 @@ class ConnectivityProfileComparer:
         dataset: Optional[str] = None,
         datasets: Optional[List[str]] = None,
         aggregation_level: str = 'type',
-        top_k: int = 15,
+        top_k: int = 25,
         top_m: int = 5,
         min_synapse_threshold: int = 3,
         direction: str = 'both',

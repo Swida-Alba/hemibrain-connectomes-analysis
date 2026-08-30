@@ -68,8 +68,10 @@ def create_find_homologs_tab():
                 similarity_metric = select_input(
                     "Sort By", SIMILARITY_METRICS, get_user_default("similarity_metric"),
                     hint="Metric used ONLY for ordering the candidate list (top-N cut). "
-                         "All similarity metrics (jaccard, cosine, rank_corr, combined) are "
-                         "always computed — same backend as Connectivity Profiling.",
+                         "Selectable: jaccard (default, conservative — bounded [0,1], "
+                         "never degenerate), rank_union, cosine. Every metric is still "
+                         "computed by the backend; rank_corr is hidden because it is "
+                         "unreliable at bodyId level (see BENCHMARK_RESULTS.md §6c).",
                 )
             with ui.row().classes("gap-4"):
                 use_fast = checkbox_input("Fast Search", get_user_default("fast_search"), hint="Use adjacency expansion for faster candidate discovery.")

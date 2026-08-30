@@ -13,15 +13,16 @@ Key Features:
     - Skeleton visualization: Optionally visualize top candidates with VisualizeSkeleton
 
 Profile Construction Rules (consistent with ConnectivityProfiler):
-    - top_k: Top K partners per direction by synapse weight (default: 15)
+    - top_k: Top K partners per direction by synapse weight (default: 25)
     - top_m: Minimum unique partner types to ensure (default: 5)
     - Dynamic expansion: If top_k yields < top_m types, expand K
     - expand_untyped_2hop: Fetch 2-hop typed partners for untyped 1-hop (default: True)
 
 Output Files (always saved when output_dir is set):
-    - bodyid_results.csv: BodyId-level comparisons (sorted by source_bodyId, rank_corr)
+    - bodyid_results.csv: BodyId-level comparisons (sorted by source_bodyId, jaccard)
     - type_summary.csv: Type-level aggregated summary (avg/best/std metrics)
-    - homolog_results.csv: Legacy format (sorted by rank_corr only)
+    - type_level_results.csv: Pooled all-adjacency type-level ranking
+    - homolog_results.csv: Legacy format (rank_union-ordered)
     - visualizations/: Skeleton visualizations (if visualize_skeleton=True)
 
 Finding Methods:
@@ -50,8 +51,8 @@ if __name__ == "__main__":
         visualize_skeleton=True,  # Enable to visualize top candidates
         visualize_top_n=5,         # Number of candidates to visualize
         verbose=True,
-        similarity_metric='rank_union',
-        top_n=30,
+        similarity_metric='jaccard',
+        top_n=100,
         vector_prefiltering=True,
     )
     

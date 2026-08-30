@@ -402,7 +402,7 @@ _CONNECTION_TYPE_COLUMNS = [
 _HOMOLOG_RESULT_COLUMNS = [
     "source_bodyId", "source_type", "target_bodyId", "target_type",
     "target_dataset", "adjacency_score", "shared_type_count",
-    "union_type_count", "rank_corr", "rank_union",
+    "union_type_count", "rank_union",
     "jaccard", "weighted_jaccard", "cosine", "is_same_type",
     "is_same_dataset", "source_status", "target_status", "weak_source",
     "weak_target", "source_partner_count", "target_partner_count",
@@ -561,20 +561,21 @@ _HOMOLOG_FILES = [
      "description": "BodyId-level results (sorted by source, then metric).",
      "columns": [
          "source_bodyId", "source_type", "target_bodyId", "target_type",
-         "rank_corr", "rank_union", "jaccard",
+         "rank_union", "jaccard",
          "cosine", "adjacency_score", "shared_type_count",
          "union_type_count", "is_same_type", "is_same_dataset",
          "source_status", "target_status", "weak_source", "weak_target",
          "source_partner_count", "target_partner_count"]},
     {"pattern": "results/type_summary.csv",
-     "description": "Aggregated results at the neuron type level.",
+     "description": "Aggregated results at the neuron type level "
+                    "(sorted by avg_jaccard, descending).",
      "columns": [
          "query", "source_dataset", "target_dataset", "source_type",
          "target_type", "avg_rank_corr", "n_bodyid_comparisons",
          "avg_jaccard", "avg_rank_union", "avg_cosine",
          "avg_adjacency_score", "avg_shared_type_count",
          "avg_union_type_count", "n_complete_sources",
-         "n_incomplete_sources"]},
+         "n_incomplete_sources", "visualized", "visualization_rank"]},
     {"pattern": "results/source_status_summary.json",
      "description": "Per-source-neuron status (resolved bodyIds, candidate "
                     "counts)."},
