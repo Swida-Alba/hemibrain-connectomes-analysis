@@ -346,6 +346,11 @@ def image_summary_skip_note(summary_format, download_images) -> Optional[str]:
     return None
 
 
+# Result layer renders at most this many neurons per type (mirrors
+# morphology.TYPE_RENDER_MEMBER_CAP); large types are capped with a warning.
+TYPE_RENDER_MEMBER_CAP = 20
+
+
 @dataclass
 class NeuronBridgeFinder:
     """
@@ -7029,7 +7034,15 @@ class NeuronBridgeFinder:
                         else _to_int_bodyid(n)
                         for n in type_neurons
                     ]
-                    
+
+                    # Per-type render cap: large types would swamp the scene
+                    if len(type_neurons) > TYPE_RENDER_MEMBER_CAP:
+                        self._vprint(
+                            f"   ⚠️ {dataset} r{original_rank} '{type_name}': "
+                            f"{len(type_neurons)} members capped to "
+                            f"{TYPE_RENDER_MEMBER_CAP} for visualization")
+                        type_neurons = type_neurons[:TYPE_RENDER_MEMBER_CAP]
+
                     if len(type_neurons) > 0:
                         neuron_layers.append(type_neurons)
                         # Create legend name: r{rank}_{type}_x{N} - using ORIGINAL rank
@@ -7118,6 +7131,13 @@ class NeuronBridgeFinder:
                 
                 for type_label in sorted_types:
                     bodyids = type_to_bodyids[type_label]
+                    # Per-type render cap: large types would swamp the scene
+                    if len(bodyids) > TYPE_RENDER_MEMBER_CAP:
+                        self._vprint(
+                            f"   ⚠️ {dataset} '{type_label}': "
+                            f"{len(bodyids)} members capped to "
+                            f"{TYPE_RENDER_MEMBER_CAP} for visualization")
+                        bodyids = bodyids[:TYPE_RENDER_MEMBER_CAP]
                     neuron_layers.append(bodyids)
                     # Layer name: r{rank}_{type}_x{N} where rank is the best (min) rank for this type
                     # This is the ORIGINAL rank from score ranking, preserved after filtering
